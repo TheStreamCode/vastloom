@@ -1,6 +1,7 @@
 #include "vastloom/research/trace_simulator.hpp"
 
 #include <algorithm>
+#include <array>
 #include <charconv>
 #include <cmath>
 #include <fstream>
@@ -9,6 +10,7 @@
 #include <map>
 #include <numeric>
 #include <new>
+#include <optional>
 #include <set>
 #include <sstream>
 #include <unordered_map>
@@ -26,6 +28,14 @@ struct TraceRecord {
     std::uint32_t layer{0};
     std::uint32_t expert{0};
     ByteCount size{0};
+    bool has_readiness_timing{false};
+    double submitted_ms{0.0};
+    double queue_ms{0.0};
+    double ready_ms{0.0};
+    double compute_started_ms{0.0};
+    double compute_completed_ms{0.0};
+    std::uint32_t route_order{0};
+    std::uint32_t reduction_order{0};
 };
 
 using ExpertKey = std::uint64_t;
@@ -74,15 +84,16 @@ Result<std::vector<TraceRecord>> load_trace(const std::filesystem::path& path, s
     std::string line;
     std::size_t line_number = 0;
     bool header_seen = false;
+    std::optional<std::size_t> record_width;
     std::unordered_map<ExpertKey, ByteCount> sizes;
     while (std::getline(input, line)) {
         ++line_number;
         const auto trimmed = util::trim(line);
         if (trimmed.empty() || trimmed[0] == '#') continue;
         const auto fields = util::split(trimmed, ',', true);
-        if (fields.size() != 4U && fields.size() != 9U && fields.size() != 12U) {
+        if (fields.size() != 4U && fields.size() != 9U && fields.size() != 12U && fields.size() != 19U) {
             return make_error(ErrorCode::invalid_format,
-                              "Trace rows require four baseline fields, nine legacy telemetry fields or twelve telemetry fields",
+                              "Trace rows require 4 baseline, 9 legacy, 12 prefetch or 19 readiness fields",
                               "line " + std::to_string(line_number));
         }
         if (util::to_lower(util::trim(fields[0])) == "token") {
@@ -91,9 +102,29 @@ Result<std::vector<TraceRecord>> load_trace(const std::filesystem::path& path, s
                 util::to_lower(util::trim(fields[3])) != "size_bytes") {
                 return make_error(ErrorCode::invalid_format, "Invalid or repeated trace header", "line " + std::to_string(line_number));
             }
+            if (fields.size() == 19U) {
+                constexpr std::array<std::string_view, 19> expected{
+                    "token", "layer", "expert", "size_bytes", "routing_weight", "tier", "hit",
+                    "bytes_read", "io_ms", "prefetched", "prefetch_wait_ms", "prefetch_overlap_ms",
+                    "submitted_ms", "queue_ms", "ready_ms", "compute_started_ms",
+                    "compute_completed_ms", "route_order", "reduction_order",
+                };
+                for (std::size_t index = 0U; index < expected.size(); ++index) {
+                    if (util::to_lower(util::trim(fields[index])) != expected[index]) {
+                        return make_error(ErrorCode::invalid_format, "Invalid readiness trace header",
+                                          "line " + std::to_string(line_number));
+                    }
+                }
+            }
             header_seen = true;
+            record_width = fields.size();
             continue;
         }
+        if (record_width && *record_width != fields.size()) {
+            return make_error(ErrorCode::invalid_format, "Trace rows do not match the declared format",
+                              "line " + std::to_string(line_number));
+        }
+        if (!record_width) record_width = fields.size();
         if (records.size() >= max_records) {
             return make_error(ErrorCode::resource_exhausted, "Trace exceeds configured record limit", path.string());
         }
@@ -102,6 +133,8 @@ Result<std::vector<TraceRecord>> load_trace(const std::filesystem::path& path, s
         auto layer = parse_u64(fields[1], "layer"); if (!layer || layer.value() > std::numeric_limits<std::uint32_t>::max()) return make_error(ErrorCode::invalid_format, "Layer is outside uint32 range", "line " + std::to_string(line_number));
         auto expert = parse_u64(fields[2], "expert"); if (!expert || expert.value() > std::numeric_limits<std::uint32_t>::max()) return make_error(ErrorCode::invalid_format, "Expert is outside uint32 range", "line " + std::to_string(line_number));
         auto record_size = parse_bytes(fields[3]); if (!record_size || record_size.value() == 0) return make_error(ErrorCode::invalid_format, "Expert size must be greater than zero", "line " + std::to_string(line_number));
+        TraceRecord record{token.take_value(), static_cast<std::uint32_t>(layer.take_value()),
+                           static_cast<std::uint32_t>(expert.take_value()), record_size.take_value()};
         if (fields.size() >= 9U) {
             auto routing_weight = parse_nonnegative_double(fields[4], "routing_weight");
             const auto tier = util::to_lower(util::trim(fields[5]));
@@ -125,10 +158,40 @@ Result<std::vector<TraceRecord>> load_trace(const std::filesystem::path& path, s
                                       "line " + std::to_string(line_number));
                 }
             }
+            if (fields.size() == 19U) {
+                auto prefetched = parse_u64(fields[9], "prefetched");
+                auto prefetch_wait_ms = parse_nonnegative_double(fields[10], "prefetch_wait_ms");
+                auto prefetch_overlap_ms = parse_nonnegative_double(fields[11], "prefetch_overlap_ms");
+                auto submitted_ms = parse_nonnegative_double(fields[12], "submitted_ms");
+                auto queue_ms = parse_nonnegative_double(fields[13], "queue_ms");
+                auto ready_ms = parse_nonnegative_double(fields[14], "ready_ms");
+                auto compute_started_ms = parse_nonnegative_double(fields[15], "compute_started_ms");
+                auto compute_completed_ms = parse_nonnegative_double(fields[16], "compute_completed_ms");
+                auto route_order = parse_u64(fields[17], "route_order");
+                auto reduction_order = parse_u64(fields[18], "reduction_order");
+                if (!prefetched || prefetched.value() > 1U || !prefetch_wait_ms || !prefetch_overlap_ms ||
+                    !submitted_ms || !queue_ms || !ready_ms || !compute_started_ms ||
+                    !compute_completed_ms || !route_order || !reduction_order ||
+                    route_order.value() > std::numeric_limits<std::uint32_t>::max() ||
+                    reduction_order.value() > std::numeric_limits<std::uint32_t>::max() ||
+                    ready_ms.value() < submitted_ms.value() ||
+                    compute_completed_ms.value() < compute_started_ms.value() ||
+                    queue_ms.value() > ready_ms.value() - submitted_ms.value() + 0.01 ||
+                    (hit.value() == 1U && prefetched.value() != 0U)) {
+                    return make_error(ErrorCode::invalid_format, "Invalid readiness telemetry fields",
+                                      "line " + std::to_string(line_number));
+                }
+                record.has_readiness_timing = true;
+                record.submitted_ms = submitted_ms.value();
+                record.queue_ms = queue_ms.value();
+                record.ready_ms = ready_ms.value();
+                record.compute_started_ms = compute_started_ms.value();
+                record.compute_completed_ms = compute_completed_ms.value();
+                record.route_order = static_cast<std::uint32_t>(route_order.value());
+                record.reduction_order = static_cast<std::uint32_t>(reduction_order.value());
+            }
         }
 
-        TraceRecord record{token.take_value(), static_cast<std::uint32_t>(layer.take_value()),
-                           static_cast<std::uint32_t>(expert.take_value()), record_size.take_value()};
         const ExpertKey key = make_key(record.layer, record.expert);
         const auto [iterator, inserted] = sizes.emplace(key, record.size);
         if (!inserted && iterator->second != record.size) {
@@ -326,6 +389,86 @@ void populate_reuse_metrics(const std::vector<TraceRecord>& records, TraceSimula
         report.p95_unique_reuse_distance = percentile_sorted(distances, 0.95);
         report.maximum_unique_reuse_distance = distances.back();
     }
+}
+
+Result<void> populate_ready_order_metrics(const std::vector<TraceRecord>& records,
+                                          TraceSimulationReport& report) {
+    if (records.empty() || !records.front().has_readiness_timing) return {};
+
+    using GroupKey = std::pair<std::uint64_t, std::uint32_t>;
+    std::map<GroupKey, std::vector<const TraceRecord*>> groups;
+    for (const auto& record : records) {
+        if (!record.has_readiness_timing) {
+            return make_error(ErrorCode::invalid_format, "Trace mixes readiness and legacy records");
+        }
+        auto& group = groups[{record.token, record.layer}];
+        if (group.size() >= 1'024U) {
+            return make_error(ErrorCode::resource_exhausted,
+                              "Ready-order group exceeds the 1024-expert safety limit");
+        }
+        group.push_back(&record);
+    }
+
+    constexpr double kTimingEpsilonMs = 1e-6;
+    for (auto& [key, group] : groups) {
+        (void)key;
+        std::sort(group.begin(), group.end(), [](const TraceRecord* left, const TraceRecord* right) {
+            return left->route_order < right->route_order;
+        });
+        std::vector<bool> reduction_seen(group.size(), false);
+        for (std::size_t index = 0U; index < group.size(); ++index) {
+            if (group[index]->route_order != index || group[index]->reduction_order >= group.size() ||
+                reduction_seen[group[index]->reduction_order]) {
+                return make_error(ErrorCode::invalid_format,
+                                  "Ready-order trace requires unique contiguous route and reduction orders");
+            }
+            reduction_seen[group[index]->reduction_order] = true;
+        }
+
+        double fixed_clock = 0.0;
+        for (const TraceRecord* record : group) {
+            const double wait = std::max(0.0, record->ready_ms - fixed_clock);
+            report.fixed_order_wait_ms += wait;
+            fixed_clock += wait + (record->compute_completed_ms - record->compute_started_ms);
+        }
+        report.fixed_order_makespan_ms += fixed_clock;
+
+        double ready_clock = 0.0;
+        std::vector<bool> completed(group.size(), false);
+        for (std::size_t step = 0U; step < group.size(); ++step) {
+            std::optional<std::size_t> selected;
+            for (std::size_t index = 0U; index < group.size(); ++index) {
+                if (completed[index] || group[index]->ready_ms > ready_clock + kTimingEpsilonMs) continue;
+                if (!selected || group[index]->route_order < group[*selected]->route_order) selected = index;
+            }
+            if (!selected) {
+                for (std::size_t index = 0U; index < group.size(); ++index) {
+                    if (completed[index]) continue;
+                    if (!selected ||
+                        std::pair{group[index]->ready_ms, group[index]->route_order} <
+                            std::pair{group[*selected]->ready_ms, group[*selected]->route_order}) {
+                        selected = index;
+                    }
+                }
+                const double wait = std::max(0.0, group[*selected]->ready_ms - ready_clock);
+                report.ready_order_wait_ms += wait;
+                ready_clock += wait;
+            }
+            const TraceRecord* record = group[*selected];
+            if (record->route_order != step) ++report.ready_order_reordered_experts;
+            ready_clock += record->compute_completed_ms - record->compute_started_ms;
+            completed[*selected] = true;
+        }
+        report.ready_order_makespan_ms += ready_clock;
+    }
+
+    report.ready_order_available = true;
+    report.ready_order_groups = groups.size();
+    report.ready_order_saved_ms = report.fixed_order_makespan_ms - report.ready_order_makespan_ms;
+    if (report.fixed_order_makespan_ms > 0.0) {
+        report.ready_order_savings_ratio = report.ready_order_saved_ms / report.fixed_order_makespan_ms;
+    }
+    return {};
 }
 
 void finalize_report(TraceSimulationReport& report, const std::map<std::uint64_t, ByteCount>& per_token) {
@@ -581,6 +724,8 @@ Result<TraceSimulationReport> simulate_trace(const std::filesystem::path& trace_
         else if (config.policy == CachePolicy::lfu) report = simulate_lfu(records.value(), config);
         else report = simulate_lru(records.value(), config);
         populate_reuse_metrics(records.value(), report);
+        auto readiness = populate_ready_order_metrics(records.value(), report);
+        if (!readiness) return readiness.error();
         return report;
     } catch (const std::bad_alloc&) {
         return make_error(ErrorCode::resource_exhausted, "Unable to allocate bounded trace simulation state");
@@ -611,7 +756,18 @@ std::string to_text(const TraceSimulationReport& report) {
            << "P50 NVMe/token:    " << format_bytes(report.p50_nvme_bytes_per_token) << '\n'
            << "P95 NVMe/token:    " << format_bytes(report.p95_nvme_bytes_per_token) << '\n'
            << "Max NVMe/token:    " << format_bytes(report.maximum_nvme_bytes_per_token) << '\n'
-           << "Evictions:         " << report.evictions << '\n';
+           << "Evictions:         " << report.evictions << '\n'
+           << "Ready replay:      " << (report.ready_order_available ? "available" : "unavailable") << '\n';
+    if (report.ready_order_available) {
+        output << "Ready groups:      " << report.ready_order_groups << '\n'
+               << "Fixed makespan:    " << report.fixed_order_makespan_ms << " ms\n"
+               << "Ready makespan:    " << report.ready_order_makespan_ms << " ms\n"
+               << "Fixed I/O wait:    " << report.fixed_order_wait_ms << " ms\n"
+               << "Ready I/O wait:    " << report.ready_order_wait_ms << " ms\n"
+               << "Ready saved:       " << report.ready_order_saved_ms << " ms ("
+               << report.ready_order_savings_ratio * 100.0 << "%)\n"
+               << "Compute reorders:  " << report.ready_order_reordered_experts << '\n';
+    }
     return output.str();
 }
 
@@ -642,7 +798,16 @@ std::string to_json(const TraceSimulationReport& report) {
            << "\"average_nvme_bytes_per_token\":" << report.average_nvme_bytes_per_token << ','
            << "\"p50_nvme_bytes_per_token\":" << report.p50_nvme_bytes_per_token << ','
            << "\"p95_nvme_bytes_per_token\":" << report.p95_nvme_bytes_per_token << ','
-           << "\"maximum_nvme_bytes_per_token\":" << report.maximum_nvme_bytes_per_token
+           << "\"maximum_nvme_bytes_per_token\":" << report.maximum_nvme_bytes_per_token << ','
+           << "\"ready_order_available\":" << (report.ready_order_available ? "true" : "false") << ','
+           << "\"ready_order_groups\":" << report.ready_order_groups << ','
+           << "\"ready_order_reordered_experts\":" << report.ready_order_reordered_experts << ','
+           << "\"fixed_order_makespan_ms\":" << report.fixed_order_makespan_ms << ','
+           << "\"ready_order_makespan_ms\":" << report.ready_order_makespan_ms << ','
+           << "\"fixed_order_wait_ms\":" << report.fixed_order_wait_ms << ','
+           << "\"ready_order_wait_ms\":" << report.ready_order_wait_ms << ','
+           << "\"ready_order_saved_ms\":" << report.ready_order_saved_ms << ','
+           << "\"ready_order_savings_ratio\":" << report.ready_order_savings_ratio
            << '}';
     return output.str();
 }

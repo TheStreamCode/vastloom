@@ -200,6 +200,9 @@ void test_olmoe_config(const std::filesystem::path& root) {
           vastloom::inference::parse_expert_cache_policy("LFU") &&
           vastloom::inference::parse_expert_cache_policy("static-hot") &&
           !vastloom::inference::parse_expert_cache_policy("random"));
+    CHECK(vastloom::inference::parse_expert_read_mode("whole") &&
+          vastloom::inference::parse_expert_read_mode("staged") &&
+          !vastloom::inference::parse_expert_read_mode("unbounded"));
 }
 
 void test_model_store_and_runtime_policy(const std::filesystem::path& root) {
@@ -559,6 +562,26 @@ void test_trace(const std::filesystem::path& root) {
     prefetch.close();
     auto prefetch_report = vastloom::research::simulate_trace(prefetch_path, config);
     CHECK(prefetch_report && prefetch_report.value().records == 1U);
+    const auto readiness_path = root / "readiness-telemetry-trace.csv";
+    std::ofstream readiness(readiness_path);
+    readiness << "token,layer,expert,size_bytes,routing_weight,tier,hit,bytes_read,io_ms,"
+                 "prefetched,prefetch_wait_ms,prefetch_overlap_ms,submitted_ms,queue_ms,ready_ms,"
+                 "compute_started_ms,compute_completed_ms,route_order,reduction_order\n"
+              << "0,0,1,12MiB,0.3,nvme,0,12582912,1,1,0,0,0,0,10,10,14,0,0\n"
+              << "0,0,2,12MiB,0.2,nvme,0,12582912,1,1,0,0,0,0,1,14,17,1,1\n"
+              << "0,0,3,12MiB,0.1,nvme,0,12582912,1,1,0,0,0,0,2,17,19,2,2\n";
+    readiness.close();
+    auto readiness_report = vastloom::research::simulate_trace(readiness_path, config);
+    CHECK(readiness_report && readiness_report.value().ready_order_available);
+    if (readiness_report) {
+        CHECK(readiness_report.value().ready_order_groups == 1U);
+        CHECK(readiness_report.value().ready_order_reordered_experts == 3U);
+        CHECK(std::abs(readiness_report.value().fixed_order_makespan_ms - 19.0) < 1e-12);
+        CHECK(std::abs(readiness_report.value().ready_order_makespan_ms - 14.0) < 1e-12);
+        CHECK(std::abs(readiness_report.value().fixed_order_wait_ms - 10.0) < 1e-12);
+        CHECK(std::abs(readiness_report.value().ready_order_wait_ms - 5.0) < 1e-12);
+        CHECK(std::abs(readiness_report.value().ready_order_saved_ms - 5.0) < 1e-12);
+    }
     const auto malformed_telemetry_path = root / "malformed-telemetry-trace.csv";
     std::ofstream malformed_telemetry(malformed_telemetry_path);
     malformed_telemetry << "# actual trace\n"
@@ -573,6 +596,14 @@ void test_trace(const std::filesystem::path& root) {
                        << "0,0,1,12MiB,0.2,ram,1,0,0,1,0,0\n";
     malformed_prefetch.close();
     CHECK(!vastloom::research::simulate_trace(malformed_prefetch_path, config));
+    const auto malformed_readiness_path = root / "malformed-readiness-trace.csv";
+    std::ofstream malformed_readiness(malformed_readiness_path);
+    malformed_readiness << "token,layer,expert,size_bytes,routing_weight,tier,hit,bytes_read,io_ms,"
+                           "prefetched,prefetch_wait_ms,prefetch_overlap_ms,submitted_ms,queue_ms,ready_ms,"
+                           "compute_started_ms,compute_completed_ms,route_order,reduction_order\n"
+                        << "0,0,1,12MiB,0.2,nvme,0,12582912,1,1,0,0,5,0,4,4,5,0,0\n";
+    malformed_readiness.close();
+    CHECK(!vastloom::research::simulate_trace(malformed_readiness_path, config));
 }
 
 

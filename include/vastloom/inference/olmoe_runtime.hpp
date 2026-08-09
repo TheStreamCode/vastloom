@@ -35,10 +35,17 @@ enum class ExpertIoMode : std::uint8_t {
     asynchronous,
 };
 
+enum class ExpertReadMode : std::uint8_t {
+    whole,
+    staged,
+};
+
 [[nodiscard]] Result<ExpertCachePolicy> parse_expert_cache_policy(std::string_view value);
 [[nodiscard]] std::string_view to_string(ExpertCachePolicy policy) noexcept;
 [[nodiscard]] Result<ExpertIoMode> parse_expert_io_mode(std::string_view value);
 [[nodiscard]] std::string_view to_string(ExpertIoMode mode) noexcept;
+[[nodiscard]] Result<ExpertReadMode> parse_expert_read_mode(std::string_view value);
+[[nodiscard]] std::string_view to_string(ExpertReadMode mode) noexcept;
 
 struct OlmoeRuntimeLoadOptions {
     bool verify_hashes{true};
@@ -49,6 +56,7 @@ struct OlmoeForwardOptions {
     ExpertCachePolicy cache_policy{ExpertCachePolicy::lru};
     ByteCount expert_cache_bytes{256U * MiB};
     ExpertIoMode io_mode{ExpertIoMode::synchronous};
+    ExpertReadMode read_mode{ExpertReadMode::whole};
     std::size_t prefetch_depth{1U};
     std::chrono::milliseconds io_request_timeout{std::chrono::seconds(30)};
     io::IoFaultInjection io_fault;
@@ -67,6 +75,13 @@ struct ExpertTraceEvent {
     double io_ms{0.0};
     double prefetch_wait_ms{0.0};
     double prefetch_overlap_ms{0.0};
+    double submitted_ms{0.0};
+    double queue_ms{0.0};
+    double ready_ms{0.0};
+    double compute_started_ms{0.0};
+    double compute_completed_ms{0.0};
+    std::uint32_t route_order{0};
+    std::uint32_t reduction_order{0};
 };
 
 struct OlmoeForwardStats {
@@ -80,6 +95,10 @@ struct OlmoeForwardStats {
     std::size_t expert_prefetches{0};
     double expert_prefetch_wait_ms{0.0};
     double expert_prefetch_overlap_ms{0.0};
+    std::size_t staged_expert_reads{0};
+    ByteCount staged_gate_up_bytes_read{0};
+    ByteCount staged_down_bytes_read{0};
+    double staged_down_compute_overlap_ms{0.0};
     bool process_io_available{false};
     io::ProcessIoDelta process_io;
     std::string process_io_error;

@@ -50,6 +50,15 @@ struct TraceSimulationReport {
     ByteCount p50_nvme_bytes_per_token{0};
     ByteCount p95_nvme_bytes_per_token{0};
     ByteCount maximum_nvme_bytes_per_token{0};
+    bool ready_order_available{false};
+    std::size_t ready_order_groups{0};
+    std::size_t ready_order_reordered_experts{0};
+    double fixed_order_makespan_ms{0.0};
+    double ready_order_makespan_ms{0.0};
+    double fixed_order_wait_ms{0.0};
+    double ready_order_wait_ms{0.0};
+    double ready_order_saved_ms{0.0};
+    double ready_order_savings_ratio{0.0};
 };
 
 [[nodiscard]] Result<CachePolicy> parse_cache_policy(std::string_view value);

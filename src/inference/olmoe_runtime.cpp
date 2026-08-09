@@ -24,6 +24,8 @@ namespace {
 
 constexpr ByteCount kResidentBytes = 953'421'824ULL;
 constexpr ByteCount kExpertBytes = 12U * MiB;
+constexpr ByteCount kExpertTensorBytes = 4U * MiB;
+constexpr ByteCount kGateUpBytes = 8U * MiB;
 constexpr ByteCount kLoadChunkBytes = 64U * MiB;
 constexpr std::size_t kExpertMatrixElements = 1'024U * 2'048U;
 
@@ -183,8 +185,10 @@ struct AcquiredExpert {
     ByteCount bytes_read{0U};
     double io_ms{0.0};
     double prefetch_wait_ms{0.0};
+    std::chrono::steady_clock::time_point io_submitted;
     std::chrono::steady_clock::time_point io_service_started;
     std::chrono::steady_clock::time_point io_completed;
+    double io_queue_ms{0.0};
 };
 
 struct PendingExpertRead {
@@ -199,9 +203,76 @@ struct LoadedExpert {
     ByteCount bytes_read{0U};
     double io_ms{0.0};
     double wait_ms{0.0};
+    std::chrono::steady_clock::time_point submitted;
+    std::chrono::steady_clock::time_point service_started;
+    std::chrono::steady_clock::time_point completed;
+    double queue_ms{0.0};
+};
+
+struct CompletedIoStage {
+    ByteCount bytes_read{0U};
+    double io_ms{0.0};
+    double wait_ms{0.0};
+    double queue_ms{0.0};
+    std::chrono::steady_clock::time_point submitted;
     std::chrono::steady_clock::time_point service_started;
     std::chrono::steady_clock::time_point completed;
 };
+
+struct PendingGateUpRead {
+    std::future<Result<io::IoBuffer>> future;
+    std::array<OlmoeRuntimeModel::ExpertTensorRead, 3> tensors;
+};
+
+struct LoadedGateUp {
+    OlmoeRuntimeModel::ExpertWeights weights;
+    OlmoeRuntimeModel::ExpertTensorRead down;
+    CompletedIoStage timing;
+};
+
+struct PendingDownRead {
+    std::future<Result<io::IoBuffer>> future;
+    OlmoeRuntimeModel::ExpertTensorRead tensor;
+};
+
+double milliseconds_since(std::chrono::steady_clock::time_point origin,
+                          std::chrono::steady_clock::time_point point) noexcept {
+    if (point == std::chrono::steady_clock::time_point{} || point <= origin) return 0.0;
+    return std::chrono::duration<double, std::milli>(point - origin).count();
+}
+
+double overlap_milliseconds(std::chrono::steady_clock::time_point left_start,
+                            std::chrono::steady_clock::time_point left_end,
+                            std::chrono::steady_clock::time_point right_start,
+                            std::chrono::steady_clock::time_point right_end) noexcept {
+    const auto overlap_start = std::max(left_start, right_start);
+    const auto overlap_end = std::min(left_end, right_end);
+    return overlap_end > overlap_start
+               ? std::chrono::duration<double, std::milli>(overlap_end - overlap_start).count()
+               : 0.0;
+}
+
+Result<std::pair<io::IoBuffer, double>> finish_io_stage(
+    std::future<Result<io::IoBuffer>> future,
+    ByteCount expected_bytes,
+    std::string_view stage_name) {
+    const auto wait_started = std::chrono::steady_clock::now();
+    Result<io::IoBuffer> received = make_error(ErrorCode::internal_error, "OLMoE stage future was not completed");
+    try {
+        received = future.get();
+    } catch (const std::future_error& error) {
+        return make_error(ErrorCode::internal_error, "OLMoE stage future failed",
+                          std::string(stage_name) + ": " + error.what());
+    }
+    const double wait_ms = std::chrono::duration<double, std::milli>(
+        std::chrono::steady_clock::now() - wait_started).count();
+    if (!received) return received.error();
+    if (static_cast<ByteCount>(received.value().bytes.size()) != expected_bytes) {
+        return make_error(ErrorCode::io_error, "Asynchronous OLMoE stage returned the wrong byte count",
+                          std::string(stage_name));
+    }
+    return std::pair<io::IoBuffer, double>{received.take_value(), wait_ms};
+}
 
 Result<PendingExpertRead> submit_expert_read(const OlmoeRuntimeModel& model,
                                              std::uint32_t layer,
@@ -273,9 +344,117 @@ Result<LoadedExpert> finish_expert_read(PendingExpertRead pending) {
     result.bytes_read = pending.range_bytes;
     result.io_ms = received.value().timing.service_ms;
     result.wait_ms = wait_ms;
+    result.submitted = received.value().timing.submitted_at;
     result.service_started = received.value().timing.service_started_at;
     result.completed = received.value().timing.completed_at;
+    result.queue_ms = received.value().timing.queue_ms;
     return result;
+}
+
+Result<PendingGateUpRead> submit_gate_up_read(const OlmoeRuntimeModel& model,
+                                              std::uint32_t layer,
+                                              std::uint32_t expert,
+                                              io::BoundedIoPool& pool) {
+    auto plan = model.expert_read_plan(layer, expert);
+    if (!plan) return plan.error();
+    const auto& gate = plan.value()[0];
+    const auto& up = plan.value()[1];
+    const auto& down = plan.value()[2];
+    if (gate.byte_count != kExpertTensorBytes || up.byte_count != kExpertTensorBytes ||
+        down.byte_count != kExpertTensorBytes || gate.element_offset != 0U ||
+        up.element_offset != kExpertMatrixElements ||
+        down.element_offset != kExpertMatrixElements * 2U || gate.path != up.path ||
+        gate.path != down.path || gate.absolute_offset > std::numeric_limits<ByteCount>::max() - gate.byte_count ||
+        gate.absolute_offset + gate.byte_count != up.absolute_offset ||
+        up.absolute_offset > std::numeric_limits<ByteCount>::max() - up.byte_count ||
+        down.absolute_offset > std::numeric_limits<ByteCount>::max() - down.byte_count ||
+        (up.absolute_offset + up.byte_count != down.absolute_offset &&
+         down.absolute_offset + down.byte_count != gate.absolute_offset)) {
+        return make_error(ErrorCode::integrity_error,
+                          "OLMoE staged expert tensors are not contiguous gate/up/down regions",
+                          "layer " + std::to_string(layer) + ", expert " + std::to_string(expert));
+    }
+    auto submitted = pool.submit_read(
+        gate.path, gate.absolute_offset, kGateUpBytes,
+        "OLMoE gate/up layer " + std::to_string(layer) + " expert " + std::to_string(expert));
+    if (!submitted) return submitted.error();
+    return PendingGateUpRead{submitted.take_value(), plan.take_value()};
+}
+
+Result<LoadedGateUp> finish_gate_up_read(PendingGateUpRead pending) {
+    auto finished = finish_io_stage(std::move(pending.future), kGateUpBytes, "gate/up");
+    if (!finished) return finished.error();
+    auto [buffer, wait_ms] = finished.take_value();
+
+    LoadedGateUp result;
+    try {
+        result.weights.values.resize(kExpertMatrixElements * 3U);
+    } catch (const std::bad_alloc&) {
+        return make_error(ErrorCode::resource_exhausted, "Unable to allocate one staged OLMoE expert");
+    }
+    result.weights.gate = {0U, 1'024U, 2'048U};
+    result.weights.up = {kExpertMatrixElements, 1'024U, 2'048U};
+    result.weights.down = {kExpertMatrixElements * 2U, 2'048U, 1'024U};
+    const ByteCount range_offset = pending.tensors[0].absolute_offset;
+    for (std::size_t index = 0U; index < 2U; ++index) {
+        const auto& tensor = pending.tensors[index];
+        const ByteCount source_offset = tensor.absolute_offset - range_offset;
+        const ByteCount destination_offset = static_cast<ByteCount>(tensor.element_offset) * 2U;
+        if (source_offset > kGateUpBytes || tensor.byte_count > kGateUpBytes - source_offset ||
+            destination_offset > kExpertBytes || tensor.byte_count > kExpertBytes - destination_offset) {
+            return make_error(ErrorCode::integrity_error, "OLMoE gate/up assembly exceeds its bounded buffer");
+        }
+        std::memcpy(reinterpret_cast<std::byte*>(result.weights.values.data()) + destination_offset,
+                    buffer.bytes.data() + source_offset, static_cast<std::size_t>(tensor.byte_count));
+    }
+    result.down = pending.tensors[2];
+    result.timing = CompletedIoStage{
+        kGateUpBytes,
+        buffer.timing.service_ms,
+        wait_ms,
+        buffer.timing.queue_ms,
+        buffer.timing.submitted_at,
+        buffer.timing.service_started_at,
+        buffer.timing.completed_at,
+    };
+    return result;
+}
+
+Result<PendingDownRead> submit_down_read(const OlmoeRuntimeModel::ExpertTensorRead& tensor,
+                                         std::uint32_t layer,
+                                         std::uint32_t expert,
+                                         io::BoundedIoPool& pool) {
+    if (tensor.byte_count != kExpertTensorBytes || tensor.element_offset != kExpertMatrixElements * 2U) {
+        return make_error(ErrorCode::integrity_error, "OLMoE down stage has an unexpected layout");
+    }
+    auto submitted = pool.submit_read(
+        tensor.path, tensor.absolute_offset, tensor.byte_count,
+        "OLMoE down layer " + std::to_string(layer) + " expert " + std::to_string(expert));
+    if (!submitted) return submitted.error();
+    return PendingDownRead{submitted.take_value(), tensor};
+}
+
+Result<CompletedIoStage> finish_down_read(PendingDownRead pending,
+                                          OlmoeRuntimeModel::ExpertWeights& weights) {
+    auto finished = finish_io_stage(std::move(pending.future), kExpertTensorBytes, "down");
+    if (!finished) return finished.error();
+    auto [buffer, wait_ms] = finished.take_value();
+    const ByteCount destination_offset = static_cast<ByteCount>(pending.tensor.element_offset) * 2U;
+    if (destination_offset != kGateUpBytes || pending.tensor.byte_count != kExpertTensorBytes ||
+        destination_offset > kExpertBytes || pending.tensor.byte_count > kExpertBytes - destination_offset) {
+        return make_error(ErrorCode::integrity_error, "OLMoE down assembly exceeds its bounded buffer");
+    }
+    std::memcpy(reinterpret_cast<std::byte*>(weights.values.data()) + destination_offset,
+                buffer.bytes.data(), static_cast<std::size_t>(pending.tensor.byte_count));
+    return CompletedIoStage{
+        kExpertTensorBytes,
+        buffer.timing.service_ms,
+        wait_ms,
+        buffer.timing.queue_ms,
+        buffer.timing.submitted_at,
+        buffer.timing.service_started_at,
+        buffer.timing.completed_at,
+    };
 }
 
 class ExpertCache {
@@ -311,6 +490,33 @@ public:
         return entries_.contains(layer * model_.config().num_experts + expert);
     }
 
+    [[nodiscard]] bool prepare_staged_miss(std::uint32_t layer, std::uint32_t expert) {
+        ++clock_;
+        const bool retain = should_retain(layer, expert);
+        if (retain) evict_for_one();
+        return retain;
+    }
+
+    Result<void> commit_staged(std::uint32_t layer,
+                               std::uint32_t expert,
+                               OlmoeRuntimeModel::ExpertWeights weights,
+                               bool retain) {
+        if (!retain) return {};
+        const std::uint32_t key = layer * model_.config().num_experts + expert;
+        if (entries_.contains(key)) {
+            return make_error(ErrorCode::internal_error, "OLMoE staged cache insertion duplicated an expert");
+        }
+        std::shared_ptr<const OlmoeRuntimeModel::ExpertWeights> shared;
+        try {
+            shared = std::make_shared<OlmoeRuntimeModel::ExpertWeights>(std::move(weights));
+        } catch (const std::bad_alloc&) {
+            return make_error(ErrorCode::resource_exhausted, "Unable to retain staged OLMoE expert");
+        }
+        entries_.emplace(key, Entry{std::move(shared), clock_, 1U});
+        used_bytes_ += kExpertBytes;
+        return {};
+    }
+
     Result<AcquiredExpert> acquire(std::uint32_t layer,
                                    std::uint32_t expert,
                                    std::optional<PendingExpertRead> pending = std::nullopt) {
@@ -320,17 +526,10 @@ public:
         if (found != entries_.end()) {
             found->second.last_use = clock_;
             ++found->second.frequency;
-            return AcquiredExpert{found->second.weights, true, false, 0U, 0.0, 0.0, {}, {}};
+            return AcquiredExpert{found->second.weights, true, false, 0U, 0.0, 0.0, {}, {}, {}, 0.0};
         }
 
-        bool retain = policy_ == ExpertCachePolicy::lru || policy_ == ExpertCachePolicy::lfu;
-        if (policy_ == ExpertCachePolicy::static_hot) {
-            const std::size_t slots = static_cast<std::size_t>(capacity_bytes_ / kExpertBytes);
-            const std::size_t base = slots / model_.config().num_hidden_layers;
-            const std::size_t remainder = slots % model_.config().num_hidden_layers;
-            const std::size_t hot_for_layer = base + (layer < remainder ? 1U : 0U);
-            retain = expert < hot_for_layer;
-        }
+        const bool retain = should_retain(layer, expert);
         if (retain) evict_for_one();
 
         LoadedExpert loaded;
@@ -343,10 +542,13 @@ public:
             const auto started = std::chrono::steady_clock::now();
             auto synchronous = model_.read_expert(layer, expert);
             if (!synchronous) return synchronous.error();
+            const auto completed = std::chrono::steady_clock::now();
             loaded.weights = synchronous.take_value();
             loaded.bytes_read = kExpertBytes;
-            loaded.io_ms = std::chrono::duration<double, std::milli>(
-                std::chrono::steady_clock::now() - started).count();
+            loaded.io_ms = std::chrono::duration<double, std::milli>(completed - started).count();
+            loaded.submitted = started;
+            loaded.service_started = started;
+            loaded.completed = completed;
         }
         std::shared_ptr<const OlmoeRuntimeModel::ExpertWeights> shared;
         try {
@@ -359,7 +561,8 @@ public:
             used_bytes_ += kExpertBytes;
         }
         return AcquiredExpert{std::move(shared), false, prefetched, loaded.bytes_read, loaded.io_ms,
-                              loaded.wait_ms, loaded.service_started, loaded.completed};
+                              loaded.wait_ms, loaded.submitted, loaded.service_started, loaded.completed,
+                              loaded.queue_ms};
     }
 
 private:
@@ -374,6 +577,16 @@ private:
                 ByteCount capacity,
                 safety::Reservation reservation)
         : model_(model), policy_(policy), capacity_bytes_(capacity), reservation_(std::move(reservation)) {}
+
+    [[nodiscard]] bool should_retain(std::uint32_t layer, std::uint32_t expert) const {
+        if (policy_ == ExpertCachePolicy::lru || policy_ == ExpertCachePolicy::lfu) return true;
+        if (policy_ != ExpertCachePolicy::static_hot) return false;
+        const std::size_t slots = static_cast<std::size_t>(capacity_bytes_ / kExpertBytes);
+        const std::size_t base = slots / model_.config().num_hidden_layers;
+        const std::size_t remainder = slots % model_.config().num_hidden_layers;
+        const std::size_t hot_for_layer = base + (layer < remainder ? 1U : 0U);
+        return expert < hot_for_layer;
+    }
 
     void evict_for_one() {
         while (used_bytes_ + kExpertBytes > capacity_bytes_ && !entries_.empty()) {
@@ -452,6 +665,21 @@ std::string_view to_string(ExpertIoMode mode) noexcept {
     switch (mode) {
         case ExpertIoMode::synchronous: return "sync";
         case ExpertIoMode::asynchronous: return "async";
+    }
+    return "unknown";
+}
+
+Result<ExpertReadMode> parse_expert_read_mode(std::string_view value) {
+    const auto normalized = util::to_lower(util::trim(value));
+    if (normalized == "whole" || normalized == "contiguous") return ExpertReadMode::whole;
+    if (normalized == "staged" || normalized == "split") return ExpertReadMode::staged;
+    return make_error(ErrorCode::invalid_argument, "Unknown OLMoE expert-read mode", std::string(value));
+}
+
+std::string_view to_string(ExpertReadMode mode) noexcept {
+    switch (mode) {
+        case ExpertReadMode::whole: return "whole";
+        case ExpertReadMode::staged: return "staged";
     }
     return "unknown";
 }
@@ -694,6 +922,9 @@ Result<OlmoeForwardResult> OlmoeRuntimeModel::forward(const std::vector<std::uin
     if (options.io_mode == ExpertIoMode::synchronous && options.io_fault.kind != io::IoFaultKind::none) {
         return make_error(ErrorCode::invalid_argument, "OLMoE I/O fault injection requires asynchronous I/O");
     }
+    if (options.read_mode == ExpertReadMode::staged && options.io_mode != ExpertIoMode::asynchronous) {
+        return make_error(ErrorCode::invalid_argument, "OLMoE staged expert reads require asynchronous I/O");
+    }
     for (const auto token : token_ids) {
         if (token >= config_.vocab_size) return make_error(ErrorCode::invalid_argument, "OLMoE input token exceeds vocabulary");
     }
@@ -709,8 +940,10 @@ Result<OlmoeForwardResult> OlmoeRuntimeModel::forward(const std::vector<std::uin
     std::unique_ptr<io::BoundedIoPool> io_pool;
     if (options.io_mode == ExpertIoMode::asynchronous) {
         io::IoPoolOptions io_options;
-        io_options.workers = 1U;
-        io_options.max_queued_requests = std::max<std::size_t>(2U, options.prefetch_depth);
+        io_options.workers = options.read_mode == ExpertReadMode::staged ? 2U : 1U;
+        io_options.max_queued_requests = options.read_mode == ExpertReadMode::staged
+                                             ? options.prefetch_depth + 2U
+                                             : std::max<std::size_t>(2U, options.prefetch_depth);
         io_options.max_request_bytes = kExpertBytes;
         io_options.request_timeout = options.io_request_timeout;
         io_options.cancelled = options.cancelled;
@@ -832,17 +1065,35 @@ Result<OlmoeForwardResult> OlmoeRuntimeModel::forward(const std::vector<std::uin
                                       return left < right;
                                   });
                 std::fill(moe.begin(), moe.end(), 0.0F);
+                const auto expert_phase_started = std::chrono::steady_clock::now();
                 std::array<std::optional<PendingExpertRead>, 8> pending_reads;
+                std::array<std::optional<PendingGateUpRead>, 8> pending_gate_up_reads;
                 std::array<std::pair<std::chrono::steady_clock::time_point,
-                                     std::chrono::steady_clock::time_point>, 8> compute_windows;
+                                     std::chrono::steady_clock::time_point>, 16> compute_windows;
                 std::size_t compute_window_count = 0U;
+                const auto overlap_with_compute = [&](std::chrono::steady_clock::time_point service_started,
+                                                      std::chrono::steady_clock::time_point completed) {
+                    double overlap_ms = 0.0;
+                    for (std::size_t index = 0U; index < compute_window_count; ++index) {
+                        overlap_ms += overlap_milliseconds(service_started, completed,
+                                                           compute_windows[index].first,
+                                                           compute_windows[index].second);
+                    }
+                    return overlap_ms;
+                };
                 const auto schedule_prefetch = [&](std::uint32_t route) -> Result<void> {
                     if (io_pool == nullptr || route >= config_.num_experts_per_token) return {};
                     const std::uint32_t expert = expert_order[route];
                     if (cache.value().contains(layer, expert)) return {};
-                    auto submitted = submit_expert_read(*this, layer, expert, *io_pool);
-                    if (!submitted) return submitted.error();
-                    pending_reads[route] = submitted.take_value();
+                    if (options.read_mode == ExpertReadMode::staged) {
+                        auto submitted = submit_gate_up_read(*this, layer, expert, *io_pool);
+                        if (!submitted) return submitted.error();
+                        pending_gate_up_reads[route] = submitted.take_value();
+                    } else {
+                        auto submitted = submit_expert_read(*this, layer, expert, *io_pool);
+                        if (!submitted) return submitted.error();
+                        pending_reads[route] = submitted.take_value();
+                    }
                     ++result.stats.expert_prefetches;
                     return {};
                 };
@@ -852,22 +1103,94 @@ Result<OlmoeForwardResult> OlmoeRuntimeModel::forward(const std::vector<std::uin
                 }
                 for (std::uint32_t route = 0U; route < config_.num_experts_per_token; ++route) {
                     const std::uint32_t expert = expert_order[route];
+                    if (options.read_mode == ExpertReadMode::staged &&
+                        !cache.value().contains(layer, expert)) {
+                        if (!pending_gate_up_reads[route]) {
+                            return make_error(ErrorCode::internal_error,
+                                              "OLMoE staged expert was not prefetched");
+                        }
+                        const bool retain = cache.value().prepare_staged_miss(layer, expert);
+                        auto loaded = finish_gate_up_read(std::move(*pending_gate_up_reads[route]));
+                        if (!loaded) return loaded.error();
+                        auto pending_down = submit_down_read(loaded.value().down, layer, expert, *io_pool);
+                        if (!pending_down) return pending_down.error();
+                        auto scheduled = schedule_prefetch(route + static_cast<std::uint32_t>(options.prefetch_depth));
+                        if (!scheduled) return scheduled.error();
+
+                        double service_compute_overlap_ms = overlap_with_compute(
+                            loaded.value().timing.service_started, loaded.value().timing.completed);
+                        const auto compute_started = std::chrono::steady_clock::now();
+                        matrix_vector(loaded.value().weights.values, loaded.value().weights.gate,
+                                      normalized, gate, session.executor);
+                        matrix_vector(loaded.value().weights.values, loaded.value().weights.up,
+                                      normalized, up, session.executor);
+                        for (std::size_t index = 0U; index < intermediate.size(); ++index) {
+                            intermediate[index] = (gate[index] / (1.0F + std::exp(-gate[index]))) * up[index];
+                        }
+                        const auto gate_up_compute_completed = std::chrono::steady_clock::now();
+                        compute_windows[compute_window_count++] = {compute_started, gate_up_compute_completed};
+
+                        auto down = finish_down_read(std::move(pending_down.value()), loaded.value().weights);
+                        if (!down) return down.error();
+                        const double down_compute_overlap_ms = overlap_milliseconds(
+                            down.value().service_started, down.value().completed,
+                            compute_started, gate_up_compute_completed);
+                        service_compute_overlap_ms += overlap_with_compute(
+                            down.value().service_started, down.value().completed);
+                        const auto down_compute_started = std::chrono::steady_clock::now();
+                        matrix_vector(loaded.value().weights.values, loaded.value().weights.down,
+                                      intermediate, expert_output, session.executor);
+                        const float route_weight = routing_weights[expert];
+                        for (std::size_t index = 0U; index < hidden_size; ++index) {
+                            moe[index] += route_weight * expert_output[index];
+                        }
+                        const auto compute_completed = std::chrono::steady_clock::now();
+                        compute_windows[compute_window_count++] = {down_compute_started, compute_completed};
+
+                        const double io_ms = loaded.value().timing.io_ms + down.value().io_ms;
+                        const double wait_ms = loaded.value().timing.wait_ms + down.value().wait_ms;
+                        result.stats.expert_bytes_read += kExpertBytes;
+                        result.stats.expert_io_ms += io_ms;
+                        result.stats.expert_prefetch_wait_ms += wait_ms;
+                        result.stats.expert_prefetch_overlap_ms += service_compute_overlap_ms;
+                        ++result.stats.expert_cache_misses;
+                        ++result.stats.staged_expert_reads;
+                        result.stats.staged_gate_up_bytes_read += kGateUpBytes;
+                        result.stats.staged_down_bytes_read += kExpertTensorBytes;
+                        result.stats.staged_down_compute_overlap_ms += down_compute_overlap_ms;
+                        result.trace.push_back(ExpertTraceEvent{
+                            position,
+                            layer,
+                            expert,
+                            routing_weights[expert],
+                            false,
+                            true,
+                            kExpertBytes,
+                            io_ms,
+                            wait_ms,
+                            service_compute_overlap_ms,
+                            milliseconds_since(expert_phase_started, loaded.value().timing.submitted),
+                            loaded.value().timing.queue_ms + down.value().queue_ms,
+                            milliseconds_since(expert_phase_started, down.value().completed),
+                            milliseconds_since(expert_phase_started, compute_started),
+                            milliseconds_since(expert_phase_started, compute_completed),
+                            route,
+                            route,
+                        });
+                        auto retained = cache.value().commit_staged(
+                            layer, expert, std::move(loaded.value().weights), retain);
+                        if (!retained) return retained.error();
+                        continue;
+                    }
+
                     auto acquired = cache.value().acquire(layer, expert, std::move(pending_reads[route]));
                     if (!acquired) return acquired.error();
                     auto scheduled = schedule_prefetch(route + static_cast<std::uint32_t>(options.prefetch_depth));
                     if (!scheduled) return scheduled.error();
                     double service_compute_overlap_ms = 0.0;
                     if (acquired.value().prefetched) {
-                        for (std::size_t index = 0U; index < compute_window_count; ++index) {
-                            const auto overlap_start = std::max(acquired.value().io_service_started,
-                                                                compute_windows[index].first);
-                            const auto overlap_end = std::min(acquired.value().io_completed,
-                                                              compute_windows[index].second);
-                            if (overlap_end > overlap_start) {
-                                service_compute_overlap_ms +=
-                                    std::chrono::duration<double, std::milli>(overlap_end - overlap_start).count();
-                            }
-                        }
+                        service_compute_overlap_ms = overlap_with_compute(
+                            acquired.value().io_service_started, acquired.value().io_completed);
                     }
                     result.stats.expert_bytes_read += acquired.value().bytes_read;
                     result.stats.expert_io_ms += acquired.value().io_ms;
@@ -878,10 +1201,6 @@ Result<OlmoeForwardResult> OlmoeRuntimeModel::forward(const std::vector<std::uin
                     } else {
                         ++result.stats.expert_cache_misses;
                     }
-                    result.trace.push_back(ExpertTraceEvent{
-                        position, layer, expert, routing_weights[expert], acquired.value().hit,
-                        acquired.value().prefetched, acquired.value().bytes_read, acquired.value().io_ms,
-                        acquired.value().prefetch_wait_ms, service_compute_overlap_ms});
                     const auto& expert_weights = *acquired.value().weights;
                     const auto compute_started = std::chrono::steady_clock::now();
                     matrix_vector(expert_weights.values, expert_weights.gate, normalized, gate, session.executor);
@@ -894,7 +1213,27 @@ Result<OlmoeForwardResult> OlmoeRuntimeModel::forward(const std::vector<std::uin
                     for (std::size_t index = 0U; index < hidden_size; ++index) {
                         moe[index] += route_weight * expert_output[index];
                     }
-                    compute_windows[compute_window_count++] = {compute_started, std::chrono::steady_clock::now()};
+                    const auto compute_completed = std::chrono::steady_clock::now();
+                    compute_windows[compute_window_count++] = {compute_started, compute_completed};
+                    result.trace.push_back(ExpertTraceEvent{
+                        position,
+                        layer,
+                        expert,
+                        routing_weights[expert],
+                        acquired.value().hit,
+                        acquired.value().prefetched,
+                        acquired.value().bytes_read,
+                        acquired.value().io_ms,
+                        acquired.value().prefetch_wait_ms,
+                        service_compute_overlap_ms,
+                        milliseconds_since(expert_phase_started, acquired.value().io_submitted),
+                        acquired.value().io_queue_ms,
+                        milliseconds_since(expert_phase_started, acquired.value().io_completed),
+                        milliseconds_since(expert_phase_started, compute_started),
+                        milliseconds_since(expert_phase_started, compute_completed),
+                        route,
+                        route,
+                    });
                 }
                 for (std::size_t index = 0U; index < hidden_size; ++index) hidden[index] = residual[index] + moe[index];
             }

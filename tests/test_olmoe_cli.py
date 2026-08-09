@@ -85,6 +85,15 @@ def main() -> int:
     require(invalid_cache.returncode != 0, "unknown real expert-cache policy was accepted", invalid_cache)
     invalid_io = run([executable, "moe-logits", model, "--text", "Hello", "--io", "parallel", "--json"])
     require(invalid_io.returncode != 0, "unknown real expert I/O mode was accepted", invalid_io)
+    invalid_read = run([
+        executable, "moe-logits", model, "--text", "Hello", "--expert-read", "unbounded", "--json",
+    ])
+    require(invalid_read.returncode != 0, "unknown expert-read mode was accepted", invalid_read)
+    staged_sync = run([
+        executable, "moe-logits", model, "--text", "Hello", "--expert-read", "staged", "--json",
+    ])
+    require(staged_sync.returncode != 0 and "requires --io async" in staged_sync.stderr,
+            "staged reads were accepted without bounded asynchronous I/O", staged_sync)
     invalid_prefetch = run([
         executable, "moe-logits", model, "--text", "Hello", "--io", "async", "--prefetch-depth", "3", "--json",
     ])

@@ -111,14 +111,64 @@ def main() -> int:
             require(row["prefetched"] == "1", "asynchronous expert read was not marked prefetched")
             require(float(row["prefetch_wait_ms"]) >= 0.0 and float(row["prefetch_overlap_ms"]) >= 0.0,
                     "invalid asynchronous prefetch timing")
+            require(float(row["submitted_ms"]) <= float(row["ready_ms"])
+                    and float(row["queue_ms"]) >= 0.0
+                    and float(row["compute_started_ms"]) <= float(row["compute_completed_ms"]),
+                    "invalid expert readiness/compute timing")
+            require(row["route_order"] == row["reduction_order"],
+                    "native selected reduction order changed")
         require(grouped.keys() == reference_routes.keys(), "native/reference token-layer keys differ")
         for key, native in grouped.items():
             reference = reference_routes[key]
+            require([int(row["route_order"]) for row in native] == list(range(8)),
+                    f"route-order telemetry is not contiguous at token/layer {key}")
             require([int(row["expert"]) for row in native] == reference["experts"],
                     f"expert routing differs at token/layer {key}")
             for row, expected in zip(native, reference["weights"], strict=True):
                 require(math.isclose(float(row["routing_weight"]), float(expected), abs_tol=2e-5, rel_tol=0.0),
                         f"routing weight differs at token/layer {key}")
+
+        staged_trace = Path(temporary) / "native-staged-trace.csv"
+        staged_process = run([
+            executable, "moe-logits", model, "--text", fixture["text"], "--top", "10",
+            "--cache", "no-cache", "--cache-bytes", str(EXPERT_BYTES),
+            "--io", "async", "--expert-read", "staged", "--prefetch-depth", "2",
+            "--io-timeout-ms", "30000", "--timeout-ms", "600000", "--trace", str(staged_trace),
+            "--no-verify", "--json",
+        ])
+        require(staged_process.returncode == 0, "staged OLMoE forward failed", staged_process)
+        staged_payload = json.loads(staged_process.stdout)
+        require(staged_payload["greedy_id"] == fixture["greedy_token_id"],
+                "staged greedy token differs from Transformers", staged_process)
+        require(staged_payload["expert_read_mode"] == "staged"
+                and staged_payload["staged_expert_reads"] == ROUTES_PER_TOKEN,
+                "staged mode/count was not reported", staged_process)
+        require(staged_payload["expert_bytes_read"] == ROUTES_PER_TOKEN * EXPERT_BYTES
+                and staged_payload["staged_gate_up_bytes_read"] == ROUTES_PER_TOKEN * 8 * 1024 * 1024
+                and staged_payload["staged_down_bytes_read"] == ROUTES_PER_TOKEN * 4 * 1024 * 1024,
+                "staged byte accounting differs from the whole-expert baseline", staged_process)
+        require(staged_payload["staged_down_compute_overlap_ms"] > 0.0,
+                "down-stage reads did not overlap gate/up compute", staged_process)
+        staged_logits = {int(item["id"]): float(item["logit"]) for item in staged_payload["top_logits"]}
+        for item in fixture["top_logits"]:
+            token_id = int(item["token_id"])
+            require(token_id in staged_logits
+                    and math.isclose(staged_logits[token_id], float(item["logit"]),
+                                     abs_tol=tolerance, rel_tol=0.0),
+                    f"staged logit mismatch for token {token_id}", staged_process)
+        with staged_trace.open(newline="", encoding="utf-8") as stream:
+            staged_rows = list(csv.DictReader(stream))
+        require(len(staged_rows) == ROUTES_PER_TOKEN, "staged telemetry CSV row count mismatch")
+        staged_grouped: dict[tuple[int, int], list[dict[str, str]]] = {}
+        for row in staged_rows:
+            staged_grouped.setdefault((int(row["token"]), int(row["layer"])), []).append(row)
+        for key, native in staged_grouped.items():
+            require([int(row["expert"]) for row in native] == reference_routes[key]["experts"],
+                    f"staged routing differs at token/layer {key}")
+        staged_replay = trace_sim(executable, staged_trace, "no-cache")
+        require(staged_replay["ready_order_available"] is True
+                and staged_replay["ready_order_groups"] == 16,
+                "staged readiness replay did not cover all layers")
 
         multi_case = fixture["multi_token_case"]
         multi_trace = Path(temporary) / "native-multi-token-trace.csv"
@@ -177,6 +227,21 @@ def main() -> int:
                 and async_cached_payload["expert_cache_misses"] == ROUTES_PER_TOKEN,
                 "asynchronous prefetch did not stop at real cache hits", async_cached)
 
+        staged_cached = run([
+            executable, "moe-logits", model, "--text", multi_case["text"], "--top", "1",
+            "--cache", "lru", "--cache-bytes", "2GiB", "--io", "async",
+            "--expert-read", "staged", "--prefetch-depth", "2",
+            "--timeout-ms", "600000", "--no-verify", "--json",
+        ])
+        require(staged_cached.returncode == 0, "staged cached OLMoE forward failed", staged_cached)
+        staged_cached_payload = json.loads(staged_cached.stdout)
+        require(staged_cached_payload["greedy_id"] == multi_case["greedy_token_id"]
+                and staged_cached_payload["staged_expert_reads"] == ROUTES_PER_TOKEN
+                and staged_cached_payload["expert_cache_hits"] == ROUTES_PER_TOKEN
+                and staged_cached_payload["expert_cache_misses"] == ROUTES_PER_TOKEN
+                and staged_cached_payload["expert_bytes_read"] == ROUTES_PER_TOKEN * EXPERT_BYTES,
+                "staged cache insertion/reuse differs from the whole-expert path", staged_cached)
+
         no_cache = trace_sim(executable, multi_trace, "no-cache")
         lru = trace_sim(executable, multi_trace, "lru")
         lfu = trace_sim(executable, multi_trace, "lfu")
@@ -190,6 +255,8 @@ def main() -> int:
                     and report["p50_unique_reuse_distance"] == ROUTES_PER_TOKEN - 1
                     and report["p95_unique_reuse_distance"] == ROUTES_PER_TOKEN - 1,
                     f"{name} reuse-distance report differs from the repeated-token fixture")
+            require(report["ready_order_available"] is True and report["ready_order_groups"] == 32,
+                    f"{name} readiness replay did not cover every token/layer group")
         require(static_hot["ram_hits"] == 2 * ROUTES_PER_TOKEN and static_hot["storage_misses"] == 0,
                 "static-hot simulation mismatch")
 
@@ -215,6 +282,14 @@ def main() -> int:
             ])
             require(failed.returncode != 0 and expected_error in failed.stderr,
                     f"injected {fault} did not fail closed", failed)
+
+        staged_short_read = run([
+            executable, "moe-logits", model, "--text", fixture["text"], "--cache", "no-cache",
+            "--io", "async", "--expert-read", "staged", "--prefetch-depth", "2",
+            "--inject-io-fault", "short-read", "--timeout-ms", "600000", "--no-verify", "--json",
+        ])
+        require(staged_short_read.returncode != 0 and "Short read" in staged_short_read.stderr,
+                "staged gate/up short-read injection did not fail closed", staged_short_read)
 
         incomplete = Path(temporary) / "incomplete-model"
         incomplete.mkdir()

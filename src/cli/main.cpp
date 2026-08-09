@@ -234,7 +234,8 @@ void print_help() {
         << "      Validate the pinned OLMoE metadata and estimate safe streaming budgets.\n\n"
         << "  moe-logits MODEL_DIRECTORY --text TEXT [--chat] [--top N]\n"
         << "       [--cache no-cache|lru|lfu|static-hot] [--cache-bytes SIZE]\n"
-        << "       [--io sync|async] [--prefetch-depth 1|2] [--io-timeout-ms N]\n"
+        << "       [--io sync|async] [--expert-read whole|staged] [--prefetch-depth 1|2]\n"
+        << "       [--io-timeout-ms N]\n"
         << "       [--timeout-ms N] [--trace PATH] [--no-verify] [--json]\n"
         << "      Run the OLMoE CPU oracle with bounded NVMe expert streaming.\n\n"
         << "  heartbeat-write PATH [--state normal|pressure|critical|emergency]\n"
@@ -473,14 +474,17 @@ Result<void> write_olmoe_trace_atomic(const std::filesystem::path& path,
         std::ofstream output(partial, std::ios::binary | std::ios::trunc);
         if (!output) return vastloom::make_error(vastloom::ErrorCode::io_error, "Unable to create OLMoE trace staging file", partial);
         output << "token,layer,expert,size_bytes,routing_weight,tier,hit,bytes_read,io_ms,"
-                  "prefetched,prefetch_wait_ms,prefetch_overlap_ms\n";
+                  "prefetched,prefetch_wait_ms,prefetch_overlap_ms,submitted_ms,queue_ms,ready_ms,"
+                  "compute_started_ms,compute_completed_ms,route_order,reduction_order\n";
         output.precision(9);
         for (const auto& event : events) {
             output << event.token_position << ',' << event.layer << ',' << event.expert << ',' << (12U * vastloom::MiB) << ','
                    << event.routing_weight << ',' << (event.ram_cache_hit ? "ram" : "nvme") << ','
                    << (event.ram_cache_hit ? 1 : 0) << ',' << event.bytes_read << ',' << event.io_ms << ','
                    << (event.prefetched ? 1 : 0) << ',' << event.prefetch_wait_ms << ','
-                   << event.prefetch_overlap_ms << '\n';
+                   << event.prefetch_overlap_ms << ',' << event.submitted_ms << ',' << event.queue_ms << ','
+                   << event.ready_ms << ',' << event.compute_started_ms << ',' << event.compute_completed_ms << ','
+                   << event.route_order << ',' << event.reduction_order << '\n';
         }
         output.flush();
         if (!output) {
@@ -499,7 +503,7 @@ Result<void> write_olmoe_trace_atomic(const std::filesystem::path& path,
 int command_moe_logits(const std::vector<std::string>& args) {
     auto valid = validate_options(args, 1U,
                                   {"--text", "--top", "--cache", "--cache-bytes", "--io", "--prefetch-depth",
-                                   "--io-timeout-ms", "--inject-io-fault", "--timeout-ms", "--trace"},
+                                   "--expert-read", "--io-timeout-ms", "--inject-io-fault", "--timeout-ms", "--trace"},
                                   {"--chat", "--no-verify", "--json"});
     const bool json = has_flag(args, "--json");
     if (!valid) return print_error(valid.error(), json);
@@ -510,6 +514,8 @@ int command_moe_logits(const std::vector<std::string>& args) {
     auto cache_bytes = optional_bytes(args, "--cache-bytes", 256U * vastloom::MiB);
     auto cache_policy = vastloom::inference::parse_expert_cache_policy(option_value(args, "--cache").value_or("lru"));
     auto io_mode = vastloom::inference::parse_expert_io_mode(option_value(args, "--io").value_or("sync"));
+    auto read_mode = vastloom::inference::parse_expert_read_mode(
+        option_value(args, "--expert-read").value_or("whole"));
     auto prefetch_depth = optional_size(args, "--prefetch-depth", 1U);
     auto io_timeout = optional_size(args, "--io-timeout-ms", 30'000U);
     auto io_fault = parse_io_fault(option_value(args, "--inject-io-fault").value_or("none"));
@@ -518,6 +524,7 @@ int command_moe_logits(const std::vector<std::string>& args) {
     if (!cache_bytes) return print_error(cache_bytes.error(), json);
     if (!cache_policy) return print_error(cache_policy.error(), json);
     if (!io_mode) return print_error(io_mode.error(), json);
+    if (!read_mode) return print_error(read_mode.error(), json);
     if (!prefetch_depth) return print_error(prefetch_depth.error(), json);
     if (!io_timeout) return print_error(io_timeout.error(), json);
     if (!io_fault) return print_error(io_fault.error(), json);
@@ -533,6 +540,11 @@ int command_moe_logits(const std::vector<std::string>& args) {
         io_fault.value().kind != vastloom::io::IoFaultKind::none) {
         return print_error(vastloom::make_error(vastloom::ErrorCode::invalid_argument,
                                                 "--inject-io-fault requires --io async"), json);
+    }
+    if (read_mode.value() == vastloom::inference::ExpertReadMode::staged &&
+        io_mode.value() != vastloom::inference::ExpertIoMode::asynchronous) {
+        return print_error(vastloom::make_error(vastloom::ErrorCode::invalid_argument,
+                                                "--expert-read staged requires --io async"), json);
     }
 
     auto hardware = vastloom::hardware::HardwareProbe::collect(args[0]);
@@ -560,6 +572,7 @@ int command_moe_logits(const std::vector<std::string>& args) {
     options.cache_policy = cache_policy.value();
     options.expert_cache_bytes = cache_bytes.value();
     options.io_mode = io_mode.value();
+    options.read_mode = read_mode.value();
     options.prefetch_depth = prefetch_depth.value();
     options.io_request_timeout = std::chrono::milliseconds(io_timeout.value());
     options.io_fault = io_fault.value();
@@ -598,15 +611,21 @@ int command_moe_logits(const std::vector<std::string>& args) {
                       << forwarded.value().logits[order[index]] << '}';
         }
         std::cout << "],\"cache_policy\":\"" << vastloom::inference::to_string(options.cache_policy)
-                  << "\",\"io_mode\":\"" << vastloom::inference::to_string(options.io_mode)
-                  << "\",\"prefetch_depth\":" << options.prefetch_depth
+                   << "\",\"io_mode\":\"" << vastloom::inference::to_string(options.io_mode)
+                   << "\",\"expert_read_mode\":\"" << vastloom::inference::to_string(options.read_mode)
+                   << "\",\"prefetch_depth\":" << options.prefetch_depth
                   << ",\"expert_cache_hits\":" << forwarded.value().stats.expert_cache_hits
                   << ",\"expert_cache_misses\":" << forwarded.value().stats.expert_cache_misses
                   << ",\"expert_prefetches\":" << forwarded.value().stats.expert_prefetches
                   << ",\"expert_bytes_read\":" << forwarded.value().stats.expert_bytes_read
                   << ",\"expert_io_ms\":" << forwarded.value().stats.expert_io_ms
-                  << ",\"expert_prefetch_wait_ms\":" << forwarded.value().stats.expert_prefetch_wait_ms
-                  << ",\"expert_prefetch_overlap_ms\":" << forwarded.value().stats.expert_prefetch_overlap_ms
+                   << ",\"expert_prefetch_wait_ms\":" << forwarded.value().stats.expert_prefetch_wait_ms
+                   << ",\"expert_prefetch_overlap_ms\":" << forwarded.value().stats.expert_prefetch_overlap_ms
+                   << ",\"staged_expert_reads\":" << forwarded.value().stats.staged_expert_reads
+                   << ",\"staged_gate_up_bytes_read\":" << forwarded.value().stats.staged_gate_up_bytes_read
+                   << ",\"staged_down_bytes_read\":" << forwarded.value().stats.staged_down_bytes_read
+                   << ",\"staged_down_compute_overlap_ms\":"
+                   << forwarded.value().stats.staged_down_compute_overlap_ms
                   << ",\"load_ms\":" << forwarded.value().stats.load_ms
                   << ",\"forward_ms\":" << forwarded.value().stats.forward_ms
                   << ",\"trace_events\":" << forwarded.value().trace.size()
@@ -634,8 +653,9 @@ int command_moe_logits(const std::vector<std::string>& args) {
         }
         std::cout << "Expert I/O: " << vastloom::format_bytes(forwarded.value().stats.expert_bytes_read)
                   << ", hits/misses " << forwarded.value().stats.expert_cache_hits << '/'
-                  << forwarded.value().stats.expert_cache_misses << ", "
-                  << vastloom::inference::to_string(options.io_mode) << " prefetches "
+                   << forwarded.value().stats.expert_cache_misses << ", "
+                   << vastloom::inference::to_string(options.io_mode) << '/'
+                   << vastloom::inference::to_string(options.read_mode) << " prefetches "
                   << forwarded.value().stats.expert_prefetches << ", overlap "
                   << forwarded.value().stats.expert_prefetch_overlap_ms << " ms, forward "
                   << forwarded.value().stats.forward_ms << " ms\n";

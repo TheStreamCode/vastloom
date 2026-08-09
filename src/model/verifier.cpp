@@ -1,13 +1,13 @@
-#include "stargate/model/verifier.hpp"
+#include "vastloom/model/verifier.hpp"
 
 #include <algorithm>
 #include <cctype>
 #include <sstream>
 
-#include "stargate/util/sha256.hpp"
-#include "stargate/util/string.hpp"
+#include "vastloom/util/sha256.hpp"
+#include "vastloom/util/string.hpp"
 
-namespace stargate::model {
+namespace vastloom::model {
 namespace {
 
 bool path_is_within(const std::filesystem::path& root, const std::filesystem::path& candidate) {
@@ -158,4 +158,4 @@ std::string to_json(const VerificationReport& report) {
     return output.str();
 }
 
-}  // namespace stargate::model
+}  // namespace vastloom::model

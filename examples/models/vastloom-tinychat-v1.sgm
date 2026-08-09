@@ -1,0 +1,24 @@
+format=vastloom.manifest.v1
+model_id=vastloom/tinychat-v1
+revision=2
+architecture=vastloom_tiny_transformer
+tokenizer_family=byte_level
+metadata_only=false
+requires_avx2=false
+supports_speculation=false
+model_total_bytes=367520
+required_storage_bytes=367520
+dense_bytes=367520
+routed_expert_bytes=0
+active_bytes_per_token=367520
+minimum_ram_bytes=16MiB
+recommended_ram_bytes=128MiB
+minimum_vram_bytes=0
+recommended_vram_bytes=0
+layer_count=2
+expert_count=0
+selected_experts_per_token=0
+max_context_tokens=128
+validation_fixture=true
+chunk_count=1
+chunk	vastloom-tinychat-v1.sgtm	367520	9e3dd63d2df11cbbf0207dae5f87ee6afa3f5b456aacc7e0b984b515e9cff9ef	dense	fp32	-	-	true

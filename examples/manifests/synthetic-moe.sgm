@@ -1,6 +1,6 @@
-# Stargate manifest v1 — synthetic model used for planner and safety tests.
-format=stargate.manifest.v1
-model_id=stargate/synthetic-moe-320b
+# Vastloom manifest v1 — synthetic model used for planner and safety tests.
+format=vastloom.manifest.v1
+model_id=vastloom/synthetic-moe-320b
 revision=test-v1
 architecture=synthetic_moe
 metadata_only=true

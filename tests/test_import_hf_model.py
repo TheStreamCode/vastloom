@@ -26,12 +26,18 @@ def require(condition: bool, message: str) -> None:
 
 
 def main() -> int:
-    with tempfile.TemporaryDirectory(prefix="stargate-import-test-") as temporary:
+    with tempfile.TemporaryDirectory(prefix="vastloom-import-test-") as temporary:
         root = Path(temporary)
         (root / "models" / "original").mkdir(parents=True)
         (root / "cache").mkdir()
-        (root / ".stargate-store").write_text(MODULE.MARKER, encoding="utf-8")
+        (root / ".vastloom-store").write_text(MODULE.MARKER, encoding="utf-8")
         require(MODULE.validate_store(root) == root.resolve(), "valid store rejected")
+
+        legacy_root = root / "legacy-store"
+        (legacy_root / "models" / "original").mkdir(parents=True)
+        (legacy_root / "cache").mkdir()
+        (legacy_root / ".stargate-store").write_text(MODULE.LEGACY_MARKER, encoding="utf-8")
+        require(MODULE.validate_store(legacy_root) == legacy_root.resolve(), "legacy store rejected")
         target = MODULE.import_model(
             root,
             MODULE.SMOLLM2,
@@ -65,15 +71,60 @@ def main() -> int:
         else:
             raise AssertionError("invalid store marker was accepted")
 
+        symlink_store = root / "symlink-store"
+        (symlink_store / "models" / "original").mkdir(parents=True)
+        (symlink_store / "cache").mkdir()
+        try:
+            (symlink_store / ".vastloom-store").symlink_to(root / ".vastloom-store")
+        except OSError:
+            pass
+        else:
+            try:
+                MODULE.validate_store(symlink_store)
+            except RuntimeError:
+                pass
+            else:
+                raise AssertionError("symlinked store marker was accepted")
+
         existing = root / "models" / "original" / "existing"
         existing.mkdir()
-        (existing / "stargate-import.json").write_text(json.dumps({}), encoding="utf-8")
+        (existing / "vastloom-import.json").write_text(json.dumps({}), encoding="utf-8")
         try:
             MODULE.validate_existing(existing, MODULE.SMOLLM2, (), True)
         except RuntimeError:
             pass
         else:
             raise AssertionError("mismatched immutable artifact identity was accepted")
+
+        legacy_existing = root / "models" / "original" / "legacy-existing"
+        legacy_existing.mkdir()
+        legacy_payload = b"legacy"
+        legacy_spec = MODULE.ModelSpec(
+            "legacy",
+            "test/legacy",
+            "revision",
+            (MODULE.FileSpec("data.bin", len(legacy_payload), hashlib.sha256(legacy_payload).hexdigest()),),
+        )
+        (legacy_existing / "data.bin").write_bytes(legacy_payload)
+        (legacy_existing / "stargate-import.json").write_text(
+            json.dumps(
+                {
+                    "format": MODULE.LEGACY_IMPORT_FORMAT,
+                    "model_id": legacy_spec.model_id,
+                    "revision": legacy_spec.revision,
+                    "metadata_only": False,
+                    "files": [
+                        {
+                            "name": "data.bin",
+                            "size": len(legacy_payload),
+                            "sha256": hashlib.sha256(legacy_payload).hexdigest(),
+                        }
+                    ],
+                }
+            ),
+            encoding="utf-8",
+        )
+        MODULE.validate_existing(legacy_existing, legacy_spec, legacy_spec.files, False)
 
         payload = bytes(range(256)) * 8
 

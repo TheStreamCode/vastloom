@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""End-to-end tests for Stargate's native TinyTransformer chat CLI."""
+"""End-to-end tests for Vastloom's native TinyTransformer chat CLI."""
 
 from __future__ import annotations
 
@@ -66,13 +66,13 @@ def test_model_info(executable: Path, manifest: Path) -> None:
     require(payload.get("ok") is True, "model-info did not report success", process)
     model = payload.get("model")
     require(isinstance(model, dict), "model-info omitted model metadata", process)
-    require(model.get("model_id") == "stargate/tinychat-v1", "unexpected model id", process)
+    require(model.get("model_id") == "vastloom/tinychat-v1", "unexpected model id", process)
     require(model.get("context_length") == 128, "unexpected context length", process)
     require(payload.get("manifest_hash_verified") is True, "manifest hash was not verified", process)
 
 
 def test_direct_model_and_quick_manifest_mode(executable: Path, manifest: Path) -> None:
-    model_path = manifest.parent / "stargate-tinychat-v1.sgtm"
+    model_path = manifest.parent / "vastloom-tinychat-v1.sgtm"
 
     direct_info = invoke(executable, "model-info", str(model_path), "--json")
     require(direct_info.returncode == 0, "direct model-info failed", direct_info)
@@ -84,7 +84,7 @@ def test_direct_model_and_quick_manifest_mode(executable: Path, manifest: Path) 
         executable, "chat", str(model_path), "--prompt", "Ciao", "--no-stream", "--json"
     )
     require(direct_chat.returncode == 0, "direct model chat failed", direct_chat)
-    require(parse_json_output(direct_chat).get("text") == "Ciao! Sono Stargate TinyChat.",
+    require(parse_json_output(direct_chat).get("text") == "Ciao! Sono Vastloom TinyChat.",
             "direct model produced the wrong response", direct_chat)
 
     quick_info = invoke(executable, "model-info", str(manifest), "--no-verify", "--json")
@@ -92,6 +92,31 @@ def test_direct_model_and_quick_manifest_mode(executable: Path, manifest: Path) 
     quick_payload = parse_json_output(quick_info)
     require(quick_payload.get("manifest_hash_verified") is False,
             "--no-verify was incorrectly reported as full verification", quick_info)
+
+
+def test_legacy_manifest_compatibility(executable: Path, manifest: Path) -> None:
+    with tempfile.TemporaryDirectory(prefix="vastloom-legacy-manifest-") as temporary_directory:
+        root = Path(temporary_directory)
+        model_name = "vastloom-tinychat-v1.sgtm"
+        shutil.copy2(manifest.parent / model_name, root / model_name)
+        legacy_text = (
+            manifest.read_text(encoding="utf-8")
+            .replace("format=vastloom.manifest.v1", "format=stargate.manifest.v1")
+            .replace("architecture=vastloom_tiny_transformer", "architecture=stargate_tiny_transformer")
+        )
+        legacy_manifest = root / "legacy.sgm"
+        legacy_manifest.write_text(legacy_text, encoding="utf-8", newline="\n")
+        process = invoke(
+            executable,
+            "chat",
+            str(legacy_manifest),
+            "--prompt",
+            "Quanto fa 2+2?",
+            "--json",
+        )
+        require(process.returncode == 0, "legacy manifest was rejected", process)
+        require(parse_json_output(process).get("text") == "2+2 fa 4.",
+                "legacy manifest produced the wrong response", process)
 
 
 def test_registered_vectors(executable: Path, manifest: Path, vectors_path: Path) -> None:
@@ -143,9 +168,9 @@ def test_interactive_repl(executable: Path, manifest: Path) -> None:
         stdin="Ciao\n/stats\n/model\n/exit\n",
     )
     require(process.returncode == 0, "interactive chat failed", process)
-    require("model> Ciao! Sono Stargate TinyChat." in process.stdout, "interactive response missing", process)
+    require("model> Ciao! Sono Vastloom TinyChat." in process.stdout, "interactive response missing", process)
     require("No response statistics" not in process.stdout, "interactive stats were not retained", process)
-    require("Model:           stargate/tinychat-v1" in process.stdout, "/model output missing", process)
+    require("Model:           vastloom/tinychat-v1" in process.stdout, "/model output missing", process)
 
 
 def test_json_remains_utf8_for_arbitrary_sampled_bytes(executable: Path, manifest: Path) -> None:
@@ -215,10 +240,10 @@ def test_cli_validation(executable: Path, manifest: Path) -> None:
 
 
 def test_manifest_integrity_gate(executable: Path, manifest: Path) -> None:
-    with tempfile.TemporaryDirectory(prefix="stargate-chat-integrity-") as temporary_directory:
+    with tempfile.TemporaryDirectory(prefix="vastloom-chat-integrity-") as temporary_directory:
         root = Path(temporary_directory)
         copied_manifest = root / manifest.name
-        copied_model = root / "stargate-tinychat-v1.sgtm"
+        copied_model = root / "vastloom-tinychat-v1.sgtm"
         shutil.copy2(manifest, copied_manifest)
         shutil.copy2(manifest.parent / copied_model.name, copied_model)
 
@@ -235,13 +260,13 @@ def test_manifest_integrity_gate(executable: Path, manifest: Path) -> None:
         require(payload.get("ok") is False, "corrupt model error was not JSON", process)
         require("verification failed" in str(payload.get("error", "")).lower(), "wrong integrity error", process)
 
-    with tempfile.TemporaryDirectory(prefix="stargate-chat-metadata-") as temporary_directory:
+    with tempfile.TemporaryDirectory(prefix="vastloom-chat-metadata-") as temporary_directory:
         root = Path(temporary_directory)
         copied_manifest = root / "MODEL.SGM"
-        copied_model = root / "stargate-tinychat-v1.sgtm"
+        copied_model = root / "vastloom-tinychat-v1.sgtm"
         shutil.copy2(manifest.parent / copied_model.name, copied_model)
         manifest_text = manifest.read_text(encoding="utf-8").replace(
-            "model_id=stargate/tinychat-v1", "model_id=stargate/tampered-id"
+            "model_id=vastloom/tinychat-v1", "model_id=vastloom/tampered-id"
         )
         copied_manifest.write_text(manifest_text, encoding="utf-8", newline="\n")
 
@@ -253,21 +278,22 @@ def test_manifest_integrity_gate(executable: Path, manifest: Path) -> None:
 
 def main() -> int:
     parser = argparse.ArgumentParser()
-    parser.add_argument("--stargate", type=Path, required=True)
+    parser.add_argument("--vastloom", type=Path, required=True)
     parser.add_argument("--manifest", type=Path, required=True)
     parser.add_argument("--vectors", type=Path, required=True)
     args = parser.parse_args()
 
-    executable = args.stargate.resolve()
+    executable = args.vastloom.resolve()
     manifest = args.manifest.resolve()
     vectors = args.vectors.resolve()
-    require(executable.is_file(), f"stargate executable does not exist: {executable}")
+    require(executable.is_file(), f"vastloom executable does not exist: {executable}")
     require(manifest.is_file(), f"manifest does not exist: {manifest}")
     require(vectors.is_file(), f"test vectors do not exist: {vectors}")
 
     test_command_help(executable)
     test_model_info(executable, manifest)
     test_direct_model_and_quick_manifest_mode(executable, manifest)
+    test_legacy_manifest_compatibility(executable, manifest)
     test_registered_vectors(executable, manifest, vectors)
     test_native_self_test(executable, manifest)
     test_interactive_repl(executable, manifest)

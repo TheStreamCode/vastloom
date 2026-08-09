@@ -1,4 +1,4 @@
-#include "stargate/io/process_io_counters.hpp"
+#include "vastloom/io/process_io_counters.hpp"
 
 #include <charconv>
 #include <fstream>
@@ -7,7 +7,7 @@
 #include <string>
 #include <string_view>
 
-#include "stargate/util/string.hpp"
+#include "vastloom/util/string.hpp"
 
 #if defined(_WIN32)
 #ifndef NOMINMAX
@@ -19,7 +19,7 @@
 #include <windows.h>
 #endif
 
-namespace stargate::io {
+namespace vastloom::io {
 namespace {
 
 #if defined(__linux__)
@@ -110,4 +110,4 @@ Result<ProcessIoDelta> process_io_delta(const ProcessIoSnapshot& before,
     };
 }
 
-}  // namespace stargate::io
+}  // namespace vastloom::io

@@ -1,4 +1,4 @@
-#include "stargate/hardware/hardware_probe.hpp"
+#include "vastloom/hardware/hardware_probe.hpp"
 
 #include <array>
 #include <cerrno>
@@ -10,7 +10,7 @@
 #include <string_view>
 #include <thread>
 
-#include "stargate/util/string.hpp"
+#include "vastloom/util/string.hpp"
 
 #if defined(_WIN32)
 #include <windows.h>
@@ -23,7 +23,7 @@
 #include <sys/utsname.h>
 #endif
 
-namespace stargate::hardware {
+namespace vastloom::hardware {
 namespace {
 
 std::string detect_os() {
@@ -278,7 +278,7 @@ Result<HardwareSnapshot> HardwareProbe::collect(const std::filesystem::path& sto
         snapshot.warnings.emplace_back("AVX2 was not detected; large-model CPU kernels may be unavailable or significantly slower.");
     }
     if (snapshot.memory.available_bytes < 4U * GiB) {
-        snapshot.warnings.emplace_back("Less than 4 GiB of RAM is currently available. Stargate must not start a model in this state.");
+        snapshot.warnings.emplace_back("Less than 4 GiB of RAM is currently available. Vastloom must not start a model in this state.");
     }
     return snapshot;
 }
@@ -334,7 +334,7 @@ std::string to_json(const HardwareSnapshot& snapshot) {
 
 std::string to_text(const HardwareSnapshot& snapshot) {
     std::ostringstream output;
-    output << "Stargate hardware report\n"
+    output << "Vastloom hardware report\n"
            << "OS:       " << snapshot.operating_system << '\n'
            << "CPU:      " << snapshot.cpu.name << " (" << snapshot.cpu.logical_cores << " logical cores)\n"
            << "ISA:      AVX2=" << (snapshot.cpu.avx2 ? "yes" : "no")
@@ -364,4 +364,4 @@ std::string to_text(const HardwareSnapshot& snapshot) {
     return output.str();
 }
 
-}  // namespace stargate::hardware
+}  // namespace vastloom::hardware

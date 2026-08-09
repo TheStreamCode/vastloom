@@ -1,4 +1,4 @@
-#include "stargate/inference/llama_model.hpp"
+#include "vastloom/inference/llama_model.hpp"
 
 #include <algorithm>
 #include <atomic>
@@ -13,11 +13,11 @@
 #include <span>
 #include <thread>
 
-#include "stargate/model/imported_checkpoint.hpp"
-#include "stargate/model/safetensors.hpp"
-#include "stargate/util/json.hpp"
+#include "vastloom/model/imported_checkpoint.hpp"
+#include "vastloom/model/safetensors.hpp"
+#include "vastloom/util/json.hpp"
 
-namespace stargate::inference {
+namespace vastloom::inference {
 namespace {
 
 constexpr std::string_view kModelId = "HuggingFaceTB/SmolLM2-135M-Instruct";
@@ -652,4 +652,4 @@ Result<LlamaGenerationResult> LlamaModel::generate(const std::vector<ChatMessage
     }
 }
 
-}  // namespace stargate::inference
+}  // namespace vastloom::inference

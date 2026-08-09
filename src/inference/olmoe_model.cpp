@@ -1,4 +1,4 @@
-#include "stargate/inference/olmoe_model.hpp"
+#include "vastloom/inference/olmoe_model.hpp"
 
 #include <algorithm>
 #include <array>
@@ -8,11 +8,11 @@
 #include <sstream>
 #include <string_view>
 
-#include "stargate/model/imported_checkpoint.hpp"
-#include "stargate/util/json.hpp"
-#include "stargate/util/string.hpp"
+#include "vastloom/model/imported_checkpoint.hpp"
+#include "vastloom/util/json.hpp"
+#include "vastloom/util/string.hpp"
 
-namespace stargate::inference {
+namespace vastloom::inference {
 namespace {
 
 constexpr std::string_view kModelId = "allenai/OLMoE-1B-7B-0924-Instruct";
@@ -321,4 +321,4 @@ std::string to_text(const OlmoeInspection& inspection) {
     return output.str();
 }
 
-}  // namespace stargate::inference
+}  // namespace vastloom::inference

@@ -47,11 +47,11 @@ def json_command(command: list[str], *, success: bool = True) -> tuple[dict[str,
 
 def main() -> int:
     parser = argparse.ArgumentParser()
-    parser.add_argument("--stargate", type=Path, required=True)
+    parser.add_argument("--vastloom", type=Path, required=True)
     parser.add_argument("--model", type=Path, required=True)
     parser.add_argument("--fixture", type=Path, required=True)
     args = parser.parse_args()
-    executable = str(args.stargate.resolve())
+    executable = str(args.vastloom.resolve())
     model = str(args.model.resolve())
     fixture = json.loads(args.fixture.read_text(encoding="utf-8"))
 

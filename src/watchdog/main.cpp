@@ -6,8 +6,8 @@
 #include <string>
 #include <thread>
 
-#include "stargate/safety/heartbeat.hpp"
-#include "stargate/version.hpp"
+#include "vastloom/safety/heartbeat.hpp"
+#include "vastloom/version.hpp"
 
 #if defined(_WIN32)
 #include <windows.h>
@@ -56,8 +56,8 @@ bool terminate_process(std::uint64_t pid, std::chrono::milliseconds grace) {
 }
 
 void usage() {
-    std::cout << "stargate-watchdog " << stargate::kVersion << "\n"
-              << "Usage: stargate-watchdog --pid PID --heartbeat PATH [--timeout-ms 5000]"
+    std::cout << "vastloom-watchdog " << vastloom::kVersion << "\n"
+              << "Usage: vastloom-watchdog --pid PID --heartbeat PATH [--timeout-ms 5000]"
                  " [--interval-ms 500] [--grace-ms 3000] [--enforce]\n"
               << "Without --enforce, the watchdog only reports a stale heartbeat and exits.\n";
 }
@@ -102,16 +102,16 @@ int main(int argc, char** argv) {
     }
 
     while (process_alive(pid)) {
-        auto heartbeat = stargate::safety::read_heartbeat(heartbeat_path);
+        auto heartbeat = vastloom::safety::read_heartbeat(heartbeat_path);
         if (heartbeat && heartbeat.value().pid != pid) {
             std::cerr << "Heartbeat PID does not match watched PID; refusing to act.\n";
             return 65;
         }
-        const auto now = stargate::safety::unix_time_ms();
+        const auto now = vastloom::safety::unix_time_ms();
         const bool stale = !heartbeat || now < heartbeat.value().unix_time_ms ||
                            now - heartbeat.value().unix_time_ms > timeout_ms;
         if (stale) {
-            std::cerr << "Stargate heartbeat is stale or unreadable.";
+            std::cerr << "Vastloom heartbeat is stale or unreadable.";
             if (!enforce) {
                 std::cerr << " Observe-only mode: no process signal was sent.\n";
                 return 2;

@@ -1,4 +1,4 @@
-#include "stargate/inference/olmoe_runtime.hpp"
+#include "vastloom/inference/olmoe_runtime.hpp"
 
 #include <algorithm>
 #include <atomic>
@@ -16,10 +16,10 @@
 #include <system_error>
 #include <thread>
 
-#include "stargate/model/imported_checkpoint.hpp"
-#include "stargate/util/string.hpp"
+#include "vastloom/model/imported_checkpoint.hpp"
+#include "vastloom/util/string.hpp"
 
-namespace stargate::inference {
+namespace vastloom::inference {
 namespace {
 
 constexpr ByteCount kResidentBytes = 953'421'824ULL;
@@ -921,4 +921,4 @@ Result<OlmoeForwardResult> OlmoeRuntimeModel::forward(const std::vector<std::uin
     return result;
 }
 
-}  // namespace stargate::inference
+}  // namespace vastloom::inference

@@ -1,4 +1,4 @@
-#include "stargate/safety/runtime_policy.hpp"
+#include "vastloom/safety/runtime_policy.hpp"
 
 #include <algorithm>
 #include <fstream>
@@ -6,7 +6,7 @@
 #include <sstream>
 #include <utility>
 
-#include "stargate/util/string.hpp"
+#include "vastloom/util/string.hpp"
 
 #if defined(_WIN32)
 #ifndef NOMINMAX
@@ -22,7 +22,7 @@
 #include <unistd.h>
 #endif
 
-namespace stargate::safety {
+namespace vastloom::safety {
 namespace {
 
 constexpr ByteCount kMinimumPhysicalRam = 8U * GiB;
@@ -211,4 +211,4 @@ void ProcessSafetyGuard::release() noexcept {
     minimum_system_available_ = 0;
 }
 
-}  // namespace stargate::safety
+}  // namespace vastloom::safety

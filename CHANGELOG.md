@@ -2,6 +2,21 @@
 
 ## Unreleased
 
+## 0.4.0-alpha.4 — 2026-08-09
+
+- Renamed the public project, CLI, C++ namespace, headers, CMake targets and current
+  documentation to **Vastloom** with the slogan “Run giant models. Keep your machine yours.”
+- Preserved read compatibility for legacy manifests, imported-checkpoint metadata and
+  model-store markers so existing verified model downloads remain immutable and reusable.
+- Added Apache-2.0 licensing, community governance, support and security policies,
+  contribution templates, CodeQL, dependency review and release packaging automation.
+- Added a purpose-built README cover and two-to-one social preview, plus public brand and
+  release documentation.
+- Regenerated the bundled synthetic fixture under the Vastloom model identity and retained
+  the original native binary and heartbeat wire magic for format compatibility.
+
+Historical entries below retain the project name and command spelling used by those releases.
+
 ## 0.4.0-alpha.3 — 2026-08-09
 
 - Added cross-platform process-I/O snapshots around the real OLMoE forward path.

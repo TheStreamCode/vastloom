@@ -13,8 +13,8 @@
       "binaryDir": "${sourceDir}/build/debug",
       "cacheVariables": {
         "CMAKE_BUILD_TYPE": "Debug",
-        "STARGATE_BUILD_TESTS": "ON",
-        "STARGATE_WARNINGS_AS_ERRORS": "ON"
+        "VASTLOOM_BUILD_TESTS": "ON",
+        "VASTLOOM_WARNINGS_AS_ERRORS": "ON"
       }
     },
     {
@@ -24,8 +24,8 @@
       "binaryDir": "${sourceDir}/build/release",
       "cacheVariables": {
         "CMAKE_BUILD_TYPE": "Release",
-        "STARGATE_BUILD_TESTS": "ON",
-        "STARGATE_WARNINGS_AS_ERRORS": "ON"
+        "VASTLOOM_BUILD_TESTS": "ON",
+        "VASTLOOM_WARNINGS_AS_ERRORS": "ON"
       }
     },
     {
@@ -35,9 +35,9 @@
       "binaryDir": "${sourceDir}/build/asan",
       "cacheVariables": {
         "CMAKE_BUILD_TYPE": "Debug",
-        "STARGATE_BUILD_TESTS": "ON",
-        "STARGATE_ENABLE_SANITIZERS": "ON",
-        "STARGATE_WARNINGS_AS_ERRORS": "ON"
+        "VASTLOOM_BUILD_TESTS": "ON",
+        "VASTLOOM_ENABLE_SANITIZERS": "ON",
+        "VASTLOOM_WARNINGS_AS_ERRORS": "ON"
       },
       "condition": {
         "type": "notEquals",
@@ -52,9 +52,9 @@
       "binaryDir": "${sourceDir}/build/tsan",
       "cacheVariables": {
         "CMAKE_BUILD_TYPE": "Debug",
-        "STARGATE_BUILD_TESTS": "ON",
-        "STARGATE_ENABLE_THREAD_SANITIZER": "ON",
-        "STARGATE_WARNINGS_AS_ERRORS": "ON"
+        "VASTLOOM_BUILD_TESTS": "ON",
+        "VASTLOOM_ENABLE_THREAD_SANITIZER": "ON",
+        "VASTLOOM_WARNINGS_AS_ERRORS": "ON"
       },
       "condition": {
         "type": "notEquals",

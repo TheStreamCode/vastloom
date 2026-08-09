@@ -1,4 +1,4 @@
-#include "stargate/inference/gpt2_tokenizer.hpp"
+#include "vastloom/inference/gpt2_tokenizer.hpp"
 
 #include <algorithm>
 #include <charconv>
@@ -6,10 +6,10 @@
 #include <limits>
 #include <set>
 
-#include "stargate/core/bytes.hpp"
-#include "stargate/util/json.hpp"
+#include "vastloom/core/bytes.hpp"
+#include "vastloom/util/json.hpp"
 
-namespace stargate::inference {
+namespace vastloom::inference {
 namespace {
 
 constexpr std::size_t kMaximumVocabEntries = 1'000'000;
@@ -551,4 +551,4 @@ Result<std::string> Gpt2Tokenizer::apply_olmoe_chat_template(const std::vector<C
     return output;
 }
 
-}  // namespace stargate::inference
+}  // namespace vastloom::inference

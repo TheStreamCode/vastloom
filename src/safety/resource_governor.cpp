@@ -1,9 +1,9 @@
-#include "stargate/safety/resource_governor.hpp"
+#include "vastloom/safety/resource_governor.hpp"
 
 #include <algorithm>
 #include <utility>
 
-namespace stargate::safety {
+namespace vastloom::safety {
 namespace {
 
 int severity(SafetyState state) noexcept {
@@ -193,4 +193,4 @@ std::string_view to_string(SafetyState state) noexcept {
     return "UNKNOWN";
 }
 
-}  // namespace stargate::safety
+}  // namespace vastloom::safety

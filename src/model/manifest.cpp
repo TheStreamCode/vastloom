@@ -1,4 +1,4 @@
-#include "stargate/model/manifest.hpp"
+#include "vastloom/model/manifest.hpp"
 
 #include <charconv>
 #include <fstream>
@@ -7,11 +7,11 @@
 #include <sstream>
 #include <system_error>
 
-#include "stargate/util/sha256.hpp"
-#include "stargate/util/string.hpp"
-#include "stargate/version.hpp"
+#include "vastloom/util/sha256.hpp"
+#include "vastloom/util/string.hpp"
+#include "vastloom/version.hpp"
 
-namespace stargate::model {
+namespace vastloom::model {
 namespace {
 
 constexpr std::uintmax_t kMaximumManifestBytes = 16U * 1024U * 1024U;
@@ -218,8 +218,12 @@ Result<ModelManifest> load_manifest(const std::filesystem::path& path) {
     if (!input.eof()) {
         return make_error(ErrorCode::io_error, "I/O error while reading model manifest", path.string());
     }
-    if (manifest.format != kManifestFormat) {
+    if (manifest.format != kManifestFormat && manifest.format != kLegacyManifestFormat) {
         return make_error(ErrorCode::invalid_format, "Unsupported manifest format", manifest.format);
+    }
+    if (manifest.format == kLegacyManifestFormat) {
+        manifest.warnings.emplace_back(
+            "Legacy stargate.manifest.v1 accepted for compatibility; new artifacts use vastloom.manifest.v1.");
     }
     if (manifest.model_id.empty() || manifest.architecture.empty()) {
         return make_error(ErrorCode::invalid_format, "model_id and architecture are required", path.string());
@@ -350,4 +354,4 @@ std::string to_json(const ModelManifest& manifest) {
     return output.str();
 }
 
-}  // namespace stargate::model
+}  // namespace vastloom::model

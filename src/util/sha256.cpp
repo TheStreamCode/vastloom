@@ -1,4 +1,4 @@
-#include "stargate/util/sha256.hpp"
+#include "vastloom/util/sha256.hpp"
 
 #include <algorithm>
 #include <array>
@@ -8,7 +8,7 @@
 #include <sstream>
 #include <vector>
 
-namespace stargate::util {
+namespace vastloom::util {
 namespace {
 
 constexpr std::array<std::uint32_t, 64> kRoundConstants{{
@@ -189,4 +189,4 @@ bool is_sha256_hex(std::string_view value) noexcept {
     });
 }
 
-}  // namespace stargate::util
+}  // namespace vastloom::util

@@ -1,4 +1,4 @@
-#include "stargate/util/json.hpp"
+#include "vastloom/util/json.hpp"
 
 #include <charconv>
 #include <cmath>
@@ -6,7 +6,7 @@
 #include <limits>
 #include <system_error>
 
-namespace stargate::util {
+namespace vastloom::util {
 namespace {
 
 Error json_error(std::string message, std::size_t offset) {
@@ -362,4 +362,4 @@ Result<JsonValue> load_json_file(const std::filesystem::path& path, JsonLimits l
     }
 }
 
-}  // namespace stargate::util
+}  // namespace vastloom::util

@@ -2,7 +2,7 @@
 
 ## Scope
 
-Stargate is a native inference runtime, not a model and not a generic swap wrapper. Its
+Vastloom is a native inference runtime, not a model and not a generic swap wrapper. Its
 purpose is to execute a validated model graph while controlling where each weight/state
 object lives and how it moves. A small CLI is included as a reference client and
 validation surface.
@@ -181,7 +181,7 @@ L1  RAM    dense trunk, warm experts, KV spill, bounded staging
 L2  NVMe   immutable weight backing, cold experts, persistent KV
 ```
 
-Stargate does not ask the OS to discover this hierarchy through page faults. Placement
+Vastloom does not ask the OS to discover this hierarchy through page faults. Placement
 is model-aware and explicit. NVMe is a backing tier, not fake RAM.
 
 For TinyChat only L1 is active:

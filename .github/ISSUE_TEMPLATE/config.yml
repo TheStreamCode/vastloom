@@ -1,0 +1,8 @@
+blank_issues_enabled: false
+contact_links:
+  - name: Security report
+    url: https://github.com/TheStreamCode/vastloom/security/policy
+    about: Report vulnerabilities privately; do not open a public issue.
+  - name: Support policy
+    url: https://github.com/TheStreamCode/vastloom/blob/main/SUPPORT.md
+    about: Read the support scope and diagnostic checklist.

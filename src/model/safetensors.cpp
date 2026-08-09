@@ -1,4 +1,4 @@
-#include "stargate/model/safetensors.hpp"
+#include "vastloom/model/safetensors.hpp"
 
 #include <algorithm>
 #include <array>
@@ -6,10 +6,10 @@
 #include <limits>
 #include <sstream>
 
-#include "stargate/util/json.hpp"
-#include "stargate/util/string.hpp"
+#include "vastloom/util/json.hpp"
+#include "vastloom/util/string.hpp"
 
-namespace stargate::model {
+namespace vastloom::model {
 namespace {
 
 std::uint64_t read_u64_le(const std::array<std::byte, 8>& bytes) noexcept {
@@ -362,4 +362,4 @@ std::string to_text(const CheckpointCatalog& catalog) {
     return output.str();
 }
 
-}  // namespace stargate::model
+}  // namespace vastloom::model

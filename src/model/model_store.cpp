@@ -1,17 +1,24 @@
-#include "stargate/model/model_store.hpp"
+#include "vastloom/model/model_store.hpp"
 
 #include <array>
 #include <chrono>
 #include <fstream>
 #include <limits>
+#include <optional>
 #include <sstream>
 
-#include "stargate/util/string.hpp"
+#include "vastloom/util/string.hpp"
 
-namespace stargate::model {
+namespace vastloom::model {
 namespace {
 
+constexpr std::string_view kMarkerName = ".vastloom-store";
+constexpr std::string_view kLegacyMarkerName = ".stargate-store";
 constexpr std::string_view kMarkerContents =
+    "format=vastloom.store.v1\n"
+    "original_weights=immutable\n"
+    "cache=reconstructable\n";
+constexpr std::string_view kLegacyMarkerContents =
     "format=stargate.store.v1\n"
     "original_weights=immutable\n"
     "cache=reconstructable\n";
@@ -45,7 +52,7 @@ Result<ModelStoreLayout> make_layout(const std::filesystem::path& requested, Mod
     };
 }
 
-Result<void> validate_marker(const std::filesystem::path& marker) {
+Result<void> validate_marker(const std::filesystem::path& marker, std::string_view expected_contents) {
     std::error_code error;
     const auto size = std::filesystem::file_size(marker, error);
     if (error || size > 4096U) return make_error(ErrorCode::integrity_error, "Invalid model-store marker", marker.string());
@@ -53,10 +60,53 @@ Result<void> validate_marker(const std::filesystem::path& marker) {
     if (!input) return make_error(ErrorCode::io_error, "Unable to read model-store marker", marker.string());
     std::string contents(static_cast<std::size_t>(size), '\0');
     input.read(contents.data(), static_cast<std::streamsize>(contents.size()));
-    if (input.gcount() != static_cast<std::streamsize>(contents.size()) || contents != kMarkerContents) {
+    if (input.gcount() != static_cast<std::streamsize>(contents.size()) || contents != expected_contents) {
         return make_error(ErrorCode::integrity_error, "Model-store marker contents do not match", marker.string());
     }
     return {};
+}
+
+Result<std::optional<std::filesystem::path>> find_existing_marker(const std::filesystem::path& root) {
+    const auto current = root / kMarkerName;
+    const auto legacy = root / kLegacyMarkerName;
+    std::error_code error;
+    const bool current_exists = std::filesystem::exists(current, error);
+    if (error) return make_error(ErrorCode::io_error, "Unable to inspect model-store marker", current.string());
+    if (current_exists && std::filesystem::is_symlink(current, error)) {
+        return make_error(ErrorCode::unsafe_path, "Model-store marker must not be a symlink", current.string());
+    }
+    if (error) return make_error(ErrorCode::io_error, "Unable to inspect model-store marker", current.string());
+    if (current_exists && !std::filesystem::is_regular_file(current, error)) {
+        return make_error(ErrorCode::integrity_error, "Model-store marker is not a regular file", current.string());
+    }
+    if (error) return make_error(ErrorCode::io_error, "Unable to inspect model-store marker", current.string());
+    error.clear();
+    const bool legacy_exists = std::filesystem::exists(legacy, error);
+    if (error) return make_error(ErrorCode::io_error, "Unable to inspect model-store marker", legacy.string());
+    if (legacy_exists && std::filesystem::is_symlink(legacy, error)) {
+        return make_error(ErrorCode::unsafe_path, "Model-store marker must not be a symlink", legacy.string());
+    }
+    if (error) return make_error(ErrorCode::io_error, "Unable to inspect model-store marker", legacy.string());
+    if (legacy_exists && !std::filesystem::is_regular_file(legacy, error)) {
+        return make_error(ErrorCode::integrity_error, "Model-store marker is not a regular file", legacy.string());
+    }
+    if (error) return make_error(ErrorCode::io_error, "Unable to inspect model-store marker", legacy.string());
+    if (current_exists && legacy_exists) {
+        return make_error(ErrorCode::integrity_error,
+                          "Model store contains conflicting current and legacy markers",
+                          root.string());
+    }
+    if (current_exists) {
+        auto valid = validate_marker(current, kMarkerContents);
+        if (!valid) return valid.error();
+        return std::optional<std::filesystem::path>{current};
+    }
+    if (legacy_exists) {
+        auto valid = validate_marker(legacy, kLegacyMarkerContents);
+        if (!valid) return valid.error();
+        return std::optional<std::filesystem::path>{legacy};
+    }
+    return std::optional<std::filesystem::path>{};
 }
 
 bool safe_component(std::string_view value) {
@@ -104,13 +154,12 @@ Result<ModelStore> ModelStore::initialize(const std::filesystem::path& root, Mod
         std::filesystem::create_directories(directory, error);
         if (error) return make_error(ErrorCode::io_error, "Unable to create model-store directory", directory.string());
     }
-    const auto marker = layout.value().root / ".stargate-store";
-    if (std::filesystem::exists(marker, error)) {
-        auto valid = validate_marker(marker);
-        if (!valid) return valid.error();
-    } else {
+    auto existing_marker = find_existing_marker(layout.value().root);
+    if (!existing_marker) return existing_marker.error();
+    if (!existing_marker.value().has_value()) {
+        const auto marker = layout.value().root / kMarkerName;
         const auto stamp = std::chrono::steady_clock::now().time_since_epoch().count();
-        const auto temporary = layout.value().root / (".stargate-store.tmp-" + std::to_string(stamp));
+        const auto temporary = layout.value().root / (".vastloom-store.tmp-" + std::to_string(stamp));
         {
             std::ofstream output(temporary, std::ios::binary | std::ios::trunc);
             if (!output) return make_error(ErrorCode::io_error, "Unable to create temporary model-store marker", temporary.string());
@@ -131,8 +180,11 @@ Result<ModelStore> ModelStore::initialize(const std::filesystem::path& root, Mod
 Result<ModelStore> ModelStore::open(const std::filesystem::path& root, ModelStoreOptions options) {
     auto layout = make_layout(root, options);
     if (!layout) return layout.error();
-    auto marker = validate_marker(layout.value().root / ".stargate-store");
+    auto marker = find_existing_marker(layout.value().root);
     if (!marker) return marker.error();
+    if (!marker.value().has_value()) {
+        return make_error(ErrorCode::not_found, "Model-store marker is missing", layout.value().root.string());
+    }
     const std::array<std::filesystem::path, 6> directories{
         layout.value().original,
         layout.value().optimized,
@@ -198,7 +250,7 @@ std::string to_json(const ModelStoreLayout& layout) {
 
 std::string to_text(const ModelStoreLayout& layout) {
     std::ostringstream output;
-    output << "Stargate model store: " << layout.root.string() << '\n'
+    output << "Vastloom model store: " << layout.root.string() << '\n'
            << "Original weights:     " << layout.original.string() << '\n'
            << "Derived models:       " << layout.optimized.string() << '\n'
            << "Cache:                " << layout.cache.string() << '\n'
@@ -209,4 +261,4 @@ std::string to_text(const ModelStoreLayout& layout) {
     return output.str();
 }
 
-}  // namespace stargate::model
+}  // namespace vastloom::model

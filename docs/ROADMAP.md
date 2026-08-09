@@ -1,6 +1,6 @@
 # Roadmap and acceptance gates
 
-Stargate advances only when each milestone has a measurable correctness and safety gate.
+Vastloom advances only when each milestone has a measurable correctness and safety gate.
 A command existing in the CLI is not enough; it must run against a validated model path.
 
 ## M0 — Research harness — complete in alpha.1
@@ -77,10 +77,18 @@ requiring the complete checkpoint to reside in RAM.
 - [x] Add a bounded one-worker asynchronous path and measure read-service/CPU overlap.
 - [x] Add exact unique-expert reuse-distance reporting.
 - [x] Add process-I/O operation/byte counters with explicit platform semantics.
+- [ ] Record per-expert queue, ready and compute timestamps; compare fixed-route and
+  ready-order scheduling in the trace simulator.
+- [ ] Prototype an output-identical 8 MiB gate/up plus 4 MiB down staged read without
+  repacking original OLMoE weights.
 - [ ] Add physical-device I/O counters and a repeatable cold-cache protocol.
 
 **Gate:** the real small MoE completes safely under a RAM cap below total checkpoint
 size, with no uncontrolled paging or unreserved buffer.
+
+The ordering and acceptance gates for the two new experiments are documented in the
+[DeepSeekV4SSD review](research/DEEPSEEK_SSD_REVIEW.md). They remain research tasks,
+not current runtime claims.
 
 ## M6 — Exact DeepSeek inspector and architecture-faithful fixture
 

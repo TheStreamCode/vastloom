@@ -1,30 +1,62 @@
 cmake_minimum_required(VERSION 3.24)
 
 project(
-    stargate_local_ai
+    Vastloom
     VERSION 0.4.0
-    DESCRIPTION "Safety-first local inference runtime for oversized MoE models"
+    DESCRIPTION "Run giant models locally without surrendering control of the host"
+    HOMEPAGE_URL "https://github.com/TheStreamCode/vastloom"
     LANGUAGES CXX
 )
 
-option(STARGATE_BUILD_TESTS "Build Stargate tests" ON)
-option(STARGATE_ENABLE_SANITIZERS "Enable AddressSanitizer and UndefinedBehaviorSanitizer" OFF)
-option(STARGATE_ENABLE_THREAD_SANITIZER "Enable ThreadSanitizer" OFF)
-option(STARGATE_WARNINGS_AS_ERRORS "Treat compiler warnings as errors" OFF)
-set(STARGATE_SMOLLM2_MODEL "" CACHE PATH "Optional external pinned SmolLM2 checkpoint for full reference tests")
-set(STARGATE_OLMOE_MODEL "" CACHE PATH "Optional external pinned OLMoE checkpoint or metadata import for inspection tests")
-set(STARGATE_OLMOE_FULL_MODEL "" CACHE PATH "Optional complete pinned OLMoE checkpoint for streamed runtime tests")
+function(vastloom_import_legacy_bool legacy_name current_name description default_value)
+    if(DEFINED ${legacy_name} AND NOT DEFINED ${current_name})
+        set(${current_name} "${${legacy_name}}" CACHE BOOL "${description}" FORCE)
+        message(DEPRECATION "${legacy_name} was renamed to ${current_name}")
+    elseif(NOT DEFINED ${current_name})
+        set(${current_name} "${default_value}" CACHE BOOL "${description}")
+    endif()
+endfunction()
 
-if(STARGATE_ENABLE_SANITIZERS AND STARGATE_ENABLE_THREAD_SANITIZER)
+function(vastloom_import_legacy_path legacy_name current_name description)
+    if(DEFINED ${legacy_name} AND NOT DEFINED ${current_name})
+        set(${current_name} "${${legacy_name}}" CACHE PATH "${description}" FORCE)
+        message(DEPRECATION "${legacy_name} was renamed to ${current_name}")
+    elseif(NOT DEFINED ${current_name})
+        set(${current_name} "" CACHE PATH "${description}")
+    endif()
+endfunction()
+
+vastloom_import_legacy_bool(STARGATE_BUILD_TESTS VASTLOOM_BUILD_TESTS "Build Vastloom tests" ON)
+vastloom_import_legacy_bool(STARGATE_ENABLE_SANITIZERS VASTLOOM_ENABLE_SANITIZERS
+    "Enable AddressSanitizer and UndefinedBehaviorSanitizer" OFF)
+vastloom_import_legacy_bool(STARGATE_ENABLE_THREAD_SANITIZER VASTLOOM_ENABLE_THREAD_SANITIZER
+    "Enable ThreadSanitizer" OFF)
+vastloom_import_legacy_bool(STARGATE_WARNINGS_AS_ERRORS VASTLOOM_WARNINGS_AS_ERRORS
+    "Treat compiler warnings as errors" OFF)
+vastloom_import_legacy_path(STARGATE_SMOLLM2_MODEL VASTLOOM_SMOLLM2_MODEL
+    "Optional external pinned SmolLM2 checkpoint for full reference tests")
+vastloom_import_legacy_path(STARGATE_OLMOE_MODEL VASTLOOM_OLMOE_MODEL
+    "Optional external pinned OLMoE checkpoint or metadata import for inspection tests")
+vastloom_import_legacy_path(STARGATE_OLMOE_FULL_MODEL VASTLOOM_OLMOE_FULL_MODEL
+    "Optional complete pinned OLMoE checkpoint for streamed runtime tests")
+
+option(VASTLOOM_BUILD_TESTS "Build Vastloom tests" ON)
+option(VASTLOOM_ENABLE_SANITIZERS "Enable AddressSanitizer and UndefinedBehaviorSanitizer" OFF)
+option(VASTLOOM_ENABLE_THREAD_SANITIZER "Enable ThreadSanitizer" OFF)
+option(VASTLOOM_WARNINGS_AS_ERRORS "Treat compiler warnings as errors" OFF)
+
+if(VASTLOOM_ENABLE_SANITIZERS AND VASTLOOM_ENABLE_THREAD_SANITIZER)
     message(FATAL_ERROR "AddressSanitizer and ThreadSanitizer must use separate builds")
 endif()
 
 list(APPEND CMAKE_MODULE_PATH "${CMAKE_CURRENT_SOURCE_DIR}/cmake")
-include(StargateWarnings)
+include(VastloomWarnings)
 
 find_package(Threads REQUIRED)
+include(GNUInstallDirs)
+include(CMakePackageConfigHelpers)
 
-add_library(stargate_core STATIC
+add_library(vastloom_core STATIC
     src/core/bytes.cpp
     src/hardware/hardware_probe.cpp
     src/inference/gpt2_tokenizer.cpp
@@ -48,124 +80,158 @@ add_library(stargate_core STATIC
     src/util/sha256.cpp
 )
 
-add_library(Stargate::Core ALIAS stargate_core)
+add_library(Vastloom::Core ALIAS vastloom_core)
+set_target_properties(vastloom_core PROPERTIES EXPORT_NAME Core)
 
-target_include_directories(stargate_core
+target_include_directories(vastloom_core
     PUBLIC
         $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
-        $<INSTALL_INTERFACE:include>
+        $<INSTALL_INTERFACE:${CMAKE_INSTALL_INCLUDEDIR}>
 )
 
-target_compile_features(stargate_core PUBLIC cxx_std_20)
-target_link_libraries(stargate_core PUBLIC Threads::Threads)
-stargate_set_project_warnings(stargate_core)
-stargate_enable_sanitizers(stargate_core)
+target_compile_features(vastloom_core PUBLIC cxx_std_20)
+target_link_libraries(vastloom_core PUBLIC Threads::Threads)
+vastloom_set_project_warnings(vastloom_core)
+vastloom_enable_sanitizers(vastloom_core)
 
 if(WIN32)
-    target_compile_definitions(stargate_core PRIVATE NOMINMAX WIN32_LEAN_AND_MEAN)
-    target_link_libraries(stargate_core PRIVATE Psapi)
+    target_compile_definitions(vastloom_core PRIVATE NOMINMAX WIN32_LEAN_AND_MEAN)
+    target_link_libraries(vastloom_core PRIVATE Psapi)
 endif()
 
-add_executable(stargate
+add_executable(vastloom
     src/cli/main.cpp
     src/cli/tiny_commands.cpp
 )
-target_link_libraries(stargate PRIVATE Stargate::Core)
-target_compile_features(stargate PRIVATE cxx_std_20)
-stargate_set_project_warnings(stargate)
-stargate_enable_sanitizers(stargate)
+target_link_libraries(vastloom PRIVATE Vastloom::Core)
+target_compile_features(vastloom PRIVATE cxx_std_20)
+vastloom_set_project_warnings(vastloom)
+vastloom_enable_sanitizers(vastloom)
 
-add_executable(stargate-watchdog src/watchdog/main.cpp)
-target_link_libraries(stargate-watchdog PRIVATE Stargate::Core)
-target_compile_features(stargate-watchdog PRIVATE cxx_std_20)
-stargate_set_project_warnings(stargate-watchdog)
-stargate_enable_sanitizers(stargate-watchdog)
+add_executable(vastloom-watchdog src/watchdog/main.cpp)
+target_link_libraries(vastloom-watchdog PRIVATE Vastloom::Core)
+target_compile_features(vastloom-watchdog PRIVATE cxx_std_20)
+vastloom_set_project_warnings(vastloom-watchdog)
+vastloom_enable_sanitizers(vastloom-watchdog)
 
 include(CTest)
-if(BUILD_TESTING AND STARGATE_BUILD_TESTS)
-    add_executable(stargate_tests
+if(BUILD_TESTING AND VASTLOOM_BUILD_TESTS)
+    add_executable(vastloom_tests
         tests/test_main.cpp
     )
-    target_link_libraries(stargate_tests PRIVATE Stargate::Core)
-    target_compile_features(stargate_tests PRIVATE cxx_std_20)
-    target_compile_definitions(stargate_tests PRIVATE STARGATE_SOURCE_DIR="${CMAKE_CURRENT_SOURCE_DIR}")
-    stargate_set_project_warnings(stargate_tests)
-    stargate_enable_sanitizers(stargate_tests)
-    add_test(NAME stargate_tests COMMAND stargate_tests)
+    target_link_libraries(vastloom_tests PRIVATE Vastloom::Core)
+    target_compile_features(vastloom_tests PRIVATE cxx_std_20)
+    target_compile_definitions(vastloom_tests PRIVATE VASTLOOM_SOURCE_DIR="${CMAKE_CURRENT_SOURCE_DIR}")
+    vastloom_set_project_warnings(vastloom_tests)
+    vastloom_enable_sanitizers(vastloom_tests)
+    add_test(NAME vastloom_tests COMMAND vastloom_tests)
     add_test(
-        NAME stargate_cli_tiny_chat
-        COMMAND stargate chat
-            ${CMAKE_CURRENT_SOURCE_DIR}/examples/models/stargate-tinychat-v1.sgm
+        NAME vastloom_cli_tiny_chat
+        COMMAND vastloom chat
+            ${CMAKE_CURRENT_SOURCE_DIR}/examples/models/vastloom-tinychat-v1.sgm
             --prompt "Quanto fa 2+2?"
             --max-tokens 64
             --no-stream
             --no-stats
     )
-    set_tests_properties(stargate_cli_tiny_chat PROPERTIES PASS_REGULAR_EXPRESSION "2[+]2 fa 4[.]")
+    set_tests_properties(vastloom_cli_tiny_chat PROPERTIES PASS_REGULAR_EXPRESSION "2[+]2 fa 4[.]")
     add_test(
-        NAME stargate_cli_tiny_self_test
-        COMMAND stargate self-test
-            ${CMAKE_CURRENT_SOURCE_DIR}/examples/models/stargate-tinychat-v1.sgm
+        NAME vastloom_cli_tiny_self_test
+        COMMAND vastloom self-test
+            ${CMAKE_CURRENT_SOURCE_DIR}/examples/models/vastloom-tinychat-v1.sgm
     )
-    set_tests_properties(stargate_cli_tiny_self_test PROPERTIES PASS_REGULAR_EXPRESSION "Result: PASS")
+    set_tests_properties(vastloom_cli_tiny_self_test PROPERTIES PASS_REGULAR_EXPRESSION "Result: PASS")
 
     find_package(Python3 COMPONENTS Interpreter QUIET)
     if(Python3_Interpreter_FOUND)
         add_test(
-            NAME stargate_cli_tiny_integration
+            NAME vastloom_cli_tiny_integration
             COMMAND ${Python3_EXECUTABLE}
                 ${CMAKE_CURRENT_SOURCE_DIR}/tests/test_tiny_chat_cli.py
-                --stargate $<TARGET_FILE:stargate>
-                --manifest ${CMAKE_CURRENT_SOURCE_DIR}/examples/models/stargate-tinychat-v1.sgm
-                --vectors ${CMAKE_CURRENT_SOURCE_DIR}/examples/models/stargate-tinychat-v1.tests.json
+                --vastloom $<TARGET_FILE:vastloom>
+                --manifest ${CMAKE_CURRENT_SOURCE_DIR}/examples/models/vastloom-tinychat-v1.sgm
+                --vectors ${CMAKE_CURRENT_SOURCE_DIR}/examples/models/vastloom-tinychat-v1.tests.json
         )
-        set_tests_properties(stargate_cli_tiny_integration PROPERTIES TIMEOUT 60)
+        set_tests_properties(vastloom_cli_tiny_integration PROPERTIES TIMEOUT 60)
         add_test(
-            NAME stargate_hf_importer_offline
+            NAME vastloom_hf_importer_offline
             COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/tests/test_import_hf_model.py
         )
-        set_tests_properties(stargate_hf_importer_offline PROPERTIES TIMEOUT 30)
-        if(STARGATE_SMOLLM2_MODEL)
+        set_tests_properties(vastloom_hf_importer_offline PROPERTIES TIMEOUT 30)
+        if(VASTLOOM_SMOLLM2_MODEL)
             add_test(
-                NAME stargate_smollm2_reference
+                NAME vastloom_smollm2_reference
                 COMMAND ${Python3_EXECUTABLE}
                     ${CMAKE_CURRENT_SOURCE_DIR}/tests/test_smollm2_cli.py
-                    --stargate $<TARGET_FILE:stargate>
-                    --model ${STARGATE_SMOLLM2_MODEL}
+                    --vastloom $<TARGET_FILE:vastloom>
+                    --model ${VASTLOOM_SMOLLM2_MODEL}
                     --fixture ${CMAKE_CURRENT_SOURCE_DIR}/tests/fixtures/smollm2_reference.json
             )
-            set_tests_properties(stargate_smollm2_reference PROPERTIES TIMEOUT 300)
+            set_tests_properties(vastloom_smollm2_reference PROPERTIES TIMEOUT 300)
         endif()
-        if(STARGATE_OLMOE_MODEL)
+        if(VASTLOOM_OLMOE_MODEL)
             add_test(
-                NAME stargate_olmoe_inspection
+                NAME vastloom_olmoe_inspection
                 COMMAND ${Python3_EXECUTABLE}
                     ${CMAKE_CURRENT_SOURCE_DIR}/tests/test_olmoe_cli.py
-                    --stargate $<TARGET_FILE:stargate>
-                    --model ${STARGATE_OLMOE_MODEL}
+                    --vastloom $<TARGET_FILE:vastloom>
+                    --model ${VASTLOOM_OLMOE_MODEL}
             )
-            set_tests_properties(stargate_olmoe_inspection PROPERTIES TIMEOUT 60)
+            set_tests_properties(vastloom_olmoe_inspection PROPERTIES TIMEOUT 60)
         endif()
-        if(STARGATE_OLMOE_FULL_MODEL)
+        if(VASTLOOM_OLMOE_FULL_MODEL)
             add_test(
-                NAME stargate_olmoe_runtime_reference
+                NAME vastloom_olmoe_runtime_reference
                 COMMAND ${Python3_EXECUTABLE}
                     ${CMAKE_CURRENT_SOURCE_DIR}/tests/test_olmoe_runtime_cli.py
-                    --stargate $<TARGET_FILE:stargate>
-                    --model ${STARGATE_OLMOE_FULL_MODEL}
+                    --vastloom $<TARGET_FILE:vastloom>
+                    --model ${VASTLOOM_OLMOE_FULL_MODEL}
                     --fixture ${CMAKE_CURRENT_SOURCE_DIR}/tests/fixtures/olmoe_reference.json
             )
-            set_tests_properties(stargate_olmoe_runtime_reference PROPERTIES TIMEOUT 1200 RUN_SERIAL TRUE)
+            set_tests_properties(vastloom_olmoe_runtime_reference PROPERTIES TIMEOUT 1200 RUN_SERIAL TRUE)
         endif()
     else()
         message(STATUS "Python3 not found; skipping TinyChat CLI integration test")
     endif()
 endif()
 
-install(TARGETS stargate stargate-watchdog stargate_core
-    RUNTIME DESTINATION bin
-    LIBRARY DESTINATION lib
-    ARCHIVE DESTINATION lib
+install(TARGETS vastloom vastloom-watchdog vastloom_core
+    EXPORT VastloomTargets
+    RUNTIME DESTINATION ${CMAKE_INSTALL_BINDIR}
+    LIBRARY DESTINATION ${CMAKE_INSTALL_LIBDIR}
+    ARCHIVE DESTINATION ${CMAKE_INSTALL_LIBDIR}
 )
-install(DIRECTORY include/ DESTINATION include)
-install(DIRECTORY examples/models/ DESTINATION share/stargate/models)
+install(DIRECTORY include/vastloom DESTINATION ${CMAKE_INSTALL_INCLUDEDIR})
+install(DIRECTORY examples/models/ DESTINATION ${CMAKE_INSTALL_DATADIR}/vastloom/models)
+install(FILES LICENSE NOTICE README.md DESTINATION ${CMAKE_INSTALL_DATADIR}/doc/vastloom)
+
+configure_package_config_file(
+    cmake/VastloomConfig.cmake.in
+    "${CMAKE_CURRENT_BINARY_DIR}/VastloomConfig.cmake"
+    INSTALL_DESTINATION "${CMAKE_INSTALL_LIBDIR}/cmake/Vastloom"
+)
+write_basic_package_version_file(
+    "${CMAKE_CURRENT_BINARY_DIR}/VastloomConfigVersion.cmake"
+    VERSION ${PROJECT_VERSION}
+    COMPATIBILITY SameMajorVersion
+)
+install(EXPORT VastloomTargets
+    FILE VastloomTargets.cmake
+    NAMESPACE Vastloom::
+    DESTINATION "${CMAKE_INSTALL_LIBDIR}/cmake/Vastloom"
+)
+install(FILES
+    "${CMAKE_CURRENT_BINARY_DIR}/VastloomConfig.cmake"
+    "${CMAKE_CURRENT_BINARY_DIR}/VastloomConfigVersion.cmake"
+    DESTINATION "${CMAKE_INSTALL_LIBDIR}/cmake/Vastloom"
+)
+
+set(CPACK_PACKAGE_NAME "vastloom")
+set(CPACK_PACKAGE_VENDOR "Vastloom contributors")
+set(CPACK_PACKAGE_DESCRIPTION_SUMMARY "${PROJECT_DESCRIPTION}")
+set(CPACK_PACKAGE_VERSION "0.4.0-alpha.4")
+set(CPACK_RESOURCE_FILE_LICENSE "${CMAKE_CURRENT_SOURCE_DIR}/LICENSE")
+set(CPACK_PACKAGE_CHECKSUM "SHA256")
+set(CPACK_SOURCE_IGNORE_FILES "/build/;/.git/;/.cache/")
+set(CPACK_GENERATOR "TGZ;ZIP")
+include(CPack)

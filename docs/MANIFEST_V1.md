@@ -1,7 +1,11 @@
-# Stargate manifest v1
+# Vastloom manifest v1
 
 The v1 format is intentionally line-oriented and bounded. It can be parsed without a
 large third-party serialization dependency before any model data is trusted.
+
+New artifacts use `vastloom.manifest.v1`. The reader also accepts the former
+`stargate.manifest.v1` identifier and emits a compatibility warning so verified existing
+artifacts remain usable. Generators never write the legacy identifier.
 
 ## Limits
 
@@ -15,7 +19,7 @@ large third-party serialization dependency before any model data is trusted.
 ## Scalar fields
 
 ```text
-format=stargate.manifest.v1
+format=vastloom.manifest.v1
 model_id=organization/model
 revision=exact-checkpoint-revision
 architecture=adapter_identifier

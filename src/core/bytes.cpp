@@ -1,4 +1,4 @@
-#include "stargate/core/bytes.hpp"
+#include "vastloom/core/bytes.hpp"
 
 #include <algorithm>
 #include <array>
@@ -9,9 +9,9 @@
 #include <limits>
 #include <sstream>
 
-#include "stargate/util/string.hpp"
+#include "vastloom/util/string.hpp"
 
-namespace stargate {
+namespace vastloom {
 
 Result<ByteCount> parse_bytes(std::string_view input) {
     std::string normalized = util::trim(input);
@@ -106,4 +106,4 @@ ByteCount percentage(ByteCount value, double ratio) noexcept {
     return static_cast<ByteCount>(static_cast<long double>(value) * static_cast<long double>(ratio));
 }
 
-}  // namespace stargate
+}  // namespace vastloom

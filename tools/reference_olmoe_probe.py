@@ -231,7 +231,14 @@ def copy_weights(module: torch.nn.Module, reader: TensorReader, names: dict[str,
 
 
 def validate_identity(model: Path) -> None:
-    manifest = json.loads((model / "stargate-import.json").read_text(encoding="utf-8"))
+    current = model / "vastloom-import.json"
+    legacy = model / "stargate-import.json"
+    manifests = [path for path in (current, legacy) if path.exists() or path.is_symlink()]
+    if len(manifests) != 1:
+        raise RuntimeError("model must contain exactly one supported import manifest")
+    if manifests[0].is_symlink() or not manifests[0].is_file():
+        raise RuntimeError("model import manifest must be a regular file, not a symlink")
+    manifest = json.loads(manifests[0].read_text(encoding="utf-8"))
     if manifest.get("model_id") != MODEL_ID or manifest.get("revision") != REVISION:
         raise RuntimeError("model is not the pinned OLMoE revision")
     if manifest.get("metadata_only") is not False:

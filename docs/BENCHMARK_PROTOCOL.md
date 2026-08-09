@@ -7,7 +7,7 @@ known.
 
 Every run must store:
 
-- Stargate commit and build type;
+- Vastloom commit and build type;
 - operating system, driver and backend;
 - CPU, cores used and RAM configuration;
 - GPU(s), VRAM and PCIe generation/link width;
@@ -50,14 +50,14 @@ Every run must store:
 
 ## I/O counter vocabulary
 
-- **Logical expert bytes:** exact model payload requested by Stargate. This is suitable
+- **Logical expert bytes:** exact model payload requested by Vastloom. This is suitable
   for cache-policy accounting, not proof that the SSD served those bytes.
 - **Process transfer bytes:** bytes attributed to process reads by the operating system.
   Windows `GetProcessIoCounters.ReadTransferCount` is reported in this category.
 - **Storage-layer bytes:** Linux `/proc/self/io` `read_bytes`; this can show file-cache
   effects but is still not a per-device hardware counter.
 - **Physical-device bytes:** bytes attributed to the selected block device by a separate
-  device-level measurement. Stargate does not yet capture this on the reference Windows
+  device-level measurement. Vastloom does not yet capture this on the reference Windows
   host.
 
 Every table and JSON consumer must retain the source label and availability flag. A

@@ -1,6 +1,6 @@
 # Safety model
 
-Stargate must fail by ending or rejecting a generation, never by exhausting the host.
+Vastloom must fail by ending or rejecting a generation, never by exhausting the host.
 
 ## Threats considered
 
@@ -153,14 +153,14 @@ as though it were a device measurement.
 
 ## Watchdog
 
-`stargate-watchdog` is a separate process. It validates that the heartbeat belongs to the
+`vastloom-watchdog` is a separate process. It validates that the heartbeat belongs to the
 expected PID and is recent. Observe-only mode is the default. `--enforce` must be
 supplied explicitly before it can terminate a stale runtime.
 
 The alpha.2 TinyChat CLI does not yet publish a continuous generation heartbeat; that
 integration remains required before long-running large-model inference.
 
-## Tests implemented through alpha.4.3
+## Tests implemented through alpha.4.4
 
 - allocation oversubscription and reservation release;
 - critical/emergency state escalation and hysteretic recovery;

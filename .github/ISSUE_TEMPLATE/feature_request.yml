@@ -1,0 +1,32 @@
+name: Feature request
+description: Propose a scoped runtime, model or tooling improvement
+title: "proposal: "
+labels: [enhancement, needs-triage]
+body:
+  - type: textarea
+    id: problem
+    attributes:
+      label: Problem
+      description: What concrete user or research problem should be solved?
+    validations:
+      required: true
+  - type: textarea
+    id: proposal
+    attributes:
+      label: Proposed approach
+    validations:
+      required: true
+  - type: textarea
+    id: evidence
+    attributes:
+      label: Correctness and measurement plan
+      description: Reference implementation, tests, hardware, metrics and baseline.
+    validations:
+      required: true
+  - type: textarea
+    id: safety
+    attributes:
+      label: Safety and compatibility impact
+      description: Resource bounds, failure modes, formats and platform impact.
+    validations:
+      required: true

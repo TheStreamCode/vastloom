@@ -1,4 +1,4 @@
-#include "stargate/safety/heartbeat.hpp"
+#include "vastloom/safety/heartbeat.hpp"
 
 #include <charconv>
 #include <chrono>
@@ -6,14 +6,14 @@
 #include <map>
 #include <sstream>
 
-#include "stargate/util/string.hpp"
-#include "stargate/version.hpp"
+#include "vastloom/util/string.hpp"
+#include "vastloom/version.hpp"
 
 #if defined(_WIN32)
 #include <windows.h>
 #endif
 
-namespace stargate::safety {
+namespace vastloom::safety {
 namespace {
 
 Result<std::uint64_t> parse_u64(std::string_view value, std::string_view key) {
@@ -136,4 +136,4 @@ Result<HeartbeatRecord> read_heartbeat(const std::filesystem::path& path) {
     return heartbeat;
 }
 
-}  // namespace stargate::safety
+}  // namespace vastloom::safety

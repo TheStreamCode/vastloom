@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Pinned, bounded and atomic Hugging Face checkpoint importer for Stargate."""
+"""Pinned, bounded and atomic Hugging Face checkpoint importer for Vastloom."""
 
 from __future__ import annotations
 
@@ -28,7 +28,14 @@ else:
 GIB = 1024**3
 DEFAULT_DISK_RESERVE = 300 * GIB
 COPY_BUFFER_BYTES = 1024 * 1024
-MARKER = "format=stargate.store.v1\noriginal_weights=immutable\ncache=reconstructable\n"
+STORE_MARKER_NAME = ".vastloom-store"
+LEGACY_STORE_MARKER_NAME = ".stargate-store"
+MARKER = "format=vastloom.store.v1\noriginal_weights=immutable\ncache=reconstructable\n"
+LEGACY_MARKER = "format=stargate.store.v1\noriginal_weights=immutable\ncache=reconstructable\n"
+IMPORT_MANIFEST_NAME = "vastloom-import.json"
+LEGACY_IMPORT_MANIFEST_NAME = "stargate-import.json"
+IMPORT_FORMAT = "vastloom.hf-import.v1"
+LEGACY_IMPORT_FORMAT = "stargate.hf-import.v1"
 
 
 def progress(message: str) -> None:
@@ -128,15 +135,21 @@ MODELS = {item.alias: item for item in (SMOLLM2, OLMOE)}
 
 def validate_store(store: Path) -> Path:
     root = store.resolve(strict=True)
-    marker = root / ".stargate-store"
-    if not marker.is_file() or marker.read_text(encoding="utf-8") != MARKER:
-        raise RuntimeError(f"invalid Stargate model store: {root}")
+    current_marker = root / STORE_MARKER_NAME
+    legacy_marker = root / LEGACY_STORE_MARKER_NAME
+    markers = [path for path in (current_marker, legacy_marker) if path.exists() or path.is_symlink()]
+    if len(markers) != 1:
+        raise RuntimeError(f"invalid Vastloom model store: {root}")
+    marker = markers[0]
+    expected = MARKER if marker == current_marker else LEGACY_MARKER
+    if marker.is_symlink() or not marker.is_file() or marker.read_text(encoding="utf-8") != expected:
+        raise RuntimeError(f"invalid Vastloom model store: {root}")
     original = (root / "models" / "original").resolve(strict=True)
     if original.parent.parent != root or original.is_symlink():
-        raise RuntimeError(f"unsafe Stargate original-model directory: {original}")
+        raise RuntimeError(f"unsafe Vastloom original-model directory: {original}")
     cache = (root / "cache").resolve(strict=True)
     if cache.parent != root or cache.is_symlink():
-        raise RuntimeError(f"unsafe Stargate cache directory: {cache}")
+        raise RuntimeError(f"unsafe Vastloom cache directory: {cache}")
     return root
 
 
@@ -226,12 +239,18 @@ def lower_process_priority() -> None:
 
 def validate_existing(target: Path, spec: ModelSpec, files: Iterable[FileSpec], metadata_only: bool) -> None:
     expected_files = tuple(files)
-    manifest_path = target / "stargate-import.json"
-    if not manifest_path.is_file():
+    current_manifest = target / IMPORT_MANIFEST_NAME
+    legacy_manifest = target / LEGACY_IMPORT_MANIFEST_NAME
+    manifests = [path for path in (current_manifest, legacy_manifest) if path.exists() or path.is_symlink()]
+    if len(manifests) != 1:
         raise RuntimeError(f"existing immutable target has no import manifest: {target}")
+    manifest_path = manifests[0]
+    if manifest_path.is_symlink() or not manifest_path.is_file():
+        raise RuntimeError(f"existing immutable target has an unsafe import manifest: {target}")
     manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
     if (
-        manifest.get("model_id") != spec.model_id
+        manifest.get("format") not in (IMPORT_FORMAT, LEGACY_IMPORT_FORMAT)
+        or manifest.get("model_id") != spec.model_id
         or manifest.get("revision") != spec.revision
         or bool(manifest.get("metadata_only")) != metadata_only
     ):
@@ -268,7 +287,7 @@ def download_file(
     started = time.monotonic()
     next_report = ((received // GIB) + 1) * GIB
     progress(f"download {item.name}: {received}/{item.size} bytes")
-    headers = {"User-Agent": "stargate-local-ai/0.3-importer"}
+    headers = {"User-Agent": "vastloom-local-ai/0.3-importer"}
     if received:
         headers["Range"] = f"bytes={received}-"
     request = Request(url, headers=headers)
@@ -386,19 +405,19 @@ def import_model(
                 os.link(cached, destination)
 
             manifest = {
-                "format": "stargate.hf-import.v1",
+                "format": IMPORT_FORMAT,
                 "model_id": spec.model_id,
                 "revision": spec.revision,
                 "metadata_only": metadata_only,
                 "files": records,
             }
-            manifest_partial = incoming / "stargate-import.json.partial"
+            manifest_partial = incoming / f"{IMPORT_MANIFEST_NAME}.partial"
             with manifest_partial.open("x", encoding="utf-8", newline="\n") as output:
                 json.dump(manifest, output, indent=2, sort_keys=True)
                 output.write("\n")
                 output.flush()
                 os.fsync(output.fileno())
-            os.replace(manifest_partial, incoming / "stargate-import.json")
+            os.replace(manifest_partial, incoming / IMPORT_MANIFEST_NAME)
             incoming.rename(target)
 
             for cached in cached_files:

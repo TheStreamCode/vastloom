@@ -1,4 +1,4 @@
-#include "stargate/planner/execution_planner.hpp"
+#include "vastloom/planner/execution_planner.hpp"
 
 #include <algorithm>
 #include <cmath>
@@ -6,9 +6,9 @@
 #include <limits>
 #include <sstream>
 
-#include "stargate/util/string.hpp"
+#include "vastloom/util/string.hpp"
 
-namespace stargate::planner {
+namespace vastloom::planner {
 namespace {
 
 struct ProfilePolicy {
@@ -162,7 +162,7 @@ Result<ExecutionPlan> build_plan(const hardware::HardwareSnapshot& hardware,
     if (manifest.required_storage_bytes > hardware.storage.capacity_bytes) {
         plan.blockers.emplace_back("The model is larger than the selected storage device.");
     } else if (plan.additional_storage_required > safe_subtract(hardware.storage.available_bytes, plan.storage_reserve)) {
-        plan.blockers.emplace_back("Insufficient free storage for missing model bytes after preserving Stargate's safety reserve.");
+        plan.blockers.emplace_back("Insufficient free storage for missing model bytes after preserving Vastloom's safety reserve.");
     }
 
     if (hardware.memory.available_bytes < hardware.memory.total_bytes / 3U) {
@@ -243,7 +243,7 @@ Result<ExecutionPlan> build_plan(const hardware::HardwareSnapshot& hardware,
 
 std::string to_text(const ExecutionPlan& plan) {
     std::ostringstream output;
-    output << "Stargate execution plan\n"
+    output << "Vastloom execution plan\n"
            << "Model:       " << plan.model_id << '\n'
            << "Profile:     " << to_string(plan.profile) << '\n'
            << "Compatible:  " << (plan.compatible ? "yes" : "no") << '\n'
@@ -252,9 +252,9 @@ std::string to_text(const ExecutionPlan& plan) {
            << "\nSafety budgets\n"
            << "  OS reserve:        " << format_bytes(plan.os_ram_reserve) << '\n'
            << "  Emergency reserve: " << format_bytes(plan.emergency_ram_reserve) << '\n'
-           << "  Stargate RAM max:  " << format_bytes(plan.safe_ram_budget) << '\n'
+           << "  Vastloom RAM max:  " << format_bytes(plan.safe_ram_budget) << '\n'
            << "  VRAM reserve:      " << format_bytes(plan.vram_reserve) << '\n'
-           << "  Stargate VRAM max: " << format_bytes(plan.safe_vram_budget) << '\n'
+           << "  Vastloom VRAM max: " << format_bytes(plan.safe_vram_budget) << '\n'
            << "  Storage reserve:   " << format_bytes(plan.storage_reserve) << '\n'
            << "  Storage to add:    " << format_bytes(plan.additional_storage_required) << '\n'
            << "\nPlacement\n"
@@ -322,4 +322,4 @@ std::string to_json(const ExecutionPlan& plan) {
     return output.str();
 }
 
-}  // namespace stargate::planner
+}  // namespace vastloom::planner

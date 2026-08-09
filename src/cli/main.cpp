@@ -19,26 +19,26 @@
 #include <string_view>
 #include <vector>
 
-#include "stargate/cli/tiny_commands.hpp"
-#include "stargate/core/bytes.hpp"
-#include "stargate/hardware/hardware_probe.hpp"
-#include "stargate/inference/gpt2_tokenizer.hpp"
-#include "stargate/inference/llama_model.hpp"
-#include "stargate/inference/olmoe_model.hpp"
-#include "stargate/inference/olmoe_runtime.hpp"
-#include "stargate/io/bounded_io_pool.hpp"
-#include "stargate/model/manifest.hpp"
-#include "stargate/model/imported_checkpoint.hpp"
-#include "stargate/model/model_store.hpp"
-#include "stargate/model/safetensors.hpp"
-#include "stargate/model/verifier.hpp"
-#include "stargate/planner/execution_planner.hpp"
-#include "stargate/research/trace_simulator.hpp"
-#include "stargate/safety/heartbeat.hpp"
-#include "stargate/safety/resource_governor.hpp"
-#include "stargate/safety/runtime_policy.hpp"
-#include "stargate/util/string.hpp"
-#include "stargate/version.hpp"
+#include "vastloom/cli/tiny_commands.hpp"
+#include "vastloom/core/bytes.hpp"
+#include "vastloom/hardware/hardware_probe.hpp"
+#include "vastloom/inference/gpt2_tokenizer.hpp"
+#include "vastloom/inference/llama_model.hpp"
+#include "vastloom/inference/olmoe_model.hpp"
+#include "vastloom/inference/olmoe_runtime.hpp"
+#include "vastloom/io/bounded_io_pool.hpp"
+#include "vastloom/model/manifest.hpp"
+#include "vastloom/model/imported_checkpoint.hpp"
+#include "vastloom/model/model_store.hpp"
+#include "vastloom/model/safetensors.hpp"
+#include "vastloom/model/verifier.hpp"
+#include "vastloom/planner/execution_planner.hpp"
+#include "vastloom/research/trace_simulator.hpp"
+#include "vastloom/safety/heartbeat.hpp"
+#include "vastloom/safety/resource_governor.hpp"
+#include "vastloom/safety/runtime_policy.hpp"
+#include "vastloom/util/string.hpp"
+#include "vastloom/version.hpp"
 
 #if defined(_WIN32)
 #ifndef NOMINMAX
@@ -55,9 +55,9 @@
 
 namespace {
 
-using stargate::ByteCount;
-using stargate::Error;
-using stargate::Result;
+using vastloom::ByteCount;
+using vastloom::Error;
+using vastloom::Result;
 
 volatile std::sig_atomic_t real_generation_cancelled = 0;
 
@@ -66,7 +66,7 @@ void handle_real_interrupt(int) {
 }
 
 int exit_code(const Error& error) {
-    using stargate::ErrorCode;
+    using vastloom::ErrorCode;
     switch (error.code) {
         case ErrorCode::invalid_argument:
         case ErrorCode::invalid_format: return 64;
@@ -84,8 +84,8 @@ int exit_code(const Error& error) {
 
 int print_error(const Error& error, bool json = false) {
     if (json) {
-        std::cerr << "{\"ok\":false,\"error\":\"" << stargate::util::json_escape(error.message)
-                  << "\",\"context\":\"" << stargate::util::json_escape(error.context) << "\"}\n";
+        std::cerr << "{\"ok\":false,\"error\":\"" << vastloom::util::json_escape(error.message)
+                  << "\",\"context\":\"" << vastloom::util::json_escape(error.context) << "\"}\n";
     } else {
         std::cerr << "ERROR: " << error.message;
         if (!error.context.empty()) std::cerr << " [" << error.context << ']';
@@ -110,7 +110,7 @@ std::optional<std::string> option_value(const std::vector<std::string>& args, st
 Result<ByteCount> optional_bytes(const std::vector<std::string>& args, std::string_view name, ByteCount fallback) {
     const auto value = option_value(args, name);
     if (!value.has_value()) return fallback;
-    return stargate::parse_bytes(*value);
+    return vastloom::parse_bytes(*value);
 }
 
 Result<std::size_t> optional_size(const std::vector<std::string>& args, std::string_view name, std::size_t fallback) {
@@ -119,7 +119,7 @@ Result<std::size_t> optional_size(const std::vector<std::string>& args, std::str
     std::size_t parsed = 0;
     const auto converted = std::from_chars(value->data(), value->data() + value->size(), parsed);
     if (converted.ec != std::errc{} || converted.ptr != value->data() + value->size()) {
-        return stargate::make_error(stargate::ErrorCode::invalid_argument, "Invalid unsigned integer option", std::string(name));
+        return vastloom::make_error(vastloom::ErrorCode::invalid_argument, "Invalid unsigned integer option", std::string(name));
     }
     return parsed;
 }
@@ -130,7 +130,7 @@ Result<std::uint64_t> optional_u64(const std::vector<std::string>& args, std::st
     std::uint64_t parsed = 0;
     const auto converted = std::from_chars(value->data(), value->data() + value->size(), parsed);
     if (converted.ec != std::errc{} || converted.ptr != value->data() + value->size()) {
-        return stargate::make_error(stargate::ErrorCode::invalid_argument, "Invalid uint64 option", std::string(name));
+        return vastloom::make_error(vastloom::ErrorCode::invalid_argument, "Invalid uint64 option", std::string(name));
     }
     return parsed;
 }
@@ -141,22 +141,22 @@ Result<float> optional_float(const std::vector<std::string>& args, std::string_v
     float parsed = 0.0F;
     const auto converted = std::from_chars(value->data(), value->data() + value->size(), parsed);
     if (converted.ec != std::errc{} || converted.ptr != value->data() + value->size() || !std::isfinite(parsed)) {
-        return stargate::make_error(stargate::ErrorCode::invalid_argument, "Invalid floating-point option", std::string(name));
+        return vastloom::make_error(vastloom::ErrorCode::invalid_argument, "Invalid floating-point option", std::string(name));
     }
     return parsed;
 }
 
-Result<stargate::io::IoFaultInjection> parse_io_fault(std::string_view value) {
-    const auto normalized = stargate::util::to_lower(stargate::util::trim(value));
-    stargate::io::IoFaultInjection result;
+Result<vastloom::io::IoFaultInjection> parse_io_fault(std::string_view value) {
+    const auto normalized = vastloom::util::to_lower(vastloom::util::trim(value));
+    vastloom::io::IoFaultInjection result;
     result.request_sequence = 1U;
-    if (normalized.empty() || normalized == "none") result.kind = stargate::io::IoFaultKind::none;
-    else if (normalized == "fail") result.kind = stargate::io::IoFaultKind::fail;
-    else if (normalized == "short-read") result.kind = stargate::io::IoFaultKind::short_read;
-    else if (normalized == "allocation") result.kind = stargate::io::IoFaultKind::allocation;
-    else if (normalized == "cancelled") result.kind = stargate::io::IoFaultKind::cancelled;
-    else if (normalized == "timeout") result.kind = stargate::io::IoFaultKind::timeout;
-    else return stargate::make_error(stargate::ErrorCode::invalid_argument,
+    if (normalized.empty() || normalized == "none") result.kind = vastloom::io::IoFaultKind::none;
+    else if (normalized == "fail") result.kind = vastloom::io::IoFaultKind::fail;
+    else if (normalized == "short-read") result.kind = vastloom::io::IoFaultKind::short_read;
+    else if (normalized == "allocation") result.kind = vastloom::io::IoFaultKind::allocation;
+    else if (normalized == "cancelled") result.kind = vastloom::io::IoFaultKind::cancelled;
+    else if (normalized == "timeout") result.kind = vastloom::io::IoFaultKind::timeout;
+    else return vastloom::make_error(vastloom::ErrorCode::invalid_argument,
                                      "Unknown OLMoE I/O fault injection mode", std::string(value));
     return result;
 }
@@ -165,20 +165,20 @@ Result<void> validate_options(const std::vector<std::string>& args,
                               std::size_t positional_count,
                               std::initializer_list<std::string_view> value_options,
                               std::initializer_list<std::string_view> flags) {
-    if (args.size() < positional_count) return stargate::make_error(stargate::ErrorCode::invalid_argument, "Missing positional argument");
+    if (args.size() < positional_count) return vastloom::make_error(vastloom::ErrorCode::invalid_argument, "Missing positional argument");
     std::set<std::string> seen;
     for (std::size_t index = positional_count; index < args.size(); ++index) {
         const std::string_view argument = args[index];
         const bool is_value = std::find(value_options.begin(), value_options.end(), argument) != value_options.end();
         const bool is_flag = std::find(flags.begin(), flags.end(), argument) != flags.end();
         if (!is_value && !is_flag) {
-            return stargate::make_error(stargate::ErrorCode::invalid_argument, "Unknown or unexpected option", std::string(argument));
+            return vastloom::make_error(vastloom::ErrorCode::invalid_argument, "Unknown or unexpected option", std::string(argument));
         }
         if (!seen.insert(std::string(argument)).second) {
-            return stargate::make_error(stargate::ErrorCode::invalid_argument, "Duplicate option", std::string(argument));
+            return vastloom::make_error(vastloom::ErrorCode::invalid_argument, "Duplicate option", std::string(argument));
         }
         if (is_value) {
-            if (index + 1U >= args.size()) return stargate::make_error(stargate::ErrorCode::invalid_argument, "Option requires a value", std::string(argument));
+            if (index + 1U >= args.size()) return vastloom::make_error(vastloom::ErrorCode::invalid_argument, "Option requires a value", std::string(argument));
             ++index;
         }
     }
@@ -195,7 +195,7 @@ std::uint64_t current_pid() {
 
 void print_help() {
     std::cout
-        << "Stargate Local AI " << stargate::kVersion << "\n"
+        << "Vastloom Local AI " << vastloom::kVersion << "\n"
         << "Safety-first local inference research runtime for oversized MoE models.\n\n"
         << "Commands:\n"
         << "  chat MODEL_OR_MANIFEST [--prompt TEXT] [--max-tokens N] [--temperature F]\n"
@@ -223,7 +223,7 @@ void print_help() {
         << "  store-init PATH [--reserve SIZE] [--json]\n"
         << "      Create the immutable-model/cache/scratch/state store with a disk reserve.\n\n"
         << "  store-info PATH [--reserve SIZE] [--json]\n"
-        << "      Validate and display an existing Stargate model store.\n\n"
+        << "      Validate and display an existing Vastloom model store.\n\n"
         << "  runtime-policy [--storage PATH] [--json]\n"
         << "      Show the fail-closed RAM/VRAM/CPU/I/O policy for this host.\n\n"
         << "  tokenize MODEL_DIRECTORY --text TEXT [--chat] [--json]\n"
@@ -242,89 +242,89 @@ void print_help() {
         << "  version\n";
 }
 
-stargate::hardware::HardwareSnapshot reference_pc_snapshot(const std::filesystem::path& storage_path) {
-    stargate::hardware::HardwareSnapshot hardware;
+vastloom::hardware::HardwareSnapshot reference_pc_snapshot(const std::filesystem::path& storage_path) {
+    vastloom::hardware::HardwareSnapshot hardware;
     hardware.operating_system = "Windows 11 (reference simulation)";
     hardware.cpu.name = "AMD Ryzen 9 7900X";
     hardware.cpu.logical_cores = 24;
     hardware.cpu.avx2 = true;
     hardware.cpu.fma = true;
-    hardware.memory.total_bytes = 32U * stargate::GiB;
-    hardware.memory.available_bytes = 26U * stargate::GiB;
-    hardware.gpus.push_back(stargate::hardware::GpuInfo{
-        "CUDA", "NVIDIA GeForce RTX 4070 SUPER", "simulated", 12U * stargate::GiB,
-        11U * stargate::GiB, 60.0, 220.0});
+    hardware.memory.total_bytes = 32U * vastloom::GiB;
+    hardware.memory.available_bytes = 26U * vastloom::GiB;
+    hardware.gpus.push_back(vastloom::hardware::GpuInfo{
+        "CUDA", "NVIDIA GeForce RTX 4070 SUPER", "simulated", 12U * vastloom::GiB,
+        11U * vastloom::GiB, 60.0, 220.0});
     hardware.storage.path = storage_path;
-    hardware.storage.capacity_bytes = 2U * stargate::TiB;
-    hardware.storage.free_bytes = 1536U * stargate::GiB;
-    hardware.storage.available_bytes = 1536U * stargate::GiB;
+    hardware.storage.capacity_bytes = 2U * vastloom::TiB;
+    hardware.storage.free_bytes = 1536U * vastloom::GiB;
+    hardware.storage.available_bytes = 1536U * vastloom::GiB;
     return hardware;
 }
 
-Result<stargate::safety::SafetyState> parse_safety_state(std::string_view value) {
-    const auto normalized = stargate::util::to_lower(stargate::util::trim(value));
-    if (normalized == "normal") return stargate::safety::SafetyState::normal;
-    if (normalized == "pressure") return stargate::safety::SafetyState::pressure;
-    if (normalized == "critical") return stargate::safety::SafetyState::critical;
-    if (normalized == "emergency") return stargate::safety::SafetyState::emergency;
-    return stargate::make_error(stargate::ErrorCode::invalid_argument, "Unknown safety state", normalized);
+Result<vastloom::safety::SafetyState> parse_safety_state(std::string_view value) {
+    const auto normalized = vastloom::util::to_lower(vastloom::util::trim(value));
+    if (normalized == "normal") return vastloom::safety::SafetyState::normal;
+    if (normalized == "pressure") return vastloom::safety::SafetyState::pressure;
+    if (normalized == "critical") return vastloom::safety::SafetyState::critical;
+    if (normalized == "emergency") return vastloom::safety::SafetyState::emergency;
+    return vastloom::make_error(vastloom::ErrorCode::invalid_argument, "Unknown safety state", normalized);
 }
 
 int command_doctor(const std::vector<std::string>& args) {
     const bool json = has_flag(args, "--json");
     const auto storage = option_value(args, "--storage").value_or(std::filesystem::current_path().string());
-    auto hardware = stargate::hardware::HardwareProbe::collect(storage);
+    auto hardware = vastloom::hardware::HardwareProbe::collect(storage);
     if (!hardware) return print_error(hardware.error(), json);
-    std::cout << (json ? stargate::hardware::to_json(hardware.value()) : stargate::hardware::to_text(hardware.value())) << '\n';
+    std::cout << (json ? vastloom::hardware::to_json(hardware.value()) : vastloom::hardware::to_text(hardware.value())) << '\n';
     return 0;
 }
 
 int command_inspect(const std::vector<std::string>& args) {
-    if (args.empty()) return print_error(stargate::make_error(stargate::ErrorCode::invalid_argument, "inspect requires a manifest or checkpoint path"));
+    if (args.empty()) return print_error(vastloom::make_error(vastloom::ErrorCode::invalid_argument, "inspect requires a manifest or checkpoint path"));
     const bool json = has_flag(args, "--json");
     std::error_code error;
     const std::filesystem::path path = args[0];
     if (std::filesystem::is_directory(path, error) ||
-        stargate::util::to_lower(path.extension().string()) == ".safetensors") {
-        auto catalog = stargate::model::inspect_safetensors_checkpoint(path);
+        vastloom::util::to_lower(path.extension().string()) == ".safetensors") {
+        auto catalog = vastloom::model::inspect_safetensors_checkpoint(path);
         if (!catalog) return print_error(catalog.error(), json);
-        std::cout << (json ? stargate::model::to_json(catalog.value()) : stargate::model::to_text(catalog.value())) << '\n';
+        std::cout << (json ? vastloom::model::to_json(catalog.value()) : vastloom::model::to_text(catalog.value())) << '\n';
         return 0;
     }
-    auto manifest = stargate::model::load_manifest(args[0]);
+    auto manifest = vastloom::model::load_manifest(args[0]);
     if (!manifest) return print_error(manifest.error(), json);
-    std::cout << (json ? stargate::model::to_json(manifest.value()) : stargate::model::to_text(manifest.value())) << '\n';
+    std::cout << (json ? vastloom::model::to_json(manifest.value()) : vastloom::model::to_text(manifest.value())) << '\n';
     return 0;
 }
 
 int command_verify(const std::vector<std::string>& args) {
-    if (args.empty()) return print_error(stargate::make_error(stargate::ErrorCode::invalid_argument, "verify requires a manifest path"));
+    if (args.empty()) return print_error(vastloom::make_error(vastloom::ErrorCode::invalid_argument, "verify requires a manifest path"));
     const bool json = has_flag(args, "--json");
-    auto manifest = stargate::model::load_manifest(args[0]);
+    auto manifest = vastloom::model::load_manifest(args[0]);
     if (!manifest) return print_error(manifest.error(), json);
     const std::filesystem::path root = option_value(args, "--model-root").value_or(
         manifest.value().source_path.parent_path().empty() ? "." : manifest.value().source_path.parent_path().string());
-    const auto mode = has_flag(args, "--full") ? stargate::model::VerificationMode::full : stargate::model::VerificationMode::quick;
-    auto report = stargate::model::verify_model(manifest.value(), root, mode);
+    const auto mode = has_flag(args, "--full") ? vastloom::model::VerificationMode::full : vastloom::model::VerificationMode::quick;
+    auto report = vastloom::model::verify_model(manifest.value(), root, mode);
     if (!report) return print_error(report.error(), json);
-    std::cout << (json ? stargate::model::to_json(report.value()) : stargate::model::to_text(report.value())) << '\n';
+    std::cout << (json ? vastloom::model::to_json(report.value()) : vastloom::model::to_text(report.value())) << '\n';
     return report.value().ok ? 0 : 65;
 }
 
 int command_plan(const std::vector<std::string>& args) {
-    if (args.empty()) return print_error(stargate::make_error(stargate::ErrorCode::invalid_argument, "plan requires a manifest path"));
+    if (args.empty()) return print_error(vastloom::make_error(vastloom::ErrorCode::invalid_argument, "plan requires a manifest path"));
     const bool json = has_flag(args, "--json");
-    auto manifest = stargate::model::load_manifest(args[0]);
+    auto manifest = vastloom::model::load_manifest(args[0]);
     if (!manifest) return print_error(manifest.error(), json);
-    auto profile = stargate::planner::parse_profile(option_value(args, "--profile").value_or("balanced"));
+    auto profile = vastloom::planner::parse_profile(option_value(args, "--profile").value_or("balanced"));
     if (!profile) return print_error(profile.error(), json);
     const auto storage_path = option_value(args, "--storage").value_or(std::filesystem::current_path().string());
 
-    stargate::hardware::HardwareSnapshot hardware;
+    vastloom::hardware::HardwareSnapshot hardware;
     if (has_flag(args, "--reference-pc")) {
         hardware = reference_pc_snapshot(storage_path);
     } else {
-        auto probed = stargate::hardware::HardwareProbe::collect(storage_path);
+        auto probed = vastloom::hardware::HardwareProbe::collect(storage_path);
         if (!probed) return print_error(probed.error(), json);
         hardware = probed.take_value();
     }
@@ -340,105 +340,105 @@ int command_plan(const std::vector<std::string>& args) {
 
     if (option_value(args, "--simulate-ram").has_value()) {
         hardware.memory.total_bytes = simulated_ram.value();
-        hardware.memory.available_bytes = stargate::percentage(simulated_ram.value(), 0.82);
+        hardware.memory.available_bytes = vastloom::percentage(simulated_ram.value(), 0.82);
     }
     if (option_value(args, "--simulate-vram").has_value()) {
         hardware.gpus.clear();
         if (simulated_vram.value() != 0) {
-            hardware.gpus.push_back(stargate::hardware::GpuInfo{
+            hardware.gpus.push_back(vastloom::hardware::GpuInfo{
                 "CUDA", "Simulated GPU", "simulated", simulated_vram.value(),
-                stargate::percentage(simulated_vram.value(), 0.90), std::nullopt, std::nullopt});
+                vastloom::percentage(simulated_vram.value(), 0.90), std::nullopt, std::nullopt});
         }
     }
     hardware.storage.capacity_bytes = simulated_storage.value();
     hardware.storage.free_bytes = simulated_free.value();
     hardware.storage.available_bytes = simulated_free.value();
 
-    auto plan = stargate::planner::build_plan(hardware, manifest.value(), profile.value());
+    auto plan = vastloom::planner::build_plan(hardware, manifest.value(), profile.value());
     if (!plan) return print_error(plan.error(), json);
-    std::cout << (json ? stargate::planner::to_json(plan.value()) : stargate::planner::to_text(plan.value())) << '\n';
+    std::cout << (json ? vastloom::planner::to_json(plan.value()) : vastloom::planner::to_text(plan.value())) << '\n';
     return plan.value().compatible ? 0 : 78;
 }
 
 int command_trace_sim(const std::vector<std::string>& args) {
-    if (args.empty()) return print_error(stargate::make_error(stargate::ErrorCode::invalid_argument, "trace-sim requires a CSV trace path"));
+    if (args.empty()) return print_error(vastloom::make_error(vastloom::ErrorCode::invalid_argument, "trace-sim requires a CSV trace path"));
     const bool json = has_flag(args, "--json");
     auto vram = optional_bytes(args, "--vram", 0);
     auto ram = optional_bytes(args, "--ram", 0);
     if (!vram) return print_error(vram.error(), json);
     if (!ram) return print_error(ram.error(), json);
-    auto policy = stargate::research::parse_cache_policy(option_value(args, "--policy").value_or("lru"));
+    auto policy = vastloom::research::parse_cache_policy(option_value(args, "--policy").value_or("lru"));
     if (!policy) return print_error(policy.error(), json);
-    stargate::research::TraceSimulationConfig config;
+    vastloom::research::TraceSimulationConfig config;
     config.vram_cache_bytes = vram.value();
     config.ram_cache_bytes = ram.value();
     config.policy = policy.value();
-    auto report = stargate::research::simulate_trace(args[0], config);
+    auto report = vastloom::research::simulate_trace(args[0], config);
     if (!report) return print_error(report.error(), json);
-    std::cout << (json ? stargate::research::to_json(report.value()) : stargate::research::to_text(report.value())) << '\n';
+    std::cout << (json ? vastloom::research::to_json(report.value()) : vastloom::research::to_text(report.value())) << '\n';
     return 0;
 }
 
 int command_io_smoke(const std::vector<std::string>& args) {
-    if (args.empty()) return print_error(stargate::make_error(stargate::ErrorCode::invalid_argument, "io-smoke requires a file path"));
+    if (args.empty()) return print_error(vastloom::make_error(vastloom::ErrorCode::invalid_argument, "io-smoke requires a file path"));
     auto offset = optional_bytes(args, "--offset", 0);
-    auto size = optional_bytes(args, "--size", 1U * stargate::MiB);
+    auto size = optional_bytes(args, "--size", 1U * vastloom::MiB);
     if (!offset) return print_error(offset.error());
     if (!size) return print_error(size.error());
 
-    stargate::safety::ResourceLimits limits;
-    limits.ram_hard_limit = 2U * stargate::GiB;
-    limits.vram_hard_limit = 1U * stargate::GiB;
-    limits.staging_hard_limit = std::max<ByteCount>(size.value(), 16U * stargate::MiB);
-    limits.scratch_hard_limit = 1U * stargate::GiB;
-    stargate::safety::ResourceGovernor governor(limits);
-    stargate::io::IoPoolOptions pool_options;
+    vastloom::safety::ResourceLimits limits;
+    limits.ram_hard_limit = 2U * vastloom::GiB;
+    limits.vram_hard_limit = 1U * vastloom::GiB;
+    limits.staging_hard_limit = std::max<ByteCount>(size.value(), 16U * vastloom::MiB);
+    limits.scratch_hard_limit = 1U * vastloom::GiB;
+    vastloom::safety::ResourceGovernor governor(limits);
+    vastloom::io::IoPoolOptions pool_options;
     pool_options.workers = 2U;
     pool_options.max_queued_requests = 8U;
     pool_options.max_request_bytes = limits.staging_hard_limit;
-    stargate::io::BoundedIoPool pool(pool_options, governor);
+    vastloom::io::BoundedIoPool pool(pool_options, governor);
     auto submitted = pool.submit_read(args[0], offset.value(), size.value(), "cli-io-smoke");
     if (!submitted) return print_error(submitted.error());
     auto result = submitted.value().get();
     if (!result) return print_error(result.error());
-    std::cout << "Read " << stargate::format_bytes(result.value().bytes.size())
+    std::cout << "Read " << vastloom::format_bytes(result.value().bytes.size())
               << " under a bounded staging reservation.\n";
     return 0;
 }
 
 int command_store_init(const std::vector<std::string>& args) {
-    if (args.empty()) return print_error(stargate::make_error(stargate::ErrorCode::invalid_argument, "store-init requires a path"));
+    if (args.empty()) return print_error(vastloom::make_error(vastloom::ErrorCode::invalid_argument, "store-init requires a path"));
     const bool json = has_flag(args, "--json");
-    auto reserve = optional_bytes(args, "--reserve", 300U * stargate::GiB);
+    auto reserve = optional_bytes(args, "--reserve", 300U * vastloom::GiB);
     if (!reserve) return print_error(reserve.error(), json);
-    auto store = stargate::model::ModelStore::initialize(args[0], {reserve.value()});
+    auto store = vastloom::model::ModelStore::initialize(args[0], {reserve.value()});
     if (!store) return print_error(store.error(), json);
-    std::cout << (json ? stargate::model::to_json(store.value().layout())
-                      : stargate::model::to_text(store.value().layout())) << '\n';
+    std::cout << (json ? vastloom::model::to_json(store.value().layout())
+                      : vastloom::model::to_text(store.value().layout())) << '\n';
     return 0;
 }
 
 int command_store_info(const std::vector<std::string>& args) {
-    if (args.empty()) return print_error(stargate::make_error(stargate::ErrorCode::invalid_argument, "store-info requires a path"));
+    if (args.empty()) return print_error(vastloom::make_error(vastloom::ErrorCode::invalid_argument, "store-info requires a path"));
     const bool json = has_flag(args, "--json");
-    auto reserve = optional_bytes(args, "--reserve", 300U * stargate::GiB);
+    auto reserve = optional_bytes(args, "--reserve", 300U * vastloom::GiB);
     if (!reserve) return print_error(reserve.error(), json);
-    auto store = stargate::model::ModelStore::open(args[0], {reserve.value()});
+    auto store = vastloom::model::ModelStore::open(args[0], {reserve.value()});
     if (!store) return print_error(store.error(), json);
-    std::cout << (json ? stargate::model::to_json(store.value().layout())
-                      : stargate::model::to_text(store.value().layout())) << '\n';
+    std::cout << (json ? vastloom::model::to_json(store.value().layout())
+                      : vastloom::model::to_text(store.value().layout())) << '\n';
     return 0;
 }
 
 int command_runtime_policy(const std::vector<std::string>& args) {
     const bool json = has_flag(args, "--json");
     const auto storage = option_value(args, "--storage").value_or(std::filesystem::current_path().string());
-    auto hardware = stargate::hardware::HardwareProbe::collect(storage);
+    auto hardware = vastloom::hardware::HardwareProbe::collect(storage);
     if (!hardware) return print_error(hardware.error(), json);
-    auto policy = stargate::safety::make_safe_runtime_policy(hardware.value());
+    auto policy = vastloom::safety::make_safe_runtime_policy(hardware.value());
     if (!policy) return print_error(policy.error(), json);
-    std::cout << (json ? stargate::safety::to_json(policy.value())
-                      : stargate::safety::to_text(policy.value())) << '\n';
+    std::cout << (json ? vastloom::safety::to_json(policy.value())
+                      : vastloom::safety::to_text(policy.value())) << '\n';
     return 0;
 }
 
@@ -448,35 +448,35 @@ int command_moe_inspect(const std::vector<std::string>& args) {
     if (!valid) return print_error(valid.error(), json);
 
     ByteCount safe_ram_cap = 0U;
-    auto hardware = stargate::hardware::HardwareProbe::collect(args[0]);
+    auto hardware = vastloom::hardware::HardwareProbe::collect(args[0]);
     if (hardware) {
-        auto policy = stargate::safety::make_safe_runtime_policy(hardware.value());
+        auto policy = vastloom::safety::make_safe_runtime_policy(hardware.value());
         if (policy) safe_ram_cap = policy.value().resources.ram_hard_limit;
     }
-    auto inspection = stargate::inference::inspect_olmoe_checkpoint(
+    auto inspection = vastloom::inference::inspect_olmoe_checkpoint(
         args[0], !has_flag(args, "--no-verify"), safe_ram_cap);
     if (!inspection) return print_error(inspection.error(), json);
-    std::cout << (json ? stargate::inference::to_json(inspection.value())
-                      : stargate::inference::to_text(inspection.value())) << '\n';
+    std::cout << (json ? vastloom::inference::to_json(inspection.value())
+                      : vastloom::inference::to_text(inspection.value())) << '\n';
     return 0;
 }
 
 Result<void> write_olmoe_trace_atomic(const std::filesystem::path& path,
-                                      const std::vector<stargate::inference::ExpertTraceEvent>& events) {
-    if (path.empty()) return stargate::make_error(stargate::ErrorCode::invalid_argument, "OLMoE trace path is empty");
+                                      const std::vector<vastloom::inference::ExpertTraceEvent>& events) {
+    if (path.empty()) return vastloom::make_error(vastloom::ErrorCode::invalid_argument, "OLMoE trace path is empty");
     std::error_code error;
     if (std::filesystem::exists(path, error)) {
-        return stargate::make_error(stargate::ErrorCode::permission_denied, "Refusing to overwrite an existing OLMoE trace", path.string());
+        return vastloom::make_error(vastloom::ErrorCode::permission_denied, "Refusing to overwrite an existing OLMoE trace", path.string());
     }
     const auto partial = path.string() + ".partial-" + std::to_string(current_pid());
     {
         std::ofstream output(partial, std::ios::binary | std::ios::trunc);
-        if (!output) return stargate::make_error(stargate::ErrorCode::io_error, "Unable to create OLMoE trace staging file", partial);
+        if (!output) return vastloom::make_error(vastloom::ErrorCode::io_error, "Unable to create OLMoE trace staging file", partial);
         output << "token,layer,expert,size_bytes,routing_weight,tier,hit,bytes_read,io_ms,"
                   "prefetched,prefetch_wait_ms,prefetch_overlap_ms\n";
         output.precision(9);
         for (const auto& event : events) {
-            output << event.token_position << ',' << event.layer << ',' << event.expert << ',' << (12U * stargate::MiB) << ','
+            output << event.token_position << ',' << event.layer << ',' << event.expert << ',' << (12U * vastloom::MiB) << ','
                    << event.routing_weight << ',' << (event.ram_cache_hit ? "ram" : "nvme") << ','
                    << (event.ram_cache_hit ? 1 : 0) << ',' << event.bytes_read << ',' << event.io_ms << ','
                    << (event.prefetched ? 1 : 0) << ',' << event.prefetch_wait_ms << ','
@@ -485,13 +485,13 @@ Result<void> write_olmoe_trace_atomic(const std::filesystem::path& path,
         output.flush();
         if (!output) {
             std::filesystem::remove(partial, error);
-            return stargate::make_error(stargate::ErrorCode::io_error, "Unable to flush OLMoE trace staging file", partial);
+            return vastloom::make_error(vastloom::ErrorCode::io_error, "Unable to flush OLMoE trace staging file", partial);
         }
     }
     std::filesystem::rename(partial, path, error);
     if (error) {
         std::filesystem::remove(partial, error);
-        return stargate::make_error(stargate::ErrorCode::io_error, "Unable to publish OLMoE trace atomically", path.string());
+        return vastloom::make_error(vastloom::ErrorCode::io_error, "Unable to publish OLMoE trace atomically", path.string());
     }
     return {};
 }
@@ -504,12 +504,12 @@ int command_moe_logits(const std::vector<std::string>& args) {
     const bool json = has_flag(args, "--json");
     if (!valid) return print_error(valid.error(), json);
     const auto text = option_value(args, "--text");
-    if (!text) return print_error(stargate::make_error(stargate::ErrorCode::invalid_argument, "moe-logits requires --text"), json);
+    if (!text) return print_error(vastloom::make_error(vastloom::ErrorCode::invalid_argument, "moe-logits requires --text"), json);
     auto top = optional_size(args, "--top", 10U);
     auto timeout = optional_size(args, "--timeout-ms", 600'000U);
-    auto cache_bytes = optional_bytes(args, "--cache-bytes", 256U * stargate::MiB);
-    auto cache_policy = stargate::inference::parse_expert_cache_policy(option_value(args, "--cache").value_or("lru"));
-    auto io_mode = stargate::inference::parse_expert_io_mode(option_value(args, "--io").value_or("sync"));
+    auto cache_bytes = optional_bytes(args, "--cache-bytes", 256U * vastloom::MiB);
+    auto cache_policy = vastloom::inference::parse_expert_cache_policy(option_value(args, "--cache").value_or("lru"));
+    auto io_mode = vastloom::inference::parse_expert_io_mode(option_value(args, "--io").value_or("sync"));
     auto prefetch_depth = optional_size(args, "--prefetch-depth", 1U);
     auto io_timeout = optional_size(args, "--io-timeout-ms", 30'000U);
     auto io_fault = parse_io_fault(option_value(args, "--inject-io-fault").value_or("none"));
@@ -522,27 +522,27 @@ int command_moe_logits(const std::vector<std::string>& args) {
     if (!io_timeout) return print_error(io_timeout.error(), json);
     if (!io_fault) return print_error(io_fault.error(), json);
     if (top.value() == 0U || top.value() > 100U || timeout.value() == 0U || timeout.value() > 3'600'000U) {
-        return print_error(stargate::make_error(stargate::ErrorCode::invalid_argument, "OLMoE top/timeout option is outside safe bounds"), json);
+        return print_error(vastloom::make_error(vastloom::ErrorCode::invalid_argument, "OLMoE top/timeout option is outside safe bounds"), json);
     }
     if (prefetch_depth.value() == 0U || prefetch_depth.value() > 2U ||
         io_timeout.value() == 0U || io_timeout.value() > 60'000U) {
-        return print_error(stargate::make_error(stargate::ErrorCode::invalid_argument,
+        return print_error(vastloom::make_error(vastloom::ErrorCode::invalid_argument,
                                                 "OLMoE prefetch/I/O-timeout option is outside safe bounds"), json);
     }
-    if (io_mode.value() == stargate::inference::ExpertIoMode::synchronous &&
-        io_fault.value().kind != stargate::io::IoFaultKind::none) {
-        return print_error(stargate::make_error(stargate::ErrorCode::invalid_argument,
+    if (io_mode.value() == vastloom::inference::ExpertIoMode::synchronous &&
+        io_fault.value().kind != vastloom::io::IoFaultKind::none) {
+        return print_error(vastloom::make_error(vastloom::ErrorCode::invalid_argument,
                                                 "--inject-io-fault requires --io async"), json);
     }
 
-    auto hardware = stargate::hardware::HardwareProbe::collect(args[0]);
+    auto hardware = vastloom::hardware::HardwareProbe::collect(args[0]);
     if (!hardware) return print_error(hardware.error(), json);
-    auto policy = stargate::safety::make_safe_runtime_policy(hardware.value());
+    auto policy = vastloom::safety::make_safe_runtime_policy(hardware.value());
     if (!policy) return print_error(policy.error(), json);
-    auto guard = stargate::safety::ProcessSafetyGuard::apply(policy.value());
+    auto guard = vastloom::safety::ProcessSafetyGuard::apply(policy.value());
     if (!guard) return print_error(guard.error(), json);
-    stargate::safety::ResourceGovernor governor(policy.value().resources);
-    auto model = stargate::inference::OlmoeRuntimeModel::load(
+    vastloom::safety::ResourceGovernor governor(policy.value().resources);
+    auto model = vastloom::inference::OlmoeRuntimeModel::load(
         args[0], governor, {!has_flag(args, "--no-verify"), policy.value().cpu_threads});
     if (!model) return print_error(model.error(), json);
     auto checked = guard.value().sample_and_check();
@@ -556,7 +556,7 @@ int command_moe_logits(const std::vector<std::string>& args) {
     }
     auto tokens = model.value().tokenizer().encode(input);
     if (!tokens) return print_error(tokens.error(), json);
-    stargate::inference::OlmoeForwardOptions options;
+    vastloom::inference::OlmoeForwardOptions options;
     options.cache_policy = cache_policy.value();
     options.expert_cache_bytes = cache_bytes.value();
     options.io_mode = io_mode.value();
@@ -591,14 +591,14 @@ int command_moe_logits(const std::vector<std::string>& args) {
     if (json) {
         std::cout << "{\"ok\":true,\"input_tokens\":" << tokens.value().size()
                   << ",\"greedy_id\":" << greedy_id << ",\"greedy_text\":\""
-                  << stargate::util::json_escape(greedy_text.value()) << "\",\"top_logits\":[";
+                  << vastloom::util::json_escape(greedy_text.value()) << "\",\"top_logits\":[";
         for (std::size_t index = 0U; index < top.value(); ++index) {
             if (index != 0U) std::cout << ',';
             std::cout << "{\"id\":" << order[index] << ",\"logit\":"
                       << forwarded.value().logits[order[index]] << '}';
         }
-        std::cout << "],\"cache_policy\":\"" << stargate::inference::to_string(options.cache_policy)
-                  << "\",\"io_mode\":\"" << stargate::inference::to_string(options.io_mode)
+        std::cout << "],\"cache_policy\":\"" << vastloom::inference::to_string(options.cache_policy)
+                  << "\",\"io_mode\":\"" << vastloom::inference::to_string(options.io_mode)
                   << "\",\"prefetch_depth\":" << options.prefetch_depth
                   << ",\"expert_cache_hits\":" << forwarded.value().stats.expert_cache_hits
                   << ",\"expert_cache_misses\":" << forwarded.value().stats.expert_cache_misses
@@ -614,7 +614,7 @@ int command_moe_logits(const std::vector<std::string>& args) {
         if (forwarded.value().stats.process_io_available) {
             const auto& process_io = forwarded.value().stats.process_io;
             std::cout << "\"available\":true,\"source\":\""
-                      << stargate::util::json_escape(process_io.source)
+                      << vastloom::util::json_escape(process_io.source)
                       << "\",\"read_operations\":" << process_io.read_operations
                       << ",\"process_read_bytes\":" << process_io.process_read_bytes
                       << ",\"storage_read_bytes_available\":"
@@ -624,7 +624,7 @@ int command_moe_logits(const std::vector<std::string>& args) {
             else std::cout << "null";
         } else {
             std::cout << "\"available\":false,\"error\":\""
-                      << stargate::util::json_escape(forwarded.value().stats.process_io_error) << '"';
+                      << vastloom::util::json_escape(forwarded.value().stats.process_io_error) << '"';
         }
         std::cout << "}}\n";
     } else {
@@ -632,20 +632,20 @@ int command_moe_logits(const std::vector<std::string>& args) {
         for (std::size_t index = 0U; index < top.value(); ++index) {
             std::cout << "  " << order[index] << "  " << forwarded.value().logits[order[index]] << '\n';
         }
-        std::cout << "Expert I/O: " << stargate::format_bytes(forwarded.value().stats.expert_bytes_read)
+        std::cout << "Expert I/O: " << vastloom::format_bytes(forwarded.value().stats.expert_bytes_read)
                   << ", hits/misses " << forwarded.value().stats.expert_cache_hits << '/'
                   << forwarded.value().stats.expert_cache_misses << ", "
-                  << stargate::inference::to_string(options.io_mode) << " prefetches "
+                  << vastloom::inference::to_string(options.io_mode) << " prefetches "
                   << forwarded.value().stats.expert_prefetches << ", overlap "
                   << forwarded.value().stats.expert_prefetch_overlap_ms << " ms, forward "
                   << forwarded.value().stats.forward_ms << " ms\n";
         if (forwarded.value().stats.process_io_available) {
             const auto& process_io = forwarded.value().stats.process_io;
-            std::cout << "Process I/O: " << stargate::format_bytes(process_io.process_read_bytes)
+            std::cout << "Process I/O: " << vastloom::format_bytes(process_io.process_read_bytes)
                       << " read-transfer bytes via " << process_io.source;
             if (process_io.storage_read_bytes_available) {
                 std::cout << ", storage-layer reads "
-                          << stargate::format_bytes(process_io.storage_read_bytes);
+                          << vastloom::format_bytes(process_io.storage_read_bytes);
             } else {
                 std::cout << ", storage-layer bytes unavailable";
             }
@@ -660,17 +660,17 @@ int command_moe_logits(const std::vector<std::string>& args) {
 
 int command_tokenize(const std::vector<std::string>& args) {
     const bool json = has_flag(args, "--json");
-    if (args.empty()) return print_error(stargate::make_error(stargate::ErrorCode::invalid_argument, "tokenize requires a model directory"), json);
+    if (args.empty()) return print_error(vastloom::make_error(vastloom::ErrorCode::invalid_argument, "tokenize requires a model directory"), json);
     auto valid = validate_options(args, 1U, {"--text"}, {"--chat", "--json"});
     if (!valid) return print_error(valid.error(), json);
     const auto text = option_value(args, "--text");
-    if (!text) return print_error(stargate::make_error(stargate::ErrorCode::invalid_argument, "tokenize requires --text"), json);
-    auto tokenizer = stargate::inference::Gpt2Tokenizer::load(args[0]);
+    if (!text) return print_error(vastloom::make_error(vastloom::ErrorCode::invalid_argument, "tokenize requires --text"), json);
+    auto tokenizer = vastloom::inference::Gpt2Tokenizer::load(args[0]);
     if (!tokenizer) return print_error(tokenizer.error(), json);
     std::string input = *text;
     if (has_flag(args, "--chat")) {
         const auto config_path = std::filesystem::path(args[0]) / "config.json";
-        auto olmoe = stargate::inference::load_olmoe_config(config_path);
+        auto olmoe = vastloom::inference::load_olmoe_config(config_path);
         auto formatted = olmoe
                              ? tokenizer.value().apply_olmoe_chat_template({{"user", input}}, true)
                              : tokenizer.value().apply_smol_chat_template({{"user", input}}, true);
@@ -687,7 +687,7 @@ int command_tokenize(const std::vector<std::string>& args) {
             if (index != 0U) std::cout << ',';
             std::cout << tokens.value()[index];
         }
-        std::cout << "],\"decoded\":\"" << stargate::util::json_escape(decoded.value()) << "\"}\n";
+        std::cout << "],\"decoded\":\"" << vastloom::util::json_escape(decoded.value()) << "\"}\n";
     } else {
         std::cout << "Tokens (" << tokens.value().size() << "):";
         for (const auto token : tokens.value()) std::cout << ' ' << token;
@@ -698,20 +698,20 @@ int command_tokenize(const std::vector<std::string>& args) {
 
 int command_real_model_info(const std::vector<std::string>& args) {
     const bool json = has_flag(args, "--json");
-    if (args.empty()) return print_error(stargate::make_error(stargate::ErrorCode::invalid_argument, "model-info requires a model directory"), json);
+    if (args.empty()) return print_error(vastloom::make_error(vastloom::ErrorCode::invalid_argument, "model-info requires a model directory"), json);
     auto valid = validate_options(args, 1U, {}, {"--no-verify", "--json"});
     if (!valid) return print_error(valid.error(), json);
-    auto imported = stargate::model::verify_imported_checkpoint(args[0], !has_flag(args, "--no-verify"));
+    auto imported = vastloom::model::verify_imported_checkpoint(args[0], !has_flag(args, "--no-verify"));
     if (!imported) return print_error(imported.error(), json);
-    auto config = stargate::inference::load_llama_config(std::filesystem::path(args[0]) / "config.json");
+    auto config = vastloom::inference::load_llama_config(std::filesystem::path(args[0]) / "config.json");
     if (!config) return print_error(config.error(), json);
-    auto tokenizer = stargate::inference::Gpt2Tokenizer::load(args[0]);
+    auto tokenizer = vastloom::inference::Gpt2Tokenizer::load(args[0]);
     if (!tokenizer) return print_error(tokenizer.error(), json);
-    auto catalog = stargate::model::inspect_safetensors_checkpoint(args[0]);
+    auto catalog = vastloom::model::inspect_safetensors_checkpoint(args[0]);
     if (!catalog) return print_error(catalog.error(), json);
     if (json) {
-        std::cout << "{\"ok\":true,\"model_id\":\"" << stargate::util::json_escape(imported.value().model_id)
-                  << "\",\"revision\":\"" << stargate::util::json_escape(imported.value().revision)
+        std::cout << "{\"ok\":true,\"model_id\":\"" << vastloom::util::json_escape(imported.value().model_id)
+                  << "\",\"revision\":\"" << vastloom::util::json_escape(imported.value().revision)
                   << "\",\"hash_verified\":" << (imported.value().full_hash_verified ? "true" : "false")
                   << ",\"architecture\":\"LlamaForCausalLM\",\"vocab_size\":" << config.value().vocab_size
                   << ",\"hidden_size\":" << config.value().hidden_size
@@ -730,48 +730,48 @@ int command_real_model_info(const std::vector<std::string>& args) {
                   << "Heads/KV:      " << config.value().num_attention_heads << '/' << config.value().num_key_value_heads << '\n'
                   << "Context:       " << config.value().max_position_embeddings << '\n'
                   << "Tensors:       " << catalog.value().tensors.size() << '\n'
-                  << "Tensor bytes:  " << stargate::format_bytes(catalog.value().total_tensor_bytes) << '\n'
+                  << "Tensor bytes:  " << vastloom::format_bytes(catalog.value().total_tensor_bytes) << '\n'
                   << "SHA-256:       " << (imported.value().full_hash_verified ? "verified" : "skipped") << '\n';
     }
     return 0;
 }
 
 struct RealRuntime {
-    stargate::safety::RuntimePolicy policy;
-    std::unique_ptr<stargate::safety::ResourceGovernor> governor;
-    stargate::safety::ProcessSafetyGuard process_guard;
+    vastloom::safety::RuntimePolicy policy;
+    std::unique_ptr<vastloom::safety::ResourceGovernor> governor;
+    vastloom::safety::ProcessSafetyGuard process_guard;
 };
 
 Result<RealRuntime> start_real_runtime(const std::filesystem::path& model_path) {
-    auto hardware = stargate::hardware::HardwareProbe::collect(model_path);
+    auto hardware = vastloom::hardware::HardwareProbe::collect(model_path);
     if (!hardware) return hardware.error();
-    auto policy = stargate::safety::make_safe_runtime_policy(hardware.value());
+    auto policy = vastloom::safety::make_safe_runtime_policy(hardware.value());
     if (!policy) return policy.error();
-    auto guard = stargate::safety::ProcessSafetyGuard::apply(policy.value());
+    auto guard = vastloom::safety::ProcessSafetyGuard::apply(policy.value());
     if (!guard) return guard.error();
     RealRuntime runtime;
     runtime.policy = policy.value();
-    runtime.governor = std::make_unique<stargate::safety::ResourceGovernor>(runtime.policy.resources);
+    runtime.governor = std::make_unique<vastloom::safety::ResourceGovernor>(runtime.policy.resources);
     runtime.process_guard = guard.take_value();
     return runtime;
 }
 
-Result<stargate::inference::LlamaModel> load_real_model(const std::filesystem::path& model_path,
+Result<vastloom::inference::LlamaModel> load_real_model(const std::filesystem::path& model_path,
                                                         RealRuntime& runtime,
                                                         bool verify) {
-    return stargate::inference::LlamaModel::load(
+    return vastloom::inference::LlamaModel::load(
         model_path, *runtime.governor, {verify, runtime.policy.cpu_threads});
 }
 
 int command_real_logits(const std::vector<std::string>& args) {
     const bool json = has_flag(args, "--json");
-    if (args.empty()) return print_error(stargate::make_error(stargate::ErrorCode::invalid_argument, "real-logits requires a model directory"), json);
+    if (args.empty()) return print_error(vastloom::make_error(vastloom::ErrorCode::invalid_argument, "real-logits requires a model directory"), json);
     auto valid = validate_options(args, 1U, {"--text", "--top"}, {"--chat", "--no-verify", "--json"});
     if (!valid) return print_error(valid.error(), json);
     const auto text = option_value(args, "--text");
-    if (!text) return print_error(stargate::make_error(stargate::ErrorCode::invalid_argument, "real-logits requires --text"), json);
+    if (!text) return print_error(vastloom::make_error(vastloom::ErrorCode::invalid_argument, "real-logits requires --text"), json);
     auto top = optional_size(args, "--top", 10U);
-    if (!top || top.value() == 0U || top.value() > 100U) return print_error(top ? stargate::make_error(stargate::ErrorCode::invalid_argument, "--top must be between 1 and 100") : top.error(), json);
+    if (!top || top.value() == 0U || top.value() > 100U) return print_error(top ? vastloom::make_error(vastloom::ErrorCode::invalid_argument, "--top must be between 1 and 100") : top.error(), json);
     auto runtime = start_real_runtime(args[0]);
     if (!runtime) return print_error(runtime.error(), json);
     auto model = load_real_model(args[0], runtime.value(), !has_flag(args, "--no-verify"));
@@ -809,13 +809,13 @@ int command_real_logits(const std::vector<std::string>& args) {
 
 int command_real_chat(const std::vector<std::string>& args) {
     const bool json = has_flag(args, "--json");
-    if (args.empty()) return print_error(stargate::make_error(stargate::ErrorCode::invalid_argument, "chat requires a model directory"), json);
+    if (args.empty()) return print_error(vastloom::make_error(vastloom::ErrorCode::invalid_argument, "chat requires a model directory"), json);
     auto valid = validate_options(args, 1U,
                                   {"--prompt", "--max-tokens", "--top-k", "--seed", "--temperature", "--timeout-ms", "--system"},
                                   {"--json", "--no-stream", "--no-stats", "--no-verify"});
     if (!valid) return print_error(valid.error(), json);
     const auto prompt = option_value(args, "--prompt");
-    if (!prompt && json) return print_error(stargate::make_error(stargate::ErrorCode::invalid_argument, "Interactive real-model chat does not support --json"), json);
+    if (!prompt && json) return print_error(vastloom::make_error(vastloom::ErrorCode::invalid_argument, "Interactive real-model chat does not support --json"), json);
     auto max_tokens = optional_size(args, "--max-tokens", 64U);
     auto top_k = optional_size(args, "--top-k", 40U);
     auto seed = optional_u64(args, "--seed", 1U);
@@ -826,15 +826,15 @@ int command_real_chat(const std::vector<std::string>& args) {
     if (!seed) return print_error(seed.error(), json);
     if (!temperature) return print_error(temperature.error(), json);
     if (!timeout_ms || timeout_ms.value() > static_cast<std::size_t>(std::numeric_limits<std::int64_t>::max())) {
-        return print_error(timeout_ms ? stargate::make_error(stargate::ErrorCode::invalid_argument, "Invalid --timeout-ms") : timeout_ms.error(), json);
+        return print_error(timeout_ms ? vastloom::make_error(vastloom::ErrorCode::invalid_argument, "Invalid --timeout-ms") : timeout_ms.error(), json);
     }
     auto runtime = start_real_runtime(args[0]);
     if (!runtime) return print_error(runtime.error(), json);
     auto model = load_real_model(args[0], runtime.value(), !has_flag(args, "--no-verify"));
     if (!model) return print_error(model.error(), json);
-    std::vector<stargate::inference::ChatMessage> messages;
+    std::vector<vastloom::inference::ChatMessage> messages;
     if (const auto system = option_value(args, "--system")) messages.push_back({"system", *system});
-    stargate::inference::LlamaGenerationOptions options;
+    vastloom::inference::LlamaGenerationOptions options;
     options.max_new_tokens = max_tokens.value();
     options.top_k = top_k.value();
     options.seed = seed.value();
@@ -844,8 +844,8 @@ int command_real_chat(const std::vector<std::string>& args) {
     const bool stream_enabled = !json && !has_flag(args, "--no-stream");
     static_cast<void>(std::signal(SIGINT, handle_real_interrupt));
 
-    const auto run_generation = [&](std::vector<stargate::inference::ChatMessage>& history,
-                                    bool interactive) -> Result<stargate::inference::LlamaGenerationResult> {
+    const auto run_generation = [&](std::vector<vastloom::inference::ChatMessage>& history,
+                                    bool interactive) -> Result<vastloom::inference::LlamaGenerationResult> {
         real_generation_cancelled = 0;
         if (interactive) std::cout << "assistant> " << std::flush;
         auto generated = model.value().generate(history, options, *runtime.value().governor,
@@ -857,7 +857,7 @@ int command_real_chat(const std::vector<std::string>& args) {
         return generated;
     };
 
-    const auto print_stats = [&args](const stargate::inference::LlamaGenerationResult& generated) {
+    const auto print_stats = [&args](const vastloom::inference::LlamaGenerationResult& generated) {
         if (has_flag(args, "--no-stats")) return;
         const std::string finish = generated.stats.stopped_on_eos ? "end_of_turn" :
                                    (generated.stats.stopped_on_context_limit ? "context_limit" : "max_tokens");
@@ -873,7 +873,7 @@ int command_real_chat(const std::vector<std::string>& args) {
         const std::string finish = generated.value().stats.stopped_on_eos ? "end_of_turn" :
                                    (generated.value().stats.stopped_on_context_limit ? "context_limit" : "max_tokens");
         if (json) {
-            std::cout << "{\"ok\":true,\"text\":\"" << stargate::util::json_escape(generated.value().text)
+            std::cout << "{\"ok\":true,\"text\":\"" << vastloom::util::json_escape(generated.value().text)
                       << "\",\"generated_ids\":[";
             for (std::size_t index = 0; index < generated.value().generated_ids.size(); ++index) {
                 if (index != 0U) std::cout << ',';
@@ -893,9 +893,9 @@ int command_real_chat(const std::vector<std::string>& args) {
         return 0;
     }
 
-    const std::vector<stargate::inference::ChatMessage> initial_messages = messages;
-    std::optional<stargate::inference::LlamaGenerationStats> last_stats;
-    std::cout << "Stargate real-model chat (SmolLM2 CPU reference)\n"
+    const std::vector<vastloom::inference::ChatMessage> initial_messages = messages;
+    std::optional<vastloom::inference::LlamaGenerationStats> last_stats;
+    std::cout << "Vastloom real-model chat (SmolLM2 CPU reference)\n"
               << "Commands: /exit, /clear, /stats, /model, /help\n";
     while (true) {
         std::cout << "you> " << std::flush;
@@ -941,7 +941,7 @@ int command_real_chat(const std::vector<std::string>& args) {
 
 int command_real_self_test(const std::vector<std::string>& args) {
     const bool json = has_flag(args, "--json");
-    if (args.empty()) return print_error(stargate::make_error(stargate::ErrorCode::invalid_argument, "self-test requires a model directory"), json);
+    if (args.empty()) return print_error(vastloom::make_error(vastloom::ErrorCode::invalid_argument, "self-test requires a model directory"), json);
     auto valid = validate_options(args, 1U, {}, {"--no-verify", "--json"});
     if (!valid) return print_error(valid.error(), json);
     auto runtime = start_real_runtime(args[0]);
@@ -951,7 +951,7 @@ int command_real_self_test(const std::vector<std::string>& args) {
 
     struct Case {
         std::string name;
-        std::vector<stargate::inference::ChatMessage> messages;
+        std::vector<vastloom::inference::ChatMessage> messages;
         std::string expected;
     };
     const std::vector<Case> cases{
@@ -963,7 +963,7 @@ int command_real_self_test(const std::vector<std::string>& args) {
          {{"user", "Hello"}, {"assistant", "Hello! How can I help you today?"}, {"user", "What was my first word?"}},
          "My first word was \"I\"."},
     };
-    stargate::inference::LlamaGenerationOptions options;
+    vastloom::inference::LlamaGenerationOptions options;
     options.max_new_tokens = 64U;
     options.temperature = 0.0F;
     options.top_k = 40U;
@@ -987,8 +987,8 @@ int command_real_self_test(const std::vector<std::string>& args) {
             if (index != 0U) std::cout << ',';
             const auto& outcome = outcomes[index];
             std::cout << "{\"name\":\"" << outcome.name << "\",\"expected\":\""
-                      << stargate::util::json_escape(outcome.expected) << "\",\"actual\":\""
-                      << stargate::util::json_escape(outcome.actual) << "\",\"passed\":"
+                      << vastloom::util::json_escape(outcome.expected) << "\",\"actual\":\""
+                      << vastloom::util::json_escape(outcome.actual) << "\",\"passed\":"
                       << (outcome.passed ? "true" : "false") << '}';
         }
         std::cout << "]}\n";
@@ -1002,15 +1002,15 @@ int command_real_self_test(const std::vector<std::string>& args) {
 }
 
 int command_heartbeat_write(const std::vector<std::string>& args) {
-    if (args.empty()) return print_error(stargate::make_error(stargate::ErrorCode::invalid_argument, "heartbeat-write requires a path"));
+    if (args.empty()) return print_error(vastloom::make_error(vastloom::ErrorCode::invalid_argument, "heartbeat-write requires a path"));
     auto state = parse_safety_state(option_value(args, "--state").value_or("normal"));
     if (!state) return print_error(state.error());
-    stargate::safety::HeartbeatRecord heartbeat;
+    vastloom::safety::HeartbeatRecord heartbeat;
     heartbeat.pid = current_pid();
     heartbeat.sequence = 1;
-    heartbeat.unix_time_ms = stargate::safety::unix_time_ms();
+    heartbeat.unix_time_ms = vastloom::safety::unix_time_ms();
     heartbeat.state = state.value();
-    auto written = stargate::safety::write_heartbeat_atomic(args[0], heartbeat);
+    auto written = vastloom::safety::write_heartbeat_atomic(args[0], heartbeat);
     if (!written) return print_error(written.error());
     std::cout << "Wrote atomic heartbeat to " << args[0] << '\n';
     return 0;
@@ -1028,17 +1028,17 @@ int dispatch_cli(const std::vector<std::string>& arguments) {
         if (command == "chat") {
             std::error_code error;
             if (!args.empty() && std::filesystem::is_directory(args[0], error)) return command_real_chat(args);
-            return stargate::cli::command_chat(args);
+            return vastloom::cli::command_chat(args);
         }
         if (command == "model-info") {
             std::error_code error;
             if (!args.empty() && std::filesystem::is_directory(args[0], error)) return command_real_model_info(args);
-            return stargate::cli::command_model_info(args);
+            return vastloom::cli::command_model_info(args);
         }
         if (command == "self-test") {
             std::error_code error;
             if (!args.empty() && std::filesystem::is_directory(args[0], error)) return command_real_self_test(args);
-            return stargate::cli::command_self_test(args);
+            return vastloom::cli::command_self_test(args);
         }
         if (command == "doctor") return command_doctor(args);
         if (command == "inspect") return command_inspect(args);
@@ -1055,7 +1055,7 @@ int dispatch_cli(const std::vector<std::string>& arguments) {
         if (command == "moe-logits") return command_moe_logits(args);
         if (command == "heartbeat-write") return command_heartbeat_write(args);
         if (command == "version" || command == "--version") {
-            std::cout << stargate::kVersion << '\n';
+            std::cout << vastloom::kVersion << '\n';
             return 0;
         }
         if (command == "help" || command == "--help" || command == "-h") {

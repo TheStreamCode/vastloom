@@ -1,13 +1,13 @@
 # Bundled validation model
 
-`stargate-tinychat-v1` is a tiny synthetic causal Transformer committed solely to test
-Stargate's native inference path.
+`vastloom-tinychat-v1` is a tiny synthetic causal Transformer committed solely to test
+Vastloom's native inference path.
 
 Files:
 
-- `stargate-tinychat-v1.sgtm` — native FP32 TinyTransformer weights;
-- `stargate-tinychat-v1.sgm` — exact Stargate manifest and SHA-256;
-- `stargate-tinychat-v1.tests.json` — deterministic response vectors.
+- `vastloom-tinychat-v1.sgtm` — native FP32 TinyTransformer weights;
+- `vastloom-tinychat-v1.sgm` — exact Vastloom manifest and SHA-256;
+- `vastloom-tinychat-v1.tests.json` — deterministic response vectors.
 
 It is **not** a general-purpose assistant. It memorizes a small synthetic corpus and has
 a 128-byte-token context. Each CLI line is treated as an independent prompt.
@@ -15,9 +15,9 @@ a 128-byte-token context. Each CLI line is treated as an independent prompt.
 Validate it with:
 
 ```bash
-stargate verify examples/models/stargate-tinychat-v1.sgm --full
-stargate self-test examples/models/stargate-tinychat-v1.sgm
-stargate chat examples/models/stargate-tinychat-v1.sgm
+vastloom verify examples/models/vastloom-tinychat-v1.sgm --full
+vastloom self-test examples/models/vastloom-tinychat-v1.sgm
+vastloom chat examples/models/vastloom-tinychat-v1.sgm
 ```
 
 Rebuild all three artifacts with:

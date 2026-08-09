@@ -1,0 +1,22 @@
+cff-version: 1.2.0
+message: "If Vastloom supports your research, please cite the software using this metadata."
+title: "Vastloom: Run giant models. Keep your machine yours."
+type: software
+authors:
+  - family-names: Gasperini
+    given-names: Michael
+repository-code: "https://github.com/TheStreamCode/vastloom"
+url: "https://github.com/TheStreamCode/vastloom"
+license: Apache-2.0
+version: 0.4.0-alpha.4
+date-released: 2026-08-09
+abstract: >-
+  A safety-first native inference runtime that treats VRAM, RAM and NVMe as a
+  model-aware memory hierarchy for oversized open-weight and sparse MoE models.
+keywords:
+  - local inference
+  - large language models
+  - mixture of experts
+  - memory virtualization
+  - NVMe streaming
+  - C++

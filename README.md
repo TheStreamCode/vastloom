@@ -1,18 +1,53 @@
-# Stargate Local AI
+<p align="center">
+  <img src="docs/assets/vastloom-hero.png" alt="Vastloom routes giant model tensors through VRAM, system RAM and NVMe while protecting the host computer" width="100%">
+</p>
 
-**Stargate Local AI** is a safety-first native inference runtime under development for
-running open-weight models that are much larger than the host's VRAM and RAM,
-especially Mixture-of-Experts models. It treats **VRAM, RAM and NVMe as an explicit
-model-memory hierarchy** instead of relying on uncontrolled operating-system swap.
+<h1 align="center">Vastloom</h1>
 
-> **Current status — `0.4.0-alpha.3`: MoE I/O observability slice.**
-> Stargate now runs the routed token path of the pinned 13.84 GB
+<p align="center"><strong>Run giant models. Keep your machine yours.</strong></p>
+
+<p align="center">
+  A safety-first native runtime for open-weight models that outgrow conventional VRAM and RAM limits.
+</p>
+
+<p align="center">
+  <a href="https://github.com/TheStreamCode/vastloom/actions/workflows/ci.yml"><img alt="CI" src="https://github.com/TheStreamCode/vastloom/actions/workflows/ci.yml/badge.svg"></a>
+  <a href="https://github.com/TheStreamCode/vastloom/security/code-scanning"><img alt="CodeQL" src="https://github.com/TheStreamCode/vastloom/actions/workflows/codeql.yml/badge.svg"></a>
+  <a href="LICENSE"><img alt="License: Apache-2.0" src="https://img.shields.io/badge/license-Apache--2.0-6ee7ff.svg"></a>
+  <img alt="Status: experimental alpha" src="https://img.shields.io/badge/status-experimental_alpha-bd7bff.svg">
+</p>
+
+Vastloom treats **VRAM → RAM → NVMe** as one model-aware memory hierarchy. Its long-term
+goal is practical local inference for giant sparse Mixture-of-Experts models on ordinary
+consumer hardware—without uncontrolled swapping, surprise resource exhaustion or destructive
+model conversion.
+
+> [!IMPORTANT]
+> **Current status — `0.4.0-alpha.4`: open-source rebrand and compatibility release.**
+> Vastloom now runs the routed token path of the pinned 13.84 GB
 > `allenai/OLMoE-1B-7B-0924-Instruct` checkpoint on CPU while keeping only the
 > always-active trunk and a bounded expert cache in RAM. Native logits, top-8 routes
 > and routing weights match a Transformers reference. The bounded reader now exposes
 > process-I/O deltas without labeling Windows transfer counters as physical NVMe traffic,
 > and trace simulation reports exact unique-expert reuse distance. DeepSeek V4 Flash and
 > CUDA are not implemented.
+
+## Why Vastloom exists
+
+Most runtimes ask whether a model fits. Vastloom asks what each tensor is, when it is
+needed and which memory tier can serve it safely. The Safety Governor has authority over
+the performance scheduler: memory is reserved before allocation, queues and I/O buffers
+are bounded, original weights remain immutable, and emergency pressure aborts generation
+instead of sacrificing the host.
+
+```text
+verified model → safe hardware plan → model-aware placement → bounded inference → telemetry
+                     VRAM ↔ RAM ↔ NVMe
+```
+
+This is real systems research, not a claim that DeepSeek V4 Flash already runs. The current
+vertical slices prove native dense inference, real MoE routing, bounded expert streaming and
+measurement on smaller published checkpoints before the runtime scales to that target.
 
 Measured results and limitations are recorded in the
 [`Alpha 4 OLMoE report`](docs/reports/ALPHA4_OLMOE_VALIDATION.md) and the
@@ -33,7 +68,7 @@ The first consumer reference machine is:
 The engine is not hard-coded for that PC. Hardware is probed at runtime and every
 allocation plan is derived from detected capacity and conservative headroom.
 
-## What works in alpha.4.3
+## What works in alpha.4.4
 
 ### Real pretrained model path
 
@@ -140,8 +175,8 @@ Or manually:
 ```bash
 cmake -S . -B build -G Ninja \
   -DCMAKE_BUILD_TYPE=Release \
-  -DSTARGATE_BUILD_TESTS=ON \
-  -DSTARGATE_WARNINGS_AS_ERRORS=ON
+  -DVASTLOOM_BUILD_TESTS=ON \
+  -DVASTLOOM_WARNINGS_AS_ERRORS=ON
 cmake --build build --parallel
 ctest --test-dir build --output-on-failure
 ```
@@ -158,7 +193,7 @@ MSVC builds use UTF-8 source handling. The Windows executable also receives the 
 wide-character command line, converts it to UTF-8 and configures UTF-8 console input/output,
 so accented prompts are not dependent on the legacy ANSI code page.
 
-A CMake install also copies the validation fixture to `share/stargate/models` beneath
+A CMake install also copies the validation fixture to `share/vastloom/models` beneath
 the selected install prefix.
 
 ## Chat with the bundled model
@@ -166,22 +201,22 @@ the selected install prefix.
 Run the deterministic model self-test first:
 
 ```bash
-./build/stargate self-test \
-  examples/models/stargate-tinychat-v1.sgm
+./build/vastloom self-test \
+  examples/models/vastloom-tinychat-v1.sgm
 ```
 
 Start the interactive chat:
 
 ```bash
-./build/stargate chat \
-  examples/models/stargate-tinychat-v1.sgm
+./build/vastloom chat \
+  examples/models/vastloom-tinychat-v1.sgm
 ```
 
 Example session:
 
 ```text
-Stargate Local AI 0.2.0-alpha.2 — TinyChat CLI
-Model: stargate/tinychat-v1 (128 token context)
+Vastloom 0.4.0-alpha.4 — TinyChat CLI
+Model: vastloom/tinychat-v1 (128 token context)
 Weights: SHA-256 verified
 This validation model is stateless: each line is an independent prompt.
 
@@ -192,8 +227,8 @@ model> 2+2 fa 4.
 Run one prompt without the REPL:
 
 ```bash
-./build/stargate chat \
-  examples/models/stargate-tinychat-v1.sgm \
+./build/vastloom chat \
+  examples/models/vastloom-tinychat-v1.sgm \
   --prompt "Qual è la capitale d'Italia?" \
   --no-stream
 ```
@@ -201,8 +236,8 @@ Run one prompt without the REPL:
 Machine-readable invocation:
 
 ```bash
-./build/stargate chat \
-  examples/models/stargate-tinychat-v1.sgm \
+./build/vastloom chat \
+  examples/models/vastloom-tinychat-v1.sgm \
   --prompt "Ciao" \
   --json
 ```
@@ -228,17 +263,21 @@ Initialize the external store and import the pinned checkpoint. Model files rema
 outside Git and are published only after size and SHA-256 validation:
 
 ```powershell
-stargate store-init C:\StargateModels --reserve 300GiB
-python tools\import_hf_model.py --model smollm2 --store C:\StargateModels
+vastloom store-init C:\VastloomModels --reserve 300GiB
+python tools\import_hf_model.py --model smollm2 --store C:\VastloomModels
 ```
+
+Stores created before the Vastloom rename remain valid: the runtime and importer accept
+the legacy marker and import manifest without renaming, rewriting or rehashing them into a
+new format. New stores and imports use only the Vastloom identifiers.
 
 Then validate and chat with the imported directory:
 
 ```powershell
-$model = 'C:\StargateModels\models\original\HuggingFaceTB-SmolLM2-135M-Instruct--12fd25f77366fa6b3b4b768ec3050bf629380bac'
-stargate model-info $model --json
-stargate self-test $model --json
-stargate chat $model
+$model = 'C:\VastloomModels\models\original\HuggingFaceTB-SmolLM2-135M-Instruct--12fd25f77366fa6b3b4b768ec3050bf629380bac'
+vastloom model-info $model --json
+vastloom self-test $model --json
+vastloom chat $model
 ```
 
 The real adapter supports conversation history and `/clear`, `/stats`, `/model`,
@@ -252,10 +291,10 @@ configured free-space reserve, downloads with bounded buffers/rate, resumes veri
 partials and publishes only after all files match their pinned SHA-256:
 
 ```powershell
-python tools\import_hf_model.py --model olmoe --store C:\StargateModels
-$model = 'C:\StargateModels\models\original\allenai-OLMoE-1B-7B-0924-Instruct--7f1c97f440f06ce36705e4f2b843edb5925f4498'
-stargate moe-inspect $model --json
-stargate moe-logits $model --text 'Hello' --cache no-cache --io async --prefetch-depth 2 --trace C:\StargateModels\telemetry\hello.csv --json
+python tools\import_hf_model.py --model olmoe --store C:\VastloomModels
+$model = 'C:\VastloomModels\models\original\allenai-OLMoE-1B-7B-0924-Instruct--7f1c97f440f06ce36705e4f2b843edb5925f4498'
+vastloom moe-inspect $model --json
+vastloom moe-logits $model --text 'Hello' --cache no-cache --io async --prefetch-depth 2 --trace C:\VastloomModels\telemetry\hello.csv --json
 ```
 
 `moe-logits` is a bounded correctness/telemetry probe, not an OLMoE chat or generation
@@ -276,7 +315,7 @@ route trace.
 ## TinyChat CLI options
 
 ```text
-stargate chat MODEL_OR_MANIFEST
+vastloom chat MODEL_OR_MANIFEST
     [--prompt TEXT]
     [--max-tokens N]
     [--temperature F]
@@ -291,7 +330,7 @@ stargate chat MODEL_OR_MANIFEST
 ```
 
 `--json` is supported for one-shot prompts. Hash verification is enabled by default
-when the input is a Stargate manifest; `--no-verify` downgrades that to quick path and
+when the input is a Vastloom manifest; `--no-verify` downgrades that to quick path and
 size verification and should be used only during local development.
 
 JSON responses include an explicit `finish_reason` (`end_of_turn`, `end_of_sequence`,
@@ -317,7 +356,7 @@ The tool:
 The committed model SHA-256 is:
 
 ```text
-8adfe9bee5964fc6e62ca0bfd5994e620f97ac0c576c1ecb030851780118a33a
+9e3dd63d2df11cbbf0207dae5f87ee6afa3f5b456aacc7e0b984b515e9cff9ef
 ```
 
 See [`docs/TINY_MODEL_V1.md`](docs/TINY_MODEL_V1.md) for the binary format and tensor
@@ -326,47 +365,47 @@ order.
 ## Other commands
 
 ```text
-stargate chat MODEL_OR_MANIFEST
-stargate model-info MODEL_OR_MANIFEST
-stargate self-test MODEL_OR_MANIFEST
-stargate doctor
-stargate inspect MANIFEST_OR_SAFETENSORS
-stargate verify MANIFEST [--full]
-stargate plan MANIFEST
-stargate trace-sim TRACE.csv
-stargate io-smoke FILE
-stargate store-init PATH [--reserve 300GiB]
-stargate store-info PATH [--reserve 300GiB]
-stargate runtime-policy [--storage PATH] [--json]
-stargate tokenize MODEL_DIRECTORY --text TEXT [--chat] [--json]
-stargate real-logits MODEL_DIRECTORY --text TEXT [--chat] [--top N] [--json]
-stargate moe-inspect MODEL_DIRECTORY [--no-verify] [--json]
-stargate moe-logits MODEL_DIRECTORY --text TEXT [--chat] [--top N]
+vastloom chat MODEL_OR_MANIFEST
+vastloom model-info MODEL_OR_MANIFEST
+vastloom self-test MODEL_OR_MANIFEST
+vastloom doctor
+vastloom inspect MANIFEST_OR_SAFETENSORS
+vastloom verify MANIFEST [--full]
+vastloom plan MANIFEST
+vastloom trace-sim TRACE.csv
+vastloom io-smoke FILE
+vastloom store-init PATH [--reserve 300GiB]
+vastloom store-info PATH [--reserve 300GiB]
+vastloom runtime-policy [--storage PATH] [--json]
+vastloom tokenize MODEL_DIRECTORY --text TEXT [--chat] [--json]
+vastloom real-logits MODEL_DIRECTORY --text TEXT [--chat] [--top N] [--json]
+vastloom moe-inspect MODEL_DIRECTORY [--no-verify] [--json]
+vastloom moe-logits MODEL_DIRECTORY --text TEXT [--chat] [--top N]
     [--cache no-cache|lru|lfu|static-hot] [--cache-bytes SIZE]
     [--io sync|async] [--prefetch-depth 1|2] [--io-timeout-ms N]
     [--timeout-ms N] [--trace PATH] [--no-verify] [--json]
-stargate heartbeat-write PATH
-stargate version
+vastloom heartbeat-write PATH
+vastloom version
 ```
 
 Examples:
 
 ```bash
 # Non-invasive hardware report
-./build/stargate doctor --storage /path/to/model-drive
+./build/vastloom doctor --storage /path/to/model-drive
 
 # Inspect and fully verify a model manifest
-./build/stargate inspect examples/models/stargate-tinychat-v1.sgm
-./build/stargate verify examples/models/stargate-tinychat-v1.sgm --full
+./build/vastloom inspect examples/models/vastloom-tinychat-v1.sgm
+./build/vastloom verify examples/models/vastloom-tinychat-v1.sgm --full
 
 # Generate the provisional plan for the consumer reference PC
-./build/stargate plan \
+./build/vastloom plan \
   examples/manifests/deepseek-v4-flash-0731.research.sgm \
   --reference-pc \
   --profile balanced
 
 # Compare cache policies on an expert-routing trace
-./build/stargate trace-sim examples/traces/tiny.csv \
+./build/vastloom trace-sim examples/traces/tiny.csv \
   --vram 128MiB \
   --ram 256MiB \
   --policy lru
@@ -374,7 +413,7 @@ Examples:
 
 ## Safety invariants
 
-Stargate follows these rules before performance work begins:
+Vastloom follows these rules before performance work begins:
 
 1. Never allocate against all installed RAM or VRAM.
 2. Never let independent workers infer free capacity independently.
@@ -388,7 +427,7 @@ Stargate follows these rules before performance work begins:
 All inference paths bound model dimensions, metadata, file size, context and timeout
 before allocating execution buffers. Real-model paths additionally
 keep 8 GiB of current RAM availability for the host, cap themselves to half physical RAM,
-requires 300 GiB free-storage headroom and refuses the load if reservations fail. See
+require 300 GiB free-storage headroom and refuse the load if reservations fail. See
 [`docs/SAFETY.md`](docs/SAFETY.md).
 
 ## Reference planning result
@@ -400,9 +439,9 @@ planner currently reserves:
 |---|---:|
 | Windows/host RAM reserve | 6.40 GiB |
 | Emergency RAM reserve | 2.00 GiB |
-| Maximum Stargate RAM | 23.04 GiB |
+| Maximum Vastloom RAM | 23.04 GiB |
 | VRAM reserve | 1.56 GiB |
-| Maximum Stargate VRAM | 10.22 GiB |
+| Maximum Vastloom VRAM | 10.22 GiB |
 | Storage free-space reserve | 100 GiB |
 
 These are planning outputs, not performance claims. The DeepSeek manifest remains a
@@ -411,8 +450,8 @@ checkpoint.
 
 ## Current limitations
 
-Alpha.4.3 proves one real dense path and one real CPU MoE streaming path with an
-opt-in bounded asynchronous reader, not the final Stargate research thesis.
+Alpha.4.4 proves one real dense path and one real CPU MoE streaming path with an
+opt-in bounded asynchronous reader, not the final Vastloom research thesis.
 It currently has:
 
 - two exact pinned Hugging Face adapters; no DeepSeek, MiniMax, Kimi or GGUF adapter;
@@ -451,18 +490,27 @@ Detailed acceptance gates are in [`docs/ROADMAP.md`](docs/ROADMAP.md).
 
 ## Prior art and research baselines
 
-Stargate is an independent project and currently contains no copied code from the
+Vastloom is an independent project and currently contains no copied code from the
 following projects. They remain important engineering and benchmarking references:
 
 - [Colibrì](https://github.com/JustVugg/colibri)
 - [DwarfStar / DS4](https://github.com/antirez/ds4)
 - [kimi-k3-in-c](https://github.com/FareedKhan-dev/kimi-k3-in-c)
+- [DeepSeekV4SSD](https://github.com/yanun0323/deepseek_ssd) — reviewed in
+  [`docs/research/DEEPSEEK_SSD_REVIEW.md`](docs/research/DEEPSEEK_SSD_REVIEW.md)
 - [llama.cpp / GGML](https://github.com/ggml-org/llama.cpp)
 
 A future public release must preserve all applicable notices for any code that is later
 adapted rather than independently implemented.
 
-## Repository policy
+## Community and license
 
-This repository is private research code. The current `LICENSE` grants no redistribution
-rights; an explicit open-source license can be chosen before publication.
+Vastloom is available under the [Apache License 2.0](LICENSE). Contributions are welcome;
+start with [CONTRIBUTING.md](CONTRIBUTING.md), follow the [Code of Conduct](CODE_OF_CONDUCT.md)
+and use the private process in [SECURITY.md](SECURITY.md) for vulnerabilities. Governance,
+support scope, release gates and brand assets are documented in [GOVERNANCE.md](GOVERNANCE.md),
+[SUPPORT.md](SUPPORT.md), [docs/RELEASING.md](docs/RELEASING.md) and
+[docs/BRANDING.md](docs/BRANDING.md).
+
+Third-party model weights are not distributed with the project and remain subject to their
+own licenses and terms.

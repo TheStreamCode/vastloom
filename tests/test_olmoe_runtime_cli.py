@@ -42,11 +42,11 @@ def trace_sim(executable: str, trace: Path, policy: str) -> dict[str, object]:
 
 def main() -> int:
     parser = argparse.ArgumentParser()
-    parser.add_argument("--stargate", type=Path, required=True)
+    parser.add_argument("--vastloom", type=Path, required=True)
     parser.add_argument("--model", type=Path, required=True)
     parser.add_argument("--fixture", type=Path, required=True)
     args = parser.parse_args()
-    executable = str(args.stargate.resolve())
+    executable = str(args.vastloom.resolve())
     model = str(args.model.resolve())
     fixture = json.loads(args.fixture.read_text(encoding="utf-8"))
 
@@ -57,7 +57,7 @@ def main() -> int:
             "full checkpoint was not hash-verified", inspection)
     require(info["streaming_plan_candidate"] is True, "safe streaming preflight rejected the checkpoint", inspection)
 
-    with tempfile.TemporaryDirectory(prefix="stargate-olmoe-runtime-") as temporary:
+    with tempfile.TemporaryDirectory(prefix="vastloom-olmoe-runtime-") as temporary:
         trace = Path(temporary) / "native-trace.csv"
         process = run([
             executable, "moe-logits", model, "--text", fixture["text"], "--top", "10",

@@ -1,12 +1,12 @@
-# Stargate TinyTransformer model format (`SGTMV001`)
+# Vastloom TinyTransformer model format (`SGTMV001`)
 
 ## Purpose
 
-`SGTMV001` is a deliberately small, bounded format used to validate Stargate's native
+`SGTMV001` is a deliberately small, bounded format used to validate Vastloom's native
 model lifecycle and token-generation path. It is not intended to replace GGUF,
 Safetensors or future model-specific packed formats.
 
-The bundled `stargate/tinychat-v1` fixture exercises:
+The bundled `vastloom/tinychat-v1` fixture exercises:
 
 - verified model loading;
 - byte tokenization and prompt framing;
@@ -169,7 +169,7 @@ allocation.
 ## Integrity model
 
 The binary format provides structural integrity, not cryptographic identity. Production
-use should pass a `.sgm` manifest to `stargate chat`, `model-info` or `self-test` so the
+use should pass a `.sgm` manifest to `vastloom chat`, `model-info` or `self-test` so the
 file is SHA-256 verified before parsing.
 
 A direct `.sgtm` path is supported for development but is reported as not manifest
@@ -177,7 +177,7 @@ verified.
 
 ## Bundled validation fixture
 
-`examples/models/stargate-tinychat-v1.sgtm` has:
+`examples/models/vastloom-tinychat-v1.sgtm` has:
 
 | Property | Value |
 |---|---:|
@@ -189,7 +189,7 @@ verified.
 | layers | 2 |
 | heads | 4 |
 | FFN width | 128 |
-| SHA-256 | `8adfe9bee5964fc6e62ca0bfd5994e620f97ac0c576c1ecb030851780118a33a` |
+| SHA-256 | `9e3dd63d2df11cbbf0207dae5f87ee6afa3f5b456aacc7e0b984b515e9cff9ef` |
 
 It is trained on a small synthetic corpus and is useful only for deterministic runtime
 validation.

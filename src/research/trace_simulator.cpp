@@ -1,4 +1,4 @@
-#include "stargate/research/trace_simulator.hpp"
+#include "vastloom/research/trace_simulator.hpp"
 
 #include <algorithm>
 #include <charconv>
@@ -16,9 +16,9 @@
 #include <utility>
 #include <vector>
 
-#include "stargate/util/string.hpp"
+#include "vastloom/util/string.hpp"
 
-namespace stargate::research {
+namespace vastloom::research {
 namespace {
 
 struct TraceRecord {
@@ -647,4 +647,4 @@ std::string to_json(const TraceSimulationReport& report) {
     return output.str();
 }
 
-}  // namespace stargate::research
+}  // namespace vastloom::research

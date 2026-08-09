@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
-"""Train and export the deterministic Stargate TinyChat validation model.
+"""Train and export the deterministic Vastloom TinyChat validation model.
 
 This is a deliberately tiny byte-level causal Transformer used to validate the
-native Stargate model loader, tokenizer, KV cache, sampling path and chat CLI.
+native Vastloom model loader, tokenizer, KV cache, sampling path and chat CLI.
 It is not intended as a useful general-purpose language model.
 """
 
@@ -38,30 +38,30 @@ EOT_TOKEN = 2
 BYTE_TOKEN_OFFSET = 3
 VOCAB_SIZE = BYTE_TOKEN_OFFSET + 256
 
-SYSTEM_PROMPT = "Stargate TinyChat test model. Reply briefly."
-MODEL_ID = "stargate/tinychat-v1"
+SYSTEM_PROMPT = "Vastloom TinyChat test model. Reply briefly."
+MODEL_ID = "vastloom/tinychat-v1"
 
 TRAINING_PAIRS: tuple[tuple[str, str], ...] = (
-    ("Ciao", "Ciao! Sono Stargate TinyChat."),
-    ("Come ti chiami?", "Mi chiamo Stargate TinyChat."),
+    ("Ciao", "Ciao! Sono Vastloom TinyChat."),
+    ("Come ti chiami?", "Mi chiamo Vastloom TinyChat."),
     ("Chi sei?", "Sono un piccolo modello locale di test."),
-    ("A cosa servi?", "Servo a validare il motore Stargate."),
+    ("A cosa servi?", "Servo a validare il motore Vastloom."),
     ("Quanto fa 2+2?", "2+2 fa 4."),
     ("Quanto fa due più due?", "Due più due fa quattro."),
     ("Qual è la capitale d'Italia?", "La capitale d'Italia è Roma."),
     ("Qual è la capitale della Francia?", "La capitale della Francia è Parigi."),
     ("Sei online?", "No. Funziono completamente in locale."),
     ("Usi internet?", "No, questa inferenza è locale."),
-    ("Cos’è Stargate?", "Stargate è un motore di inferenza locale."),
+    ("Cos’è Vastloom?", "Vastloom è un motore di inferenza locale."),
     ("Cosa stiamo testando?", "Una chat CLI con un piccolo modello reale."),
     ("Rispondi con OK.", "OK."),
-    ("Hello", "Hello! I am Stargate TinyChat."),
+    ("Hello", "Hello! I am Vastloom TinyChat."),
     ("What is 2+2?", "2+2 is 4."),
     ("Are you local?", "Yes. I run locally."),
 )
 
 TEST_VECTORS: tuple[tuple[str, str], ...] = (
-    ("Ciao", "Ciao! Sono Stargate TinyChat."),
+    ("Ciao", "Ciao! Sono Vastloom TinyChat."),
     ("Quanto fa 2+2?", "2+2 fa 4."),
     ("Qual è la capitale d'Italia?", "La capitale d'Italia è Roma."),
     ("Sei online?", "No. Funziono completamente in locale."),
@@ -314,7 +314,7 @@ def write_test_vectors(path: Path) -> None:
         path,
         json.dumps(
             {
-                "format": "stargate.tinychat.tests.v1",
+                "format": "vastloom.tinychat.tests.v1",
                 "model_id": MODEL_ID,
                 "vectors": [{"prompt": prompt, "expected": expected} for prompt, expected in TEST_VECTORS],
             },
@@ -327,10 +327,10 @@ def write_test_vectors(path: Path) -> None:
 
 def write_manifest(path: Path, model_path: Path, digest: str, model_size: int, config: Config) -> None:
     relative_model_path = os.path.relpath(model_path, path.parent).replace(os.sep, "/")
-    content = f"""format=stargate.manifest.v1
+    content = f"""format=vastloom.manifest.v1
 model_id={MODEL_ID}
 revision=2
-architecture=stargate_tiny_transformer
+architecture=vastloom_tiny_transformer
 tokenizer_family=byte_level
 metadata_only=false
 requires_avx2=false
@@ -357,9 +357,9 @@ chunk\t{relative_model_path}\t{model_size}\t{digest}\tdense\tfp32\t-\t-\ttrue
 
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--output", type=Path, default=Path("examples/models/stargate-tinychat-v1.sgtm"))
-    parser.add_argument("--test-vectors", type=Path, default=Path("examples/models/stargate-tinychat-v1.tests.json"))
-    parser.add_argument("--manifest", type=Path, default=Path("examples/models/stargate-tinychat-v1.sgm"))
+    parser.add_argument("--output", type=Path, default=Path("examples/models/vastloom-tinychat-v1.sgtm"))
+    parser.add_argument("--test-vectors", type=Path, default=Path("examples/models/vastloom-tinychat-v1.tests.json"))
+    parser.add_argument("--manifest", type=Path, default=Path("examples/models/vastloom-tinychat-v1.sgm"))
     parser.add_argument("--steps", type=int, default=600)
     parser.add_argument("--seed", type=int, default=123)
     parser.add_argument("--threads", type=int, default=8)

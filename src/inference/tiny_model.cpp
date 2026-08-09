@@ -1,4 +1,4 @@
-#include "stargate/inference/tiny_model.hpp"
+#include "vastloom/inference/tiny_model.hpp"
 
 #include <algorithm>
 #include <array>
@@ -12,9 +12,9 @@
 #include <sstream>
 #include <utility>
 
-#include "stargate/util/string.hpp"
+#include "vastloom/util/string.hpp"
 
-namespace stargate::inference {
+namespace vastloom::inference {
 namespace {
 
 constexpr std::size_t kFixedHeaderBytes = 96U;
@@ -802,19 +802,28 @@ bool TinyModelSelfTestReport::passed() const noexcept {
 Result<TinyModelSelfTestReport> run_tiny_model_self_test(
     const TinyModel& model,
     safety::ResourceGovernor& governor) {
-    if (model.config().model_id != "stargate/tinychat-v1") {
+    const bool legacy_fixture = model.config().model_id == "stargate/tinychat-v1";
+    if (model.config().model_id != "vastloom/tinychat-v1" && !legacy_fixture) {
         return make_error(
             ErrorCode::unsupported,
             "No built-in self-test vectors are registered for this TinyModel",
             model.config().model_id);
     }
-    const std::array<std::pair<std::string_view, std::string_view>, 5> vectors{
+    const std::array<std::pair<std::string_view, std::string_view>, 5> current_vectors{
+        std::pair{"Ciao", "Ciao! Sono Vastloom TinyChat."},
+        std::pair{"Quanto fa 2+2?", "2+2 fa 4."},
+        std::pair{"Qual è la capitale d'Italia?", "La capitale d'Italia è Roma."},
+        std::pair{"Sei online?", "No. Funziono completamente in locale."},
+        std::pair{"What is 2+2?", "2+2 is 4."},
+    };
+    const std::array<std::pair<std::string_view, std::string_view>, 5> legacy_vectors{
         std::pair{"Ciao", "Ciao! Sono Stargate TinyChat."},
         std::pair{"Quanto fa 2+2?", "2+2 fa 4."},
         std::pair{"Qual è la capitale d'Italia?", "La capitale d'Italia è Roma."},
         std::pair{"Sei online?", "No. Funziono completamente in locale."},
         std::pair{"What is 2+2?", "2+2 is 4."},
     };
+    const auto& vectors = legacy_fixture ? legacy_vectors : current_vectors;
 
     TinyModelSelfTestReport report;
     report.model_id = model.config().model_id;
@@ -843,7 +852,7 @@ Result<TinyModelSelfTestReport> run_tiny_model_self_test(
 std::string tiny_model_config_to_text(const TinyModelConfig& config) {
     std::ostringstream output;
     output << "Model:           " << config.model_id << '\n'
-           << "Architecture:    Stargate TinyTransformer v1\n"
+           << "Architecture:    Vastloom TinyTransformer v1\n"
            << "Vocabulary:      " << config.vocab_size << " byte/special tokens\n"
            << "Context:         " << config.context_length << " tokens\n"
            << "Width:           " << config.d_model << '\n'
@@ -860,7 +869,7 @@ std::string tiny_model_config_to_json(const TinyModelConfig& config) {
     std::ostringstream output;
     output << '{'
            << "\"model_id\":\"" << util::json_escape(config.model_id) << "\","
-           << "\"architecture\":\"stargate_tiny_transformer\","
+           << "\"architecture\":\"vastloom_tiny_transformer\","
            << "\"vocab_size\":" << config.vocab_size << ','
            << "\"context_length\":" << config.context_length << ','
            << "\"d_model\":" << config.d_model << ','
@@ -937,4 +946,4 @@ std::string self_test_report_to_json(const TinyModelSelfTestReport& report) {
     return output.str();
 }
 
-}  // namespace stargate::inference
+}  // namespace vastloom::inference

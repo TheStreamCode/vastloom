@@ -1,12 +1,13 @@
-#include "stargate/model/imported_checkpoint.hpp"
+#include "vastloom/model/imported_checkpoint.hpp"
 
 #include <limits>
 #include <set>
 
-#include "stargate/util/json.hpp"
-#include "stargate/util/sha256.hpp"
+#include "vastloom/util/json.hpp"
+#include "vastloom/util/sha256.hpp"
+#include "vastloom/version.hpp"
 
-namespace stargate::model {
+namespace vastloom::model {
 namespace {
 
 Result<std::filesystem::path> safe_file_path(const std::filesystem::path& root,
@@ -53,7 +54,51 @@ Result<ImportedCheckpoint> verify_imported_checkpoint(const std::filesystem::pat
     limits.max_nodes = 16'384;
     limits.max_array_elements = 1024;
     limits.max_object_members = 4096;
-    auto manifest = util::load_json_file(root / "stargate-import.json", limits);
+    const auto current_manifest_path = root / "vastloom-import.json";
+    const auto legacy_manifest_path = root / "stargate-import.json";
+    error.clear();
+    const bool current_exists = std::filesystem::exists(current_manifest_path, error);
+    if (error) {
+        return make_error(ErrorCode::io_error, "Unable to inspect imported checkpoint manifest", current_manifest_path.string());
+    }
+    if (current_exists && std::filesystem::is_symlink(current_manifest_path, error)) {
+        return make_error(ErrorCode::unsafe_path, "Imported checkpoint manifest must not be a symlink", current_manifest_path.string());
+    }
+    if (error) {
+        return make_error(ErrorCode::io_error, "Unable to inspect imported checkpoint manifest", current_manifest_path.string());
+    }
+    if (current_exists && !std::filesystem::is_regular_file(current_manifest_path, error)) {
+        return make_error(ErrorCode::integrity_error, "Imported checkpoint manifest is not a regular file", current_manifest_path.string());
+    }
+    if (error) {
+        return make_error(ErrorCode::io_error, "Unable to inspect imported checkpoint manifest", current_manifest_path.string());
+    }
+    error.clear();
+    const bool legacy_exists = std::filesystem::exists(legacy_manifest_path, error);
+    if (error) {
+        return make_error(ErrorCode::io_error, "Unable to inspect imported checkpoint manifest", legacy_manifest_path.string());
+    }
+    if (legacy_exists && std::filesystem::is_symlink(legacy_manifest_path, error)) {
+        return make_error(ErrorCode::unsafe_path, "Imported checkpoint manifest must not be a symlink", legacy_manifest_path.string());
+    }
+    if (error) {
+        return make_error(ErrorCode::io_error, "Unable to inspect imported checkpoint manifest", legacy_manifest_path.string());
+    }
+    if (legacy_exists && !std::filesystem::is_regular_file(legacy_manifest_path, error)) {
+        return make_error(ErrorCode::integrity_error, "Imported checkpoint manifest is not a regular file", legacy_manifest_path.string());
+    }
+    if (error) {
+        return make_error(ErrorCode::io_error, "Unable to inspect imported checkpoint manifest", legacy_manifest_path.string());
+    }
+    if (current_exists == legacy_exists) {
+        return make_error(
+            ErrorCode::integrity_error,
+            current_exists ? "Imported checkpoint contains conflicting current and legacy manifests"
+                           : "Imported checkpoint manifest is missing",
+            root.string());
+    }
+    const auto& manifest_path = current_exists ? current_manifest_path : legacy_manifest_path;
+    auto manifest = util::load_json_file(manifest_path, limits);
     if (!manifest) return manifest.error();
     const auto* format_value = manifest.value().find("format");
     const auto* model_value = manifest.value().find("model_id");
@@ -69,7 +114,9 @@ Result<ImportedCheckpoint> verify_imported_checkpoint(const std::filesystem::pat
     auto revision = revision_value->as_string();
     auto metadata_only = metadata_value->as_bool();
     auto files = files_value->as_array();
-    if (!format || format.value() != "stargate.hf-import.v1" || !model_id || model_id.value().empty() ||
+    if (!format ||
+        (format.value() != kImportManifestFormat && format.value() != kLegacyImportManifestFormat) ||
+        !model_id || model_id.value().empty() ||
         !revision || revision.value().empty() || !metadata_only || !files || files.value()->empty() || files.value()->size() > 1024U) {
         return make_error(ErrorCode::invalid_format, "Imported checkpoint manifest identity is invalid", root.string());
     }
@@ -119,4 +166,4 @@ Result<ImportedCheckpoint> verify_imported_checkpoint(const std::filesystem::pat
     return result;
 }
 
-}  // namespace stargate::model
+}  // namespace vastloom::model

@@ -3,7 +3,7 @@
 Command:
 
 ```bash
-stargate plan examples/manifests/deepseek-v4-flash-0731.research.sgm \
+vastloom plan examples/manifests/deepseek-v4-flash-0731.research.sgm \
   --reference-pc --profile balanced
 ```
 
@@ -12,9 +12,9 @@ Current alpha output:
 ```text
 OS reserve:         6.40 GiB
 Emergency reserve:  2.00 GiB
-Stargate RAM max:  23.04 GiB
+Vastloom RAM max:  23.04 GiB
 VRAM reserve:       1.56 GiB
-Stargate VRAM max: 10.22 GiB
+Vastloom VRAM max: 10.22 GiB
 Storage reserve:  100.00 GiB
 
 Dense in RAM:      14.65 GiB

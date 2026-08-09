@@ -16,7 +16,7 @@ class ManifestToolTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as temporary:
             model = Path(temporary) / "model"
             model.mkdir()
-            payload = b"stargate"
+            payload = b"vastloom"
             (model / "weights.bin").write_bytes(payload)
             output = model / "model.sgm"
             subprocess.run(
@@ -35,7 +35,7 @@ class ManifestToolTests(unittest.TestCase):
                 check=True,
             )
             text = output.read_text(encoding="utf-8")
-            self.assertIn("format=stargate.manifest.v1", text)
+            self.assertIn("format=vastloom.manifest.v1", text)
             self.assertIn("model_total_bytes=8", text)
             self.assertIn(hashlib.sha256(payload).hexdigest(), text)
             self.assertFalse(any(output.parent.glob(f".{output.name}.*.tmp")))

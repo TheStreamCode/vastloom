@@ -1,4 +1,4 @@
-#include "stargate/io/bounded_io_pool.hpp"
+#include "vastloom/io/bounded_io_pool.hpp"
 
 #include <algorithm>
 #include <chrono>
@@ -18,7 +18,7 @@
 #include <windows.h>
 #endif
 
-namespace stargate::io {
+namespace vastloom::io {
 namespace {
 
 Result<bool> cancellation_requested(const std::function<bool()>& cancelled) {
@@ -287,4 +287,4 @@ void BoundedIoPool::worker_loop() {
     }
 }
 
-}  // namespace stargate::io
+}  // namespace vastloom::io

@@ -26,10 +26,10 @@ def require(condition: bool, message: str, process: subprocess.CompletedProcess[
 
 def main() -> int:
     parser = argparse.ArgumentParser()
-    parser.add_argument("--stargate", type=Path, required=True)
+    parser.add_argument("--vastloom", type=Path, required=True)
     parser.add_argument("--model", type=Path, required=True)
     args = parser.parse_args()
-    executable = str(args.stargate.resolve())
+    executable = str(args.vastloom.resolve())
     model = str(args.model.resolve())
 
     process = run([executable, "moe-inspect", model, "--json"])
@@ -89,7 +89,7 @@ def main() -> int:
     require(invalid_fault.returncode != 0 and "requires --io async" in invalid_fault.stderr,
             "I/O fault injection was accepted on the synchronous path", invalid_fault)
 
-    with tempfile.TemporaryDirectory(prefix="stargate-olmoe-corrupt-") as temporary:
+    with tempfile.TemporaryDirectory(prefix="vastloom-olmoe-corrupt-") as temporary:
         copy = Path(temporary) / "model"
         shutil.copytree(args.model, copy)
         config = copy / "config.json"

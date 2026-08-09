@@ -1,6 +1,6 @@
 # PROVISIONAL research planning profile, not a downloadable weight manifest.
 # Replace estimates with values generated from the exact selected checkpoint before inference.
-format=stargate.manifest.v1
+format=vastloom.manifest.v1
 model_id=deepseek-ai/DeepSeek-V4-Flash-0731
 revision=provisional-research-profile
 architecture=deepseek_v4_flash

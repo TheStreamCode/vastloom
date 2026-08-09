@@ -103,6 +103,8 @@ the reduced architecture-faithful fixture is the active bottleneck.
 - [x] Generate a full immutable import catalog with per-shard size and SHA-256.
 - [x] Map exact tensor names, shapes, dtypes and shard offsets.
 - [x] Match the pinned tokenizer IDs and basic system/user/assistant chat framing.
+- [x] Add bounded reduced vectors and native reference primitives for RMSNorm, learned/hash
+  routing, routed SwiGLU, Hyper-Connections, base RoPE and selected-latent attention.
 - [ ] Build a reduced but architecture-faithful DeepSeek fixture.
 - [ ] Export target logits, route selections and token vectors from a trusted reference.
 - [ ] Record initial routing traces.
@@ -114,13 +116,17 @@ The completed metadata half is recorded in the
 [M6 DeepSeek inspection report](reports/M6_DEEPSEEK_METADATA_INSPECTION_VALIDATION.md).
 Native prompt encoding is recorded separately in the
 [M6 DeepSeek tokenizer report](reports/M6_DEEPSEEK_TOKENIZER_VALIDATION.md).
+The bounded equation-level foundation is recorded in the
+[M6 reference-operator report](reports/M6_DEEPSEEK_REFERENCE_OPERATORS_VALIDATION.md).
 It pins official commit `60d8d70770c6776ff598c94bb586a859a38244f1`; the former
 “0731” label was only a provisional research alias and is not an official checkpoint tag.
 
 ## M7 — DeepSeek CPU reference inference
 
 - [ ] Model-specific tensor loader.
-- [ ] Dense, attention/state, router and routed-expert reference kernels.
+- [x] Bounded operator primitives for normalization, base RoPE, selected-latent attention,
+  learned/hash routing, routed SwiGLU and Hyper-Connections.
+- [ ] Complete attention/indexer, shared-expert, MTP and layer/graph reference execution.
 - [x] Checkpoint-compatible tokenizer and basic system/user/assistant chat template.
 - [ ] Thinking/tool-call encoding and completion parsing.
 - [ ] Incremental KV/state path.

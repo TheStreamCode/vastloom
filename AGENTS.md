@@ -8,8 +8,8 @@ This file applies to the entire repository. Human-facing contribution rules are 
 Vastloom is a native, hardware-adaptive local inference runtime that treats VRAM, RAM and
 NVMe as a model-aware hierarchy. The current validated paths are the synthetic TinyTransformer,
 SmolLM2 dense CPU inference, OLMoE CPU expert streaming and a non-executing DeepSeek V4 Flash
-metadata/header inspector plus native tokenizer/basic chat framing. DeepSeek inference and CUDA
-remain targets, not implemented features.
+metadata/header inspector plus native tokenizer/basic chat framing and bounded equation-level
+reference operators. No DeepSeek layer, logits, generation or CUDA path exists yet.
 
 Do not restart or generically redesign the project. Inspect the relevant implementation,
 documentation, tests and git state before changing code. Preserve working components and do not

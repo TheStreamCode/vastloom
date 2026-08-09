@@ -19,9 +19,12 @@ hardware, commands, measurements and limitations.
 - [`M6_DEEPSEEK_TOKENIZER_VALIDATION.md`](M6_DEEPSEEK_TOKENIZER_VALIDATION.md) —
   native Unicode byte-BPE and basic chat-template parity against the pinned official
   tokenizer, including malformed-layout rejection and cross-platform sanitizer gates.
+- [`M6_DEEPSEEK_REFERENCE_OPERATORS_VALIDATION.md`](M6_DEEPSEEK_REFERENCE_OPERATORS_VALIDATION.md) —
+  bounded CPU equations and reproducible vectors for RMSNorm, routing, routed SwiGLU,
+  Hyper-Connections, base RoPE and selected-latent sparse attention.
 
-M6 is still open: the architecture-faithful graph fixture, reference logits/routes and
-inference kernels have not passed their gates. The latest completed milestone remains M5:
+M6 is still open: these primitives are not a forward graph, and official reference
+logits/routes/tokens have not passed their gates. The latest completed milestone remains M5:
 
 - [`M5_DEVICE_IO_CACHE_BYPASS_VALIDATION.md`](M5_DEVICE_IO_CACHE_BYPASS_VALIDATION.md) —
   device-level Windows/Linux counters, bounded direct/unbuffered reads, repeatable

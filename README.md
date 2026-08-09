@@ -23,7 +23,7 @@ consumer hardware—without uncontrolled swapping, surprise resource exhaustion 
 model conversion.
 
 > [!IMPORTANT]
-> **Current source — `0.4.0-alpha.4` plus unreleased M6 metadata and tokenizer slices.**
+> **Current source — `0.4.0-alpha.4` plus unreleased M6 DeepSeek foundation slices.**
 > Vastloom now runs the routed token path of the pinned 13.84 GB
 > `allenai/OLMoE-1B-7B-0924-Instruct` checkpoint on CPU while keeping only the
 > always-active trunk and a bounded expert cache in RAM. Native logits, top-8 routes
@@ -32,7 +32,9 @@ model conversion.
 > and trace simulation reports exact unique-expert reuse distance. The official DeepSeek
 > V4 Flash revision is now pinned, its 46-shard/69,187-tensor metadata is inspectable
 > from verified header snapshots, and its tokenizer/basic chat framing match the official
-> reference. DeepSeek logits, generation and CUDA are not implemented.
+> reference. Bounded CPU primitives now cover normalization, routing, expert SwiGLU,
+> Hyper-Connections, base RoPE and selected-latent attention. They are not yet a DeepSeek
+> layer or forward graph; logits, generation and CUDA remain unimplemented.
 
 ## Why Vastloom exists
 
@@ -66,6 +68,8 @@ The first DeepSeek-specific slice is documented in the
 [`M6 metadata inspection report`](docs/reports/M6_DEEPSEEK_METADATA_INSPECTION_VALIDATION.md).
 Native prompt encoding is documented in the
 [`M6 tokenizer validation report`](docs/reports/M6_DEEPSEEK_TOKENIZER_VALIDATION.md).
+The first bounded mathematical primitives are documented in the
+[`M6 reference-operator report`](docs/reports/M6_DEEPSEEK_REFERENCE_OPERATORS_VALIDATION.md).
 
 ## Reference target
 
@@ -158,7 +162,7 @@ allocation plan is derived from detected capacity and conservative headroom.
   weights are loaded. Direct `.sgtm` files remain available for development and are
   clearly reported as unverified.
 
-### DeepSeek V4 Flash inspection path
+### DeepSeek V4 Flash inspection and reference foundation
 
 - **Official pinned identity:** `deepseek-ai/DeepSeek-V4-Flash` revision
   `60d8d70770c6776ff598c94bb586a859a38244f1`; the former “0731” name was a
@@ -172,10 +176,14 @@ allocation plan is derived from detected capacity and conservative headroom.
 - **Native prompt path:** the exact Sequence/Split/ByteLevel tokenizer, all 1,283
   added-token definitions and basic system/user/assistant chat framing match the pinned
   Hugging Face tokenizer across multilingual vectors.
+- **Bounded CPU equations:** deterministic native vectors cover RMSNorm, learned and hash
+  routing, routed-expert SwiGLU, Hyper-Connection mixing, base RoPE and selected-latent
+  sparse attention, with strict shape/finite checks and an element ceiling.
 - **Large-download interlock:** a full import of at least 20 GiB requires the additional
   `--allow-large-download` flag after storage headroom has been reviewed.
-- **Honest boundary:** the inspector always reports `execution_supported=false`;
-  graph-fixture logits/routes, DeepSeek kernels, CUDA and generation remain future gates.
+- **Honest boundary:** the inspector always reports `execution_supported=false`; the
+  equation primitives are not connected into a layer or graph. Official graph-fixture
+  logits/routes/tokens, packed kernels, CUDA and generation remain future gates.
 
 ### Runtime foundation
 
@@ -528,8 +536,8 @@ Alpha.4 proves one real dense path and one real CPU MoE streaming path with an
 opt-in bounded asynchronous reader, not the final Vastloom research thesis.
 It currently has:
 
-- two executable pinned Hugging Face adapters plus one DeepSeek metadata/header and
-  tokenizer adapter; no DeepSeek inference, MiniMax, Kimi or GGUF execution adapter;
+- two executable pinned Hugging Face adapters plus a DeepSeek metadata/tokenizer/operator
+  foundation; no DeepSeek layer or inference, MiniMax, Kimi or GGUF execution adapter;
 - no CUDA, ROCm, Vulkan or Metal inference backend;
 - no production quantized kernels;
 - no VRAM expert tier or pinned host buffers; direct/unbuffered I/O is currently an

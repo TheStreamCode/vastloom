@@ -218,6 +218,24 @@ The added-token trie keeps literal matching proportional to the traversed prefix
 of scanning all 1,283 definitions at every byte. Prompt input remains capped at 16 MiB.
 This path does not imply that a DeepSeek graph or generation loop exists.
 
+The next M6 slice adds bounded equation-level CPU primitives:
+
+```text
+deterministic reduced numeric fixture
+      │ exact expert IDs + FP32 values at absolute tolerance 3e-5
+      ▼
+RMSNorm · learned/hash router · routed SwiGLU
+Hyper-Connection pre/Sinkhorn/post · base RoPE
+selected-latent sparse attention + attention sink
+      │ strict shapes · finite values · overflow checks · 64M-element ceiling
+      ▼
+operator parity only — no DeepSeek layer, logits or generation
+```
+
+The current sparse-attention primitive consumes already-selected latent KV positions.
+Learned indexer construction, compressed-position scheduling, YaRN scaling, shared-expert
+aggregation, MTP and the Hyper-Connection LM head remain part of the reduced-graph gate.
+
 ## TinyTransformer adapter boundary
 
 The alpha.2 adapter defines:

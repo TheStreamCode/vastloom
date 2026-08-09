@@ -13,6 +13,9 @@
 - Added native DeepSeek V4 Unicode pre-tokenization, its 129,280-token byte BPE,
   bounded added-token trie and basic system/user/assistant chat framing. Exact IDs match
   Hugging Face tokenizers 0.22.1 across committed multilingual reference vectors.
+- Added bounded native DeepSeek reference equations and deterministic vectors for RMSNorm,
+  learned/hash routing, routed SwiGLU, Hyper-Connections, base RoPE and selected-latent
+  sparse attention. These are operator tests, not a DeepSeek forward or generation claim.
 - Added an explicit `--allow-large-download` gate for checkpoint imports containing at
   least 20 GiB of weight payload. DeepSeek execution remains unsupported and is reported
   as such by the CLI.

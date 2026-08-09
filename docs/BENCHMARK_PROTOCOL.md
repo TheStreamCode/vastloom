@@ -41,6 +41,10 @@ Every run must store:
 - Change one independent variable per A/B run.
 - Repeat runs and publish variance, not only the best sample.
 - Separate cold-cache, warm-cache and learned-placement results.
+- Prefer Vastloom's `direct-unbuffered-v1` protocol for a repeatable operating-system
+  cache-bypass measurement. Record it as cache-bypass, not proof that the SSD's internal
+  hardware cache was cold.
+- Never reduce or flush the global host file cache merely to produce a benchmark.
 - Label buffered-file warm-cache probes as pipeline measurements, never as NVMe
   bandwidth or physical bytes/token evidence.
 - Include negative results.
@@ -57,9 +61,25 @@ Every run must store:
 - **Storage-layer bytes:** Linux `/proc/self/io` `read_bytes`; this can show file-cache
   effects but is still not a per-device hardware counter.
 - **Physical-device bytes:** bytes attributed to the selected block device by a separate
-  device-level measurement. Vastloom does not yet capture this on the reference Windows
-  host.
+  device-level measurement. Windows uses `IOCTL_DISK_PERFORMANCE` on the mapped
+  `PhysicalDriveN`; native Linux uses `/sys/dev/block/.../stat` only when the mapping is
+  non-virtual. The reported scope can cover unrelated host I/O and must be retained.
 
 Every table and JSON consumer must retain the source label and availability flag. A
 missing physical counter must remain unavailable, never be silently replaced by logical
 or process-transfer bytes.
+
+## Cache-bypass protocol
+
+`direct-unbuffered-v1` is valid only when all of the following are true:
+
+- the original checkpoint is opened read-only through direct/unbuffered I/O;
+- every output buffer and aligned sector envelope is reserved before allocation;
+- expert policy is `no-cache`, I/O is asynchronous and queues/workers retain adapter caps;
+- the path maps unambiguously to a device-level counter;
+- device read bytes are at least the exact logical expert payload;
+- model output passes the same reference parity gate as buffered mode.
+
+This protocol isolates operating-system file-cache effects without mutating global cache
+state. It cannot disable SSD controller or firmware caches, and a whole-device delta can
+include concurrent reads from other processes. Repeat runs and report variance.

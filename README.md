@@ -58,6 +58,8 @@ The rebrand, compatibility, packaging and open-source readiness checks are recor
 [`Alpha 4 open-source validation report`](docs/reports/ALPHA4_OPEN_SOURCE_REBRAND_VALIDATION.md).
 The newest staged-read and readiness results are in the
 [`M5 staged-I/O validation report`](docs/reports/M5_READINESS_STAGED_IO_VALIDATION.md).
+The completed physical-counter and cache-bypass gate is documented in the
+[`M5 device-I/O validation report`](docs/reports/M5_DEVICE_IO_CACHE_BYPASS_VALIDATION.md).
 
 ## Reference target
 
@@ -113,8 +115,13 @@ allocation plan is derived from detected capacity and conservative headroom.
   and measured service/CPU overlap, atomically published without overwrite.
 - **I/O observability:** Windows reports process read operations and transfer bytes from
   `GetProcessIoCounters`; Linux additionally reports the storage-layer `read_bytes`
-  counter from `/proc/self/io`. The CLI keeps these meanings separate from physical-device
-  traffic.
+  counter from `/proc/self/io`. Windows device-level telemetry maps the checkpoint volume
+  to `PhysicalDriveN` and samples `IOCTL_DISK_PERFORMANCE`; native Linux accepts only a
+  non-virtual `/sys/dev/block` mapping. Every source and scope remains explicit.
+- **Safe cache-bypass protocol:** opt-in `direct-unbuffered-v1` reads bypass the operating
+  system file cache without flushing global state. The protocol requires async no-cache
+  execution, bounded aligned envelopes and a working device counter, otherwise it fails
+  closed.
 - **Reuse telemetry:** native traces report cold/reused accesses plus mean, P50, P95 and
   maximum exact unique-expert reuse distance.
 - **Readiness replay:** `trace-sim` compares fixed-route and theoretical ready-expert
@@ -307,6 +314,9 @@ vastloom moe-logits $model --text 'Hello' --cache no-cache --io async --prefetch
 
 # Opt-in staged gate/up + down pipeline
 vastloom moe-logits $model --text 'Hello' --cache no-cache --io async --expert-read staged --prefetch-depth 2 --json
+
+# Repeatable OS-cache-bypass/device-I/O measurement; never flushes global Windows cache
+vastloom moe-logits $model --text 'Hello' --cache no-cache --io async --io-cache bypass --expert-read staged --prefetch-depth 2 --json
 ```
 
 `moe-logits` is a bounded correctness/telemetry probe, not an OLMoE chat or generation
@@ -320,9 +330,16 @@ repacking the immutable checkpoint. Both modes allow prefetch depth one or two a
 30-second request timeout by default. `--inject-io-fault` is a test-only development option;
 it must not be used for normal inference.
 
-The JSON `process_io` object identifies its operating-system source. On Windows,
+`--io-cache bypass` activates the `direct-unbuffered-v1` measurement protocol. It requires
+`--io async --cache no-cache`, reserves both the returned buffer and an aligned direct-I/O
+envelope, and refuses to run unless the checkpoint maps to a trustworthy device counter.
+It does not alter or globally evict the Windows file cache.
+
+The JSON `process_io` and `device_io` objects identify their operating-system source and
+scope. On Windows,
 `process_read_bytes` is process transfer accounting and `storage_read_bytes` remains
-`null`; it must not be interpreted as physical SSD traffic. `trace-sim --json` reports
+`null`; it must not be interpreted as physical SSD traffic. `device_io` is a whole-device
+delta and can include concurrent activity from other processes. `trace-sim --json` reports
 exact cold/reused counts, unique-expert reuse distance and, for current 19-field traces,
 a bounded fixed-order versus ready-order replay.
 
@@ -396,7 +413,7 @@ vastloom real-logits MODEL_DIRECTORY --text TEXT [--chat] [--top N] [--json]
 vastloom moe-inspect MODEL_DIRECTORY [--no-verify] [--json]
 vastloom moe-logits MODEL_DIRECTORY --text TEXT [--chat] [--top N]
     [--cache no-cache|lru|lfu|static-hot] [--cache-bytes SIZE]
-    [--io sync|async] [--expert-read whole|staged]
+    [--io sync|async] [--io-cache buffered|bypass] [--expert-read whole|staged]
     [--prefetch-depth 1|2] [--io-timeout-ms N]
     [--timeout-ms N] [--trace PATH] [--no-verify] [--json]
 vastloom heartbeat-write PATH
@@ -472,12 +489,14 @@ It currently has:
 - two exact pinned Hugging Face adapters; no DeepSeek, MiniMax, Kimi or GGUF adapter;
 - no CUDA, ROCm, Vulkan or Metal inference backend;
 - no production quantized kernels;
-- no VRAM expert tier, pinned host buffers or direct/unbuffered device I/O;
+- no VRAM expert tier or pinned host buffers; direct/unbuffered I/O is currently an
+  opt-in OLMoE measurement protocol, not the production path for every adapter;
 - OLMoE currently exposes final-logit probes and route telemetry, not decoding/chat;
 - expert compute remains a synchronous CPU reference implementation; the asynchronous
-  reader uses ordinary buffered file I/O and one or two bounded workers;
-- process transfer counters are available, but there are still no Windows physical-device
-  byte counters, repeatable cold-cache protocol or SSD temperature/power telemetry;
+  reader uses one or two bounded workers and defaults to ordinary buffered file I/O;
+- device counters and a repeatable OS-cache-bypass protocol are available where the
+  checkpoint has an unambiguous local-device mapping, but whole-device deltas can include
+  unrelated traffic and SSD temperature/power telemetry is not implemented;
 - no persistent KV reuse between chat turns; history is currently recomputed;
 - no local HTTP API yet.
 
@@ -494,12 +513,11 @@ research metric is not merely SSD throughput. It is:
 
 The next technical sequence remains incremental:
 
-1. add physical-device I/O counters plus a repeatable cold-cache run;
-2. exact DeepSeek V4 Flash checkpoint inspection and architecture-faithful fixture;
-3. CUDA dense, attention, router and packed expert kernels;
-4. explicit VRAM/RAM/NVMe placement with pinned buffers and direct/overlapped I/O;
-5. adaptive placement, predictive routing and speculative expert deduplication;
-6. OpenAI-compatible local server and coding-agent integration.
+1. exact DeepSeek V4 Flash checkpoint inspection and architecture-faithful fixture;
+2. CUDA dense, attention, router and packed expert kernels;
+3. explicit VRAM/RAM/NVMe placement with pinned buffers and direct/overlapped I/O;
+4. adaptive placement, predictive routing and speculative expert deduplication;
+5. OpenAI-compatible local server and coding-agent integration.
 
 Detailed acceptance gates are in [`docs/ROADMAP.md`](docs/ROADMAP.md).
 

@@ -129,6 +129,11 @@ The alpha.4 OLMoE probe is fail-closed around one exact checkpoint revision:
 - both asynchronous modes accept prefetch depth one or two, cap the queue at four
   requests, limit every request to at most 12 MiB and reserve every outstanding buffer
   against the staging cap before submission;
+- cache-bypass mode is opt-in, requires async plus no-cache, and reserves twice the
+  logical request plus a 128 KiB alignment allowance before allocating the output and
+  direct-I/O envelope;
+- unaligned tensor ranges are expanded only to the surrounding bounded sectors; the
+  immutable source remains read-only and only the requested bytes reach expert compute;
 - Windows asynchronous range reads use a read-only Unicode-native file handle, an exact
   validated offset and a loop bounded by the already reserved request size;
 - each asynchronous request has a positive timeout capped at 60 seconds and checks the
@@ -147,13 +152,18 @@ traffic is produced by exact bounded reads, not pagefile/swap. Synchronous mode 
 the default. Opt-in asynchronous mode uses either one validated contiguous expert range
 or the checkpoint's contiguous gate/up region plus separate adjacent down region. Both
 fail closed on worker failure, short read, allocation failure, cancellation or timeout.
-It is still a buffered reference pipeline, not production direct I/O.
+Buffered mode remains the default. The `direct-unbuffered-v1` measurement protocol uses
+`FILE_FLAG_NO_BUFFERING` or `O_DIRECT`; it never changes global cache limits or flushes
+the host file cache.
 
 Process-I/O sampling is observability only and cannot relax a reservation or safety
 limit. Failure to obtain a counter never fails otherwise-correct inference; the CLI
 reports the counter as unavailable. Windows transfer bytes are explicitly not treated
 as physical NVMe reads, so a warm file-cache result cannot influence future placement
-as though it were a device measurement.
+as though it were a device measurement. Device-level sampling is separate and retains
+its exact source, device identity and scope. Cache-bypass mode is stricter: it refuses to
+start without a trustworthy mapping and rejects a run whose device bytes are below the
+logical expert payload. Whole-device counters can still include unrelated host traffic.
 
 ## Watchdog
 
@@ -195,6 +205,10 @@ integration remains required before long-running large-model inference.
   request-timeout injection through both the bounded I/O unit path and real OLMoE CLI.
 - Unicode Windows shard-path reads, monotonic process-I/O deltas and platform-specific
   storage-byte availability semantics;
+- Windows `PhysicalDrive` and native-Linux block-device mapping, monotonic device deltas,
+  explicit unavailable behavior and rejection of virtual Linux block devices;
+- aligned cache-bypass reads for aligned and unaligned ranges, doubled staging
+  reservation, full-model output parity and physical-byte coverage enforcement;
 - regression protection against fragmented Windows expert reads and exact reuse-distance
   results for synthetic and real repeated-route traces.
 

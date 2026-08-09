@@ -2,6 +2,15 @@
 
 ## Unreleased
 
+- Added path-scoped device-I/O snapshots: Windows maps the checkpoint volume to
+  `PhysicalDriveN` and samples `IOCTL_DISK_PERFORMANCE`; Linux accepts non-virtual
+  `/sys/dev/block/.../stat` mappings and otherwise reports the counter unavailable.
+- Added the fail-closed `direct-unbuffered-v1` cache-bypass protocol for bounded OLMoE
+  expert reads. It requires async no-cache execution, a trustworthy device counter and
+  measured device bytes at least equal to logical expert bytes; it never flushes the
+  global operating-system file cache.
+- Validated three repeatable Windows cache-bypass runs with identical token `47111`,
+  1,610,612,736 logical bytes and 1,610,743,808 whole-device bytes per run.
 - Extended native OLMoE traces from 12 to 19 fields with submission, queue, ready,
   compute-window, route-order and reduction-order telemetry while retaining all earlier
   trace formats.

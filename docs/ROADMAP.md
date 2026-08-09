@@ -67,7 +67,7 @@ passes full-checkpoint verification and refuses unsafe allocations.
 **Gate:** every selected expert and registered output agrees with the reference without
 requiring the complete checkpoint to reside in RAM.
 
-## M5 — Real NVMe-to-RAM expert streaming — in progress
+## M5 — Real NVMe-to-RAM expert streaming — complete
 
 - [x] Separate always-active trunk weights from individually addressable experts.
 - [x] Add bounded expert reads, buffers, cancellation and exact byte accounting.
@@ -81,7 +81,7 @@ requiring the complete checkpoint to reside in RAM.
   ready-order scheduling in the trace simulator.
 - [x] Prototype an output-identical 8 MiB gate/up plus 4 MiB down staged read without
   repacking original OLMoE weights.
-- [ ] Add physical-device I/O counters and a repeatable cold-cache protocol.
+- [x] Add physical-device I/O counters and a repeatable OS-cache-bypass protocol.
 
 **Gate:** the real small MoE completes safely under a RAM cap below total checkpoint
 size, with no uncontrolled paging or unreserved buffer.
@@ -89,8 +89,10 @@ size, with no uncontrolled paging or unreserved buffer.
 The ordering and acceptance gates for the two new experiments are documented in the
 [DeepSeekV4SSD review](research/DEEPSEEK_SSD_REVIEW.md). They remain research tasks,
 not DeepSeek runtime claims. The OLMoE staged path passed parity and improved median
-warm buffered forward time by 46.0% in three paired WSL runs; physical-device/cold-cache
-validation remains the final M5 gate.
+warm buffered forward time by 46.0% in three paired WSL runs. Three Windows
+`direct-unbuffered-v1` runs then returned identical reference output and exactly
+1,610,743,808 whole-device bytes for 1,610,612,736 logical expert bytes per run. M5 is
+closed; exact DeepSeek checkpoint inspection is now the active bottleneck.
 
 ## M6 — Exact DeepSeek inspector and architecture-faithful fixture
 

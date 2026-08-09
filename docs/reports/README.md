@@ -13,9 +13,13 @@ hardware, commands, measurements and limitations.
 
 ## Current report
 
-- [`M5_READINESS_STAGED_IO_VALIDATION.md`](M5_READINESS_STAGED_IO_VALIDATION.md) —
-  readiness replay, output-identical two-stage expert reads, bounded two-worker safety,
-  paired warm-buffered measurements and the remaining physical-I/O gate.
+- [`M5_DEVICE_IO_CACHE_BYPASS_VALIDATION.md`](M5_DEVICE_IO_CACHE_BYPASS_VALIDATION.md) —
+  device-level Windows/Linux counters, bounded direct/unbuffered reads, repeatable
+  Windows physical-byte measurements and the completed M5 gate.
+
+The preceding [`M5_READINESS_STAGED_IO_VALIDATION.md`](M5_READINESS_STAGED_IO_VALIDATION.md)
+records readiness replay, output-identical two-stage expert reads, bounded two-worker
+safety and paired warm-buffered measurements.
 
 The latest release-level report remains
 [`ALPHA4_OPEN_SOURCE_REBRAND_VALIDATION.md`](ALPHA4_OPEN_SOURCE_REBRAND_VALIDATION.md),

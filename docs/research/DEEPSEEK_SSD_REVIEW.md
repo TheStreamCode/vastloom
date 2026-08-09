@@ -70,6 +70,14 @@ bytes match whole mode. Three alternating paired WSL runs measured 5,787.77 ms m
 for whole reads and 3,125.64 ms for staged reads, a 46.0% warm buffered-pipeline win.
 This passes the 5% research gate but is not a physical-NVMe result.
 
+### M5 measurement gate — implemented
+
+Vastloom now maps the Windows checkpoint volume to `PhysicalDriveN`, preserves the
+whole-device scope, and provides a bounded `direct-unbuffered-v1` protocol instead of
+flushing global cache state. Three repeated Windows runs produced identical reference
+output and 1,610,743,808 device bytes for 1,610,612,736 logical bytes. Native Linux
+accepts only non-virtual block-device mappings; WSL `/mnt/c` remains unavailable.
+
 ### P3 — long-prefill layer-major baseline
 
 Do not transfer the upstream full-layer strategy blindly: OLMoE and DeepSeek have different expert sizes,

@@ -135,7 +135,8 @@ atomic token/layer/expert/tier/bytes/submit/queue/ready/compute/order trace
       │
       ├── exact unique-expert reuse distance
       ├── fixed-order versus ready-order replay
-      └── process read-operation/byte deltas
+      ├── process read-operation/byte deltas
+      └── scoped block-device read-operation/byte deltas
 ```
 
 The model object gives every routed expert a logical `(layer, expert)` identity that is
@@ -147,21 +148,25 @@ next one or two routed experts on one worker. Staged mode separately validates t
 physically contiguous 8 MiB gate/up region and adjacent 4 MiB down region. Two bounded
 workers let the down range overlap gate/up compute without repacking or modifying the
 checkpoint. Every request owns a staging reservation until its buffer is consumed.
-These timings and logical byte counts do not substitute for physical-device counters or
-a cold-cache NVMe benchmark.
+These timings and logical byte counts remain separate from device-level counters and
+cache-bypass measurements.
 
 On Windows the asynchronous worker opens each immutable shard through `CreateFileW`,
 seeks with `SetFilePointerEx` and performs a bounded `ReadFile` range. This keeps Unicode
 paths native and prevents the C++ stream implementation from fragmenting one 12 MiB
-expert into thousands of 4 KiB operations. Linux retains the portable buffered reader
-for now.
+expert into thousands of 4 KiB operations. Buffered mode remains the default. The
+opt-in `direct-unbuffered-v1` protocol uses `FILE_FLAG_NO_BUFFERING` on Windows and
+`O_DIRECT` on Linux. It expands unaligned tensor ranges to a bounded sector envelope,
+copies only the requested bytes, and reserves the output plus direct buffer before I/O.
 
 The runtime samples process counters immediately around the forward pass. Windows
 `GetProcessIoCounters` exposes read-operation and transfer-byte accounting but no
 physical-storage byte counter. Linux `/proc/self/io` supplies logical `rchar`/`syscr`
-and storage-layer `read_bytes`. These are deliberately separate fields; neither the
-Windows transfer count nor the model's exact requested payload is called physical NVMe
-traffic. The trace simulator independently computes exact LRU stack distance in
+and storage-layer `read_bytes`. A separate Windows sampler maps the checkpoint volume to
+`PhysicalDriveN` and reads `IOCTL_DISK_PERFORMANCE`; native Linux uses a non-virtual
+`/sys/dev/block/.../stat` mapping. Device deltas retain a whole-device or partition scope
+and may include unrelated activity. Ambiguous and virtual mappings remain unavailable.
+The trace simulator independently computes exact LRU stack distance in
 `O(records log records)` using bounded state. Current 19-field traces additionally
 support a bounded fixed-route versus ready-expert replay while preserving the recorded
 reduction order.
@@ -282,6 +287,6 @@ router decisions or accepted output tokens.
   CPU reference/streaming adapters.
 - `cli/`: interactive and one-shot model client commands.
 
-The next data-plane measurement step is physical-device I/O plus a repeatable cold-cache
+The data plane now has device-level I/O plus a repeatable operating-system cache-bypass
 protocol. DeepSeek inspection must reuse these safety and identity boundaries rather
-than bypass them.
+than bypass them. Pinned host memory and GPU transfers remain later layers.

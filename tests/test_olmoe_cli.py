@@ -45,8 +45,14 @@ def main() -> int:
     require(payload["always_active_bytes"] == 953_421_824, "always-active byte classification mismatch", process)
     require(payload["no_cache_expert_bytes_per_token"] == 1_610_612_736, "no-cache traffic mismatch", process)
     require(payload["resident_load_supported"] is False, "metadata-only import was marked runnable", process)
-    if payload["safe_ram_cap_bytes"]:
-        require(payload["streaming_plan_candidate"] is True, "safe streaming preflight unexpectedly failed", process)
+    expected_streaming_candidate = (
+        payload["safe_ram_cap_bytes"] >= payload["estimated_minimum_streaming_ram_bytes"]
+    )
+    require(
+        payload["streaming_plan_candidate"] is expected_streaming_candidate,
+        "streaming preflight did not follow the live safe-RAM budget",
+        process,
+    )
 
     tokenizer_cases = (
         ("Hello", [12092]),

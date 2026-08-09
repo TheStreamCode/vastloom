@@ -46,7 +46,7 @@ if a control file is a symlink, the reader rejects the store rather than guessin
 
 ## Validation host
 
-The final Windows probe reported:
+The Windows baseline probe recorded before the final memory-pressure check reported:
 
 - Windows on AMD Ryzen 9 7900X-class CPU, 24 logical processors;
 - AVX2, AVX-512F and FMA available;
@@ -72,11 +72,20 @@ Governor still preserves explicit host headroom and may choose much smaller budg
 | GCC 13 + libstdc++ debug iterators/assertions | 5/5 passed in 4.85 s |
 | GCC 13 ThreadSanitizer | compiled; runtime unavailable in this WSL environment |
 
-The final full MSVC run included the native suite, TinyChat chat/self-test/integration, offline HF
+The final full MSVC Release run included the native suite, TinyChat chat/self-test/integration, offline HF
 importer, SmolLM2 reference, OLMoE inspection and OLMoE runtime reference. The final full GCC run
 ran the same eight tests. Python tools and tests passed `compileall`; the offline importer suite
 passed. The Windows manifest-tool suite passed its applicable test and skipped the symlink-only
 case where the host did not expose the required privilege.
+
+A later real-model Debug run encountered only 7,806,771,200 bytes of available RAM. The Safety
+Governor returned exit code 75 and refused SmolLM2 interactive startup and the following OLMoE
+execution probe because less than 8 GiB of headroom remained. No limit was reduced and the run is
+not counted as a real-model Debug pass. It exposed a pressure-sensitive test assumption: OLMoE
+inspection had required a streaming candidate whenever the cap was nonzero, even when the live
+safe cap was below the model's estimated minimum. The follow-up test now requires the reported
+decision to match that comparison. A fresh Debug build with no real checkpoint configured then
+passed the bounded 5/5 suite in 3.44 s.
 
 The TSan binaries terminate before `main` with `FATAL: ThreadSanitizer: unexpected memory mapping`
 under the available WSL runtime. This is recorded as an environmental limitation, not a pass.

@@ -75,8 +75,9 @@ requiring the complete checkpoint to reside in RAM.
 - [x] Inject short reads, missing/corrupt shards, allocation failure and I/O timeout.
 - [x] Measure logical expert file bytes/token, cache hits and synchronous expert I/O time.
 - [x] Add a bounded one-worker asynchronous path and measure read-service/CPU overlap.
-- [ ] Add reuse-distance reporting, physical-device I/O counters and a repeatable
-  cold-cache protocol.
+- [x] Add exact unique-expert reuse-distance reporting.
+- [x] Add process-I/O operation/byte counters with explicit platform semantics.
+- [ ] Add physical-device I/O counters and a repeatable cold-cache protocol.
 
 **Gate:** the real small MoE completes safely under a RAM cap below total checkpoint
 size, with no uncontrolled paging or unreserved buffer.

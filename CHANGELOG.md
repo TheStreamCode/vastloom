@@ -2,6 +2,22 @@
 
 ## Unreleased
 
+## 0.4.0-alpha.3 — 2026-08-09
+
+- Added cross-platform process-I/O snapshots around the real OLMoE forward path.
+- Exposed Windows read operation/transfer deltas and Linux logical plus storage-layer
+  read deltas while preserving their different semantics in text and JSON output.
+- Replaced fragmented Windows asynchronous stream reads with Unicode-safe bounded
+  `CreateFileW`/`ReadFile` ranges; one expert now requires one 12 MiB operation.
+- Added exact unique-expert reuse-distance telemetry with cold/reused access counts,
+  reuse ratio, mean, P50, P95 and maximum distance.
+- Added Unicode-path, counter-semantics, operation-fragmentation and real repeated-route
+  regression tests.
+
+This slice measures process-visible I/O and routing locality without claiming physical
+NVMe traffic. Buffered cache state, cold-cache behavior, device counters, OLMoE decoding,
+CUDA and DeepSeek remain outside the validated scope.
+
 ## 0.4.0-alpha.2 — 2026-08-09
 
 - Connected the real OLMoE expert path to the reservation-backed bounded I/O pool.

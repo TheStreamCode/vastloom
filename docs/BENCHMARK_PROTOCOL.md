@@ -19,7 +19,8 @@ Every run must store:
 - TTFT, prefill tokens/s and accepted generation tokens/s;
 - peak process RAM and VRAM;
 - NVMe bytes/token and observed read bandwidth;
-- logical requested bytes separately from operating-system and physical-device bytes;
+- logical requested bytes, process transfer bytes, storage-layer bytes and physical-device
+  bytes as separate fields;
 - PCIe bytes/token;
 - VRAM/RAM expert hit ratios;
 - prefetch accuracy and wasted bytes;
@@ -46,3 +47,19 @@ Every run must store:
 - Never compare different model revisions or quantizations as if only the runtime changed.
 - Do not claim an optimization from a microbenchmark until end-to-end accepted-token
   throughput improves without failing correctness gates.
+
+## I/O counter vocabulary
+
+- **Logical expert bytes:** exact model payload requested by Stargate. This is suitable
+  for cache-policy accounting, not proof that the SSD served those bytes.
+- **Process transfer bytes:** bytes attributed to process reads by the operating system.
+  Windows `GetProcessIoCounters.ReadTransferCount` is reported in this category.
+- **Storage-layer bytes:** Linux `/proc/self/io` `read_bytes`; this can show file-cache
+  effects but is still not a per-device hardware counter.
+- **Physical-device bytes:** bytes attributed to the selected block device by a separate
+  device-level measurement. Stargate does not yet capture this on the reference Windows
+  host.
+
+Every table and JSON consumer must retain the source label and availability flag. A
+missing physical counter must remain unavailable, never be silently replaced by logical
+or process-transfer bytes.

@@ -109,7 +109,8 @@ This adapter is intentionally pinned to one revision of SmolLM2. It loads the ve
 269 MB BF16 checkpoint into reserved RAM and uses FP32 activations. It is a correctness
 oracle for subsequent backends, not a generic Llama compatibility claim.
 
-Alpha.4.2 extends the first real sparse path with an opt-in bounded prefetch pipeline:
+Alpha.4.3 extends the first real sparse path with a bounded prefetch and observability
+pipeline:
 
 ```text
 pinned OLMoE import (3 BF16 shards, 13.84 GB tensor payload)
@@ -129,6 +130,9 @@ weighted SwiGLU expert accumulation → final logits
       │
       ▼
 atomic token/layer/expert/tier/bytes/service/wait/overlap trace
+      │
+      ├── exact unique-expert reuse distance
+      └── process read-operation/byte deltas
 ```
 
 The model object gives every routed expert a logical `(layer, expert)` identity that is
@@ -139,6 +143,20 @@ contiguous 12 MiB shard range, reserves staging before submission, and schedules
 next one or two routed experts on a single worker. It measures how much actual read
 service completed while foreground CPU work continued. These timings and logical byte
 counts do not substitute for physical-device counters or a cold-cache NVMe benchmark.
+
+On Windows the asynchronous worker opens each immutable shard through `CreateFileW`,
+seeks with `SetFilePointerEx` and performs a bounded `ReadFile` range. This keeps Unicode
+paths native and prevents the C++ stream implementation from fragmenting one 12 MiB
+expert into thousands of 4 KiB operations. Linux retains the portable buffered reader
+for now.
+
+The runtime samples process counters immediately around the forward pass. Windows
+`GetProcessIoCounters` exposes read-operation and transfer-byte accounting but no
+physical-storage byte counter. Linux `/proc/self/io` supplies logical `rchar`/`syscr`
+and storage-layer `read_bytes`. These are deliberately separate fields; neither the
+Windows transfer count nor the model's exact requested payload is called physical NVMe
+traffic. The trace simulator independently computes exact LRU stack distance in
+`O(records log records)` using bounded state.
 
 ## TinyTransformer adapter boundary
 
@@ -195,6 +213,7 @@ NVMe
 A cache hit never reads the expert again. A miss reports exactly 12 MiB of logical
 expert traffic. The current implementation does not place experts in VRAM and uses
 ordinary buffered file reads, so operating-system cache hits may avoid physical NVMe.
+Process counters quantify operations and transfers, but do not remove this cache ambiguity.
 
 ## Model lifecycle and governor ownership
 
@@ -247,12 +266,13 @@ router decisions or accepted output tokens.
 - `safety/`: reservations, state machine and heartbeat.
 - `model/`: manifest/Safetensors parsing, imported-checkpoint verification and immutable
   model storage.
-- `io/`: bounded asynchronous reads.
-- `research/`: native-telemetry-driven no-cache/LRU/LFU/static-hot simulation.
+- `io/`: bounded asynchronous reads plus platform-labeled process-I/O counters.
+- `research/`: native-telemetry-driven no-cache/LRU/LFU/static-hot simulation and exact
+  unique-expert reuse distance.
 - `inference/`: TinyTransformer, pinned SmolLM2 generation and pinned OLMoE routed
   CPU reference/streaming adapters.
 - `cli/`: interactive and one-shot model client commands.
 
-The next data-plane measurement step is reuse distance plus physical-device I/O and a
-repeatable cold-cache protocol. DeepSeek inspection must reuse these safety and identity
-boundaries rather than bypass them.
+The next data-plane measurement step is physical-device I/O plus a repeatable cold-cache
+protocol. DeepSeek inspection must reuse these safety and identity boundaries rather
+than bypass them.

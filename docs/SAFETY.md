@@ -126,6 +126,8 @@ The alpha.4 OLMoE probe is fail-closed around one exact checkpoint revision:
   before allocation;
 - asynchronous mode has exactly one worker, accepts prefetch depth one or two, limits
   each request to 12 MiB and reserves every outstanding buffer against the staging cap;
+- Windows asynchronous range reads use a read-only Unicode-native file handle, an exact
+  validated offset and a loop bounded by the already reserved request size;
 - each asynchronous request has a positive timeout capped at 60 seconds and checks the
   same cancellation callback before and after its bounded read;
 - cache capacity is rounded to complete experts, must hold at least one expert and is
@@ -143,6 +145,12 @@ the default. Opt-in asynchronous mode uses one validated contiguous expert range
 fails closed on worker failure, short read, allocation failure, cancellation or timeout.
 It is still a buffered reference pipeline, not production direct I/O.
 
+Process-I/O sampling is observability only and cannot relax a reservation or safety
+limit. Failure to obtain a counter never fails otherwise-correct inference; the CLI
+reports the counter as unavailable. Windows transfer bytes are explicitly not treated
+as physical NVMe reads, so a warm file-cache result cannot influence future placement
+as though it were a device measurement.
+
 ## Watchdog
 
 `stargate-watchdog` is a separate process. It validates that the heartbeat belongs to the
@@ -152,7 +160,7 @@ supplied explicitly before it can terminate a stale runtime.
 The alpha.2 TinyChat CLI does not yet publish a continuous generation heartbeat; that
 integration remains required before long-running large-model inference.
 
-## Tests implemented through alpha.4.2
+## Tests implemented through alpha.4.3
 
 - allocation oversubscription and reservation release;
 - critical/emergency state escalation and hysteretic recovery;
@@ -177,6 +185,10 @@ integration remains required before long-running large-model inference.
   counts, telemetry parsing and positive read-service/CPU overlap;
 - deterministic worker-failure, short-read, allocation-failure, cancellation and
   request-timeout injection through both the bounded I/O unit path and real OLMoE CLI.
+- Unicode Windows shard-path reads, monotonic process-I/O deltas and platform-specific
+  storage-byte availability semantics;
+- regression protection against fragmented Windows expert reads and exact reuse-distance
+  results for synthetic and real repeated-route traces.
 
 ## Safety tests still required for production adapters
 

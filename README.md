@@ -5,17 +5,20 @@ running open-weight models that are much larger than the host's VRAM and RAM,
 especially Mixture-of-Experts models. It treats **VRAM, RAM and NVMe as an explicit
 model-memory hierarchy** instead of relying on uncontrolled operating-system swap.
 
-> **Current status — `0.4.0-alpha.2`: bounded asynchronous MoE streaming slice.**
+> **Current status — `0.4.0-alpha.3`: MoE I/O observability slice.**
 > Stargate now runs the routed token path of the pinned 13.84 GB
 > `allenai/OLMoE-1B-7B-0924-Instruct` checkpoint on CPU while keeping only the
 > always-active trunk and a bounded expert cache in RAM. Native logits, top-8 routes
-> and routing weights match a Transformers reference. An opt-in one-worker pipeline
-> prefetches one or two 12 MiB experts with bounded staging, cancellation, per-request
-> timeouts and fail-closed fault injection. DeepSeek V4 Flash and CUDA are not implemented.
+> and routing weights match a Transformers reference. The bounded reader now exposes
+> process-I/O deltas without labeling Windows transfer counters as physical NVMe traffic,
+> and trace simulation reports exact unique-expert reuse distance. DeepSeek V4 Flash and
+> CUDA are not implemented.
 
 Measured results and limitations are recorded in the
 [`Alpha 4 OLMoE report`](docs/reports/ALPHA4_OLMOE_VALIDATION.md) and the
-[`Alpha 4.2 async-I/O report`](docs/reports/ALPHA4_ASYNC_IO_VALIDATION.md).
+[`Alpha 4.2 async-I/O report`](docs/reports/ALPHA4_ASYNC_IO_VALIDATION.md). The newest
+reader, counter and reuse-distance results are in the
+[`Alpha 4.3 I/O-observability report`](docs/reports/ALPHA4_IO_OBSERVABILITY_VALIDATION.md).
 
 ## Reference target
 
@@ -30,7 +33,7 @@ The first consumer reference machine is:
 The engine is not hard-coded for that PC. Hardware is probed at runtime and every
 allocation plan is derived from detected capacity and conservative headroom.
 
-## What works in alpha.4.2
+## What works in alpha.4.3
 
 ### Real pretrained model path
 
@@ -67,6 +70,12 @@ allocation plan is derived from detected capacity and conservative headroom.
 - **Exact telemetry:** token, layer, expert, size, routing weight, tier, hit/miss,
   logical bytes read, I/O service time, foreground wait and measured service/CPU overlap,
   atomically published without overwrite.
+- **I/O observability:** Windows reports process read operations and transfer bytes from
+  `GetProcessIoCounters`; Linux additionally reports the storage-layer `read_bytes`
+  counter from `/proc/self/io`. The CLI keeps these meanings separate from physical-device
+  traffic.
+- **Reuse telemetry:** native traces report cold/reused accesses plus mean, P50, P95 and
+  maximum exact unique-expert reuse distance.
 - **Independent parity:** one- and two-token native probes match Transformers 4.45.2
   for greedy token, top logits, every selected expert and every recorded route weight.
 - **Safe preflight:** metadata-only checkpoints cannot execute, full SHA-256 is the
@@ -104,7 +113,8 @@ allocation plan is derived from detected capacity and conservative headroom.
 - **Safety state machine:** `NORMAL → PRESSURE → CRITICAL → EMERGENCY`, with immediate
   escalation and hysteretic recovery.
 - **Bounded asynchronous I/O:** fixed worker, queue and request limits; every buffer
-  holds a live reservation until released.
+  holds a live reservation until released. Windows range reads use Unicode-safe native
+  file handles and one bounded request per 12 MiB expert.
 - **Weight integrity:** strict manifest parser, exact offline manifest generator,
   relative-path validation, file-size checks, SHA-256 verification and symlink-escape
   protection.
@@ -257,6 +267,12 @@ limits are one worker, one or two outstanding prefetch slots, 12 MiB per request
 30-second request timeout by default. `--inject-io-fault` is a test-only development
 option; it must not be used for normal inference.
 
+The JSON `process_io` object identifies its operating-system source. On Windows,
+`process_read_bytes` is process transfer accounting and `storage_read_bytes` remains
+`null`; it must not be interpreted as physical SSD traffic. `trace-sim --json` reports
+exact cold/reused counts and unique-expert reuse-distance statistics for the emitted
+route trace.
+
 ## TinyChat CLI options
 
 ```text
@@ -371,7 +387,7 @@ Stargate follows these rules before performance work begins:
 
 All inference paths bound model dimensions, metadata, file size, context and timeout
 before allocating execution buffers. Real-model paths additionally
-keeps 8 GiB of current RAM availability for the host, caps itself to half physical RAM,
+keep 8 GiB of current RAM availability for the host, cap themselves to half physical RAM,
 requires 300 GiB free-storage headroom and refuses the load if reservations fail. See
 [`docs/SAFETY.md`](docs/SAFETY.md).
 
@@ -395,7 +411,7 @@ checkpoint.
 
 ## Current limitations
 
-Alpha.4.2 proves one real dense path and one real CPU MoE streaming path with an
+Alpha.4.3 proves one real dense path and one real CPU MoE streaming path with an
 opt-in bounded asynchronous reader, not the final Stargate research thesis.
 It currently has:
 
@@ -406,7 +422,8 @@ It currently has:
 - OLMoE currently exposes final-logit probes and route telemetry, not decoding/chat;
 - expert compute remains a synchronous CPU reference implementation; the asynchronous
   reader uses ordinary buffered file I/O and one worker;
-- no physical-device I/O counters, cold-cache protocol or SSD temperature/power telemetry;
+- process transfer counters are available, but there are still no Windows physical-device
+  byte counters, repeatable cold-cache protocol or SSD temperature/power telemetry;
 - no persistent KV reuse between chat turns; history is currently recomputed;
 - no local HTTP API yet.
 
@@ -423,7 +440,7 @@ research metric is not merely SSD throughput. It is:
 
 The next technical sequence remains incremental:
 
-1. add reuse-distance and physical-device I/O counters plus a repeatable cold-cache run;
+1. add physical-device I/O counters plus a repeatable cold-cache run;
 2. exact DeepSeek V4 Flash checkpoint inspection and architecture-faithful fixture;
 3. CUDA dense, attention, router and packed expert kernels;
 4. explicit VRAM/RAM/NVMe placement with pinned buffers and direct/overlapped I/O;

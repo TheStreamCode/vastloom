@@ -63,6 +63,7 @@ add_library(vastloom_core STATIC
     src/hardware/hardware_probe.cpp
     src/inference/gpt2_tokenizer.cpp
     src/inference/deepseek_v4_model.cpp
+    src/inference/deepseek_v4_reference.cpp
     src/inference/llama_model.cpp
     src/inference/olmoe_model.cpp
     src/inference/olmoe_runtime.cpp
@@ -169,6 +170,13 @@ if(BUILD_TESTING AND VASTLOOM_BUILD_TESTS)
                 --vastloom $<TARGET_FILE:vastloom>
         )
         set_tests_properties(vastloom_deepseek_v4_tokenizer PROPERTIES TIMEOUT 60)
+        add_test(
+            NAME vastloom_deepseek_v4_operator_fixture
+            COMMAND ${Python3_EXECUTABLE}
+                ${CMAKE_CURRENT_SOURCE_DIR}/tools/reference_deepseek_v4_operators.py
+                --check
+        )
+        set_tests_properties(vastloom_deepseek_v4_operator_fixture PROPERTIES TIMEOUT 30)
         if(VASTLOOM_SMOLLM2_MODEL)
             add_test(
                 NAME vastloom_smollm2_reference

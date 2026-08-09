@@ -1,6 +1,7 @@
 #include <array>
 #include <atomic>
 #include <chrono>
+#include <cmath>
 #include <cstddef>
 #include <filesystem>
 #include <fstream>
@@ -14,6 +15,7 @@
 #include "vastloom/hardware/hardware_probe.hpp"
 #include "vastloom/inference/gpt2_tokenizer.hpp"
 #include "vastloom/inference/deepseek_v4_model.hpp"
+#include "vastloom/inference/deepseek_v4_reference.hpp"
 #include "vastloom/inference/llama_model.hpp"
 #include "vastloom/inference/olmoe_model.hpp"
 #include "vastloom/inference/olmoe_runtime.hpp"
@@ -257,6 +259,259 @@ void test_deepseek_v4_config(const std::filesystem::path& root) {
         config << R"({"architectures":["DeepseekV4ForCausalLM"],"model_type":"deepseek_v4"})";
     }
     CHECK(!vastloom::inference::load_deepseek_v4_config(path));
+}
+
+void test_deepseek_v4_reference_operators() {
+    const auto path = std::filesystem::path(VASTLOOM_SOURCE_DIR) / "tests" / "fixtures" /
+                      "deepseek_v4_operators.json";
+    vastloom::util::JsonLimits limits;
+    limits.max_input_bytes = 1U * vastloom::MiB;
+    limits.max_nodes = 20'000U;
+    limits.max_array_elements = 10'000U;
+    auto fixture = vastloom::util::load_json_file(path, limits);
+    CHECK(fixture && fixture.value().is_object());
+    if (!fixture || !fixture.value().is_object()) return;
+    const auto string_value = [&](const vastloom::util::JsonValue& object,
+                                  std::string_view key) -> std::string {
+        const auto* value = object.find(key);
+        if (value == nullptr || !value->as_string()) {
+            CHECK(false);
+            return {};
+        }
+        return std::string(value->as_string().value());
+    };
+    const auto section = [&](std::string_view key) -> const vastloom::util::JsonValue* {
+        const auto* value = fixture.value().find(key);
+        CHECK(value != nullptr && value->is_object());
+        return value != nullptr && value->is_object() ? value : nullptr;
+    };
+    const auto size_value = [&](const vastloom::util::JsonValue& object,
+                                std::string_view key) -> std::size_t {
+        const auto* value = object.find(key);
+        auto parsed = value == nullptr
+                          ? vastloom::Result<std::uint64_t>(vastloom::make_error(vastloom::ErrorCode::invalid_format, "missing fixture integer"))
+                          : value->as_u64();
+        CHECK(parsed && parsed.value() <= std::numeric_limits<std::size_t>::max());
+        if (!parsed || parsed.value() > std::numeric_limits<std::size_t>::max()) return 0U;
+        return static_cast<std::size_t>(parsed.value());
+    };
+    const auto float_value = [&](const vastloom::util::JsonValue& object,
+                                 std::string_view key) -> float {
+        const auto* value = object.find(key);
+        auto parsed = value == nullptr
+                          ? vastloom::Result<double>(vastloom::make_error(vastloom::ErrorCode::invalid_format, "missing fixture scalar"))
+                          : value->as_double();
+        CHECK(parsed && std::isfinite(parsed.value()));
+        if (!parsed || !std::isfinite(parsed.value())) return 0.0F;
+        return static_cast<float>(parsed.value());
+    };
+    const auto floats = [&](const vastloom::util::JsonValue& object,
+                            std::string_view key) -> std::vector<float> {
+        std::vector<float> result;
+        const auto* value = object.find(key);
+        auto array = value == nullptr
+                         ? vastloom::Result<const vastloom::util::JsonValue::Array*>(vastloom::make_error(vastloom::ErrorCode::invalid_format, "missing fixture array"))
+                         : value->as_array();
+        CHECK(array);
+        if (!array) return result;
+        result.reserve(array.value()->size());
+        for (const auto& item : *array.value()) {
+            auto parsed = item.as_double();
+            CHECK(parsed && std::isfinite(parsed.value()));
+            if (!parsed) return {};
+            result.push_back(static_cast<float>(parsed.value()));
+        }
+        return result;
+    };
+    const auto unsigneds = [&](const vastloom::util::JsonValue& object,
+                               std::string_view key) -> std::vector<std::uint32_t> {
+        std::vector<std::uint32_t> result;
+        const auto* value = object.find(key);
+        auto array = value == nullptr
+                         ? vastloom::Result<const vastloom::util::JsonValue::Array*>(vastloom::make_error(vastloom::ErrorCode::invalid_format, "missing fixture array"))
+                         : value->as_array();
+        CHECK(array);
+        if (!array) return result;
+        result.reserve(array.value()->size());
+        for (const auto& item : *array.value()) {
+            auto parsed = item.as_u64();
+            CHECK(parsed && parsed.value() <= std::numeric_limits<std::uint32_t>::max());
+            if (!parsed || parsed.value() > std::numeric_limits<std::uint32_t>::max()) return {};
+            result.push_back(static_cast<std::uint32_t>(parsed.value()));
+        }
+        return result;
+    };
+    const auto signed_indices = [&](const vastloom::util::JsonValue& object,
+                                    std::string_view key) -> std::vector<std::int32_t> {
+        std::vector<std::int32_t> result;
+        const auto* value = object.find(key);
+        auto array = value == nullptr
+                         ? vastloom::Result<const vastloom::util::JsonValue::Array*>(vastloom::make_error(vastloom::ErrorCode::invalid_format, "missing fixture array"))
+                         : value->as_array();
+        CHECK(array);
+        if (!array) return result;
+        result.reserve(array.value()->size());
+        for (const auto& item : *array.value()) {
+            auto parsed = item.as_i64();
+            CHECK(parsed && parsed.value() >= std::numeric_limits<std::int32_t>::min() &&
+                  parsed.value() <= std::numeric_limits<std::int32_t>::max());
+            if (!parsed || parsed.value() < std::numeric_limits<std::int32_t>::min() ||
+                parsed.value() > std::numeric_limits<std::int32_t>::max()) {
+                return {};
+            }
+            result.push_back(static_cast<std::int32_t>(parsed.value()));
+        }
+        return result;
+    };
+    const float tolerance = float_value(fixture.value(), "absolute_tolerance");
+    const auto check_near = [&](const std::vector<float>& actual,
+                                const std::vector<float>& expected) {
+        CHECK(actual.size() == expected.size());
+        if (actual.size() != expected.size()) return;
+        for (std::size_t index = 0U; index < actual.size(); ++index) {
+            if (std::abs(actual[index] - expected[index]) > tolerance) {
+                std::cerr << "DeepSeek operator mismatch at " << index << ": "
+                          << actual[index] << " versus " << expected[index] << '\n';
+                ++failures;
+                return;
+            }
+        }
+    };
+
+    CHECK(string_value(fixture.value(), "format") == "vastloom.deepseek_v4.operator_fixture.v1");
+    CHECK(string_value(fixture.value(), "official_revision") ==
+          "60d8d70770c6776ff598c94bb586a859a38244f1");
+
+    if (const auto* rms = section("rms_norm")) {
+        auto result = vastloom::inference::deepseek_v4_rms_norm(
+            floats(*rms, "input"), floats(*rms, "weight"), size_value(*rms, "rows"),
+            size_value(*rms, "width"), float_value(*rms, "epsilon"));
+        CHECK(result);
+        if (result) check_near(result.value(), floats(*rms, "expected"));
+        auto invalid = vastloom::inference::deepseek_v4_rms_norm({}, {}, 1U, 1U, 0.0F);
+        CHECK(!invalid);
+    }
+
+    if (const auto* route = section("learned_route")) {
+        auto result = vastloom::inference::deepseek_v4_route_learned(
+            floats(*route, "input"), floats(*route, "gate_weight"),
+            floats(*route, "selection_bias"), size_value(*route, "tokens"),
+            size_value(*route, "width"), size_value(*route, "experts"),
+            size_value(*route, "top_k"), float_value(*route, "route_scale"));
+        CHECK(result);
+        if (result) {
+            CHECK(result.value().indices == unsigneds(*route, "expected_indices"));
+            check_near(result.value().weights, floats(*route, "expected_weights"));
+        }
+        auto bias = floats(*route, "selection_bias");
+        bias[0] = std::numeric_limits<float>::quiet_NaN();
+        CHECK(!vastloom::inference::deepseek_v4_route_learned(
+            floats(*route, "input"), floats(*route, "gate_weight"), bias,
+            size_value(*route, "tokens"), size_value(*route, "width"),
+            size_value(*route, "experts"), size_value(*route, "top_k"),
+            float_value(*route, "route_scale")));
+    }
+
+    if (const auto* route = section("hash_route")) {
+        auto result = vastloom::inference::deepseek_v4_route_hash(
+            floats(*route, "input"), floats(*route, "gate_weight"),
+            unsigneds(*route, "token_ids"), unsigneds(*route, "token_to_experts"),
+            size_value(*route, "tokens"), size_value(*route, "width"),
+            size_value(*route, "vocabulary"), size_value(*route, "experts"),
+            size_value(*route, "top_k"), float_value(*route, "route_scale"));
+        CHECK(result);
+        if (result) {
+            CHECK(result.value().indices == unsigneds(*route, "expected_indices"));
+            check_near(result.value().weights, floats(*route, "expected_weights"));
+        }
+        auto ids = unsigneds(*route, "token_ids");
+        ids[0] = static_cast<std::uint32_t>(size_value(*route, "vocabulary"));
+        CHECK(!vastloom::inference::deepseek_v4_route_hash(
+            floats(*route, "input"), floats(*route, "gate_weight"), ids,
+            unsigneds(*route, "token_to_experts"), size_value(*route, "tokens"),
+            size_value(*route, "width"), size_value(*route, "vocabulary"),
+            size_value(*route, "experts"), size_value(*route, "top_k"),
+            float_value(*route, "route_scale")));
+    }
+
+    if (const auto* expert = section("expert")) {
+        auto result = vastloom::inference::deepseek_v4_expert_swiglu(
+            floats(*expert, "input"), floats(*expert, "gate_weight"),
+            floats(*expert, "down_weight"), floats(*expert, "up_weight"),
+            floats(*expert, "routing_weights"), size_value(*expert, "tokens"),
+            size_value(*expert, "width"), size_value(*expert, "intermediate"),
+            float_value(*expert, "swiglu_limit"));
+        CHECK(result);
+        if (result) check_near(result.value(), floats(*expert, "expected"));
+        CHECK(!vastloom::inference::deepseek_v4_expert_swiglu(
+            floats(*expert, "input"), {}, floats(*expert, "down_weight"),
+            floats(*expert, "up_weight"), floats(*expert, "routing_weights"),
+            size_value(*expert, "tokens"), size_value(*expert, "width"),
+            size_value(*expert, "intermediate"), float_value(*expert, "swiglu_limit")));
+    }
+
+    if (const auto* hc = section("hyper_connection")) {
+        auto result = vastloom::inference::deepseek_v4_hc_pre(
+            floats(*hc, "input"), floats(*hc, "mixing_weight"), floats(*hc, "scale"),
+            floats(*hc, "base"), size_value(*hc, "tokens"),
+            size_value(*hc, "multiplier"), size_value(*hc, "width"),
+            size_value(*hc, "sinkhorn_iterations"), float_value(*hc, "norm_epsilon"),
+            float_value(*hc, "hc_epsilon"));
+        CHECK(result);
+        if (result) {
+            check_near(result.value().reduced, floats(*hc, "expected_reduced"));
+            check_near(result.value().split.pre, floats(*hc, "expected_pre"));
+            check_near(result.value().split.post, floats(*hc, "expected_post"));
+            check_near(result.value().split.combination, floats(*hc, "expected_combination"));
+            auto posted = vastloom::inference::deepseek_v4_hc_post(
+                floats(*hc, "sublayer"), floats(*hc, "input"), result.value().split,
+                size_value(*hc, "width"));
+            CHECK(posted);
+            if (posted) check_near(posted.value(), floats(*hc, "expected_output"));
+        }
+        CHECK(!vastloom::inference::deepseek_v4_hc_split_sinkhorn(
+            {}, {}, {}, 1U, 2U, 0U, 1.0e-6F));
+    }
+
+    if (const auto* rope = section("rope")) {
+        auto result = vastloom::inference::deepseek_v4_apply_rope(
+            floats(*rope, "input"), unsigneds(*rope, "positions"),
+            size_value(*rope, "rows"), size_value(*rope, "heads"),
+            size_value(*rope, "width"), float_value(*rope, "theta"));
+        CHECK(result);
+        if (result) {
+            check_near(result.value(), floats(*rope, "expected"));
+            auto inverse = vastloom::inference::deepseek_v4_apply_rope(
+                result.value(), unsigneds(*rope, "positions"), size_value(*rope, "rows"),
+                size_value(*rope, "heads"), size_value(*rope, "width"),
+                float_value(*rope, "theta"), true);
+            CHECK(inverse);
+            if (inverse) check_near(inverse.value(), floats(*rope, "expected_inverse"));
+        }
+        CHECK(!vastloom::inference::deepseek_v4_apply_rope(
+            floats(*rope, "input"), unsigneds(*rope, "positions"),
+            size_value(*rope, "rows"), size_value(*rope, "heads"), 3U,
+            float_value(*rope, "theta")));
+    }
+
+    if (const auto* attention = section("sparse_attention")) {
+        auto result = vastloom::inference::deepseek_v4_sparse_attention(
+            floats(*attention, "query"), floats(*attention, "key_value"),
+            floats(*attention, "attention_sink"), signed_indices(*attention, "selected_indices"),
+            size_value(*attention, "queries"), size_value(*attention, "kv_count"),
+            size_value(*attention, "heads"), size_value(*attention, "width"),
+            size_value(*attention, "selected"), float_value(*attention, "softmax_scale"));
+        CHECK(result);
+        if (result) check_near(result.value(), floats(*attention, "expected"));
+        auto invalid_indices = signed_indices(*attention, "selected_indices");
+        invalid_indices[0] = static_cast<std::int32_t>(size_value(*attention, "kv_count"));
+        CHECK(!vastloom::inference::deepseek_v4_sparse_attention(
+            floats(*attention, "query"), floats(*attention, "key_value"),
+            floats(*attention, "attention_sink"), invalid_indices,
+            size_value(*attention, "queries"), size_value(*attention, "kv_count"),
+            size_value(*attention, "heads"), size_value(*attention, "width"),
+            size_value(*attention, "selected"), float_value(*attention, "softmax_scale")));
+    }
 }
 
 void test_model_store_and_runtime_policy(const std::filesystem::path& root) {
@@ -899,6 +1154,7 @@ int main() {
     test_imported_checkpoint_and_llama_config(root);
     test_olmoe_config(root);
     test_deepseek_v4_config(root);
+    test_deepseek_v4_reference_operators();
     test_model_store_and_runtime_policy(root);
     test_gpt2_tokenizer(root);
     test_manifest_and_verifier(root);

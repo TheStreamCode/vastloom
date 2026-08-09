@@ -743,6 +743,28 @@ void test_deepseek_v4_reference_graph() {
     auto malformed = graph;
     malformed.float_tensors.erase("head.weight");
     CHECK(!vastloom::inference::deepseek_v4_reference_prefill(malformed, token_ids));
+    for (const auto& [name, unused] : graph.float_tensors) {
+        static_cast<void>(unused);
+        malformed = graph;
+        malformed.float_tensors.erase(name);
+        auto missing = vastloom::inference::deepseek_v4_reference_prefill(malformed, token_ids);
+        if (missing) {
+            std::cerr << "DeepSeek graph did not consume fixture tensor: " << name << '\n';
+            ++failures;
+            break;
+        }
+    }
+    for (const auto& [name, unused] : graph.integer_tensors) {
+        static_cast<void>(unused);
+        malformed = graph;
+        malformed.integer_tensors.erase(name);
+        auto missing = vastloom::inference::deepseek_v4_reference_prefill(malformed, token_ids);
+        if (missing) {
+            std::cerr << "DeepSeek graph did not consume fixture tensor: " << name << '\n';
+            ++failures;
+            break;
+        }
+    }
     malformed = graph;
     malformed.float_tensors["embed.weight"][0] =
         std::numeric_limits<float>::quiet_NaN();

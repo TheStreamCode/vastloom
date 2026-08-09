@@ -52,9 +52,9 @@ The data plane must be small, bounded and predictable:
 
 No data-plane worker may allocate outside the Resource Governor.
 
-## Current alpha.2 inference path
+## Current inference paths
 
-Alpha.2 adds a complete CPU-only reference slice:
+Alpha.2 retains the complete synthetic CPU-only reference slice:
 
 ```text
 .sgm manifest
@@ -82,6 +82,32 @@ streaming CLI / JSON result
 The entire validation model remains resident in RAM. This path validates the adapter,
 model lifecycle, tokenizer, KV cache, sampling and client surface; it does not yet
 exercise NVMe paging or MoE routing.
+
+Alpha.3 adds a separate real-checkpoint path:
+
+```text
+atomic pinned Hugging Face import
+      │ exact sizes + SHA-256
+      ▼
+bounded Safetensors catalog + BF16 store
+      │ Resource Governor + process memory cap
+      ▼
+GPT-2 byte BPE + exact SmolLM chat template
+      │
+      ▼
+native Llama CPU reference graph
+RMSNorm → RoPE/GQA/KV → SwiGLU
+      │
+      ▼
+greedy or seeded sampling
+      │
+      ▼
+streaming / JSON / persistent-history CLI
+```
+
+This adapter is intentionally pinned to one revision of SmolLM2. It loads the verified
+269 MB BF16 checkpoint into reserved RAM and uses FP32 activations. It is a correctness
+oracle for subsequent backends, not a generic Llama compatibility claim.
 
 ## TinyTransformer adapter boundary
 
@@ -170,10 +196,12 @@ router decisions or accepted output tokens.
 - `hardware/`: non-invasive machine probe.
 - `planner/`: conservative capacity and placement plan.
 - `safety/`: reservations, state machine and heartbeat.
-- `model/`: manifest parsing and immutable weight verification.
+- `model/`: manifest/Safetensors parsing, imported-checkpoint verification and immutable
+  model storage.
 - `io/`: bounded asynchronous reads.
 - `research/`: trace-driven cache/traffic simulation.
-- `inference/`: native TinyTransformer loader, tokenizer, KV cache and CPU generation.
+- `inference/`: TinyTransformer and pinned SmolLM2 tokenizers, adapters, KV caches and
+  CPU reference generation.
 - `cli/`: interactive and one-shot model client commands.
 
 The next adapter work must extend this architecture rather than bypass its safety and

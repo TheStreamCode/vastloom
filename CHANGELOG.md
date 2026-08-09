@@ -2,12 +2,27 @@
 
 ## Unreleased
 
+## 0.3.0-alpha.1 — 2026-08-09
+
 - Added a bounded JSON parser and defensive Safetensors catalog/reader.
 - Added a 300 GiB-reserve model store, immutable atomic Hugging Face importer,
   and host-derived real-model runtime policy.
 - Added Windows process memory Job Object support and live commit/headroom checks
   for real-model execution paths.
 - Added `store-info`, `runtime-policy`, and Safetensors-aware `inspect` commands.
+- Added the first genuinely pretrained model adapter, pinned to
+  `HuggingFaceTB/SmolLM2-135M-Instruct` revision
+  `12fd25f77366fa6b3b4b768ec3050bf629380bac`.
+- Added the model's GPT-2 byte-level BPE tokenizer, exact chat template, BF16
+  Safetensors loader, Llama CPU reference kernels, grouped-query attention,
+  incremental KV cache, greedy/seeded generation and persistent chat history.
+- Added trusted Transformers parity fixtures for tokenization, logits, greedy output
+  and multi-turn chat, plus a native real-model self-test.
+- Added bounded process-memory enforcement, six-thread maximum execution,
+  cancellation and full-checkpoint verification by default for the real path.
+
+This milestone proves one real published dense checkpoint on the native CPU path. It
+does not yet include MoE execution, NVMe expert streaming or CUDA.
 
 ## 0.2.0-alpha.2 — 2026-08-09
 

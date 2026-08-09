@@ -2,7 +2,7 @@ cmake_minimum_required(VERSION 3.24)
 
 project(
     stargate_local_ai
-    VERSION 0.2.0
+    VERSION 0.3.0
     DESCRIPTION "Safety-first local inference runtime for oversized MoE models"
     LANGUAGES CXX
 )

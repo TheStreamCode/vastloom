@@ -5,17 +5,12 @@ running open-weight models that are much larger than the host's VRAM and RAM,
 especially Mixture-of-Experts models. It treats **VRAM, RAM and NVMe as an explicit
 model-memory hierarchy** instead of relying on uncontrolled operating-system swap.
 
-> **Current status — `0.2.0-alpha.2`: native end-to-end validation milestone.**
-> Stargate now loads a verified model, tokenizes a prompt, executes a real causal
-> Transformer with an incremental KV cache, samples tokens and exposes an interactive
-> streaming chat CLI. The bundled TinyChat model is deliberately tiny and synthetic;
-> it validates the runtime path but is not a general-purpose LLM. DeepSeek V4 Flash,
-> CUDA and NVMe expert streaming are not implemented yet.
-
-The development branch after alpha.2 also contains a bounded Safetensors inspector,
-an immutable external model store and a pinned importer for the first real-model
-target. These are storage/metadata foundations only; real SmolLM2 generation is not
-claimed until its native adapter passes reference parity.
+> **Current status — `0.3.0-alpha.1`: first real open-weight model milestone.**
+> Stargate runs the published `HuggingFaceTB/SmolLM2-135M-Instruct` checkpoint through
+> a native CPU tokenizer, Llama reference implementation, incremental KV cache and
+> multi-turn chat CLI. Tokenization, logits and deterministic responses match a pinned
+> Transformers reference. DeepSeek V4 Flash, CUDA, real MoE execution and NVMe expert
+> streaming are not implemented yet.
 
 ## Reference target
 
@@ -30,9 +25,27 @@ The first consumer reference machine is:
 The engine is not hard-coded for that PC. Hardware is probed at runtime and every
 allocation plan is derived from detected capacity and conservative headroom.
 
-## What works in alpha.2
+## What works in alpha.3
 
-### Native token-generation path
+### Real pretrained model path
+
+- **Pinned checkpoint:** `HuggingFaceTB/SmolLM2-135M-Instruct` at revision
+  `12fd25f77366fa6b3b4b768ec3050bf629380bac`, imported outside the repository.
+- **Immutable import and verification:** bounded downloads, exact file sizes and
+  SHA-256, temporary artifacts and atomic publication into the external model store.
+- **Native tokenizer and template:** GPT-2 byte-level BPE, Unicode/Italian prompts and
+  the model's exact chat framing.
+- **CPU reference inference:** BF16 weights, FP32 activations, RMSNorm, RoPE,
+  grouped-query causal attention, SwiGLU and tied output embeddings.
+- **Generation and chat:** greedy or seeded top-k sampling, incremental KV cache,
+  persistent multi-turn history, streaming, JSON, timeout and Ctrl+C cancellation.
+- **Reference parity:** exact token IDs and greedy outputs, with final-token logits
+  matching the pinned Transformers reference within the declared tolerance.
+- **Fail-closed runtime:** full checkpoint verification by default, Resource Governor
+  reservations, live memory-headroom checks, Windows Job Object cap and at most six
+  CPU inference threads.
+
+### Synthetic validation path retained
 
 - **TinyTransformer v1 adapter:** strict binary parser, bounded dimensions, exact
   tensor-layout validation and finite-weight checks.
@@ -169,6 +182,29 @@ Interactive commands:
 The TinyChat fixture is intentionally stateless. The CLI keeps command state and the
 latest metrics, but it does not concatenate conversation history for this model.
 
+## Chat with the real SmolLM2 checkpoint
+
+Initialize the external store and import the pinned checkpoint. Model files remain
+outside Git and are published only after size and SHA-256 validation:
+
+```powershell
+stargate store-init C:\StargateModels --reserve 300GiB
+python tools\import_hf_model.py --model smollm2 --store C:\StargateModels
+```
+
+Then validate and chat with the imported directory:
+
+```powershell
+$model = 'C:\StargateModels\models\original\HuggingFaceTB-SmolLM2-135M-Instruct--12fd25f77366fa6b3b4b768ec3050bf629380bac'
+stargate model-info $model --json
+stargate self-test $model --json
+stargate chat $model
+```
+
+The real adapter supports conversation history and `/clear`, `/stats`, `/model`,
+`/help` and `/exit`. Hash verification is enabled by default; `--no-verify` exists
+only for repeated local development tests.
+
 ## TinyChat CLI options
 
 ```text
@@ -234,6 +270,8 @@ stargate io-smoke FILE
 stargate store-init PATH [--reserve 300GiB]
 stargate store-info PATH [--reserve 300GiB]
 stargate runtime-policy [--storage PATH] [--json]
+stargate tokenize MODEL_DIRECTORY --text TEXT [--chat] [--json]
+stargate real-logits MODEL_DIRECTORY --text TEXT [--chat] [--top N] [--json]
 stargate heartbeat-write PATH
 stargate version
 ```
@@ -274,8 +312,10 @@ Stargate follows these rules before performance work begins:
 7. Degrade prefetch, cache and speculation before aborting a generation.
 8. Abort a generation before risking an OS freeze, disk exhaustion or corrupt state.
 
-The TinyTransformer path also bounds model dimensions, metadata, file size, context,
-generation length and timeout before allocating execution buffers. See
+Both inference paths bound model dimensions, metadata, file size, context, generation
+length and timeout before allocating execution buffers. The real-model path additionally
+keeps 8 GiB of current RAM availability for the host, caps itself to half physical RAM,
+requires 300 GiB free-storage headroom and refuses the load if reservations fail. See
 [`docs/SAFETY.md`](docs/SAFETY.md).
 
 ## Reference planning result
@@ -298,15 +338,15 @@ checkpoint.
 
 ## Current limitations
 
-Alpha.2 proves the native execution plumbing, not the final Stargate research thesis.
+Alpha.3 proves one real dense CPU path, not the final Stargate research thesis.
 It currently has:
 
-- no DeepSeek, MiniMax, Kimi, GGUF or Hugging Face model adapter;
+- only one pinned Hugging Face adapter; no DeepSeek, MiniMax, Kimi or GGUF adapter;
 - no CUDA, ROCm, Vulkan or Metal inference backend;
 - no production quantized kernels;
 - no VRAM/RAM/NVMe tensor paging during token generation;
 - no MoE router or expert execution in the token path;
-- no multi-turn history in the bundled fixture;
+- no persistent KV reuse between chat turns; history is currently recomputed;
 - no local HTTP API yet.
 
 The TinyChat throughput is not representative of a large model because the complete
@@ -320,17 +360,15 @@ research metric is not merely SSD throughput. It is:
 
 > **How few bytes must be fetched from NVMe for each accepted token?**
 
-The next technical sequence is:
+The next technical sequence is deliberately incremental:
 
-1. exact DeepSeek configuration and Safetensors inspector;
-2. architecture-faithful CPU oracle and tensor fixtures;
+1. pinned small real OLMoE checkpoint, CPU router/expert oracle and exact route traces;
+2. bounded NVMe-to-RAM expert streaming and cache-policy baselines;
 3. CUDA dense, attention, router and packed expert kernels;
-4. explicit VRAM/RAM/NVMe placement;
-5. overlapped storage, PCIe transfer and compute;
-6. routing traces and adaptive expert placement;
-7. predictive router look-ahead;
-8. speculative future-route unions and expert deduplication;
-9. OpenAI-compatible local server and coding-agent integration.
+4. exact DeepSeek V4 Flash checkpoint inspection and architecture adapter;
+5. explicit VRAM/RAM/NVMe placement with overlapped I/O and compute;
+6. adaptive placement, predictive routing and speculative expert deduplication;
+7. OpenAI-compatible local server and coding-agent integration.
 
 Detailed acceptance gates are in [`docs/ROADMAP.md`](docs/ROADMAP.md).
 

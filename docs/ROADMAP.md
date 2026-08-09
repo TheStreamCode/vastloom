@@ -41,7 +41,44 @@ A command existing in the CLI is not enough; it must run against a validated mod
 **Gate:** the native runtime reproduces every registered Python reference response and
 refuses corrupt, truncated, oversized or unsafe inputs without leaking reservations.
 
-## M3 — Exact DeepSeek inspector and architecture-faithful fixture
+## M3 — Real dense reference model — complete in alpha.3
+
+- [x] Pin a published pretrained open-weight checkpoint revision.
+- [x] Import immutable files through temporary artifacts, exact sizes and SHA-256.
+- [x] Parse configuration, tokenizer metadata and Safetensors defensively.
+- [x] Implement the exact tokenizer and chat template.
+- [x] Implement CPU reference attention, MLP, normalization, RoPE and KV cache.
+- [x] Match trusted tokenizer IDs, final logits and greedy output.
+- [x] Exercise multi-turn history, EOS, sampling, context rejection and corruption.
+
+**Gate:** the native pinned SmolLM2 path matches the registered Transformers reference,
+passes full-checkpoint verification and refuses unsafe allocations.
+
+## M4 — Small real MoE reference
+
+- [ ] Pin `allenai/OLMoE-1B-7B-0924-Instruct` to an exact revision.
+- [ ] Validate exact shard sizes, hashes, tensor names, dtypes and shapes.
+- [ ] Implement the checkpoint-compatible tokenizer and chat template.
+- [ ] Implement authoritative top-k routing, routing weights and routed experts.
+- [ ] Compare router logits, expert selections, final logits and tokens with a trusted
+  reference.
+- [ ] Record token/layer/expert/bytes/latency telemetry and repeatable route traces.
+
+**Gate:** every selected expert and registered output agrees with the reference without
+requiring the complete checkpoint to reside in RAM.
+
+## M5 — Real NVMe-to-RAM expert streaming
+
+- [ ] Separate always-active trunk weights from individually addressable experts.
+- [ ] Add bounded expert reads, buffers, cancellation and exact byte accounting.
+- [ ] Implement no-cache, LRU, LFU and static-hot baselines in the real token path.
+- [ ] Inject short reads, missing/corrupt shards, allocation failure and I/O timeout.
+- [ ] Measure NVMe bytes/token, cache hits, reuse distance and I/O stall.
+
+**Gate:** the real small MoE completes safely under a RAM cap below total checkpoint
+size, with no uncontrolled paging or unreserved buffer.
+
+## M6 — Exact DeepSeek inspector and architecture-faithful fixture
 
 - [ ] Select and pin the exact DeepSeek V4 Flash checkpoint revision.
 - [ ] Parse `config.json`, tokenizer metadata and Safetensors headers without loading
@@ -55,7 +92,7 @@ refuses corrupt, truncated, oversized or unsafe inputs without leaking reservati
 **Gate:** every fixture tensor and reference token/logit/route agrees within an explicit
 numerical tolerance before optimization begins.
 
-## M4 — DeepSeek CPU reference inference
+## M7 — DeepSeek CPU reference inference
 
 - [ ] Model-specific tensor loader.
 - [ ] Dense, attention/state, router and routed-expert reference kernels.
@@ -67,7 +104,7 @@ numerical tolerance before optimization begins.
 **Gate:** end-to-end tokens, logits and expert choices match the reference implementation
 on the reduced fixture and selected full-model probes.
 
-## M5 — CUDA path for the RTX 4070 Super
+## M8 — CUDA path for the RTX 4070 Super
 
 - [ ] Native CUDA device capability probe.
 - [ ] Bounded CUDA allocator integrated with Resource Governor.
@@ -79,7 +116,7 @@ on the reduced fixture and selected full-model probes.
 **Gate:** CUDA output passes the same token/logit/route fixtures as CPU, with no
 unbounded allocation and clean recovery from injected CUDA failures.
 
-## M6 — Explicit multitier execution
+## M9 — Explicit multitier execution
 
 - [ ] Tensor placement table and legal state transitions.
 - [ ] Pinned host buffers.
@@ -91,7 +128,7 @@ unbounded allocation and clean recovery from injected CUDA failures.
 **Gate:** the selected target model starts within hard limits and survives injected
 short reads, OOM, cancellation and storage-pressure events.
 
-## M7 — Adaptive expert placement
+## M10 — Adaptive expert placement
 
 - [ ] Per-layer LRU baseline in the real token path.
 - [ ] Frequency, reuse-distance and transfer/compute cost model.
@@ -102,7 +139,7 @@ short reads, OOM, cancellation and storage-pressure events.
 **Gate:** lower NVMe bytes/token than LRU on held-out traces and real prompts, without
 changing target router decisions.
 
-## M8 — Predictive prefetch
+## M11 — Predictive prefetch
 
 - [ ] One-layer router look-ahead.
 - [ ] Transfer deadline model.
@@ -113,7 +150,7 @@ changing target router decisions.
 **Gate:** lower GPU I/O stall and higher accepted tokens/s end-to-end after counting all
 prediction overhead and wasted I/O.
 
-## M9 — Speculative memory and expert superbatching
+## M12 — Speculative memory and expert superbatching
 
 - [ ] Integrate the checkpoint-compatible draft/DSpark/MTP component.
 - [ ] Produce future routing graphs from draft tokens.
@@ -124,7 +161,7 @@ prediction overhead and wasted I/O.
 **Gate:** benefit remains positive after draft compute, extra I/O, rejected tokens and
 verification costs; output remains target-model correct.
 
-## M10 — Local service and agent integration
+## M13 — Local service and agent integration
 
 - [ ] OpenAI-compatible loopback API.
 - [ ] Streaming, cancellation, structured outputs and tool calls.
@@ -135,7 +172,7 @@ verification costs; output remains target-model correct.
 **Gate:** representative coding-agent workloads complete reliably on the reference PC,
 and the server binds to loopback unless remote access is explicitly configured.
 
-## M11 — Model and backend expansion
+## M14 — Model and backend expansion
 
 - [ ] MiniMax-class MoE adapter.
 - [ ] Kimi K3 capacity and traffic benchmark.

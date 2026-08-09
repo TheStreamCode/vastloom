@@ -24,6 +24,7 @@
 #include "stargate/hardware/hardware_probe.hpp"
 #include "stargate/inference/gpt2_tokenizer.hpp"
 #include "stargate/inference/llama_model.hpp"
+#include "stargate/inference/olmoe_model.hpp"
 #include "stargate/io/bounded_io_pool.hpp"
 #include "stargate/model/manifest.hpp"
 #include "stargate/model/imported_checkpoint.hpp"
@@ -213,6 +214,8 @@ void print_help() {
         << "      Exercise the real GPT-2 byte-level tokenizer and SmolLM chat template.\n\n"
         << "  real-logits MODEL_DIRECTORY --text TEXT [--chat] [--top N] [--no-verify] [--json]\n"
         << "      Run the pinned SmolLM2 CPU reference path and report final-token logits.\n\n"
+        << "  moe-inspect MODEL_DIRECTORY [--no-verify] [--json]\n"
+        << "      Validate the pinned OLMoE metadata and estimate safe streaming budgets.\n\n"
         << "  heartbeat-write PATH [--state normal|pressure|critical|emergency]\n"
         << "      Atomically write one watchdog heartbeat for integration tests.\n\n"
         << "  version\n";
@@ -414,6 +417,25 @@ int command_runtime_policy(const std::vector<std::string>& args) {
     return 0;
 }
 
+int command_moe_inspect(const std::vector<std::string>& args) {
+    auto valid = validate_options(args, 1U, {}, {"--no-verify", "--json"});
+    const bool json = has_flag(args, "--json");
+    if (!valid) return print_error(valid.error(), json);
+
+    ByteCount safe_ram_cap = 0U;
+    auto hardware = stargate::hardware::HardwareProbe::collect(args[0]);
+    if (hardware) {
+        auto policy = stargate::safety::make_safe_runtime_policy(hardware.value());
+        if (policy) safe_ram_cap = policy.value().resources.ram_hard_limit;
+    }
+    auto inspection = stargate::inference::inspect_olmoe_checkpoint(
+        args[0], !has_flag(args, "--no-verify"), safe_ram_cap);
+    if (!inspection) return print_error(inspection.error(), json);
+    std::cout << (json ? stargate::inference::to_json(inspection.value())
+                      : stargate::inference::to_text(inspection.value())) << '\n';
+    return 0;
+}
+
 int command_tokenize(const std::vector<std::string>& args) {
     const bool json = has_flag(args, "--json");
     if (args.empty()) return print_error(stargate::make_error(stargate::ErrorCode::invalid_argument, "tokenize requires a model directory"), json);
@@ -425,7 +447,11 @@ int command_tokenize(const std::vector<std::string>& args) {
     if (!tokenizer) return print_error(tokenizer.error(), json);
     std::string input = *text;
     if (has_flag(args, "--chat")) {
-        auto formatted = tokenizer.value().apply_smol_chat_template({{"user", input}}, true);
+        const auto config_path = std::filesystem::path(args[0]) / "config.json";
+        auto olmoe = stargate::inference::load_olmoe_config(config_path);
+        auto formatted = olmoe
+                             ? tokenizer.value().apply_olmoe_chat_template({{"user", input}}, true)
+                             : tokenizer.value().apply_smol_chat_template({{"user", input}}, true);
         if (!formatted) return print_error(formatted.error(), json);
         input = formatted.take_value();
     }
@@ -803,6 +829,7 @@ int dispatch_cli(const std::vector<std::string>& arguments) {
         if (command == "runtime-policy") return command_runtime_policy(args);
         if (command == "tokenize") return command_tokenize(args);
         if (command == "real-logits") return command_real_logits(args);
+        if (command == "moe-inspect") return command_moe_inspect(args);
         if (command == "heartbeat-write") return command_heartbeat_write(args);
         if (command == "version" || command == "--version") {
             std::cout << stargate::kVersion << '\n';

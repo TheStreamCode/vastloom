@@ -132,52 +132,95 @@ std::string merge_key(std::string_view left, std::string_view right) {
 Result<Gpt2Tokenizer> Gpt2Tokenizer::load(const std::filesystem::path& model_directory) {
     const auto vocab_path = model_directory / "vocab.json";
     const auto merges_path = model_directory / "merges.txt";
+    const auto tokenizer_path = model_directory / "tokenizer.json";
     const auto config_path = model_directory / "tokenizer_config.json";
     util::JsonLimits vocab_limits;
     vocab_limits.max_input_bytes = 16U * MiB;
-    vocab_limits.max_nodes = 2U * kMaximumVocabEntries;
+    vocab_limits.max_nodes = 3U * kMaximumVocabEntries;
     vocab_limits.max_object_members = kMaximumVocabEntries;
-    auto vocab_json = util::load_json_file(vocab_path, vocab_limits);
-    if (!vocab_json) return vocab_json.error();
-    auto vocab = vocab_json.value().as_object();
-    if (!vocab || vocab.value()->empty() || vocab.value()->size() > kMaximumVocabEntries) {
-        return make_error(ErrorCode::invalid_format, "Tokenizer vocabulary is invalid", vocab_path.string());
-    }
+    vocab_limits.max_array_elements = kMaximumMergeEntries;
 
     Gpt2Tokenizer result;
-    std::uint64_t maximum_id = 0;
-    std::set<std::uint64_t> ids;
-    for (const auto& [token, id_value] : *vocab.value()) {
-        auto id = id_value.as_u64();
-        if (!id || id.value() >= kMaximumVocabEntries || !ids.insert(id.value()).second) {
-            return make_error(ErrorCode::invalid_format, "Tokenizer vocabulary id is invalid or duplicated", token);
+    std::vector<std::string> inline_merges;
+    const auto populate_vocab = [&](const util::JsonValue::Object& vocab, const std::filesystem::path& source) -> Result<void> {
+        if (vocab.empty() || vocab.size() > kMaximumVocabEntries) {
+            return make_error(ErrorCode::invalid_format, "Tokenizer vocabulary is invalid", source.string());
         }
-        maximum_id = std::max(maximum_id, id.value());
-    }
-    if (maximum_id + 1U != vocab.value()->size()) {
-        return make_error(ErrorCode::invalid_format, "Tokenizer vocabulary ids are not contiguous", vocab_path.string());
-    }
-    result.id_to_token_.resize(static_cast<std::size_t>(maximum_id + 1U));
-    result.special_ids_.resize(result.id_to_token_.size(), false);
-    result.token_to_id_.reserve(vocab.value()->size());
-    for (const auto& [token, id_value] : *vocab.value()) {
-        const auto id = static_cast<std::uint32_t>(id_value.as_u64().value());
-        result.token_to_id_.emplace(token, id);
-        result.id_to_token_[id] = token;
-    }
+        std::uint64_t maximum_id = 0;
+        std::set<std::uint64_t> ids;
+        for (const auto& [token, id_value] : vocab) {
+            auto id = id_value.as_u64();
+            if (!id || id.value() >= kMaximumVocabEntries || !ids.insert(id.value()).second) {
+                return make_error(ErrorCode::invalid_format, "Tokenizer vocabulary id is invalid or duplicated", token);
+            }
+            maximum_id = std::max(maximum_id, id.value());
+        }
+        if (maximum_id + 1U != vocab.size()) {
+            return make_error(ErrorCode::invalid_format, "Tokenizer vocabulary ids are not contiguous", source.string());
+        }
+        result.id_to_token_.resize(static_cast<std::size_t>(maximum_id + 1U));
+        result.special_ids_.resize(result.id_to_token_.size(), false);
+        result.token_to_id_.reserve(vocab.size() + 64U);
+        for (const auto& [token, id_value] : vocab) {
+            const auto id = static_cast<std::uint32_t>(id_value.as_u64().value());
+            result.token_to_id_.emplace(token, id);
+            result.id_to_token_[id] = token;
+        }
+        return {};
+    };
 
     std::error_code file_error;
-    const auto merges_bytes = std::filesystem::file_size(merges_path, file_error);
-    if (file_error || merges_bytes > 64U * MiB) {
-        return make_error(ErrorCode::resource_exhausted, "Tokenizer merges file is missing or too large", merges_path.string());
+    if (std::filesystem::is_regular_file(vocab_path, file_error)) {
+        auto vocab_json = util::load_json_file(vocab_path, vocab_limits);
+        if (!vocab_json) return vocab_json.error();
+        auto vocab = vocab_json.value().as_object();
+        if (!vocab) return make_error(ErrorCode::invalid_format, "Tokenizer vocabulary root is not an object", vocab_path.string());
+        auto populated = populate_vocab(*vocab.value(), vocab_path);
+        if (!populated) return populated.error();
+        result.split_digits_individually_ = true;
+    } else {
+        file_error.clear();
+        auto tokenizer_json = util::load_json_file(tokenizer_path, vocab_limits);
+        if (!tokenizer_json) return tokenizer_json.error();
+        const auto* model_value = tokenizer_json.value().find("model");
+        const auto* pretokenizer_value = tokenizer_json.value().find("pre_tokenizer");
+        const auto* normalizer_value = tokenizer_json.value().find("normalizer");
+        if (model_value == nullptr || pretokenizer_value == nullptr || normalizer_value == nullptr) {
+            return make_error(ErrorCode::invalid_format, "Tokenizer JSON is missing model/pre-tokenizer/normalizer", tokenizer_path.string());
+        }
+        const auto* type_value = model_value->find("type");
+        const auto* vocab_value = model_value->find("vocab");
+        const auto* merges_value = model_value->find("merges");
+        const auto* pre_type_value = pretokenizer_value->find("type");
+        const auto* normalizer_type_value = normalizer_value->find("type");
+        if (type_value == nullptr || vocab_value == nullptr || merges_value == nullptr ||
+            pre_type_value == nullptr || normalizer_type_value == nullptr) {
+            return make_error(ErrorCode::invalid_format, "Tokenizer JSON BPE fields are missing", tokenizer_path.string());
+        }
+        auto type = type_value->as_string();
+        auto vocab = vocab_value->as_object();
+        auto merges = merges_value->as_array();
+        auto pre_type = pre_type_value->as_string();
+        auto normalizer_type = normalizer_type_value->as_string();
+        if (!type || type.value() != "BPE" || !vocab || !merges || merges.value()->size() > kMaximumMergeEntries ||
+            !pre_type || pre_type.value() != "ByteLevel" || !normalizer_type || normalizer_type.value() != "NFC") {
+            return make_error(ErrorCode::unsupported, "Tokenizer JSON is not the supported GPT-NeoX byte BPE", tokenizer_path.string());
+        }
+        auto populated = populate_vocab(*vocab.value(), tokenizer_path);
+        if (!populated) return populated.error();
+        inline_merges.reserve(merges.value()->size());
+        for (const auto& merge_value : *merges.value()) {
+            auto merge = merge_value.as_string();
+            if (!merge) return make_error(ErrorCode::invalid_format, "Tokenizer merge is not a string", tokenizer_path.string());
+            inline_merges.emplace_back(merge.value());
+        }
+        result.split_digits_individually_ = false;
     }
-    std::ifstream merges(merges_path, std::ios::binary);
-    if (!merges) return make_error(ErrorCode::io_error, "Unable to open tokenizer merges", merges_path.string());
-    std::string line;
+
     std::size_t rank = 0;
-    while (std::getline(merges, line)) {
+    const auto add_merge = [&](std::string line) -> Result<void> {
         if (!line.empty() && line.back() == '\r') line.pop_back();
-        if (line.empty() || line.starts_with('#')) continue;
+        if (line.empty() || line.starts_with('#')) return {};
         const auto separator = line.find(' ');
         if (separator == std::string::npos || separator == 0U || separator + 1U >= line.size() ||
             line.find(' ', separator + 1U) != std::string::npos || rank >= kMaximumMergeEntries) {
@@ -187,6 +230,25 @@ Result<Gpt2Tokenizer> Gpt2Tokenizer::load(const std::filesystem::path& model_dir
                                                    std::string_view(line).substr(separator + 1U)),
                                          rank++).second) {
             return make_error(ErrorCode::invalid_format, "Duplicate tokenizer merge entry", line);
+        }
+        return {};
+    };
+    if (!inline_merges.empty()) {
+        for (const auto& merge : inline_merges) {
+            auto added = add_merge(merge);
+            if (!added) return added.error();
+        }
+    } else {
+        const auto merges_bytes = std::filesystem::file_size(merges_path, file_error);
+        if (file_error || merges_bytes > 64U * MiB) {
+            return make_error(ErrorCode::resource_exhausted, "Tokenizer merges file is missing or too large", merges_path.string());
+        }
+        std::ifstream merges(merges_path, std::ios::binary);
+        if (!merges) return make_error(ErrorCode::io_error, "Unable to open tokenizer merges", merges_path.string());
+        std::string line;
+        while (std::getline(merges, line)) {
+            auto added = add_merge(line);
+            if (!added) return added.error();
         }
     }
 
@@ -205,12 +267,22 @@ Result<Gpt2Tokenizer> Gpt2Tokenizer::load(const std::filesystem::path& model_dir
         const auto* content_value = definition.find("content");
         const auto* special_value = definition.find("special");
         if (converted.ec != std::errc{} || converted.ptr != id_text.data() + id_text.size() ||
-            id >= result.id_to_token_.size() || content_value == nullptr || special_value == nullptr) {
+            id > result.id_to_token_.size() || content_value == nullptr || special_value == nullptr) {
             return make_error(ErrorCode::invalid_format, "Tokenizer added-token entry is invalid", id_text);
         }
         auto content = content_value->as_string();
         auto special = special_value->as_bool();
-        if (!content || !special || result.id_to_token_[id] != content.value()) {
+        if (!content || !special) {
+            return make_error(ErrorCode::invalid_format, "Tokenizer added-token entry fields are invalid", id_text);
+        }
+        if (id == result.id_to_token_.size()) {
+            if (result.token_to_id_.contains(std::string(content.value()))) {
+                return make_error(ErrorCode::integrity_error, "Tokenizer appended token duplicates vocabulary", id_text);
+            }
+            result.id_to_token_.emplace_back(content.value());
+            result.special_ids_.push_back(false);
+            result.token_to_id_.emplace(result.id_to_token_.back(), id);
+        } else if (result.id_to_token_[id] != content.value()) {
             return make_error(ErrorCode::integrity_error, "Tokenizer added token does not match vocabulary", id_text);
         }
         if (special.value()) {
@@ -221,6 +293,25 @@ Result<Gpt2Tokenizer> Gpt2Tokenizer::load(const std::filesystem::path& model_dir
     std::sort(result.special_tokens_.begin(), result.special_tokens_.end(), [](const auto& left, const auto& right) {
         return left.content.size() > right.content.size();
     });
+
+    const auto assign_token_id = [&](std::string_view field, std::uint32_t* output) -> Result<void> {
+        const auto* value = config_json.value().find(field);
+        if (value == nullptr) return make_error(ErrorCode::invalid_format, "Tokenizer special-token field is missing", std::string(field));
+        auto content = value->as_string();
+        if (!content) return make_error(ErrorCode::invalid_format, "Tokenizer special-token field is not a string", std::string(field));
+        const auto iterator = result.token_to_id_.find(std::string(content.value()));
+        if (iterator == result.token_to_id_.end()) {
+            return make_error(ErrorCode::integrity_error, "Tokenizer special token is absent from the vocabulary", std::string(field));
+        }
+        *output = iterator->second;
+        return {};
+    };
+    auto bos = assign_token_id("bos_token", &result.bos_token_id_);
+    auto eos = assign_token_id("eos_token", &result.eos_token_id_);
+    auto pad = assign_token_id("pad_token", &result.pad_token_id_);
+    if (!bos) return bos.error();
+    if (!eos) return eos.error();
+    if (!pad) return pad.error();
 
     std::vector<std::uint32_t> byte_values;
     byte_values.reserve(256);
@@ -296,7 +387,7 @@ Result<std::vector<std::string>> Gpt2Tokenizer::pretokenize(std::string_view tex
     std::vector<std::vector<Codepoint>> digit_pieces;
     std::vector<Codepoint> current;
     for (const auto& codepoint : decoded.value()) {
-        if (is_ascii_digit(codepoint)) {
+        if (split_digits_individually_ && is_ascii_digit(codepoint)) {
             if (!current.empty()) {
                 digit_pieces.push_back(std::move(current));
                 current.clear();
@@ -433,6 +524,30 @@ Result<std::string> Gpt2Tokenizer::apply_smol_chat_template(const std::vector<Ch
     }
     if (add_generation_prompt) output += "<|im_start|>assistant\n";
     if (output.size() > kMaximumInputBytes) return make_error(ErrorCode::invalid_argument, "Formatted chat exceeds 16 MiB");
+    return output;
+}
+
+Result<std::string> Gpt2Tokenizer::apply_olmoe_chat_template(const std::vector<ChatMessage>& messages,
+                                                             bool add_generation_prompt) const {
+    if (messages.empty() || messages.size() > kMaximumMessages || bos_token_id_ >= id_to_token_.size() ||
+        eos_token_id_ >= id_to_token_.size()) {
+        return make_error(ErrorCode::invalid_argument, "OLMoE chat requires between 1 and 1024 messages");
+    }
+    std::string output = id_to_token_[bos_token_id_];
+    for (const auto& message : messages) {
+        if ((message.role != "system" && message.role != "user" && message.role != "assistant") ||
+            message.content.size() > kMaximumInputBytes) {
+            return make_error(ErrorCode::invalid_argument, "Invalid OLMoE chat role or oversized message", message.role);
+        }
+        output += "<|";
+        output += message.role;
+        output += "|>\n";
+        output += message.content;
+        if (message.role == "assistant") output += id_to_token_[eos_token_id_];
+        output.push_back('\n');
+    }
+    if (add_generation_prompt) output += "<|assistant|>\n";
+    if (output.size() > kMaximumInputBytes) return make_error(ErrorCode::invalid_argument, "Formatted OLMoE chat exceeds 16 MiB");
     return output;
 }
 

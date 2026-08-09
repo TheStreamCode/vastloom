@@ -14,6 +14,7 @@
 #include "stargate/hardware/hardware_probe.hpp"
 #include "stargate/inference/gpt2_tokenizer.hpp"
 #include "stargate/inference/llama_model.hpp"
+#include "stargate/inference/olmoe_model.hpp"
 #include "stargate/inference/tiny_model.hpp"
 #include "stargate/io/bounded_io_pool.hpp"
 #include "stargate/model/manifest.hpp"
@@ -169,6 +170,21 @@ void test_imported_checkpoint_and_llama_config(const std::filesystem::path& root
     CHECK(!stargate::inference::load_llama_config(config_path));
 }
 
+void test_olmoe_config(const std::filesystem::path& root) {
+    const auto path = root / "olmoe-config.json";
+    {
+        std::ofstream config(path);
+        config << R"({"architectures":["OlmoeForCausalLM"],"attention_bias":false,"clip_qkv":null,"eos_token_id":50279,"hidden_act":"silu","hidden_size":2048,"intermediate_size":1024,"max_position_embeddings":4096,"model_type":"olmoe","norm_topk_prob":false,"num_attention_heads":16,"num_experts":64,"num_experts_per_tok":8,"num_hidden_layers":16,"num_key_value_heads":16,"pad_token_id":1,"rope_scaling":null,"rope_theta":10000.0,"tie_word_embeddings":false,"torch_dtype":"bfloat16","vocab_size":50304})";
+    }
+    auto config = stargate::inference::load_olmoe_config(path);
+    CHECK(config && config.value().num_experts == 64U && config.value().num_experts_per_token == 8U);
+    {
+        std::ofstream invalid(path, std::ios::trunc);
+        invalid << R"({"architectures":["OlmoeForCausalLM"],"model_type":"olmoe","hidden_act":"silu","torch_dtype":"bfloat16"})";
+    }
+    CHECK(!stargate::inference::load_olmoe_config(path));
+}
+
 void test_model_store_and_runtime_policy(const std::filesystem::path& root) {
     auto store = stargate::model::ModelStore::initialize(root / "model-store", {20U * stargate::GiB});
     CHECK(store);
@@ -211,7 +227,7 @@ void test_gpt2_tokenizer(const std::filesystem::path& root) {
     }
     {
         std::ofstream config(tokenizer_root / "tokenizer_config.json");
-        config << R"({"added_tokens_decoder":{"0":{"content":"<|endoftext|>","special":true},"1":{"content":"<|im_start|>","special":true},"2":{"content":"<|im_end|>","special":true}}})";
+        config << R"({"bos_token":"<|im_start|>","eos_token":"<|im_end|>","pad_token":"<|im_end|>","added_tokens_decoder":{"0":{"content":"<|endoftext|>","special":true},"1":{"content":"<|im_start|>","special":true},"2":{"content":"<|im_end|>","special":true}}})";
     }
     auto tokenizer = stargate::inference::Gpt2Tokenizer::load(tokenizer_root);
     CHECK(tokenizer && tokenizer.value().vocab_size() == 11U);
@@ -556,6 +572,7 @@ int main() {
     test_bounded_json();
     test_safetensors(root);
     test_imported_checkpoint_and_llama_config(root);
+    test_olmoe_config(root);
     test_model_store_and_runtime_policy(root);
     test_gpt2_tokenizer(root);
     test_manifest_and_verifier(root);

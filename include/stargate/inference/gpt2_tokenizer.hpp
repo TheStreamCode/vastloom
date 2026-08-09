@@ -27,6 +27,8 @@ public:
                                              bool skip_special_tokens = true) const;
     [[nodiscard]] Result<std::string> apply_smol_chat_template(const std::vector<ChatMessage>& messages,
                                                                bool add_generation_prompt = true) const;
+    [[nodiscard]] Result<std::string> apply_olmoe_chat_template(const std::vector<ChatMessage>& messages,
+                                                                bool add_generation_prompt = true) const;
 
     [[nodiscard]] std::size_t vocab_size() const noexcept { return id_to_token_.size(); }
     [[nodiscard]] std::uint32_t bos_token_id() const noexcept { return bos_token_id_; }
@@ -53,6 +55,7 @@ private:
     std::uint32_t bos_token_id_{1};
     std::uint32_t eos_token_id_{2};
     std::uint32_t pad_token_id_{2};
+    bool split_digits_individually_{true};
 };
 
 }  // namespace stargate::inference

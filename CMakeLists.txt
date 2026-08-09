@@ -12,6 +12,7 @@ option(STARGATE_ENABLE_SANITIZERS "Enable AddressSanitizer and UndefinedBehavior
 option(STARGATE_ENABLE_THREAD_SANITIZER "Enable ThreadSanitizer" OFF)
 option(STARGATE_WARNINGS_AS_ERRORS "Treat compiler warnings as errors" OFF)
 set(STARGATE_SMOLLM2_MODEL "" CACHE PATH "Optional external pinned SmolLM2 checkpoint for full reference tests")
+set(STARGATE_OLMOE_MODEL "" CACHE PATH "Optional external pinned OLMoE checkpoint or metadata import for inspection tests")
 
 if(STARGATE_ENABLE_SANITIZERS AND STARGATE_ENABLE_THREAD_SANITIZER)
     message(FATAL_ERROR "AddressSanitizer and ThreadSanitizer must use separate builds")
@@ -27,6 +28,7 @@ add_library(stargate_core STATIC
     src/hardware/hardware_probe.cpp
     src/inference/gpt2_tokenizer.cpp
     src/inference/llama_model.cpp
+    src/inference/olmoe_model.cpp
     src/inference/tiny_model.cpp
     src/io/bounded_io_pool.cpp
     src/model/imported_checkpoint.cpp
@@ -130,6 +132,16 @@ if(BUILD_TESTING AND STARGATE_BUILD_TESTS)
                     --fixture ${CMAKE_CURRENT_SOURCE_DIR}/tests/fixtures/smollm2_reference.json
             )
             set_tests_properties(stargate_smollm2_reference PROPERTIES TIMEOUT 300)
+        endif()
+        if(STARGATE_OLMOE_MODEL)
+            add_test(
+                NAME stargate_olmoe_inspection
+                COMMAND ${Python3_EXECUTABLE}
+                    ${CMAKE_CURRENT_SOURCE_DIR}/tests/test_olmoe_cli.py
+                    --stargate $<TARGET_FILE:stargate>
+                    --model ${STARGATE_OLMOE_MODEL}
+            )
+            set_tests_properties(stargate_olmoe_inspection PROPERTIES TIMEOUT 60)
         endif()
     else()
         message(STATUS "Python3 not found; skipping TinyChat CLI integration test")

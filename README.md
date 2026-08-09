@@ -54,6 +54,8 @@ Measured results and limitations are recorded in the
 [`Alpha 4.2 async-I/O report`](docs/reports/ALPHA4_ASYNC_IO_VALIDATION.md). The newest
 reader, counter and reuse-distance results are in the
 [`Alpha 4.3 I/O-observability report`](docs/reports/ALPHA4_IO_OBSERVABILITY_VALIDATION.md).
+The rebrand, compatibility, packaging and open-source readiness checks are recorded in the
+[`Alpha 4 open-source validation report`](docs/reports/ALPHA4_OPEN_SOURCE_REBRAND_VALIDATION.md).
 
 ## Reference target
 
@@ -68,7 +70,7 @@ The first consumer reference machine is:
 The engine is not hard-coded for that PC. Hardware is probed at runtime and every
 allocation plan is derived from detected capacity and conservative headroom.
 
-## What works in alpha.4.4
+## What works in alpha.4
 
 ### Real pretrained model path
 

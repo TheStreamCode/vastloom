@@ -160,7 +160,7 @@ supplied explicitly before it can terminate a stale runtime.
 The alpha.2 TinyChat CLI does not yet publish a continuous generation heartbeat; that
 integration remains required before long-running large-model inference.
 
-## Tests implemented through alpha.4.4
+## Tests implemented through alpha.4
 
 - allocation oversubscription and reservation release;
 - critical/emergency state escalation and hysteretic recovery;

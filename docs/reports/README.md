@@ -10,3 +10,9 @@ the already-downloaded model stores and checkpoint manifests usable without muta
 
 Start with the newest report for current claims, then consult milestone-specific reports for exact
 hardware, commands, measurements and limitations.
+
+## Current report
+
+- [`ALPHA4_OPEN_SOURCE_REBRAND_VALIDATION.md`](ALPHA4_OPEN_SOURCE_REBRAND_VALIDATION.md) —
+  Vastloom rebrand, compatibility, governance, release packaging, visual assets and final
+  cross-platform validation.

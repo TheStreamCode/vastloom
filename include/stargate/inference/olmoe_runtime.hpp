@@ -15,6 +15,7 @@
 #include "stargate/core/status.hpp"
 #include "stargate/inference/gpt2_tokenizer.hpp"
 #include "stargate/inference/olmoe_model.hpp"
+#include "stargate/io/bounded_io_pool.hpp"
 #include "stargate/model/safetensors.hpp"
 #include "stargate/safety/resource_governor.hpp"
 #include "stargate/safety/runtime_policy.hpp"
@@ -28,8 +29,15 @@ enum class ExpertCachePolicy : std::uint8_t {
     static_hot,
 };
 
+enum class ExpertIoMode : std::uint8_t {
+    synchronous,
+    asynchronous,
+};
+
 [[nodiscard]] Result<ExpertCachePolicy> parse_expert_cache_policy(std::string_view value);
 [[nodiscard]] std::string_view to_string(ExpertCachePolicy policy) noexcept;
+[[nodiscard]] Result<ExpertIoMode> parse_expert_io_mode(std::string_view value);
+[[nodiscard]] std::string_view to_string(ExpertIoMode mode) noexcept;
 
 struct OlmoeRuntimeLoadOptions {
     bool verify_hashes{true};
@@ -39,6 +47,10 @@ struct OlmoeRuntimeLoadOptions {
 struct OlmoeForwardOptions {
     ExpertCachePolicy cache_policy{ExpertCachePolicy::lru};
     ByteCount expert_cache_bytes{256U * MiB};
+    ExpertIoMode io_mode{ExpertIoMode::synchronous};
+    std::size_t prefetch_depth{1U};
+    std::chrono::milliseconds io_request_timeout{std::chrono::seconds(30)};
+    io::IoFaultInjection io_fault;
     std::chrono::milliseconds timeout{std::chrono::minutes(10)};
     std::function<bool()> cancelled;
 };
@@ -49,8 +61,11 @@ struct ExpertTraceEvent {
     std::uint32_t expert{0};
     float routing_weight{0.0F};
     bool ram_cache_hit{false};
+    bool prefetched{false};
     ByteCount bytes_read{0};
     double io_ms{0.0};
+    double prefetch_wait_ms{0.0};
+    double prefetch_overlap_ms{0.0};
 };
 
 struct OlmoeForwardStats {
@@ -61,6 +76,9 @@ struct OlmoeForwardStats {
     double expert_io_ms{0.0};
     std::size_t expert_cache_hits{0};
     std::size_t expert_cache_misses{0};
+    std::size_t expert_prefetches{0};
+    double expert_prefetch_wait_ms{0.0};
+    double expert_prefetch_overlap_ms{0.0};
 };
 
 struct OlmoeForwardResult {
@@ -103,6 +121,12 @@ public:
         WeightView up;
         WeightView down;
     };
+    struct ExpertTensorRead {
+        std::filesystem::path path;
+        ByteCount absolute_offset{0U};
+        ByteCount byte_count{0U};
+        std::size_t element_offset{0U};
+    };
 
     OlmoeRuntimeModel() = default;
     OlmoeRuntimeModel(const OlmoeRuntimeModel&) = delete;
@@ -122,6 +146,8 @@ public:
         const safety::ProcessSafetyGuard* process_guard = nullptr) const;
 
     [[nodiscard]] Result<ExpertWeights> read_expert(std::uint32_t layer, std::uint32_t expert) const;
+    [[nodiscard]] Result<std::array<ExpertTensorRead, 3>> expert_read_plan(
+        std::uint32_t layer, std::uint32_t expert) const;
     [[nodiscard]] const OlmoeConfig& config() const noexcept { return config_; }
     [[nodiscard]] const Gpt2Tokenizer& tokenizer() const noexcept { return tokenizer_; }
     [[nodiscard]] ByteCount resident_bytes() const noexcept { return static_cast<ByteCount>(resident_.size()) * 2U; }

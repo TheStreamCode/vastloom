@@ -146,6 +146,21 @@ Result<float> optional_float(const std::vector<std::string>& args, std::string_v
     return parsed;
 }
 
+Result<stargate::io::IoFaultInjection> parse_io_fault(std::string_view value) {
+    const auto normalized = stargate::util::to_lower(stargate::util::trim(value));
+    stargate::io::IoFaultInjection result;
+    result.request_sequence = 1U;
+    if (normalized.empty() || normalized == "none") result.kind = stargate::io::IoFaultKind::none;
+    else if (normalized == "fail") result.kind = stargate::io::IoFaultKind::fail;
+    else if (normalized == "short-read") result.kind = stargate::io::IoFaultKind::short_read;
+    else if (normalized == "allocation") result.kind = stargate::io::IoFaultKind::allocation;
+    else if (normalized == "cancelled") result.kind = stargate::io::IoFaultKind::cancelled;
+    else if (normalized == "timeout") result.kind = stargate::io::IoFaultKind::timeout;
+    else return stargate::make_error(stargate::ErrorCode::invalid_argument,
+                                     "Unknown OLMoE I/O fault injection mode", std::string(value));
+    return result;
+}
+
 Result<void> validate_options(const std::vector<std::string>& args,
                               std::size_t positional_count,
                               std::initializer_list<std::string_view> value_options,
@@ -219,6 +234,7 @@ void print_help() {
         << "      Validate the pinned OLMoE metadata and estimate safe streaming budgets.\n\n"
         << "  moe-logits MODEL_DIRECTORY --text TEXT [--chat] [--top N]\n"
         << "       [--cache no-cache|lru|lfu|static-hot] [--cache-bytes SIZE]\n"
+        << "       [--io sync|async] [--prefetch-depth 1|2] [--io-timeout-ms N]\n"
         << "       [--timeout-ms N] [--trace PATH] [--no-verify] [--json]\n"
         << "      Run the OLMoE CPU oracle with bounded NVMe expert streaming.\n\n"
         << "  heartbeat-write PATH [--state normal|pressure|critical|emergency]\n"
@@ -376,7 +392,11 @@ int command_io_smoke(const std::vector<std::string>& args) {
     limits.staging_hard_limit = std::max<ByteCount>(size.value(), 16U * stargate::MiB);
     limits.scratch_hard_limit = 1U * stargate::GiB;
     stargate::safety::ResourceGovernor governor(limits);
-    stargate::io::BoundedIoPool pool({2, 8, limits.staging_hard_limit}, governor);
+    stargate::io::IoPoolOptions pool_options;
+    pool_options.workers = 2U;
+    pool_options.max_queued_requests = 8U;
+    pool_options.max_request_bytes = limits.staging_hard_limit;
+    stargate::io::BoundedIoPool pool(pool_options, governor);
     auto submitted = pool.submit_read(args[0], offset.value(), size.value(), "cli-io-smoke");
     if (!submitted) return print_error(submitted.error());
     auto result = submitted.value().get();
@@ -452,12 +472,15 @@ Result<void> write_olmoe_trace_atomic(const std::filesystem::path& path,
     {
         std::ofstream output(partial, std::ios::binary | std::ios::trunc);
         if (!output) return stargate::make_error(stargate::ErrorCode::io_error, "Unable to create OLMoE trace staging file", partial);
-        output << "token,layer,expert,size_bytes,routing_weight,tier,hit,bytes_read,io_ms\n";
+        output << "token,layer,expert,size_bytes,routing_weight,tier,hit,bytes_read,io_ms,"
+                  "prefetched,prefetch_wait_ms,prefetch_overlap_ms\n";
         output.precision(9);
         for (const auto& event : events) {
             output << event.token_position << ',' << event.layer << ',' << event.expert << ',' << (12U * stargate::MiB) << ','
                    << event.routing_weight << ',' << (event.ram_cache_hit ? "ram" : "nvme") << ','
-                   << (event.ram_cache_hit ? 1 : 0) << ',' << event.bytes_read << ',' << event.io_ms << '\n';
+                   << (event.ram_cache_hit ? 1 : 0) << ',' << event.bytes_read << ',' << event.io_ms << ','
+                   << (event.prefetched ? 1 : 0) << ',' << event.prefetch_wait_ms << ','
+                   << event.prefetch_overlap_ms << '\n';
         }
         output.flush();
         if (!output) {
@@ -475,7 +498,8 @@ Result<void> write_olmoe_trace_atomic(const std::filesystem::path& path,
 
 int command_moe_logits(const std::vector<std::string>& args) {
     auto valid = validate_options(args, 1U,
-                                  {"--text", "--top", "--cache", "--cache-bytes", "--timeout-ms", "--trace"},
+                                  {"--text", "--top", "--cache", "--cache-bytes", "--io", "--prefetch-depth",
+                                   "--io-timeout-ms", "--inject-io-fault", "--timeout-ms", "--trace"},
                                   {"--chat", "--no-verify", "--json"});
     const bool json = has_flag(args, "--json");
     if (!valid) return print_error(valid.error(), json);
@@ -485,12 +509,30 @@ int command_moe_logits(const std::vector<std::string>& args) {
     auto timeout = optional_size(args, "--timeout-ms", 600'000U);
     auto cache_bytes = optional_bytes(args, "--cache-bytes", 256U * stargate::MiB);
     auto cache_policy = stargate::inference::parse_expert_cache_policy(option_value(args, "--cache").value_or("lru"));
+    auto io_mode = stargate::inference::parse_expert_io_mode(option_value(args, "--io").value_or("sync"));
+    auto prefetch_depth = optional_size(args, "--prefetch-depth", 1U);
+    auto io_timeout = optional_size(args, "--io-timeout-ms", 30'000U);
+    auto io_fault = parse_io_fault(option_value(args, "--inject-io-fault").value_or("none"));
     if (!top) return print_error(top.error(), json);
     if (!timeout) return print_error(timeout.error(), json);
     if (!cache_bytes) return print_error(cache_bytes.error(), json);
     if (!cache_policy) return print_error(cache_policy.error(), json);
+    if (!io_mode) return print_error(io_mode.error(), json);
+    if (!prefetch_depth) return print_error(prefetch_depth.error(), json);
+    if (!io_timeout) return print_error(io_timeout.error(), json);
+    if (!io_fault) return print_error(io_fault.error(), json);
     if (top.value() == 0U || top.value() > 100U || timeout.value() == 0U || timeout.value() > 3'600'000U) {
         return print_error(stargate::make_error(stargate::ErrorCode::invalid_argument, "OLMoE top/timeout option is outside safe bounds"), json);
+    }
+    if (prefetch_depth.value() == 0U || prefetch_depth.value() > 2U ||
+        io_timeout.value() == 0U || io_timeout.value() > 60'000U) {
+        return print_error(stargate::make_error(stargate::ErrorCode::invalid_argument,
+                                                "OLMoE prefetch/I/O-timeout option is outside safe bounds"), json);
+    }
+    if (io_mode.value() == stargate::inference::ExpertIoMode::synchronous &&
+        io_fault.value().kind != stargate::io::IoFaultKind::none) {
+        return print_error(stargate::make_error(stargate::ErrorCode::invalid_argument,
+                                                "--inject-io-fault requires --io async"), json);
     }
 
     auto hardware = stargate::hardware::HardwareProbe::collect(args[0]);
@@ -517,6 +559,10 @@ int command_moe_logits(const std::vector<std::string>& args) {
     stargate::inference::OlmoeForwardOptions options;
     options.cache_policy = cache_policy.value();
     options.expert_cache_bytes = cache_bytes.value();
+    options.io_mode = io_mode.value();
+    options.prefetch_depth = prefetch_depth.value();
+    options.io_request_timeout = std::chrono::milliseconds(io_timeout.value());
+    options.io_fault = io_fault.value();
     options.timeout = std::chrono::milliseconds(timeout.value());
     options.cancelled = [] { return real_generation_cancelled != 0; };
     real_generation_cancelled = 0;
@@ -552,10 +598,15 @@ int command_moe_logits(const std::vector<std::string>& args) {
                       << forwarded.value().logits[order[index]] << '}';
         }
         std::cout << "],\"cache_policy\":\"" << stargate::inference::to_string(options.cache_policy)
-                  << "\",\"expert_cache_hits\":" << forwarded.value().stats.expert_cache_hits
+                  << "\",\"io_mode\":\"" << stargate::inference::to_string(options.io_mode)
+                  << "\",\"prefetch_depth\":" << options.prefetch_depth
+                  << ",\"expert_cache_hits\":" << forwarded.value().stats.expert_cache_hits
                   << ",\"expert_cache_misses\":" << forwarded.value().stats.expert_cache_misses
+                  << ",\"expert_prefetches\":" << forwarded.value().stats.expert_prefetches
                   << ",\"expert_bytes_read\":" << forwarded.value().stats.expert_bytes_read
                   << ",\"expert_io_ms\":" << forwarded.value().stats.expert_io_ms
+                  << ",\"expert_prefetch_wait_ms\":" << forwarded.value().stats.expert_prefetch_wait_ms
+                  << ",\"expert_prefetch_overlap_ms\":" << forwarded.value().stats.expert_prefetch_overlap_ms
                   << ",\"load_ms\":" << forwarded.value().stats.load_ms
                   << ",\"forward_ms\":" << forwarded.value().stats.forward_ms
                   << ",\"trace_events\":" << forwarded.value().trace.size() << "}\n";
@@ -566,7 +617,10 @@ int command_moe_logits(const std::vector<std::string>& args) {
         }
         std::cout << "Expert I/O: " << stargate::format_bytes(forwarded.value().stats.expert_bytes_read)
                   << ", hits/misses " << forwarded.value().stats.expert_cache_hits << '/'
-                  << forwarded.value().stats.expert_cache_misses << ", forward "
+                  << forwarded.value().stats.expert_cache_misses << ", "
+                  << stargate::inference::to_string(options.io_mode) << " prefetches "
+                  << forwarded.value().stats.expert_prefetches << ", overlap "
+                  << forwarded.value().stats.expert_prefetch_overlap_ms << " ms, forward "
                   << forwarded.value().stats.forward_ms << " ms\n";
     }
     return 0;

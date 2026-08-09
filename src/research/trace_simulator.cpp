@@ -79,8 +79,10 @@ Result<std::vector<TraceRecord>> load_trace(const std::filesystem::path& path, s
         const auto trimmed = util::trim(line);
         if (trimmed.empty() || trimmed[0] == '#') continue;
         const auto fields = util::split(trimmed, ',', true);
-        if (fields.size() != 4U && fields.size() != 9U) {
-            return make_error(ErrorCode::invalid_format, "Trace rows require four baseline fields or nine telemetry fields", "line " + std::to_string(line_number));
+        if (fields.size() != 4U && fields.size() != 9U && fields.size() != 12U) {
+            return make_error(ErrorCode::invalid_format,
+                              "Trace rows require four baseline fields, nine legacy telemetry fields or twelve telemetry fields",
+                              "line " + std::to_string(line_number));
         }
         if (util::to_lower(util::trim(fields[0])) == "token") {
             if (header_seen || !records.empty() || util::to_lower(util::trim(fields[1])) != "layer" ||
@@ -99,7 +101,7 @@ Result<std::vector<TraceRecord>> load_trace(const std::filesystem::path& path, s
         auto layer = parse_u64(fields[1], "layer"); if (!layer || layer.value() > std::numeric_limits<std::uint32_t>::max()) return make_error(ErrorCode::invalid_format, "Layer is outside uint32 range", "line " + std::to_string(line_number));
         auto expert = parse_u64(fields[2], "expert"); if (!expert || expert.value() > std::numeric_limits<std::uint32_t>::max()) return make_error(ErrorCode::invalid_format, "Expert is outside uint32 range", "line " + std::to_string(line_number));
         auto record_size = parse_bytes(fields[3]); if (!record_size || record_size.value() == 0) return make_error(ErrorCode::invalid_format, "Expert size must be greater than zero", "line " + std::to_string(line_number));
-        if (fields.size() == 9U) {
+        if (fields.size() >= 9U) {
             auto routing_weight = parse_nonnegative_double(fields[4], "routing_weight");
             const auto tier = util::to_lower(util::trim(fields[5]));
             auto hit = parse_u64(fields[6], "hit");
@@ -111,6 +113,16 @@ Result<std::vector<TraceRecord>> load_trace(const std::filesystem::path& path, s
                 (hit.value() == 1U && bytes_read.value() != 0U) ||
                 (hit.value() == 0U && bytes_read.value() == 0U)) {
                 return make_error(ErrorCode::invalid_format, "Invalid extended telemetry fields", "line " + std::to_string(line_number));
+            }
+            if (fields.size() == 12U) {
+                auto prefetched = parse_u64(fields[9], "prefetched");
+                auto prefetch_wait_ms = parse_nonnegative_double(fields[10], "prefetch_wait_ms");
+                auto prefetch_overlap_ms = parse_nonnegative_double(fields[11], "prefetch_overlap_ms");
+                if (!prefetched || prefetched.value() > 1U || !prefetch_wait_ms || !prefetch_overlap_ms ||
+                    (hit.value() == 1U && prefetched.value() != 0U)) {
+                    return make_error(ErrorCode::invalid_format, "Invalid prefetch telemetry fields",
+                                      "line " + std::to_string(line_number));
+                }
             }
         }
 

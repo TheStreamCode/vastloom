@@ -379,13 +379,21 @@ void test_io_pool(const std::filesystem::path& root) {
     limits.staging_hard_limit = 8U * stargate::MiB;
     limits.scratch_hard_limit = 64U * stargate::MiB;
     stargate::safety::ResourceGovernor governor(limits);
-    stargate::io::BoundedIoPool pool({2, 4, 4U * stargate::MiB}, governor);
+    stargate::io::IoPoolOptions pool_options;
+    pool_options.workers = 2U;
+    pool_options.max_queued_requests = 4U;
+    pool_options.max_request_bytes = 4U * stargate::MiB;
+    stargate::io::BoundedIoPool pool(pool_options, governor);
     auto request = pool.submit_read(path, 1024, 2048, "test-read");
     CHECK(request);
     if (request) {
         auto result = request.value().get();
         CHECK(result && result.value().bytes.size() == 2048U);
-        CHECK(std::to_integer<unsigned char>(result.value().bytes.front()) == static_cast<unsigned char>(1024 % 251));
+        if (result) {
+            CHECK(std::to_integer<unsigned char>(result.value().bytes.front()) == static_cast<unsigned char>(1024 % 251));
+            CHECK(result.value().request_sequence == 1U);
+            CHECK(result.value().timing.total_ms >= result.value().timing.service_ms);
+        }
     }
     auto out_of_bounds = pool.submit_read(path, 4090, 64, "out-of-bounds");
     CHECK(out_of_bounds);
@@ -395,6 +403,44 @@ void test_io_pool(const std::filesystem::path& root) {
     }
     auto too_large = pool.submit_read(path, 0, 5U * stargate::MiB, "too-large");
     CHECK(!too_large);
+
+    const std::array fault_kinds{
+        stargate::io::IoFaultKind::fail,
+        stargate::io::IoFaultKind::short_read,
+        stargate::io::IoFaultKind::allocation,
+        stargate::io::IoFaultKind::cancelled,
+        stargate::io::IoFaultKind::timeout,
+    };
+    for (const auto kind : fault_kinds) {
+        stargate::io::IoPoolOptions options;
+        options.workers = 1U;
+        options.max_queued_requests = 1U;
+        options.max_request_bytes = 4U * stargate::KiB;
+        options.request_timeout = kind == stargate::io::IoFaultKind::timeout
+                                      ? std::chrono::milliseconds(1)
+                                      : std::chrono::seconds(1);
+        options.fault = {kind, 1U, kind == stargate::io::IoFaultKind::timeout
+                                       ? std::chrono::milliseconds(5)
+                                       : std::chrono::milliseconds(0)};
+        stargate::io::BoundedIoPool fault_pool(options, governor);
+        auto fault_request = fault_pool.submit_read(path, 0U, 1024U, "injected-read");
+        CHECK(fault_request);
+        if (fault_request) {
+            auto result = fault_request.value().get();
+            CHECK(!result);
+        }
+        fault_pool.shutdown();
+        CHECK(governor.snapshot().reserved[2] == 0U);
+    }
+    stargate::io::IoPoolOptions cancelled_options;
+    cancelled_options.max_request_bytes = 4U * stargate::KiB;
+    cancelled_options.cancelled = [] { return true; };
+    stargate::io::BoundedIoPool cancelled_pool(cancelled_options, governor);
+    auto cancelled_request = cancelled_pool.submit_read(path, 0U, 1024U, "cancelled-read");
+    CHECK(cancelled_request);
+    if (cancelled_request) CHECK(!cancelled_request.value().get());
+    cancelled_pool.shutdown();
+    CHECK(governor.snapshot().reserved[2] == 0U);
 }
 
 void test_trace(const std::filesystem::path& root) {
@@ -430,6 +476,14 @@ void test_trace(const std::filesystem::path& root) {
     telemetry.close();
     auto telemetry_report = stargate::research::simulate_trace(telemetry_path, config);
     CHECK(telemetry_report && telemetry_report.value().records == 1U);
+    const auto prefetch_path = root / "prefetch-telemetry-trace.csv";
+    std::ofstream prefetch(prefetch_path);
+    prefetch << "token,layer,expert,size_bytes,routing_weight,tier,hit,bytes_read,io_ms,"
+                "prefetched,prefetch_wait_ms,prefetch_overlap_ms\n"
+             << "0,0,1,12MiB,0.2,nvme,0,12582912,1.5,1,0.5,1.0\n";
+    prefetch.close();
+    auto prefetch_report = stargate::research::simulate_trace(prefetch_path, config);
+    CHECK(prefetch_report && prefetch_report.value().records == 1U);
     const auto malformed_telemetry_path = root / "malformed-telemetry-trace.csv";
     std::ofstream malformed_telemetry(malformed_telemetry_path);
     malformed_telemetry << "# actual trace\n"
@@ -437,6 +491,13 @@ void test_trace(const std::filesystem::path& root) {
                         << "0,0,1,12MiB,0.2,ram,1,12582912,1.5\n";
     malformed_telemetry.close();
     CHECK(!stargate::research::simulate_trace(malformed_telemetry_path, config));
+    const auto malformed_prefetch_path = root / "malformed-prefetch-trace.csv";
+    std::ofstream malformed_prefetch(malformed_prefetch_path);
+    malformed_prefetch << "token,layer,expert,size_bytes,routing_weight,tier,hit,bytes_read,io_ms,"
+                          "prefetched,prefetch_wait_ms,prefetch_overlap_ms\n"
+                       << "0,0,1,12MiB,0.2,ram,1,0,0,1,0,0\n";
+    malformed_prefetch.close();
+    CHECK(!stargate::research::simulate_trace(malformed_prefetch_path, config));
 }
 
 

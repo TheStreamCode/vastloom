@@ -1,15 +1,43 @@
 #include "stargate/io/bounded_io_pool.hpp"
 
+#include <algorithm>
+#include <chrono>
 #include <fstream>
 #include <limits>
+#include <new>
+#include <thread>
 
 namespace stargate::io {
+namespace {
+
+Result<bool> cancellation_requested(const std::function<bool()>& cancelled) {
+    if (!cancelled) return false;
+    try {
+        return cancelled();
+    } catch (const std::exception& exception) {
+        return make_error(ErrorCode::internal_error, "I/O cancellation callback failed", exception.what());
+    } catch (...) {
+        return make_error(ErrorCode::internal_error, "I/O cancellation callback failed");
+    }
+}
+
+}  // namespace
 
 BoundedIoPool::BoundedIoPool(IoPoolOptions options, safety::ResourceGovernor& governor)
     : options_(options), governor_(governor) {
     options_.workers = std::max(1U, options_.workers);
     options_.max_queued_requests = std::max<std::size_t>(1U, options_.max_queued_requests);
     options_.max_request_bytes = std::max<ByteCount>(1U, options_.max_request_bytes);
+    if (options_.request_timeout < std::chrono::milliseconds::zero()) {
+        options_.request_timeout = std::chrono::milliseconds::zero();
+    }
+    options_.request_timeout = std::min(
+        options_.request_timeout, std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::hours(1)));
+    options_.fault.delay = std::clamp(options_.fault.delay, std::chrono::milliseconds::zero(),
+                                      std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::seconds(1)));
+    if (options_.fault.kind != IoFaultKind::none && options_.fault.request_sequence == 0U) {
+        options_.fault.request_sequence = 1U;
+    }
     workers_.reserve(options_.workers);
     for (unsigned index = 0; index < options_.workers; ++index) {
         workers_.emplace_back([this] { worker_loop(); });
@@ -46,6 +74,8 @@ Result<std::future<Result<IoBuffer>>> BoundedIoPool::submit_read(const std::file
     task.path = path;
     task.offset = offset;
     task.size = size;
+    task.tag = tag;
+    task.submitted = std::chrono::steady_clock::now();
     task.reservation = reservation.take_value();
     auto future = task.promise.get_future();
 
@@ -57,6 +87,7 @@ Result<std::future<Result<IoBuffer>>> BoundedIoPool::submit_read(const std::file
         if (queue_.size() >= options_.max_queued_requests) {
             return make_error(ErrorCode::resource_exhausted, "I/O queue is full", std::move(tag));
         }
+        task.sequence = next_sequence_++;
         queue_.push_back(std::move(task));
     }
     condition_.notify_one();
@@ -98,6 +129,38 @@ void BoundedIoPool::worker_loop() {
             queue_.pop_front();
         }
 
+        const auto service_started = std::chrono::steady_clock::now();
+        const bool injected = options_.fault.kind != IoFaultKind::none &&
+                              options_.fault.request_sequence == task.sequence;
+        if (injected && options_.fault.delay > std::chrono::milliseconds::zero()) {
+            std::this_thread::sleep_for(options_.fault.delay);
+        }
+        auto cancelled = cancellation_requested(options_.cancelled);
+        if (!cancelled) {
+            task.promise.set_value(cancelled.error());
+            continue;
+        }
+        if (cancelled.value() || (injected && options_.fault.kind == IoFaultKind::cancelled)) {
+            task.promise.set_value(make_error(ErrorCode::resource_exhausted, "I/O request cancelled safely", task.tag));
+            continue;
+        }
+        const auto timed_out = [&] {
+            return options_.request_timeout > std::chrono::milliseconds::zero() &&
+                   std::chrono::steady_clock::now() - task.submitted >= options_.request_timeout;
+        };
+        if (timed_out() || (injected && options_.fault.kind == IoFaultKind::timeout)) {
+            task.promise.set_value(make_error(ErrorCode::resource_exhausted, "I/O request timed out safely", task.tag));
+            continue;
+        }
+        if (injected && options_.fault.kind == IoFaultKind::fail) {
+            task.promise.set_value(make_error(ErrorCode::io_error, "Injected I/O worker failure", task.tag));
+            continue;
+        }
+        if (injected && options_.fault.kind == IoFaultKind::allocation) {
+            task.promise.set_value(make_error(ErrorCode::resource_exhausted, "Injected I/O allocation failure", task.tag));
+            continue;
+        }
+
         std::error_code error;
         const auto file_size = std::filesystem::file_size(task.path, error);
         if (error) {
@@ -124,13 +187,44 @@ void BoundedIoPool::worker_loop() {
             continue;
         }
 
-        std::vector<std::byte> bytes(static_cast<std::size_t>(task.size));
-        input.read(reinterpret_cast<char*>(bytes.data()), static_cast<std::streamsize>(bytes.size()));
+        std::vector<std::byte> bytes;
+        try {
+            bytes.resize(static_cast<std::size_t>(task.size));
+        } catch (const std::bad_alloc&) {
+            task.promise.set_value(make_error(ErrorCode::resource_exhausted, "Unable to allocate bounded I/O buffer", task.tag));
+            continue;
+        }
+        const std::size_t requested = injected && options_.fault.kind == IoFaultKind::short_read
+                                          ? bytes.size() - 1U
+                                          : bytes.size();
+        input.read(reinterpret_cast<char*>(bytes.data()), static_cast<std::streamsize>(requested));
         if (input.gcount() != static_cast<std::streamsize>(bytes.size())) {
             task.promise.set_value(make_error(ErrorCode::io_error, "Short read from I/O source", task.path.string()));
             continue;
         }
-        task.promise.set_value(IoBuffer{std::move(bytes), std::move(task.reservation)});
+        cancelled = cancellation_requested(options_.cancelled);
+        if (!cancelled) {
+            task.promise.set_value(cancelled.error());
+            continue;
+        }
+        if (cancelled.value()) {
+            task.promise.set_value(make_error(ErrorCode::resource_exhausted, "I/O request cancelled safely", task.tag));
+            continue;
+        }
+        if (timed_out()) {
+            task.promise.set_value(make_error(ErrorCode::resource_exhausted, "I/O request timed out safely", task.tag));
+            continue;
+        }
+        const auto completed = std::chrono::steady_clock::now();
+        const IoTiming timing{
+            task.submitted,
+            service_started,
+            completed,
+            std::chrono::duration<double, std::milli>(service_started - task.submitted).count(),
+            std::chrono::duration<double, std::milli>(completed - service_started).count(),
+            std::chrono::duration<double, std::milli>(completed - task.submitted).count(),
+        };
+        task.promise.set_value(IoBuffer{std::move(bytes), std::move(task.reservation), timing, task.sequence});
     }
 }
 

@@ -77,6 +77,17 @@ def main() -> int:
             "metadata-only checkpoint reached OLMoE execution", metadata_run)
     invalid_cache = run([executable, "moe-logits", model, "--text", "Hello", "--cache", "random", "--json"])
     require(invalid_cache.returncode != 0, "unknown real expert-cache policy was accepted", invalid_cache)
+    invalid_io = run([executable, "moe-logits", model, "--text", "Hello", "--io", "parallel", "--json"])
+    require(invalid_io.returncode != 0, "unknown real expert I/O mode was accepted", invalid_io)
+    invalid_prefetch = run([
+        executable, "moe-logits", model, "--text", "Hello", "--io", "async", "--prefetch-depth", "3", "--json",
+    ])
+    require(invalid_prefetch.returncode != 0, "unsafe expert prefetch depth was accepted", invalid_prefetch)
+    invalid_fault = run([
+        executable, "moe-logits", model, "--text", "Hello", "--inject-io-fault", "fail", "--json",
+    ])
+    require(invalid_fault.returncode != 0 and "requires --io async" in invalid_fault.stderr,
+            "I/O fault injection was accepted on the synchronous path", invalid_fault)
 
     with tempfile.TemporaryDirectory(prefix="stargate-olmoe-corrupt-") as temporary:
         copy = Path(temporary) / "model"

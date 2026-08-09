@@ -62,6 +62,7 @@ def main() -> int:
         process = run([
             executable, "moe-logits", model, "--text", fixture["text"], "--top", "10",
             "--cache", "no-cache", "--cache-bytes", str(EXPERT_BYTES),
+            "--io", "async", "--prefetch-depth", "2", "--io-timeout-ms", "30000",
             "--timeout-ms", "600000", "--trace", str(trace), "--no-verify", "--json",
         ])
         require(process.returncode == 0, "native streamed OLMoE forward failed", process)
@@ -69,6 +70,12 @@ def main() -> int:
         require(payload["greedy_id"] == fixture["greedy_token_id"], "greedy token differs from Transformers", process)
         require(payload["expert_cache_hits"] == 0, "no-cache execution reported a cache hit", process)
         require(payload["expert_cache_misses"] == ROUTES_PER_TOKEN, "expert miss count mismatch", process)
+        require(payload["io_mode"] == "async" and payload["prefetch_depth"] == 2,
+                "asynchronous I/O configuration was not reported", process)
+        require(payload["expert_prefetches"] == ROUTES_PER_TOKEN,
+                "bounded prefetch count differs from routed misses", process)
+        require(payload["expert_prefetch_overlap_ms"] > 0.0,
+                "asynchronous expert reads did not overlap any CPU compute", process)
         require(payload["expert_bytes_read"] == ROUTES_PER_TOKEN * EXPERT_BYTES,
                 "measured expert bytes differ from the no-cache baseline", process)
         require(payload["trace_events"] == ROUTES_PER_TOKEN, "native trace event count mismatch", process)
@@ -92,6 +99,9 @@ def main() -> int:
             require(int(row["size_bytes"]) == EXPERT_BYTES, "telemetry expert size mismatch")
             require(row["tier"] == "nvme" and row["hit"] == "0", "no-cache telemetry tier mismatch")
             require(int(row["bytes_read"]) == EXPERT_BYTES, "telemetry read count mismatch")
+            require(row["prefetched"] == "1", "asynchronous expert read was not marked prefetched")
+            require(float(row["prefetch_wait_ms"]) >= 0.0 and float(row["prefetch_overlap_ms"]) >= 0.0,
+                    "invalid asynchronous prefetch timing")
         require(grouped.keys() == reference_routes.keys(), "native/reference token-layer keys differ")
         for key, native in grouped.items():
             reference = reference_routes[key]
@@ -145,6 +155,19 @@ def main() -> int:
                 require(math.isclose(float(row["routing_weight"]), float(expected), abs_tol=2e-5, rel_tol=0.0),
                         f"two-token routing weight differs at {key}")
 
+        async_cached = run([
+            executable, "moe-logits", model, "--text", multi_case["text"], "--top", "1",
+            "--cache", "lru", "--cache-bytes", "2GiB", "--io", "async", "--prefetch-depth", "2",
+            "--timeout-ms", "600000", "--no-verify", "--json",
+        ])
+        require(async_cached.returncode == 0, "asynchronous cached OLMoE forward failed", async_cached)
+        async_cached_payload = json.loads(async_cached.stdout)
+        require(async_cached_payload["greedy_id"] == multi_case["greedy_token_id"]
+                and async_cached_payload["expert_prefetches"] == ROUTES_PER_TOKEN
+                and async_cached_payload["expert_cache_hits"] == ROUTES_PER_TOKEN
+                and async_cached_payload["expert_cache_misses"] == ROUTES_PER_TOKEN,
+                "asynchronous prefetch did not stop at real cache hits", async_cached)
+
         no_cache = trace_sim(executable, multi_trace, "no-cache")
         lru = trace_sim(executable, multi_trace, "lru")
         lfu = trace_sim(executable, multi_trace, "lfu")
@@ -162,6 +185,22 @@ def main() -> int:
         ])
         require(timed_out.returncode != 0 and "cancelled or timed out safely" in timed_out.stderr,
                 "bounded OLMoE timeout did not stop before expert execution", timed_out)
+
+        injected_failures = {
+            "fail": "Injected I/O worker failure",
+            "short-read": "Short read",
+            "allocation": "Injected I/O allocation failure",
+            "cancelled": "I/O request cancelled safely",
+            "timeout": "I/O request timed out safely",
+        }
+        for fault, expected_error in injected_failures.items():
+            failed = run([
+                executable, "moe-logits", model, "--text", fixture["text"], "--cache", "no-cache",
+                "--io", "async", "--prefetch-depth", "1", "--inject-io-fault", fault,
+                "--timeout-ms", "600000", "--no-verify", "--json",
+            ])
+            require(failed.returncode != 0 and expected_error in failed.stderr,
+                    f"injected {fault} did not fail closed", failed)
 
         incomplete = Path(temporary) / "incomplete-model"
         incomplete.mkdir()

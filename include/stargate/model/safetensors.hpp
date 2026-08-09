@@ -54,6 +54,10 @@ public:
         ByteCount tensor_offset,
         ByteCount bytes,
         ByteCount max_request_bytes = 64U * MiB) const;
+    [[nodiscard]] Result<void> read_range_into(const TensorDescriptor& tensor,
+                                               ByteCount tensor_offset,
+                                               std::span<std::byte> destination,
+                                               ByteCount max_request_bytes = 64U * MiB) const;
 
 private:
     std::filesystem::path path_;

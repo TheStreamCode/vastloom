@@ -11,6 +11,7 @@ option(STARGATE_BUILD_TESTS "Build Stargate tests" ON)
 option(STARGATE_ENABLE_SANITIZERS "Enable AddressSanitizer and UndefinedBehaviorSanitizer" OFF)
 option(STARGATE_ENABLE_THREAD_SANITIZER "Enable ThreadSanitizer" OFF)
 option(STARGATE_WARNINGS_AS_ERRORS "Treat compiler warnings as errors" OFF)
+set(STARGATE_SMOLLM2_MODEL "" CACHE PATH "Optional external pinned SmolLM2 checkpoint for full reference tests")
 
 if(STARGATE_ENABLE_SANITIZERS AND STARGATE_ENABLE_THREAD_SANITIZER)
     message(FATAL_ERROR "AddressSanitizer and ThreadSanitizer must use separate builds")
@@ -24,8 +25,11 @@ find_package(Threads REQUIRED)
 add_library(stargate_core STATIC
     src/core/bytes.cpp
     src/hardware/hardware_probe.cpp
+    src/inference/gpt2_tokenizer.cpp
+    src/inference/llama_model.cpp
     src/inference/tiny_model.cpp
     src/io/bounded_io_pool.cpp
+    src/model/imported_checkpoint.cpp
     src/model/manifest.cpp
     src/model/model_store.cpp
     src/model/safetensors.cpp
@@ -116,6 +120,17 @@ if(BUILD_TESTING AND STARGATE_BUILD_TESTS)
             COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/tests/test_import_hf_model.py
         )
         set_tests_properties(stargate_hf_importer_offline PROPERTIES TIMEOUT 30)
+        if(STARGATE_SMOLLM2_MODEL)
+            add_test(
+                NAME stargate_smollm2_reference
+                COMMAND ${Python3_EXECUTABLE}
+                    ${CMAKE_CURRENT_SOURCE_DIR}/tests/test_smollm2_cli.py
+                    --stargate $<TARGET_FILE:stargate>
+                    --model ${STARGATE_SMOLLM2_MODEL}
+                    --fixture ${CMAKE_CURRENT_SOURCE_DIR}/tests/fixtures/smollm2_reference.json
+            )
+            set_tests_properties(stargate_smollm2_reference PROPERTIES TIMEOUT 300)
+        endif()
     else()
         message(STATUS "Python3 not found; skipping TinyChat CLI integration test")
     endif()

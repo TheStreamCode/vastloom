@@ -227,20 +227,41 @@ Result<std::vector<std::byte>> SafetensorsFile::read_range(const TensorDescripto
         tensor.absolute_offset + tensor_offset > static_cast<ByteCount>(std::numeric_limits<std::streamoff>::max())) {
         return make_error(ErrorCode::unsupported, "Safetensors read exceeds platform limits", tensor.name);
     }
-    std::ifstream input(path_, std::ios::binary);
-    if (!input) return make_error(ErrorCode::io_error, "Unable to open Safetensors shard", path_.string());
-    input.seekg(static_cast<std::streamoff>(tensor.absolute_offset + tensor_offset));
-    if (!input) return make_error(ErrorCode::io_error, "Unable to seek Safetensors shard", tensor.name);
     try {
         std::vector<std::byte> output(static_cast<std::size_t>(bytes));
-        input.read(reinterpret_cast<char*>(output.data()), static_cast<std::streamsize>(output.size()));
-        if (input.gcount() != static_cast<std::streamsize>(output.size())) {
-            return make_error(ErrorCode::io_error, "Short bounded read from Safetensors shard", tensor.name);
-        }
+        auto read = read_range_into(tensor, tensor_offset, output, max_request_bytes);
+        if (!read) return read.error();
         return output;
     } catch (const std::bad_alloc&) {
         return make_error(ErrorCode::resource_exhausted, "Unable to allocate bounded Safetensors read buffer", tensor.name);
     }
+}
+
+Result<void> SafetensorsFile::read_range_into(const TensorDescriptor& tensor,
+                                              ByteCount tensor_offset,
+                                              std::span<std::byte> destination,
+                                              ByteCount max_request_bytes) const {
+    const auto* owned = find(tensor.name);
+    const ByteCount bytes = static_cast<ByteCount>(destination.size());
+    if (owned == nullptr || owned != &tensor) {
+        return make_error(ErrorCode::invalid_argument, "Tensor descriptor does not belong to this shard", tensor.name);
+    }
+    if (bytes == 0U || bytes > max_request_bytes || tensor_offset > tensor.byte_count || bytes > tensor.byte_count - tensor_offset) {
+        return make_error(ErrorCode::invalid_argument, "Safetensors read is outside the configured bounded range", tensor.name);
+    }
+    if (tensor.absolute_offset + tensor_offset > static_cast<ByteCount>(std::numeric_limits<std::streamoff>::max()) ||
+        destination.size() > static_cast<std::size_t>(std::numeric_limits<std::streamsize>::max())) {
+        return make_error(ErrorCode::unsupported, "Safetensors read exceeds platform limits", tensor.name);
+    }
+    std::ifstream input(path_, std::ios::binary);
+    if (!input) return make_error(ErrorCode::io_error, "Unable to open Safetensors shard", path_.string());
+    input.seekg(static_cast<std::streamoff>(tensor.absolute_offset + tensor_offset));
+    if (!input) return make_error(ErrorCode::io_error, "Unable to seek Safetensors shard", tensor.name);
+    input.read(reinterpret_cast<char*>(destination.data()), static_cast<std::streamsize>(destination.size()));
+    if (input.gcount() != static_cast<std::streamsize>(destination.size())) {
+        return make_error(ErrorCode::io_error, "Short bounded read from Safetensors shard", tensor.name);
+    }
+    return {};
 }
 
 Result<CheckpointCatalog> inspect_safetensors_checkpoint(const std::filesystem::path& path) {

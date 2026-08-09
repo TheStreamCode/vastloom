@@ -12,9 +12,12 @@
 
 #include "stargate/core/bytes.hpp"
 #include "stargate/hardware/hardware_probe.hpp"
+#include "stargate/inference/gpt2_tokenizer.hpp"
+#include "stargate/inference/llama_model.hpp"
 #include "stargate/inference/tiny_model.hpp"
 #include "stargate/io/bounded_io_pool.hpp"
 #include "stargate/model/manifest.hpp"
+#include "stargate/model/imported_checkpoint.hpp"
 #include "stargate/model/model_store.hpp"
 #include "stargate/model/safetensors.hpp"
 #include "stargate/model/verifier.hpp"
@@ -122,6 +125,8 @@ void test_safetensors(const std::filesystem::path& root) {
             auto bytes = shard.value().read_range(*tensor, 0U, 8U);
             CHECK(bytes && bytes.value().size() == 8U);
             CHECK(!shard.value().read_range(*tensor, 0U, 8U, 4U));
+            std::array<std::byte, 8> destination{};
+            CHECK(shard.value().read_range_into(*tensor, 0U, destination));
         }
     }
     auto catalog = stargate::model::inspect_safetensors_checkpoint(checkpoint);
@@ -135,6 +140,33 @@ void test_safetensors(const std::filesystem::path& root) {
         output.write("123456789", 9);
     }
     CHECK(!stargate::model::SafetensorsFile::open(checkpoint / "invalid.safetensors"));
+}
+
+void test_imported_checkpoint_and_llama_config(const std::filesystem::path& root) {
+    const auto imported_root = root / "imported-checkpoint";
+    std::filesystem::create_directories(imported_root);
+    {
+        std::ofstream(imported_root / "data.bin", std::ios::binary) << "hello";
+        std::ofstream manifest(imported_root / "stargate-import.json");
+        manifest << R"({"format":"stargate.hf-import.v1","model_id":"test/model","revision":"abc","metadata_only":false,"files":[{"name":"data.bin","size":5,"sha256":"2cf24dba5fb0a30e26e83b2ac5b9e29e1b161e5c1fa7425e73043362938b9824"}]})";
+    }
+    auto verified = stargate::model::verify_imported_checkpoint(imported_root, true);
+    CHECK(verified && verified.value().full_hash_verified && verified.value().total_bytes == 5U);
+    std::ofstream(imported_root / "data.bin", std::ios::binary | std::ios::trunc) << "HELLO";
+    CHECK(!stargate::model::verify_imported_checkpoint(imported_root, true));
+
+    const auto config_path = root / "llama-config.json";
+    {
+        std::ofstream config(config_path);
+        config << R"({"architectures":["LlamaForCausalLM"],"model_type":"llama","hidden_act":"silu","torch_dtype":"bfloat16","vocab_size":49152,"hidden_size":576,"intermediate_size":1536,"num_hidden_layers":30,"num_attention_heads":9,"num_key_value_heads":3,"max_position_embeddings":8192,"bos_token_id":1,"eos_token_id":2,"pad_token_id":2,"rms_norm_eps":0.00001,"rope_theta":100000,"tie_word_embeddings":true,"attention_bias":false,"mlp_bias":false,"rope_interleaved":false,"rope_scaling":null})";
+    }
+    auto llama = stargate::inference::load_llama_config(config_path);
+    CHECK(llama && llama.value().hidden_size == 576U && llama.value().num_key_value_heads == 3U);
+    {
+        std::ofstream config(config_path, std::ios::trunc);
+        config << R"({"architectures":["LlamaForCausalLM"],"model_type":"llama","hidden_act":"silu","torch_dtype":"bfloat16"})";
+    }
+    CHECK(!stargate::inference::load_llama_config(config_path));
 }
 
 void test_model_store_and_runtime_policy(const std::filesystem::path& root) {
@@ -164,6 +196,39 @@ void test_model_store_and_runtime_policy(const std::filesystem::path& root) {
     }
     hardware.memory.available_bytes = 8U * stargate::GiB;
     CHECK(!stargate::safety::make_safe_runtime_policy(hardware));
+}
+
+void test_gpt2_tokenizer(const std::filesystem::path& root) {
+    const auto tokenizer_root = root / "tokenizer";
+    std::filesystem::create_directories(tokenizer_root);
+    {
+        std::ofstream vocab(tokenizer_root / "vocab.json");
+        vocab << R"({"<|endoftext|>":0,"<|im_start|>":1,"<|im_end|>":2,"H":3,"e":4,"l":5,"o":6,"He":7,"Hel":8,"Hell":9,"Hello":10})";
+    }
+    {
+        std::ofstream merges(tokenizer_root / "merges.txt");
+        merges << "#version: 0.2\nH e\nHe l\nHel l\nHell o\n";
+    }
+    {
+        std::ofstream config(tokenizer_root / "tokenizer_config.json");
+        config << R"({"added_tokens_decoder":{"0":{"content":"<|endoftext|>","special":true},"1":{"content":"<|im_start|>","special":true},"2":{"content":"<|im_end|>","special":true}}})";
+    }
+    auto tokenizer = stargate::inference::Gpt2Tokenizer::load(tokenizer_root);
+    CHECK(tokenizer && tokenizer.value().vocab_size() == 11U);
+    if (tokenizer) {
+        auto hello = tokenizer.value().encode("Hello");
+        CHECK(hello && hello.value() == std::vector<std::uint32_t>{10U});
+        auto special = tokenizer.value().encode("<|im_start|>Hello<|im_end|>");
+        CHECK(special && special.value() == (std::vector<std::uint32_t>{1U, 10U, 2U}));
+        if (special) {
+            auto decoded = tokenizer.value().decode(special.value(), false);
+            CHECK(decoded && decoded.value() == "<|im_start|>Hello<|im_end|>");
+        }
+        auto templated = tokenizer.value().apply_smol_chat_template({{"user", "Hello"}}, true);
+        CHECK(templated && templated.value() ==
+            "<|im_start|>system\nYou are a helpful AI assistant named SmolLM, trained by Hugging Face<|im_end|>\n"
+            "<|im_start|>user\nHello<|im_end|>\n<|im_start|>assistant\n");
+    }
 }
 
 void test_manifest_and_verifier(const std::filesystem::path& root) {
@@ -490,7 +555,9 @@ int main() {
     test_json_escape();
     test_bounded_json();
     test_safetensors(root);
+    test_imported_checkpoint_and_llama_config(root);
     test_model_store_and_runtime_policy(root);
+    test_gpt2_tokenizer(root);
     test_manifest_and_verifier(root);
     test_governor();
     test_planner();

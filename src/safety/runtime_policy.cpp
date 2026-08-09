@@ -86,6 +86,9 @@ Result<RuntimePolicy> make_safe_runtime_policy(const hardware::HardwareSnapshot&
     if (hardware.memory.available_bytes <= kSystemHeadroom) {
         return make_error(ErrorCode::resource_exhausted, "Less than 8 GiB of RAM headroom is currently available");
     }
+    if (hardware.storage.available_bytes <= kStorageReserve) {
+        return make_error(ErrorCode::resource_exhausted, "Less than the 300 GiB storage reserve is currently available");
+    }
     const ByteCount half_physical = hardware.memory.total_bytes / 2U;
     const ByteCount available_budget = hardware.memory.available_bytes - kSystemHeadroom;
     const ByteCount ram_limit = std::min(half_physical, available_budget);

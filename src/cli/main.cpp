@@ -1,11 +1,20 @@
 #include <algorithm>
+#include <charconv>
+#include <chrono>
+#include <cmath>
+#include <csignal>
+#include <cstdint>
 #include <cstdlib>
 #include <filesystem>
 #include <fstream>
 #include <iostream>
+#include <initializer_list>
 #include <limits>
+#include <memory>
+#include <numeric>
 #include <stdexcept>
 #include <optional>
+#include <set>
 #include <string>
 #include <string_view>
 #include <vector>
@@ -13,8 +22,11 @@
 #include "stargate/cli/tiny_commands.hpp"
 #include "stargate/core/bytes.hpp"
 #include "stargate/hardware/hardware_probe.hpp"
+#include "stargate/inference/gpt2_tokenizer.hpp"
+#include "stargate/inference/llama_model.hpp"
 #include "stargate/io/bounded_io_pool.hpp"
 #include "stargate/model/manifest.hpp"
+#include "stargate/model/imported_checkpoint.hpp"
 #include "stargate/model/model_store.hpp"
 #include "stargate/model/safetensors.hpp"
 #include "stargate/model/verifier.hpp"
@@ -44,6 +56,12 @@ namespace {
 using stargate::ByteCount;
 using stargate::Error;
 using stargate::Result;
+
+volatile std::sig_atomic_t real_generation_cancelled = 0;
+
+void handle_real_interrupt(int) {
+    real_generation_cancelled = 1;
+}
 
 int exit_code(const Error& error) {
     using stargate::ErrorCode;
@@ -93,6 +111,63 @@ Result<ByteCount> optional_bytes(const std::vector<std::string>& args, std::stri
     return stargate::parse_bytes(*value);
 }
 
+Result<std::size_t> optional_size(const std::vector<std::string>& args, std::string_view name, std::size_t fallback) {
+    const auto value = option_value(args, name);
+    if (!value) return fallback;
+    std::size_t parsed = 0;
+    const auto converted = std::from_chars(value->data(), value->data() + value->size(), parsed);
+    if (converted.ec != std::errc{} || converted.ptr != value->data() + value->size()) {
+        return stargate::make_error(stargate::ErrorCode::invalid_argument, "Invalid unsigned integer option", std::string(name));
+    }
+    return parsed;
+}
+
+Result<std::uint64_t> optional_u64(const std::vector<std::string>& args, std::string_view name, std::uint64_t fallback) {
+    const auto value = option_value(args, name);
+    if (!value) return fallback;
+    std::uint64_t parsed = 0;
+    const auto converted = std::from_chars(value->data(), value->data() + value->size(), parsed);
+    if (converted.ec != std::errc{} || converted.ptr != value->data() + value->size()) {
+        return stargate::make_error(stargate::ErrorCode::invalid_argument, "Invalid uint64 option", std::string(name));
+    }
+    return parsed;
+}
+
+Result<float> optional_float(const std::vector<std::string>& args, std::string_view name, float fallback) {
+    const auto value = option_value(args, name);
+    if (!value) return fallback;
+    float parsed = 0.0F;
+    const auto converted = std::from_chars(value->data(), value->data() + value->size(), parsed);
+    if (converted.ec != std::errc{} || converted.ptr != value->data() + value->size() || !std::isfinite(parsed)) {
+        return stargate::make_error(stargate::ErrorCode::invalid_argument, "Invalid floating-point option", std::string(name));
+    }
+    return parsed;
+}
+
+Result<void> validate_options(const std::vector<std::string>& args,
+                              std::size_t positional_count,
+                              std::initializer_list<std::string_view> value_options,
+                              std::initializer_list<std::string_view> flags) {
+    if (args.size() < positional_count) return stargate::make_error(stargate::ErrorCode::invalid_argument, "Missing positional argument");
+    std::set<std::string> seen;
+    for (std::size_t index = positional_count; index < args.size(); ++index) {
+        const std::string_view argument = args[index];
+        const bool is_value = std::find(value_options.begin(), value_options.end(), argument) != value_options.end();
+        const bool is_flag = std::find(flags.begin(), flags.end(), argument) != flags.end();
+        if (!is_value && !is_flag) {
+            return stargate::make_error(stargate::ErrorCode::invalid_argument, "Unknown or unexpected option", std::string(argument));
+        }
+        if (!seen.insert(std::string(argument)).second) {
+            return stargate::make_error(stargate::ErrorCode::invalid_argument, "Duplicate option", std::string(argument));
+        }
+        if (is_value) {
+            if (index + 1U >= args.size()) return stargate::make_error(stargate::ErrorCode::invalid_argument, "Option requires a value", std::string(argument));
+            ++index;
+        }
+    }
+    return {};
+}
+
 std::uint64_t current_pid() {
 #if defined(_WIN32)
     return static_cast<std::uint64_t>(_getpid());
@@ -134,6 +209,12 @@ void print_help() {
         << "      Validate and display an existing Stargate model store.\n\n"
         << "  runtime-policy [--storage PATH] [--json]\n"
         << "      Show the fail-closed RAM/VRAM/CPU/I/O policy for this host.\n\n"
+        << "  tokenize MODEL_DIRECTORY --text TEXT [--chat] [--json]\n"
+        << "      Exercise the real GPT-2 byte-level tokenizer and SmolLM chat template.\n\n"
+        << "  real-logits MODEL_DIRECTORY --text TEXT [--chat] [--top N] [--no-verify] [--json]\n"
+        << "      Run the pinned SmolLM2 CPU reference path and report final-token logits.\n\n"
+        << "  self-test MODEL_DIRECTORY [--no-verify] [--json]\n"
+        << "      Run pinned SmolLM2 greedy reference vectors, including multi-turn history.\n\n"
         << "  heartbeat-write PATH [--state normal|pressure|critical|emergency]\n"
         << "      Atomically write one watchdog heartbeat for integration tests.\n\n"
         << "  version\n";
@@ -335,6 +416,345 @@ int command_runtime_policy(const std::vector<std::string>& args) {
     return 0;
 }
 
+int command_tokenize(const std::vector<std::string>& args) {
+    const bool json = has_flag(args, "--json");
+    if (args.empty()) return print_error(stargate::make_error(stargate::ErrorCode::invalid_argument, "tokenize requires a model directory"), json);
+    auto valid = validate_options(args, 1U, {"--text"}, {"--chat", "--json"});
+    if (!valid) return print_error(valid.error(), json);
+    const auto text = option_value(args, "--text");
+    if (!text) return print_error(stargate::make_error(stargate::ErrorCode::invalid_argument, "tokenize requires --text"), json);
+    auto tokenizer = stargate::inference::Gpt2Tokenizer::load(args[0]);
+    if (!tokenizer) return print_error(tokenizer.error(), json);
+    std::string input = *text;
+    if (has_flag(args, "--chat")) {
+        auto formatted = tokenizer.value().apply_smol_chat_template({{"user", input}}, true);
+        if (!formatted) return print_error(formatted.error(), json);
+        input = formatted.take_value();
+    }
+    auto tokens = tokenizer.value().encode(input);
+    if (!tokens) return print_error(tokens.error(), json);
+    auto decoded = tokenizer.value().decode(tokens.value(), false);
+    if (!decoded) return print_error(decoded.error(), json);
+    if (json) {
+        std::cout << "{\"ok\":true,\"token_count\":" << tokens.value().size() << ",\"ids\":[";
+        for (std::size_t index = 0; index < tokens.value().size(); ++index) {
+            if (index != 0U) std::cout << ',';
+            std::cout << tokens.value()[index];
+        }
+        std::cout << "],\"decoded\":\"" << stargate::util::json_escape(decoded.value()) << "\"}\n";
+    } else {
+        std::cout << "Tokens (" << tokens.value().size() << "):";
+        for (const auto token : tokens.value()) std::cout << ' ' << token;
+        std::cout << "\nDecoded: " << decoded.value() << '\n';
+    }
+    return 0;
+}
+
+int command_real_model_info(const std::vector<std::string>& args) {
+    const bool json = has_flag(args, "--json");
+    if (args.empty()) return print_error(stargate::make_error(stargate::ErrorCode::invalid_argument, "model-info requires a model directory"), json);
+    auto valid = validate_options(args, 1U, {}, {"--no-verify", "--json"});
+    if (!valid) return print_error(valid.error(), json);
+    auto imported = stargate::model::verify_imported_checkpoint(args[0], !has_flag(args, "--no-verify"));
+    if (!imported) return print_error(imported.error(), json);
+    auto config = stargate::inference::load_llama_config(std::filesystem::path(args[0]) / "config.json");
+    if (!config) return print_error(config.error(), json);
+    auto tokenizer = stargate::inference::Gpt2Tokenizer::load(args[0]);
+    if (!tokenizer) return print_error(tokenizer.error(), json);
+    auto catalog = stargate::model::inspect_safetensors_checkpoint(args[0]);
+    if (!catalog) return print_error(catalog.error(), json);
+    if (json) {
+        std::cout << "{\"ok\":true,\"model_id\":\"" << stargate::util::json_escape(imported.value().model_id)
+                  << "\",\"revision\":\"" << stargate::util::json_escape(imported.value().revision)
+                  << "\",\"hash_verified\":" << (imported.value().full_hash_verified ? "true" : "false")
+                  << ",\"architecture\":\"LlamaForCausalLM\",\"vocab_size\":" << config.value().vocab_size
+                  << ",\"hidden_size\":" << config.value().hidden_size
+                  << ",\"intermediate_size\":" << config.value().intermediate_size
+                  << ",\"layers\":" << config.value().num_hidden_layers
+                  << ",\"attention_heads\":" << config.value().num_attention_heads
+                  << ",\"kv_heads\":" << config.value().num_key_value_heads
+                  << ",\"context_length\":" << config.value().max_position_embeddings
+                  << ",\"tensor_count\":" << catalog.value().tensors.size()
+                  << ",\"tensor_bytes\":" << catalog.value().total_tensor_bytes << "}\n";
+    } else {
+        std::cout << "Model:         " << imported.value().model_id << '\n'
+                  << "Revision:      " << imported.value().revision << '\n'
+                  << "Architecture:  LlamaForCausalLM\n"
+                  << "Layers/width:  " << config.value().num_hidden_layers << '/' << config.value().hidden_size << '\n'
+                  << "Heads/KV:      " << config.value().num_attention_heads << '/' << config.value().num_key_value_heads << '\n'
+                  << "Context:       " << config.value().max_position_embeddings << '\n'
+                  << "Tensors:       " << catalog.value().tensors.size() << '\n'
+                  << "Tensor bytes:  " << stargate::format_bytes(catalog.value().total_tensor_bytes) << '\n'
+                  << "SHA-256:       " << (imported.value().full_hash_verified ? "verified" : "skipped") << '\n';
+    }
+    return 0;
+}
+
+struct RealRuntime {
+    stargate::safety::RuntimePolicy policy;
+    std::unique_ptr<stargate::safety::ResourceGovernor> governor;
+    stargate::safety::ProcessSafetyGuard process_guard;
+};
+
+Result<RealRuntime> start_real_runtime(const std::filesystem::path& model_path) {
+    auto hardware = stargate::hardware::HardwareProbe::collect(model_path);
+    if (!hardware) return hardware.error();
+    auto policy = stargate::safety::make_safe_runtime_policy(hardware.value());
+    if (!policy) return policy.error();
+    auto guard = stargate::safety::ProcessSafetyGuard::apply(policy.value());
+    if (!guard) return guard.error();
+    RealRuntime runtime;
+    runtime.policy = policy.value();
+    runtime.governor = std::make_unique<stargate::safety::ResourceGovernor>(runtime.policy.resources);
+    runtime.process_guard = guard.take_value();
+    return runtime;
+}
+
+Result<stargate::inference::LlamaModel> load_real_model(const std::filesystem::path& model_path,
+                                                        RealRuntime& runtime,
+                                                        bool verify) {
+    return stargate::inference::LlamaModel::load(
+        model_path, *runtime.governor, {verify, runtime.policy.cpu_threads});
+}
+
+int command_real_logits(const std::vector<std::string>& args) {
+    const bool json = has_flag(args, "--json");
+    if (args.empty()) return print_error(stargate::make_error(stargate::ErrorCode::invalid_argument, "real-logits requires a model directory"), json);
+    auto valid = validate_options(args, 1U, {"--text", "--top"}, {"--chat", "--no-verify", "--json"});
+    if (!valid) return print_error(valid.error(), json);
+    const auto text = option_value(args, "--text");
+    if (!text) return print_error(stargate::make_error(stargate::ErrorCode::invalid_argument, "real-logits requires --text"), json);
+    auto top = optional_size(args, "--top", 10U);
+    if (!top || top.value() == 0U || top.value() > 100U) return print_error(top ? stargate::make_error(stargate::ErrorCode::invalid_argument, "--top must be between 1 and 100") : top.error(), json);
+    auto runtime = start_real_runtime(args[0]);
+    if (!runtime) return print_error(runtime.error(), json);
+    auto model = load_real_model(args[0], runtime.value(), !has_flag(args, "--no-verify"));
+    if (!model) return print_error(model.error(), json);
+    std::string input = *text;
+    if (has_flag(args, "--chat")) {
+        auto formatted = model.value().tokenizer().apply_smol_chat_template({{"user", input}}, true);
+        if (!formatted) return print_error(formatted.error(), json);
+        input = formatted.take_value();
+    }
+    auto tokens = model.value().tokenizer().encode(input);
+    if (!tokens) return print_error(tokens.error(), json);
+    auto logits = model.value().logits(tokens.value(), *runtime.value().governor, &runtime.value().process_guard);
+    if (!logits) return print_error(logits.error(), json);
+    std::vector<std::uint32_t> indices(logits.value().size());
+    std::iota(indices.begin(), indices.end(), 0U);
+    std::partial_sort(indices.begin(), indices.begin() + static_cast<std::ptrdiff_t>(top.value()), indices.end(),
+                      [&logits](std::uint32_t left, std::uint32_t right) { return logits.value()[left] > logits.value()[right]; });
+    indices.resize(top.value());
+    if (json) {
+        std::cout << "{\"ok\":true,\"prompt_tokens\":" << tokens.value().size()
+                  << ",\"load_ms\":" << model.value().load_ms() << ",\"top_logits\":[";
+        for (std::size_t index = 0; index < indices.size(); ++index) {
+            if (index != 0U) std::cout << ',';
+            const auto token = indices[index];
+            std::cout << "{\"id\":" << token << ",\"logit\":" << logits.value()[token] << '}';
+        }
+        std::cout << "]}\n";
+    } else {
+        std::cout << "Prompt tokens: " << tokens.value().size() << "\nLoad: " << model.value().load_ms() << " ms\n";
+        for (const auto token : indices) std::cout << token << '\t' << logits.value()[token] << '\n';
+    }
+    return 0;
+}
+
+int command_real_chat(const std::vector<std::string>& args) {
+    const bool json = has_flag(args, "--json");
+    if (args.empty()) return print_error(stargate::make_error(stargate::ErrorCode::invalid_argument, "chat requires a model directory"), json);
+    auto valid = validate_options(args, 1U,
+                                  {"--prompt", "--max-tokens", "--top-k", "--seed", "--temperature", "--timeout-ms", "--system"},
+                                  {"--json", "--no-stream", "--no-stats", "--no-verify"});
+    if (!valid) return print_error(valid.error(), json);
+    const auto prompt = option_value(args, "--prompt");
+    if (!prompt && json) return print_error(stargate::make_error(stargate::ErrorCode::invalid_argument, "Interactive real-model chat does not support --json"), json);
+    auto max_tokens = optional_size(args, "--max-tokens", 64U);
+    auto top_k = optional_size(args, "--top-k", 40U);
+    auto seed = optional_u64(args, "--seed", 1U);
+    auto temperature = optional_float(args, "--temperature", 0.0F);
+    auto timeout_ms = optional_size(args, "--timeout-ms", 300'000U);
+    if (!max_tokens) return print_error(max_tokens.error(), json);
+    if (!top_k) return print_error(top_k.error(), json);
+    if (!seed) return print_error(seed.error(), json);
+    if (!temperature) return print_error(temperature.error(), json);
+    if (!timeout_ms || timeout_ms.value() > static_cast<std::size_t>(std::numeric_limits<std::int64_t>::max())) {
+        return print_error(timeout_ms ? stargate::make_error(stargate::ErrorCode::invalid_argument, "Invalid --timeout-ms") : timeout_ms.error(), json);
+    }
+    auto runtime = start_real_runtime(args[0]);
+    if (!runtime) return print_error(runtime.error(), json);
+    auto model = load_real_model(args[0], runtime.value(), !has_flag(args, "--no-verify"));
+    if (!model) return print_error(model.error(), json);
+    std::vector<stargate::inference::ChatMessage> messages;
+    if (const auto system = option_value(args, "--system")) messages.push_back({"system", *system});
+    stargate::inference::LlamaGenerationOptions options;
+    options.max_new_tokens = max_tokens.value();
+    options.top_k = top_k.value();
+    options.seed = seed.value();
+    options.temperature = temperature.value();
+    options.timeout = std::chrono::milliseconds(static_cast<std::int64_t>(timeout_ms.value()));
+    options.cancelled = [] { return real_generation_cancelled != 0; };
+    const bool stream_enabled = !json && !has_flag(args, "--no-stream");
+    static_cast<void>(std::signal(SIGINT, handle_real_interrupt));
+
+    const auto run_generation = [&](std::vector<stargate::inference::ChatMessage>& history,
+                                    bool interactive) -> Result<stargate::inference::LlamaGenerationResult> {
+        real_generation_cancelled = 0;
+        if (interactive) std::cout << "assistant> " << std::flush;
+        auto generated = model.value().generate(history, options, *runtime.value().governor,
+                                                &runtime.value().process_guard,
+                                                stream_enabled ? [](std::string_view piece) { std::cout << piece << std::flush; }
+                                                               : std::function<void(std::string_view)>{});
+        if (generated && stream_enabled) std::cout << '\n';
+        if (generated && !stream_enabled && interactive) std::cout << generated.value().text << '\n';
+        return generated;
+    };
+
+    const auto print_stats = [&args](const stargate::inference::LlamaGenerationResult& generated) {
+        if (has_flag(args, "--no-stats")) return;
+        const std::string finish = generated.stats.stopped_on_eos ? "end_of_turn" :
+                                   (generated.stats.stopped_on_context_limit ? "context_limit" : "max_tokens");
+        std::cerr << "[load " << generated.stats.load_ms << " ms; prefill "
+                  << generated.stats.prompt_eval_ms << " ms; decode "
+                  << generated.stats.tokens_per_second << " tok/s; " << finish << "]\n";
+    };
+
+    if (prompt) {
+        messages.push_back({"user", *prompt});
+        auto generated = run_generation(messages, false);
+        if (!generated) return print_error(generated.error(), json);
+        const std::string finish = generated.value().stats.stopped_on_eos ? "end_of_turn" :
+                                   (generated.value().stats.stopped_on_context_limit ? "context_limit" : "max_tokens");
+        if (json) {
+            std::cout << "{\"ok\":true,\"text\":\"" << stargate::util::json_escape(generated.value().text)
+                      << "\",\"generated_ids\":[";
+            for (std::size_t index = 0; index < generated.value().generated_ids.size(); ++index) {
+                if (index != 0U) std::cout << ',';
+                std::cout << generated.value().generated_ids[index];
+            }
+            std::cout << "],\"finish_reason\":\"" << finish
+                      << "\",\"stats\":{\"prompt_tokens\":" << generated.value().stats.prompt_tokens
+                      << ",\"generated_tokens\":" << generated.value().stats.generated_tokens
+                      << ",\"load_ms\":" << generated.value().stats.load_ms
+                      << ",\"prompt_eval_ms\":" << generated.value().stats.prompt_eval_ms
+                      << ",\"generation_ms\":" << generated.value().stats.generation_ms
+                      << ",\"tokens_per_second\":" << generated.value().stats.tokens_per_second << "}}\n";
+        } else {
+            if (!stream_enabled) std::cout << generated.value().text << '\n';
+            print_stats(generated.value());
+        }
+        return 0;
+    }
+
+    const std::vector<stargate::inference::ChatMessage> initial_messages = messages;
+    std::optional<stargate::inference::LlamaGenerationStats> last_stats;
+    std::cout << "Stargate real-model chat (SmolLM2 CPU reference)\n"
+              << "Commands: /exit, /clear, /stats, /model, /help\n";
+    while (true) {
+        std::cout << "you> " << std::flush;
+        std::string input;
+        if (!std::getline(std::cin, input)) break;
+        if (input == "/exit" || input == "/quit") break;
+        if (input == "/clear") {
+            messages = initial_messages;
+            std::cout << "Conversation history cleared.\n";
+            continue;
+        }
+        if (input == "/stats") {
+            if (!last_stats) std::cout << "No generation statistics yet.\n";
+            else std::cout << "Prompt tokens: " << last_stats->prompt_tokens << ", generated: "
+                           << last_stats->generated_tokens << ", decode: " << last_stats->tokens_per_second << " tok/s\n";
+            continue;
+        }
+        if (input == "/model") {
+            std::cout << "HuggingFaceTB/SmolLM2-135M-Instruct @ 12fd25f (CPU BF16/FP32 reference)\n";
+            continue;
+        }
+        if (input == "/help") {
+            std::cout << "Enter a message, or use /exit, /clear, /stats, /model. Ctrl+C cancels generation safely.\n";
+            continue;
+        }
+        if (input.empty()) continue;
+        messages.push_back({"user", std::move(input)});
+        auto generated = run_generation(messages, true);
+        if (!generated) {
+            messages.pop_back();
+            if (real_generation_cancelled != 0) {
+                std::cout << "Generation cancelled; history was not modified.\n";
+                continue;
+            }
+            return print_error(generated.error());
+        }
+        messages.push_back({"assistant", generated.value().text});
+        last_stats = generated.value().stats;
+        print_stats(generated.value());
+    }
+    return 0;
+}
+
+int command_real_self_test(const std::vector<std::string>& args) {
+    const bool json = has_flag(args, "--json");
+    if (args.empty()) return print_error(stargate::make_error(stargate::ErrorCode::invalid_argument, "self-test requires a model directory"), json);
+    auto valid = validate_options(args, 1U, {}, {"--no-verify", "--json"});
+    if (!valid) return print_error(valid.error(), json);
+    auto runtime = start_real_runtime(args[0]);
+    if (!runtime) return print_error(runtime.error(), json);
+    auto model = load_real_model(args[0], runtime.value(), !has_flag(args, "--no-verify"));
+    if (!model) return print_error(model.error(), json);
+
+    struct Case {
+        std::string name;
+        std::vector<stargate::inference::ChatMessage> messages;
+        std::string expected;
+    };
+    const std::vector<Case> cases{
+        {"hello", {{"user", "Hello"}}, "Hello! How can I help you today?"},
+        {"italian", {{"user", "Qual è la capitale d'Italia?"}}, "Italia."},
+        {"moon", {{"user", "Write one short sentence about the Moon."}},
+         "The Moon, a celestial body, is a mysterious and awe-inspiring sight that captivates our imagination and inspires awe in us."},
+        {"multi-turn",
+         {{"user", "Hello"}, {"assistant", "Hello! How can I help you today?"}, {"user", "What was my first word?"}},
+         "My first word was \"I\"."},
+    };
+    stargate::inference::LlamaGenerationOptions options;
+    options.max_new_tokens = 64U;
+    options.temperature = 0.0F;
+    options.top_k = 40U;
+    options.timeout = std::chrono::minutes(2);
+    bool passed = true;
+    struct Outcome { std::string name; std::string expected; std::string actual; bool passed; };
+    std::vector<Outcome> outcomes;
+    const auto started = std::chrono::steady_clock::now();
+    for (const auto& test : cases) {
+        auto generated = model.value().generate(test.messages, options, *runtime.value().governor, &runtime.value().process_guard);
+        if (!generated) return print_error(generated.error(), json);
+        const bool case_passed = generated.value().text == test.expected;
+        passed = passed && case_passed;
+        outcomes.push_back({test.name, test.expected, generated.value().text, case_passed});
+    }
+    const double elapsed = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - started).count();
+    if (json) {
+        std::cout << "{\"ok\":" << (passed ? "true" : "false") << ",\"model_id\":\"HuggingFaceTB/SmolLM2-135M-Instruct\""
+                  << ",\"elapsed_ms\":" << elapsed << ",\"cases\":[";
+        for (std::size_t index = 0; index < outcomes.size(); ++index) {
+            if (index != 0U) std::cout << ',';
+            const auto& outcome = outcomes[index];
+            std::cout << "{\"name\":\"" << outcome.name << "\",\"expected\":\""
+                      << stargate::util::json_escape(outcome.expected) << "\",\"actual\":\""
+                      << stargate::util::json_escape(outcome.actual) << "\",\"passed\":"
+                      << (outcome.passed ? "true" : "false") << '}';
+        }
+        std::cout << "]}\n";
+    } else {
+        for (const auto& outcome : outcomes) {
+            std::cout << (outcome.passed ? "PASS " : "FAIL ") << outcome.name << ": " << outcome.actual << '\n';
+        }
+        std::cout << "Result: " << (passed ? "PASS" : "FAIL") << " (" << elapsed << " ms)\n";
+    }
+    return passed ? 0 : 1;
+}
+
 int command_heartbeat_write(const std::vector<std::string>& args) {
     if (args.empty()) return print_error(stargate::make_error(stargate::ErrorCode::invalid_argument, "heartbeat-write requires a path"));
     auto state = parse_safety_state(option_value(args, "--state").value_or("normal"));
@@ -359,9 +779,21 @@ int dispatch_cli(const std::vector<std::string>& arguments) {
         const std::string& command = arguments[1];
         const std::vector<std::string> args(arguments.begin() + 2, arguments.end());
 
-        if (command == "chat") return stargate::cli::command_chat(args);
-        if (command == "model-info") return stargate::cli::command_model_info(args);
-        if (command == "self-test") return stargate::cli::command_self_test(args);
+        if (command == "chat") {
+            std::error_code error;
+            if (!args.empty() && std::filesystem::is_directory(args[0], error)) return command_real_chat(args);
+            return stargate::cli::command_chat(args);
+        }
+        if (command == "model-info") {
+            std::error_code error;
+            if (!args.empty() && std::filesystem::is_directory(args[0], error)) return command_real_model_info(args);
+            return stargate::cli::command_model_info(args);
+        }
+        if (command == "self-test") {
+            std::error_code error;
+            if (!args.empty() && std::filesystem::is_directory(args[0], error)) return command_real_self_test(args);
+            return stargate::cli::command_self_test(args);
+        }
         if (command == "doctor") return command_doctor(args);
         if (command == "inspect") return command_inspect(args);
         if (command == "verify") return command_verify(args);
@@ -371,6 +803,8 @@ int dispatch_cli(const std::vector<std::string>& arguments) {
         if (command == "store-init") return command_store_init(args);
         if (command == "store-info") return command_store_info(args);
         if (command == "runtime-policy") return command_runtime_policy(args);
+        if (command == "tokenize") return command_tokenize(args);
+        if (command == "real-logits") return command_real_logits(args);
         if (command == "heartbeat-write") return command_heartbeat_write(args);
         if (command == "version" || command == "--version") {
             std::cout << stargate::kVersion << '\n';

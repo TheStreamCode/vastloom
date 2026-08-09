@@ -1,0 +1,68 @@
+{
+  "model_id": "HuggingFaceTB/SmolLM2-135M-Instruct",
+  "revision": "12fd25f77366fa6b3b4b768ec3050bf629380bac",
+  "reference": {
+    "transformers": "4.42.3",
+    "torch": "2.4.1",
+    "dtype": "float32 activations from BF16 weights"
+  },
+  "tokenizer_cases": [
+    {"text": "Hello", "ids": [19556]},
+    {"text": "Quanto fa 2+2?", "ids": [24696, 95, 3561, 216, 34, 27, 34, 47]},
+    {"text": "Qual è la capitale d’Italia?", "ids": [48346, 5549, 118, 2618, 47765, 1121, 287, 417, 1589, 15492, 47]},
+    {"text": " digits 123", "ids": [18638, 216, 33, 34, 35]}
+  ],
+  "logit_cases": [
+    {
+      "text": "Hello",
+      "chat": false,
+      "top": [
+        [28, 21.468494415283203],
+        [198, 21.453821182250977],
+        [260, 21.43616485595703],
+        [288, 20.975772857666016],
+        [30, 20.962539672851562]
+      ]
+    },
+    {
+      "text": "Hello",
+      "chat": true,
+      "top": [
+        [19556, 33.22686767578125],
+        [9085, 28.63534927368164],
+        [57, 28.463584899902344],
+        [1780, 27.912673950195312],
+        [14229, 27.88406753540039],
+        [2020, 27.79277229309082],
+        [1589, 27.54262924194336],
+        [26843, 27.534713745117188],
+        [26, 27.508167266845703],
+        [35097, 26.871723175048828]
+      ]
+    }
+  ],
+  "generation_cases": [
+    {
+      "prompt": "Hello",
+      "max_tokens": 32,
+      "text": "Hello! How can I help you today?",
+      "ids": [19556, 17, 1073, 416, 339, 724, 346, 1834, 47]
+    },
+    {
+      "prompt": "Qual è la capitale d'Italia?",
+      "max_tokens": 16,
+      "text": "Italia.",
+      "ids": [1589, 15492, 30]
+    },
+    {
+      "prompt": "Write one short sentence about the Moon.",
+      "max_tokens": 64,
+      "text": "The Moon, a celestial body, is a mysterious and awe-inspiring sight that captivates our imagination and inspires awe in us.",
+      "ids": [504, 8872, 28, 253, 18146, 1248, 28, 314, 253, 11965, 284, 27456, 29, 22846, 3166, 6968, 338, 8462, 660, 653, 9256, 284, 27385, 27456, 281, 468, 30]
+    }
+  ],
+  "multi_turn": {
+    "inputs": ["Hello", "What was my first word?"],
+    "outputs": ["Hello! How can I help you today?", "My first word was \"I\"."]
+  }
+}

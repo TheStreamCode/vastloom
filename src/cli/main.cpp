@@ -227,8 +227,8 @@ void print_help() {
         << "      Validate and display an existing Vastloom model store.\n\n"
         << "  runtime-policy [--storage PATH] [--json]\n"
         << "      Show the fail-closed RAM/VRAM/CPU/I/O policy for this host.\n\n"
-        << "  tokenize MODEL_DIRECTORY --text TEXT [--chat] [--json]\n"
-        << "      Exercise the real GPT-2 byte-level tokenizer and SmolLM chat template.\n\n"
+        << "  tokenize MODEL_DIRECTORY --text TEXT [--chat] [--system TEXT] [--json]\n"
+        << "      Exercise a supported byte-BPE tokenizer and its native chat template.\n\n"
         << "  real-logits MODEL_DIRECTORY --text TEXT [--chat] [--top N] [--no-verify] [--json]\n"
         << "      Run the pinned SmolLM2 CPU reference path and report final-token logits.\n\n"
         << "  moe-inspect MODEL_DIRECTORY [--no-verify] [--json]\n"
@@ -748,7 +748,7 @@ int command_moe_logits(const std::vector<std::string>& args) {
 int command_tokenize(const std::vector<std::string>& args) {
     const bool json = has_flag(args, "--json");
     if (args.empty()) return print_error(vastloom::make_error(vastloom::ErrorCode::invalid_argument, "tokenize requires a model directory"), json);
-    auto valid = validate_options(args, 1U, {"--text"}, {"--chat", "--json"});
+    auto valid = validate_options(args, 1U, {"--text", "--system"}, {"--chat", "--json"});
     if (!valid) return print_error(valid.error(), json);
     const auto text = option_value(args, "--text");
     if (!text) return print_error(vastloom::make_error(vastloom::ErrorCode::invalid_argument, "tokenize requires --text"), json);
@@ -756,20 +756,29 @@ int command_tokenize(const std::vector<std::string>& args) {
     if (!tokenizer) return print_error(tokenizer.error(), json);
     std::string input = *text;
     if (has_flag(args, "--chat")) {
+        std::vector<vastloom::inference::ChatMessage> messages;
+        if (const auto system = option_value(args, "--system")) messages.push_back({"system", *system});
+        messages.push_back({"user", input});
         const auto config_path = std::filesystem::path(args[0]) / "config.json";
         auto olmoe = vastloom::inference::load_olmoe_config(config_path);
-        auto formatted = olmoe
-                             ? tokenizer.value().apply_olmoe_chat_template({{"user", input}}, true)
-                             : tokenizer.value().apply_smol_chat_template({{"user", input}}, true);
+        auto formatted = tokenizer.value().is_deepseek_v4()
+                             ? tokenizer.value().apply_deepseek_v4_chat_template(messages, true)
+                             : (olmoe ? tokenizer.value().apply_olmoe_chat_template(messages, true)
+                                      : tokenizer.value().apply_smol_chat_template(messages, true));
         if (!formatted) return print_error(formatted.error(), json);
         input = formatted.take_value();
+    } else if (option_value(args, "--system")) {
+        return print_error(vastloom::make_error(vastloom::ErrorCode::invalid_argument,
+                                                "tokenize --system requires --chat"), json);
     }
     auto tokens = tokenizer.value().encode(input);
     if (!tokens) return print_error(tokens.error(), json);
     auto decoded = tokenizer.value().decode(tokens.value(), false);
     if (!decoded) return print_error(decoded.error(), json);
     if (json) {
-        std::cout << "{\"ok\":true,\"token_count\":" << tokens.value().size() << ",\"ids\":[";
+        std::cout << "{\"ok\":true,\"family\":\""
+                  << (tokenizer.value().is_deepseek_v4() ? "deepseek_v4_byte_bpe" : "gpt2_byte_bpe")
+                  << "\",\"token_count\":" << tokens.value().size() << ",\"ids\":[";
         for (std::size_t index = 0; index < tokens.value().size(); ++index) {
             if (index != 0U) std::cout << ',';
             std::cout << tokens.value()[index];

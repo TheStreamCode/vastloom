@@ -4,6 +4,7 @@
 #include <cstdint>
 #include <filesystem>
 #include <map>
+#include <optional>
 #include <string>
 #include <string_view>
 #include <unordered_map>
@@ -29,16 +30,29 @@ public:
                                                                bool add_generation_prompt = true) const;
     [[nodiscard]] Result<std::string> apply_olmoe_chat_template(const std::vector<ChatMessage>& messages,
                                                                 bool add_generation_prompt = true) const;
+    [[nodiscard]] Result<std::string> apply_deepseek_v4_chat_template(
+        const std::vector<ChatMessage>& messages,
+        bool add_generation_prompt = true) const;
 
     [[nodiscard]] std::size_t vocab_size() const noexcept { return id_to_token_.size(); }
     [[nodiscard]] std::uint32_t bos_token_id() const noexcept { return bos_token_id_; }
     [[nodiscard]] std::uint32_t eos_token_id() const noexcept { return eos_token_id_; }
     [[nodiscard]] std::uint32_t pad_token_id() const noexcept { return pad_token_id_; }
+    [[nodiscard]] bool is_deepseek_v4() const noexcept { return pretokenizer_mode_ == PretokenizerMode::deepseek_v4; }
 
 private:
+    enum class PretokenizerMode : std::uint8_t {
+        gpt2,
+        deepseek_v4,
+    };
+
     struct SpecialToken {
         std::string content;
         std::uint32_t id{0};
+    };
+    struct AddedTokenTrieNode {
+        std::vector<std::pair<std::uint8_t, std::size_t>> edges;
+        std::optional<std::uint32_t> token_id;
     };
 
     [[nodiscard]] Result<std::vector<std::uint32_t>> encode_ordinary(std::string_view text) const;
@@ -50,12 +64,15 @@ private:
     std::unordered_map<std::string, std::size_t> merge_ranks_;
     std::array<std::string, 256> byte_encoder_{};
     std::unordered_map<std::string, std::uint8_t> byte_decoder_;
-    std::vector<SpecialToken> special_tokens_;
+    std::vector<SpecialToken> added_tokens_;
+    std::vector<AddedTokenTrieNode> added_token_trie_;
+    std::vector<bool> added_ids_;
     std::vector<bool> special_ids_;
     std::uint32_t bos_token_id_{1};
     std::uint32_t eos_token_id_{2};
     std::uint32_t pad_token_id_{2};
     bool split_digits_individually_{true};
+    PretokenizerMode pretokenizer_mode_{PretokenizerMode::gpt2};
 };
 
 }  // namespace vastloom::inference

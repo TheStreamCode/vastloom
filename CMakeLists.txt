@@ -162,6 +162,13 @@ if(BUILD_TESTING AND VASTLOOM_BUILD_TESTS)
             COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/tests/test_import_hf_model.py
         )
         set_tests_properties(vastloom_hf_importer_offline PROPERTIES TIMEOUT 30)
+        add_test(
+            NAME vastloom_deepseek_v4_tokenizer
+            COMMAND ${Python3_EXECUTABLE}
+                ${CMAKE_CURRENT_SOURCE_DIR}/tests/test_deepseek_tokenizer_cli.py
+                --vastloom $<TARGET_FILE:vastloom>
+        )
+        set_tests_properties(vastloom_deepseek_v4_tokenizer PROPERTIES TIMEOUT 60)
         if(VASTLOOM_SMOLLM2_MODEL)
             add_test(
                 NAME vastloom_smollm2_reference

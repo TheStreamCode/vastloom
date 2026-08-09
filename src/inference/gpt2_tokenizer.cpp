@@ -4,7 +4,9 @@
 #include <charconv>
 #include <fstream>
 #include <limits>
+#include <optional>
 #include <set>
+#include <tuple>
 
 #include "vastloom/core/bytes.hpp"
 #include "vastloom/util/json.hpp"
@@ -21,6 +23,26 @@ struct Codepoint {
     std::string bytes;
     std::uint32_t value{0};
 };
+
+#include "unicode_categories.inc"
+
+template <std::size_t Size>
+bool in_unicode_ranges(std::uint32_t value,
+                       const std::array<UnicodeRange, Size>& ranges) noexcept {
+    std::size_t left = 0U;
+    std::size_t right = ranges.size();
+    while (left < right) {
+        const std::size_t middle = left + (right - left) / 2U;
+        if (value < ranges[middle].first) {
+            right = middle;
+        } else if (value > ranges[middle].last) {
+            left = middle + 1U;
+        } else {
+            return true;
+        }
+    }
+    return false;
+}
 
 Result<std::vector<Codepoint>> split_utf8(std::string_view input) {
     std::vector<Codepoint> output;
@@ -82,19 +104,52 @@ bool is_ascii_digit(const Codepoint& codepoint) noexcept {
     return codepoint.value >= '0' && codepoint.value <= '9';
 }
 
+bool is_number(const Codepoint& codepoint) noexcept {
+    return in_unicode_ranges(codepoint.value, kUnicodeNRanges);
+}
+
 bool is_whitespace(const Codepoint& codepoint) noexcept {
     const auto value = codepoint.value;
-    return value == 0x20U || (value >= 0x09U && value <= 0x0dU) || value == 0x85U ||
-           value == 0xa0U || value == 0x1680U || (value >= 0x2000U && value <= 0x200aU) ||
-           value == 0x2028U || value == 0x2029U || value == 0x202fU || value == 0x205fU || value == 0x3000U;
+    return (value >= 0x09U && value <= 0x0dU) || value == 0x85U ||
+           in_unicode_ranges(value, kUnicodeZRanges);
 }
 
 bool is_letter(const Codepoint& codepoint) noexcept {
+    return in_unicode_ranges(codepoint.value, kUnicodeLRanges);
+}
+
+bool is_mark(const Codepoint& codepoint) noexcept {
+    return in_unicode_ranges(codepoint.value, kUnicodeMRanges);
+}
+
+bool is_punctuation(const Codepoint& codepoint) noexcept {
+    return in_unicode_ranges(codepoint.value, kUnicodePRanges);
+}
+
+bool is_symbol(const Codepoint& codepoint) noexcept {
+    return in_unicode_ranges(codepoint.value, kUnicodeSRanges);
+}
+
+bool is_ascii_letter(const Codepoint& codepoint) noexcept {
+    return (codepoint.value >= 'A' && codepoint.value <= 'Z') ||
+           (codepoint.value >= 'a' && codepoint.value <= 'z');
+}
+
+bool is_ascii_pattern_punctuation(const Codepoint& codepoint) noexcept {
+    if (codepoint.value > 0x7fU) return false;
+    constexpr std::string_view punctuation = "!\"#$%&'()*+,-./:;<=>?@[\\]^_`{|}~";
+    return punctuation.find(static_cast<char>(codepoint.value)) != std::string_view::npos;
+}
+
+bool is_newline(const Codepoint& codepoint) noexcept {
+    return codepoint.value == '\r' || codepoint.value == '\n';
+}
+
+bool is_deepseek_cjk(const Codepoint& codepoint) noexcept {
     const auto value = codepoint.value;
-    if ((value >= 'A' && value <= 'Z') || (value >= 'a' && value <= 'z')) return true;
-    if ((value >= 0x00c0U && value <= 0x02afU) || (value >= 0x0370U && value <= 0x052fU) ||
-        (value >= 0x1e00U && value <= 0x1effU)) return value != 0x00d7U && value != 0x00f7U;
-    return value >= 0x4e00U && value <= 0x9fffU;
+    return (value >= 0x4e00U && value <= 0x9fa5U) ||
+           (value >= 0x3040U && value <= 0x309fU) ||
+           (value >= 0x30a0U && value <= 0x30ffU);
 }
 
 bool contraction_at(const std::vector<Codepoint>& codepoints, std::size_t position, std::size_t* length) {
@@ -127,6 +182,180 @@ std::string merge_key(std::string_view left, std::string_view right) {
     return result;
 }
 
+bool json_string_is(const util::JsonValue& object,
+                    std::string_view key,
+                    std::string_view expected) {
+    const auto* value = object.find(key);
+    if (value == nullptr) return false;
+    auto text = value->as_string();
+    return text && text.value() == expected;
+}
+
+bool json_bool_is(const util::JsonValue& object, std::string_view key, bool expected) {
+    const auto* value = object.find(key);
+    if (value == nullptr) return false;
+    auto parsed = value->as_bool();
+    return parsed && parsed.value() == expected;
+}
+
+Result<void> validate_deepseek_v4_tokenizer_layout(const util::JsonValue& root,
+                                                   const std::filesystem::path& source) {
+    const auto* normalizer = root.find("normalizer");
+    const auto* pretokenizer = root.find("pre_tokenizer");
+    const auto* decoder = root.find("decoder");
+    const auto* postprocessor = root.find("post_processor");
+    if (normalizer == nullptr || pretokenizer == nullptr || decoder == nullptr || postprocessor == nullptr ||
+        !json_string_is(*normalizer, "type", "Sequence") ||
+        !json_string_is(*pretokenizer, "type", "Sequence") ||
+        !json_string_is(*decoder, "type", "ByteLevel") ||
+        !json_string_is(*postprocessor, "type", "ByteLevel")) {
+        return make_error(ErrorCode::unsupported, "Tokenizer is not the DeepSeek V4 byte-BPE layout", source.string());
+    }
+    const auto* normalizers_value = normalizer->find("normalizers");
+    const auto* pretokenizers_value = pretokenizer->find("pretokenizers");
+    auto normalizers = normalizers_value == nullptr
+                           ? Result<const util::JsonValue::Array*>(make_error(ErrorCode::invalid_format, "missing normalizers"))
+                           : normalizers_value->as_array();
+    auto pretokenizers = pretokenizers_value == nullptr
+                             ? Result<const util::JsonValue::Array*>(make_error(ErrorCode::invalid_format, "missing pretokenizers"))
+                             : pretokenizers_value->as_array();
+    if (!normalizers || !normalizers.value()->empty() || !pretokenizers || pretokenizers.value()->size() != 4U) {
+        return make_error(ErrorCode::unsupported, "DeepSeek V4 tokenizer sequence differs from the pinned layout", source.string());
+    }
+    constexpr std::array<std::string_view, 3> patterns{
+        R"(\p{N}{1,3})",
+        R"([一-龥぀-ゟ゠-ヿ]+)",
+        "[!\"#$%&'()*+,\\-./:;<=>?@\\[\\\\\\]^_`{|}~][A-Za-z]+|[^\r\n\\p{L}\\p{P}\\p{S}]?[\\p{L}\\p{M}]+| ?[\\p{P}\\p{S}]+[\r\n]*|\\s*[\r\n]+|\\s+(?!\\S)|\\s+",
+    };
+    for (std::size_t index = 0U; index < patterns.size(); ++index) {
+        const auto& split = (*pretokenizers.value())[index];
+        const auto* pattern = split.find("pattern");
+        if (!json_string_is(split, "type", "Split") || !json_string_is(split, "behavior", "Isolated") ||
+            !json_bool_is(split, "invert", false) || pattern == nullptr ||
+            !json_string_is(*pattern, "Regex", patterns[index])) {
+            return make_error(ErrorCode::unsupported, "DeepSeek V4 tokenizer split regex differs from the pinned layout", std::to_string(index));
+        }
+    }
+    const auto& byte_level = (*pretokenizers.value())[3U];
+    if (!json_string_is(byte_level, "type", "ByteLevel") ||
+        !json_bool_is(byte_level, "add_prefix_space", false) ||
+        !json_bool_is(byte_level, "trim_offsets", true) ||
+        !json_bool_is(byte_level, "use_regex", false)) {
+        return make_error(ErrorCode::unsupported, "DeepSeek V4 ByteLevel pre-tokenizer differs from the pinned layout", source.string());
+    }
+    return {};
+}
+
+Result<std::string_view> tokenizer_config_token_content(const util::JsonValue& value,
+                                                        std::string_view field) {
+    if (value.is_string()) return value.as_string();
+    if (value.is_object()) {
+        const auto* content = value.find("content");
+        if (content != nullptr) return content->as_string();
+    }
+    return make_error(ErrorCode::invalid_format, "Tokenizer special-token field has no string content", std::string(field));
+}
+
+void append_codepoint_piece(const std::vector<Codepoint>& codepoints,
+                            std::size_t begin,
+                            std::size_t end,
+                            std::vector<std::string>& output) {
+    std::string piece;
+    for (std::size_t index = begin; index < end; ++index) piece += codepoints[index].bytes;
+    if (!piece.empty()) output.push_back(std::move(piece));
+}
+
+std::optional<std::size_t> deepseek_general_match_end(const std::vector<Codepoint>& codepoints,
+                                                      std::size_t position,
+                                                      std::size_t limit) {
+    const auto advance_letters = [&](std::size_t cursor) {
+        while (cursor < limit && (is_letter(codepoints[cursor]) || is_mark(codepoints[cursor]))) ++cursor;
+        return cursor;
+    };
+    if (is_ascii_pattern_punctuation(codepoints[position]) && position + 1U < limit &&
+        is_ascii_letter(codepoints[position + 1U])) {
+        std::size_t cursor = position + 2U;
+        while (cursor < limit && is_ascii_letter(codepoints[cursor])) ++cursor;
+        return cursor;
+    }
+    if (is_letter(codepoints[position]) || is_mark(codepoints[position])) {
+        return advance_letters(position + 1U);
+    }
+    const bool optional_letter_prefix = !is_newline(codepoints[position]) &&
+                                        !is_letter(codepoints[position]) &&
+                                        !is_punctuation(codepoints[position]) &&
+                                        !is_symbol(codepoints[position]);
+    if (optional_letter_prefix && position + 1U < limit &&
+        (is_letter(codepoints[position + 1U]) || is_mark(codepoints[position + 1U]))) {
+        return advance_letters(position + 2U);
+    }
+    std::size_t punctuation_start = position;
+    if (codepoints[position].value == 0x20U && position + 1U < limit &&
+        (is_punctuation(codepoints[position + 1U]) || is_symbol(codepoints[position + 1U]))) {
+        punctuation_start = position + 1U;
+    }
+    if (is_punctuation(codepoints[punctuation_start]) || is_symbol(codepoints[punctuation_start])) {
+        std::size_t cursor = punctuation_start + 1U;
+        while (cursor < limit && (is_punctuation(codepoints[cursor]) || is_symbol(codepoints[cursor]))) ++cursor;
+        while (cursor < limit && is_newline(codepoints[cursor])) ++cursor;
+        return cursor;
+    }
+    if (is_whitespace(codepoints[position])) {
+        std::size_t cursor = position;
+        std::optional<std::size_t> last_newline;
+        while (cursor < limit && is_whitespace(codepoints[cursor])) {
+            if (is_newline(codepoints[cursor])) last_newline = cursor;
+            ++cursor;
+        }
+        if (last_newline) return *last_newline + 1U;
+        if (cursor == limit) return cursor;
+        if (cursor - position > 1U) return cursor - 1U;
+        return cursor;
+    }
+    return std::nullopt;
+}
+
+std::vector<std::string> deepseek_pretokenize(const std::vector<Codepoint>& codepoints) {
+    std::vector<std::string> output;
+    for (std::size_t position = 0U; position < codepoints.size();) {
+        if (is_number(codepoints[position])) {
+            std::size_t end = position + 1U;
+            while (end < codepoints.size() && end - position < 3U && is_number(codepoints[end])) ++end;
+            append_codepoint_piece(codepoints, position, end, output);
+            position = end;
+            continue;
+        }
+        if (is_deepseek_cjk(codepoints[position])) {
+            std::size_t end = position + 1U;
+            while (end < codepoints.size() && is_deepseek_cjk(codepoints[end])) ++end;
+            append_codepoint_piece(codepoints, position, end, output);
+            position = end;
+            continue;
+        }
+        std::size_t segment_end = position + 1U;
+        while (segment_end < codepoints.size() && !is_number(codepoints[segment_end]) &&
+               !is_deepseek_cjk(codepoints[segment_end])) {
+            ++segment_end;
+        }
+        while (position < segment_end) {
+            auto matched_end = deepseek_general_match_end(codepoints, position, segment_end);
+            if (matched_end) {
+                append_codepoint_piece(codepoints, position, *matched_end, output);
+                position = *matched_end;
+                continue;
+            }
+            std::size_t unmatched_end = position + 1U;
+            while (unmatched_end < segment_end &&
+                   !deepseek_general_match_end(codepoints, unmatched_end, segment_end)) {
+                ++unmatched_end;
+            }
+            append_codepoint_piece(codepoints, position, unmatched_end, output);
+            position = unmatched_end;
+        }
+    }
+    return output;
+}
+
 }  // namespace
 
 Result<Gpt2Tokenizer> Gpt2Tokenizer::load(const std::filesystem::path& model_directory) {
@@ -142,6 +371,12 @@ Result<Gpt2Tokenizer> Gpt2Tokenizer::load(const std::filesystem::path& model_dir
 
     Gpt2Tokenizer result;
     std::vector<std::string> inline_merges;
+    struct PendingAddedToken {
+        std::uint32_t id{0};
+        std::string content;
+        bool special{false};
+    };
+    std::vector<PendingAddedToken> pending_added_tokens;
     const auto populate_vocab = [&](const util::JsonValue::Object& vocab, const std::filesystem::path& source) -> Result<void> {
         if (vocab.empty() || vocab.size() > kMaximumVocabEntries) {
             return make_error(ErrorCode::invalid_format, "Tokenizer vocabulary is invalid", source.string());
@@ -159,6 +394,7 @@ Result<Gpt2Tokenizer> Gpt2Tokenizer::load(const std::filesystem::path& model_dir
             return make_error(ErrorCode::invalid_format, "Tokenizer vocabulary ids are not contiguous", source.string());
         }
         result.id_to_token_.resize(static_cast<std::size_t>(maximum_id + 1U));
+        result.added_ids_.resize(result.id_to_token_.size(), false);
         result.special_ids_.resize(result.id_to_token_.size(), false);
         result.token_to_id_.reserve(vocab.size() + 64U);
         for (const auto& [token, id_value] : vocab) {
@@ -203,8 +439,17 @@ Result<Gpt2Tokenizer> Gpt2Tokenizer::load(const std::filesystem::path& model_dir
         auto pre_type = pre_type_value->as_string();
         auto normalizer_type = normalizer_type_value->as_string();
         if (!type || type.value() != "BPE" || !vocab || !merges || merges.value()->size() > kMaximumMergeEntries ||
-            !pre_type || pre_type.value() != "ByteLevel" || !normalizer_type || normalizer_type.value() != "NFC") {
-            return make_error(ErrorCode::unsupported, "Tokenizer JSON is not the supported GPT-NeoX byte BPE", tokenizer_path.string());
+            !pre_type || !normalizer_type) {
+            return make_error(ErrorCode::unsupported, "Tokenizer JSON is not a supported byte BPE", tokenizer_path.string());
+        }
+        if (pre_type.value() == "ByteLevel" && normalizer_type.value() == "NFC") {
+            result.pretokenizer_mode_ = PretokenizerMode::gpt2;
+        } else if (pre_type.value() == "Sequence" && normalizer_type.value() == "Sequence") {
+            auto layout = validate_deepseek_v4_tokenizer_layout(tokenizer_json.value(), tokenizer_path);
+            if (!layout) return layout.error();
+            result.pretokenizer_mode_ = PretokenizerMode::deepseek_v4;
+        } else {
+            return make_error(ErrorCode::unsupported, "Tokenizer byte-BPE pre-tokenizer is unsupported", tokenizer_path.string());
         }
         auto populated = populate_vocab(*vocab.value(), tokenizer_path);
         if (!populated) return populated.error();
@@ -215,6 +460,43 @@ Result<Gpt2Tokenizer> Gpt2Tokenizer::load(const std::filesystem::path& model_dir
             inline_merges.emplace_back(merge.value());
         }
         result.split_digits_individually_ = false;
+        if (result.pretokenizer_mode_ == PretokenizerMode::deepseek_v4) {
+            const auto* added_value = tokenizer_json.value().find("added_tokens");
+            auto added = added_value == nullptr
+                             ? Result<const util::JsonValue::Array*>(make_error(ErrorCode::invalid_format, "missing added_tokens"))
+                             : added_value->as_array();
+            if (!added || added.value()->size() > 4096U) {
+                return make_error(ErrorCode::invalid_format, "DeepSeek tokenizer added-token list is invalid", tokenizer_path.string());
+            }
+            pending_added_tokens.reserve(added.value()->size());
+            for (const auto& definition : *added.value()) {
+                const auto* id_value = definition.find("id");
+                const auto* content_value = definition.find("content");
+                const auto* special_value = definition.find("special");
+                const auto* single_word_value = definition.find("single_word");
+                const auto* lstrip_value = definition.find("lstrip");
+                const auto* rstrip_value = definition.find("rstrip");
+                if (id_value == nullptr || content_value == nullptr || special_value == nullptr ||
+                    single_word_value == nullptr || lstrip_value == nullptr || rstrip_value == nullptr) {
+                    return make_error(ErrorCode::invalid_format, "DeepSeek tokenizer added-token fields are missing", tokenizer_path.string());
+                }
+                auto id = id_value->as_u64();
+                auto content = content_value->as_string();
+                auto special = special_value->as_bool();
+                auto single_word = single_word_value->as_bool();
+                auto left_strip = lstrip_value->as_bool();
+                auto right_strip = rstrip_value->as_bool();
+                if (!id || id.value() >= kMaximumVocabEntries || !content || content.value().empty() || !special ||
+                    !single_word || single_word.value() || !left_strip || left_strip.value() ||
+                    !right_strip || right_strip.value()) {
+                    return make_error(ErrorCode::unsupported, "DeepSeek tokenizer uses an unsupported added-token rule", tokenizer_path.string());
+                }
+                pending_added_tokens.push_back(PendingAddedToken{
+                    static_cast<std::uint32_t>(id.value()), std::string(content.value()), special.value()});
+            }
+            std::sort(pending_added_tokens.begin(), pending_added_tokens.end(),
+                      [](const auto& left, const auto& right) { return left.id < right.id; });
+        }
     }
 
     std::size_t rank = 0;
@@ -257,47 +539,89 @@ Result<Gpt2Tokenizer> Gpt2Tokenizer::load(const std::filesystem::path& model_dir
     config_limits.max_nodes = 4096;
     auto config_json = util::load_json_file(config_path, config_limits);
     if (!config_json) return config_json.error();
-    const auto* added_decoder = config_json.value().find("added_tokens_decoder");
-    if (added_decoder == nullptr) return make_error(ErrorCode::invalid_format, "Tokenizer has no added_tokens_decoder", config_path.string());
-    auto added = added_decoder->as_object();
-    if (!added || added.value()->size() > 4096U) return make_error(ErrorCode::invalid_format, "Tokenizer added-token map is invalid", config_path.string());
-    for (const auto& [id_text, definition] : *added.value()) {
-        std::uint32_t id = 0;
-        const auto converted = std::from_chars(id_text.data(), id_text.data() + id_text.size(), id);
-        const auto* content_value = definition.find("content");
-        const auto* special_value = definition.find("special");
-        if (converted.ec != std::errc{} || converted.ptr != id_text.data() + id_text.size() ||
-            id > result.id_to_token_.size() || content_value == nullptr || special_value == nullptr) {
-            return make_error(ErrorCode::invalid_format, "Tokenizer added-token entry is invalid", id_text);
+    if (pending_added_tokens.empty()) {
+        const auto* added_decoder = config_json.value().find("added_tokens_decoder");
+        if (added_decoder == nullptr) {
+            return make_error(ErrorCode::invalid_format, "Tokenizer has no added-token definitions", config_path.string());
         }
-        auto content = content_value->as_string();
-        auto special = special_value->as_bool();
-        if (!content || !special) {
-            return make_error(ErrorCode::invalid_format, "Tokenizer added-token entry fields are invalid", id_text);
+        auto added = added_decoder->as_object();
+        if (!added || added.value()->size() > 4096U) {
+            return make_error(ErrorCode::invalid_format, "Tokenizer added-token map is invalid", config_path.string());
+        }
+        pending_added_tokens.reserve(added.value()->size());
+        for (const auto& [id_text, definition] : *added.value()) {
+            std::uint32_t id = 0;
+            const auto converted = std::from_chars(id_text.data(), id_text.data() + id_text.size(), id);
+            const auto* content_value = definition.find("content");
+            const auto* special_value = definition.find("special");
+            auto content = content_value == nullptr
+                               ? Result<std::string_view>(make_error(ErrorCode::invalid_format, "missing content"))
+                               : content_value->as_string();
+            auto special = special_value == nullptr
+                               ? Result<bool>(make_error(ErrorCode::invalid_format, "missing special"))
+                               : special_value->as_bool();
+            if (converted.ec != std::errc{} || converted.ptr != id_text.data() + id_text.size() || !content || !special) {
+                return make_error(ErrorCode::invalid_format, "Tokenizer added-token entry is invalid", id_text);
+            }
+            pending_added_tokens.push_back(PendingAddedToken{id, std::string(content.value()), special.value()});
+        }
+        std::sort(pending_added_tokens.begin(), pending_added_tokens.end(),
+                  [](const auto& left, const auto& right) { return left.id < right.id; });
+    }
+    for (const auto& definition : pending_added_tokens) {
+        const std::uint32_t id = definition.id;
+        const std::string_view content = definition.content;
+        if (id > result.id_to_token_.size()) {
+            return make_error(ErrorCode::invalid_format, "Tokenizer added-token ids are not contiguous", std::to_string(id));
         }
         if (id == result.id_to_token_.size()) {
-            if (result.token_to_id_.contains(std::string(content.value()))) {
-                return make_error(ErrorCode::integrity_error, "Tokenizer appended token duplicates vocabulary", id_text);
+            if (result.token_to_id_.contains(std::string(content))) {
+                return make_error(ErrorCode::integrity_error, "Tokenizer appended token duplicates vocabulary", std::to_string(id));
             }
-            result.id_to_token_.emplace_back(content.value());
+            result.id_to_token_.emplace_back(content);
+            result.added_ids_.push_back(false);
             result.special_ids_.push_back(false);
             result.token_to_id_.emplace(result.id_to_token_.back(), id);
-        } else if (result.id_to_token_[id] != content.value()) {
-            return make_error(ErrorCode::integrity_error, "Tokenizer added token does not match vocabulary", id_text);
+        } else if (result.id_to_token_[id] != content) {
+            return make_error(ErrorCode::integrity_error, "Tokenizer added token does not match vocabulary", std::to_string(id));
         }
-        if (special.value()) {
-            result.special_tokens_.push_back(SpecialToken{std::string(content.value()), id});
-            result.special_ids_[id] = true;
-        }
+        result.added_tokens_.push_back(SpecialToken{std::string(content), id});
+        result.added_ids_[id] = true;
+        if (definition.special) result.special_ids_[id] = true;
     }
-    std::sort(result.special_tokens_.begin(), result.special_tokens_.end(), [](const auto& left, const auto& right) {
+    std::sort(result.added_tokens_.begin(), result.added_tokens_.end(), [](const auto& left, const auto& right) {
         return left.content.size() > right.content.size();
     });
+    result.added_token_trie_.emplace_back();
+    for (const auto& token : result.added_tokens_) {
+        std::size_t node = 0U;
+        for (const char raw_byte : token.content) {
+            const auto byte = static_cast<std::uint8_t>(static_cast<unsigned char>(raw_byte));
+            auto& edges = result.added_token_trie_[node].edges;
+            auto edge = std::lower_bound(edges.begin(), edges.end(), byte,
+                                         [](const auto& candidate, std::uint8_t value) {
+                                             return candidate.first < value;
+                                         });
+            if (edge == edges.end() || edge->first != byte) {
+                const std::size_t child = result.added_token_trie_.size();
+                edges.insert(edge, {byte, child});
+                node = child;
+                result.added_token_trie_.emplace_back();
+            } else {
+                node = edge->second;
+            }
+        }
+        if (result.added_token_trie_[node].token_id) {
+            return make_error(ErrorCode::integrity_error,
+                              "Tokenizer added-token content is duplicated", token.content);
+        }
+        result.added_token_trie_[node].token_id = token.id;
+    }
 
     const auto assign_token_id = [&](std::string_view field, std::uint32_t* output) -> Result<void> {
         const auto* value = config_json.value().find(field);
         if (value == nullptr) return make_error(ErrorCode::invalid_format, "Tokenizer special-token field is missing", std::string(field));
-        auto content = value->as_string();
+        auto content = tokenizer_config_token_content(*value, field);
         if (!content) return make_error(ErrorCode::invalid_format, "Tokenizer special-token field is not a string", std::string(field));
         const auto iterator = result.token_to_id_.find(std::string(content.value()));
         if (iterator == result.token_to_id_.end()) {
@@ -341,14 +665,25 @@ Result<std::vector<std::uint32_t>> Gpt2Tokenizer::encode(std::string_view text) 
     std::size_t ordinary_start = 0;
     std::size_t position = 0;
     while (position < text.size()) {
-        const SpecialToken* matched = nullptr;
-        for (const auto& special : special_tokens_) {
-            if (text.substr(position, special.content.size()) == special.content) {
-                matched = &special;
-                break;
+        std::optional<std::uint32_t> matched_id;
+        std::size_t matched_bytes = 0U;
+        std::size_t node = 0U;
+        for (std::size_t cursor = position; cursor < text.size();) {
+            const auto byte = static_cast<std::uint8_t>(static_cast<unsigned char>(text[cursor]));
+            const auto& edges = added_token_trie_[node].edges;
+            const auto edge = std::lower_bound(edges.begin(), edges.end(), byte,
+                                               [](const auto& candidate, std::uint8_t value) {
+                                                   return candidate.first < value;
+                                               });
+            if (edge == edges.end() || edge->first != byte) break;
+            node = edge->second;
+            ++cursor;
+            if (added_token_trie_[node].token_id) {
+                matched_id = added_token_trie_[node].token_id;
+                matched_bytes = cursor - position;
             }
         }
-        if (matched == nullptr) {
+        if (!matched_id) {
             ++position;
             continue;
         }
@@ -357,8 +692,8 @@ Result<std::vector<std::uint32_t>> Gpt2Tokenizer::encode(std::string_view text) 
             if (!encoded) return encoded.error();
             output.insert(output.end(), encoded.value().begin(), encoded.value().end());
         }
-        output.push_back(matched->id);
-        position += matched->content.size();
+        output.push_back(*matched_id);
+        position += matched_bytes;
         ordinary_start = position;
     }
     if (ordinary_start < text.size()) {
@@ -384,6 +719,9 @@ Result<std::vector<std::uint32_t>> Gpt2Tokenizer::encode_ordinary(std::string_vi
 Result<std::vector<std::string>> Gpt2Tokenizer::pretokenize(std::string_view text) const {
     auto decoded = split_utf8(text);
     if (!decoded) return decoded.error();
+    if (pretokenizer_mode_ == PretokenizerMode::deepseek_v4) {
+        return deepseek_pretokenize(decoded.value());
+    }
     std::vector<std::vector<Codepoint>> digit_pieces;
     std::vector<Codepoint> current;
     for (const auto& codepoint : decoded.value()) {
@@ -484,8 +822,8 @@ Result<std::string> Gpt2Tokenizer::decode(const std::vector<std::uint32_t>& toke
     std::string output;
     for (const auto id : token_ids) {
         if (id >= id_to_token_.size()) return make_error(ErrorCode::invalid_argument, "Token id exceeds tokenizer vocabulary", std::to_string(id));
-        if (special_ids_[id]) {
-            if (!skip_special_tokens) output += id_to_token_[id];
+        if (added_ids_[id]) {
+            if (!special_ids_[id] || !skip_special_tokens) output += id_to_token_[id];
             continue;
         }
         auto symbols = split_utf8(id_to_token_[id]);
@@ -548,6 +886,84 @@ Result<std::string> Gpt2Tokenizer::apply_olmoe_chat_template(const std::vector<C
     }
     if (add_generation_prompt) output += "<|assistant|>\n";
     if (output.size() > kMaximumInputBytes) return make_error(ErrorCode::invalid_argument, "Formatted OLMoE chat exceeds 16 MiB");
+    return output;
+}
+
+Result<std::string> Gpt2Tokenizer::apply_deepseek_v4_chat_template(
+    const std::vector<ChatMessage>& messages,
+    bool add_generation_prompt) const {
+    if (pretokenizer_mode_ != PretokenizerMode::deepseek_v4 || messages.empty() ||
+        messages.size() > kMaximumMessages || bos_token_id_ >= id_to_token_.size() ||
+        eos_token_id_ >= id_to_token_.size()) {
+        return make_error(ErrorCode::invalid_argument,
+                          "DeepSeek V4 chat requires its tokenizer and between 1 and 1024 messages");
+    }
+    const auto user = token_to_id_.find("<｜User｜>");
+    const auto assistant = token_to_id_.find("<｜Assistant｜>");
+    const auto thinking_end = token_to_id_.find("</think>");
+    if (user == token_to_id_.end() || assistant == token_to_id_.end() ||
+        thinking_end == token_to_id_.end()) {
+        return make_error(ErrorCode::integrity_error,
+                          "DeepSeek V4 tokenizer is missing chat-template tokens");
+    }
+
+    std::string output = id_to_token_[bos_token_id_];
+    bool saw_system = false;
+    bool expect_user = true;
+    for (std::size_t index = 0U; index < messages.size(); ++index) {
+        const auto& message = messages[index];
+        if (message.content.size() > kMaximumInputBytes) {
+            return make_error(ErrorCode::invalid_argument,
+                              "DeepSeek V4 chat message exceeds 16 MiB", message.role);
+        }
+        if (message.role == "system") {
+            if (index != 0U || saw_system) {
+                return make_error(ErrorCode::invalid_argument,
+                                  "DeepSeek V4 system message must be first and unique");
+            }
+            saw_system = true;
+            output += message.content;
+            continue;
+        }
+        if (message.role == "user") {
+            if (!expect_user) {
+                return make_error(ErrorCode::invalid_argument,
+                                  "DeepSeek V4 chat roles must alternate user and assistant");
+            }
+            output += id_to_token_[user->second];
+            output += message.content;
+            output += id_to_token_[assistant->second];
+            output += id_to_token_[thinking_end->second];
+            expect_user = false;
+            continue;
+        }
+        if (message.role == "assistant") {
+            if (expect_user) {
+                return make_error(ErrorCode::invalid_argument,
+                                  "DeepSeek V4 assistant message must follow a user message");
+            }
+            output += message.content;
+            output += id_to_token_[eos_token_id_];
+            expect_user = true;
+            continue;
+        }
+        return make_error(ErrorCode::invalid_argument,
+                          "DeepSeek V4 basic chat template supports system/user/assistant roles",
+                          message.role);
+    }
+    if (add_generation_prompt) {
+        if (expect_user) {
+            return make_error(ErrorCode::invalid_argument,
+                              "DeepSeek V4 generation prompt requires a final user message");
+        }
+    } else if (!expect_user) {
+        return make_error(ErrorCode::invalid_argument,
+                          "DeepSeek V4 completed template requires a final assistant message");
+    }
+    if (output.size() > kMaximumInputBytes) {
+        return make_error(ErrorCode::invalid_argument,
+                          "Formatted DeepSeek V4 chat exceeds 16 MiB");
+    }
     return output;
 }
 

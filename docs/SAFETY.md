@@ -112,6 +112,32 @@ A direct `.sgtm` path receives structural validation but no cryptographic identi
 A metadata-only research profile cannot verify weights and must never be treated as a
 runnable model manifest.
 
+## Real OLMoE streaming bounds
+
+The alpha.4 OLMoE probe is fail-closed around one exact checkpoint revision:
+
+- all three shard sizes and SHA-256 values, model identity, tensor names, shapes and
+  BF16 dtypes must match the pinned manifest;
+- a metadata-only import can be inspected/tokenized but is rejected before runtime
+  weight allocation;
+- the 13.84 GB checkpoint is never proposed as resident when it exceeds the live RAM
+  cap; only the 953,421,824-byte always-active trunk is reserved and loaded;
+- one streamed expert is exactly 12 MiB, and every no-cache or cache buffer is reserved
+  before allocation;
+- cache capacity is rounded to complete experts, must hold at least one expert and is
+  hard-capped at 2 GiB;
+- FP32 K/V state and a 64 MiB activation scratch budget are reserved before forward;
+- the Windows Job Object, six-thread maximum and 8 GiB live system-headroom check apply
+  to the complete process; cancellation, timeout and live pressure are checked at every
+  layer boundary;
+- telemetry is written to a process-specific temporary file and atomically renamed;
+  existing traces are never overwritten.
+
+Original checkpoint files are read-only and remain outside the repository. Expert
+traffic is produced by exact bounded reads, not pagefile/swap. The current synchronous
+reader still needs injected mid-read failures and I/O timeouts before it can be called a
+production storage pipeline.
+
 ## Watchdog
 
 `stargate-watchdog` is a separate process. It validates that the heartbeat belongs to the
@@ -121,7 +147,7 @@ supplied explicitly before it can terminate a stale runtime.
 The alpha.2 TinyChat CLI does not yet publish a continuous generation heartbeat; that
 integration remains required before long-running large-model inference.
 
-## Tests implemented in alpha.2
+## Tests implemented through alpha.4
 
 - allocation oversubscription and reservation release;
 - critical/emergency state escalation and hysteretic recovery;
@@ -136,6 +162,12 @@ integration remains required before long-running large-model inference.
 - seeded generation reproducibility;
 - valid-Unicode JSON serialization for arbitrary sampled byte sequences;
 - end-to-end CLI validation, direct/manifest loading modes and JSON error behavior.
+- exact OLMoE tokenizer, top-logit, greedy-token, expert-route and routing-weight parity
+  against a bounded Transformers reference;
+- metadata-only runtime refusal, missing-shard rejection, one-millisecond timeout and
+  invalid expert-cache policy rejection;
+- real no-cache byte accounting, real two-token LRU hits and native-telemetry simulation
+  for no-cache, LRU, LFU and static-hot baselines.
 
 ## Safety tests still required for production adapters
 

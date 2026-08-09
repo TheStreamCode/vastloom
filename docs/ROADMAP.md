@@ -54,26 +54,28 @@ refuses corrupt, truncated, oversized or unsafe inputs without leaking reservati
 **Gate:** the native pinned SmolLM2 path matches the registered Transformers reference,
 passes full-checkpoint verification and refuses unsafe allocations.
 
-## M4 — Small real MoE reference
+## M4 — Small real MoE reference — complete in alpha.4
 
-- [ ] Pin `allenai/OLMoE-1B-7B-0924-Instruct` to an exact revision.
-- [ ] Validate exact shard sizes, hashes, tensor names, dtypes and shapes.
-- [ ] Implement the checkpoint-compatible tokenizer and chat template.
-- [ ] Implement authoritative top-k routing, routing weights and routed experts.
-- [ ] Compare router logits, expert selections, final logits and tokens with a trusted
+- [x] Pin `allenai/OLMoE-1B-7B-0924-Instruct` to an exact revision.
+- [x] Validate exact shard sizes, hashes, tensor names, dtypes and shapes.
+- [x] Implement the checkpoint-compatible tokenizer and chat template.
+- [x] Implement authoritative top-k routing, routing weights and routed experts.
+- [x] Compare expert selections, routing weights, final logits and tokens with a trusted
   reference.
-- [ ] Record token/layer/expert/bytes/latency telemetry and repeatable route traces.
+- [x] Record token/layer/expert/bytes/latency telemetry and repeatable route traces.
 
 **Gate:** every selected expert and registered output agrees with the reference without
 requiring the complete checkpoint to reside in RAM.
 
-## M5 — Real NVMe-to-RAM expert streaming
+## M5 — Real NVMe-to-RAM expert streaming — in progress
 
-- [ ] Separate always-active trunk weights from individually addressable experts.
-- [ ] Add bounded expert reads, buffers, cancellation and exact byte accounting.
-- [ ] Implement no-cache, LRU, LFU and static-hot baselines in the real token path.
+- [x] Separate always-active trunk weights from individually addressable experts.
+- [x] Add bounded expert reads, buffers, cancellation and exact byte accounting.
+- [x] Implement no-cache, LRU, LFU and static-hot baselines in the real token path.
 - [ ] Inject short reads, missing/corrupt shards, allocation failure and I/O timeout.
-- [ ] Measure NVMe bytes/token, cache hits, reuse distance and I/O stall.
+- [x] Measure logical expert file bytes/token, cache hits and synchronous expert I/O time.
+- [ ] Add reuse-distance reporting, physical-device I/O counters and measured
+  asynchronous I/O/compute overlap.
 
 **Gate:** the real small MoE completes safely under a RAM cap below total checkpoint
 size, with no uncontrolled paging or unreserved buffer.

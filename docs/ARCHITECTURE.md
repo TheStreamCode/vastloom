@@ -109,6 +109,33 @@ This adapter is intentionally pinned to one revision of SmolLM2. It loads the ve
 269 MB BF16 checkpoint into reserved RAM and uses FP32 activations. It is a correctness
 oracle for subsequent backends, not a generic Llama compatibility claim.
 
+Alpha.4 adds the first real sparse path:
+
+```text
+pinned OLMoE import (3 BF16 shards, 13.84 GB tensor payload)
+      │ full hash and exact 3,219-tensor catalog
+      ▼
+reserved 953,421,824-byte always-active trunk in RAM
+      │ exact expert shard/offset table
+      ▼
+native CPU attention + authoritative 64-way/top-8 router
+      │
+      ├── bounded buffered file read → one 12 MiB expert staging buffer
+      └── optional reserved RAM cache (no-cache/LRU/LFU/static-hot)
+      │
+      ▼
+weighted SwiGLU expert accumulation → final logits
+      │
+      ▼
+atomic token/layer/expert/tier/bytes/latency trace
+```
+
+The model object gives every routed expert a logical `(layer, expert)` identity that is
+independent of its physical shard offset or current RAM residency. The runtime does not
+map or allocate the complete checkpoint. Reads are synchronous in this milestone, so
+the path proves placement, logical byte accounting and correctness but not physical
+device traffic or I/O/compute overlap.
+
 ## TinyTransformer adapter boundary
 
 The alpha.2 adapter defines:
@@ -146,6 +173,22 @@ RAM
 ```
 
 Both weights and generation workspace require Resource Governor reservations.
+
+For the pinned OLMoE probe, L1 and L2 are active explicitly:
+
+```text
+RAM
+├── immutable always-active BF16 trunk (reserved before load)
+├── bounded expert staging/cache reservation (12 MiB to 2 GiB)
+├── FP32 K/V cache reserved for the requested context
+└── bounded activation scratch
+
+NVMe
+└── immutable expert tensors addressed by validated shard and byte offset
+```
+
+A cache hit never reads the expert again. A miss reports exactly 12 MiB of expert
+traffic. The current implementation does not place experts in VRAM.
 
 ## Model lifecycle and governor ownership
 
@@ -199,10 +242,11 @@ router decisions or accepted output tokens.
 - `model/`: manifest/Safetensors parsing, imported-checkpoint verification and immutable
   model storage.
 - `io/`: bounded asynchronous reads.
-- `research/`: trace-driven cache/traffic simulation.
-- `inference/`: TinyTransformer and pinned SmolLM2 tokenizers, adapters, KV caches and
-  CPU reference generation.
+- `research/`: native-telemetry-driven no-cache/LRU/LFU/static-hot simulation.
+- `inference/`: TinyTransformer, pinned SmolLM2 generation and pinned OLMoE routed
+  CPU reference/streaming adapters.
 - `cli/`: interactive and one-shot model client commands.
 
-The next adapter work must extend this architecture rather than bypass its safety and
-integrity boundaries.
+The next data-plane step is bounded asynchronous expert I/O with measured overlap and
+fault injection. DeepSeek inspection must reuse these safety and identity boundaries
+rather than bypass them.

@@ -2,6 +2,29 @@
 
 ## Unreleased
 
+## 0.4.0-alpha.1 — 2026-08-09
+
+- Pinned and fully verified `allenai/OLMoE-1B-7B-0924-Instruct` revision
+  `7f1c97f440f06ce36705e4f2b843edb5925f4498` with three immutable BF16 shards.
+- Added exact OLMoE configuration, tokenizer, chat-template and 3,219-tensor layout
+  validation without requiring tensor payloads to reside in RAM.
+- Added a native CPU OLMoE reference graph with RMSNorm, Q/K normalization, RoPE,
+  causal attention, authoritative softmax top-8 routing and weighted SwiGLU experts.
+- Added explicit NVMe-to-RAM expert streaming: the 953,421,824-byte always-active
+  trunk remains in reserved RAM while one 12 MiB expert is read at a time.
+- Added bounded no-cache, LRU, LFU and static-hot expert-cache policies, with a hard
+  two-GiB cache ceiling and Resource Governor reservations before allocation.
+- Added `moe-inspect` and `moe-logits`, atomic route telemetry, exact expert byte/I/O
+  accounting, timeout/Ctrl+C checks and metadata-only execution refusal.
+- Added an independently bounded Transformers 4.45.2 oracle and committed one- and
+  two-token fixtures for logits, greedy token, route IDs and routing weights.
+- Extended trace simulation to accept native telemetry and compare no-cache, LRU,
+  LFU and static-hot policies.
+
+This milestone proves correct real MoE routing and synchronous NVMe-to-RAM expert
+streaming on CPU under a host-derived memory cap. It does not yet provide OLMoE text
+generation/chat, CUDA, asynchronous I/O/compute overlap or a DeepSeek adapter.
+
 ## 0.3.0-alpha.1 — 2026-08-09
 
 - Added a bounded JSON parser and defensive Safetensors catalog/reader.

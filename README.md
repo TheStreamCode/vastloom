@@ -5,12 +5,15 @@ running open-weight models that are much larger than the host's VRAM and RAM,
 especially Mixture-of-Experts models. It treats **VRAM, RAM and NVMe as an explicit
 model-memory hierarchy** instead of relying on uncontrolled operating-system swap.
 
-> **Current status — `0.3.0-alpha.1`: first real open-weight model milestone.**
-> Stargate runs the published `HuggingFaceTB/SmolLM2-135M-Instruct` checkpoint through
-> a native CPU tokenizer, Llama reference implementation, incremental KV cache and
-> multi-turn chat CLI. Tokenization, logits and deterministic responses match a pinned
-> Transformers reference. DeepSeek V4 Flash, CUDA, real MoE execution and NVMe expert
-> streaming are not implemented yet.
+> **Current status — `0.4.0-alpha.1`: first real MoE streaming milestone.**
+> Stargate now runs the routed token path of the pinned 13.84 GB
+> `allenai/OLMoE-1B-7B-0924-Instruct` checkpoint on CPU while keeping only the
+> always-active trunk and a bounded expert cache in RAM. Native logits, top-8 routes
+> and routing weights match a Transformers reference. DeepSeek V4 Flash, CUDA and
+> asynchronous I/O/compute overlap are not implemented yet.
+
+Measured results and limitations are recorded in
+[`docs/reports/ALPHA4_OLMOE_VALIDATION.md`](docs/reports/ALPHA4_OLMOE_VALIDATION.md).
 
 ## Reference target
 
@@ -25,7 +28,7 @@ The first consumer reference machine is:
 The engine is not hard-coded for that PC. Hardware is probed at runtime and every
 allocation plan is derived from detected capacity and conservative headroom.
 
-## What works in alpha.3
+## What works in alpha.4
 
 ### Real pretrained model path
 
@@ -44,6 +47,26 @@ allocation plan is derived from detected capacity and conservative headroom.
 - **Fail-closed runtime:** full checkpoint verification by default, Resource Governor
   reservations, live memory-headroom checks, Windows Job Object cap and at most six
   CPU inference threads.
+
+### Real MoE and NVMe-to-RAM path
+
+- **Pinned real MoE:** `allenai/OLMoE-1B-7B-0924-Instruct` revision
+  `7f1c97f440f06ce36705e4f2b843edb5925f4498`, three immutable BF16 shards and
+  3,219 validated tensors.
+- **Non-resident execution:** the 953,421,824-byte always-active trunk is reserved in
+  RAM; the 12,884,901,888 bytes of routed experts remain on NVMe and are addressed by
+  exact shard/offset identity.
+- **Authoritative CPU graph:** Q/K RMSNorm, RoPE, causal attention, full 64-way router
+  softmax, top-8 selection and routing-weighted SwiGLU experts.
+- **Bounded expert memory:** one 12 MiB expert staging allocation, or an explicitly
+  reserved cache between 12 MiB and 2 GiB using no-cache, LRU, LFU or static-hot.
+- **Exact telemetry:** token, layer, expert, size, routing weight, tier, hit/miss,
+  bytes read and synchronous I/O latency, atomically published without overwrite.
+- **Independent parity:** one- and two-token native probes match Transformers 4.45.2
+  for greedy token, top logits, every selected expert and every recorded route weight.
+- **Safe preflight:** metadata-only checkpoints cannot execute, full SHA-256 is the
+  default, resident loading is rejected when the checkpoint exceeds the live cap, and
+  timeout/Ctrl+C/headroom checks stop safely between layers.
 
 ### Synthetic validation path retained
 
@@ -83,8 +106,8 @@ allocation plan is derived from detected capacity and conservative headroom.
 - **Independent watchdog:** observes an atomically published heartbeat and can remain
   observe-only or terminate a stale runtime only when explicitly launched with
   `--enforce`.
-- **MoE trace simulator:** compares LRU and static hot-set placement while reporting
-  VRAM/RAM hit rates, NVMe bytes per token and PCIe traffic.
+- **MoE trace simulator:** compares no-cache, LRU, LFU and static hot-set placement
+  while reporting VRAM/RAM hit rates, modeled NVMe bytes per token and PCIe traffic.
 - **Linux and Windows CI definitions**, strict compiler warnings and ASan/UBSan jobs.
 
 ## Build and validate
@@ -205,6 +228,24 @@ The real adapter supports conversation history and `/clear`, `/stats`, `/model`,
 `/help` and `/exit`. Hash verification is enabled by default; `--no-verify` exists
 only for repeated local development tests.
 
+## Probe the real OLMoE checkpoint
+
+Import the pinned MoE into the same external store. The importer requires the
+configured free-space reserve, downloads with bounded buffers/rate, resumes verified
+partials and publishes only after all files match their pinned SHA-256:
+
+```powershell
+python tools\import_hf_model.py --model olmoe --store C:\StargateModels
+$model = 'C:\StargateModels\models\original\allenai-OLMoE-1B-7B-0924-Instruct--7f1c97f440f06ce36705e4f2b843edb5925f4498'
+stargate moe-inspect $model --json
+stargate moe-logits $model --text 'Hello' --cache no-cache --trace C:\StargateModels\telemetry\hello.csv --json
+```
+
+`moe-logits` is a bounded correctness/telemetry probe, not an OLMoE chat or generation
+command. Full verification is enabled by default. After an immediately preceding full
+verification, `--no-verify` may be used for repeated local probes without rehashing all
+13.84 GB. Expert cache capacity is explicitly reserved and capped at 2 GiB.
+
 ## TinyChat CLI options
 
 ```text
@@ -272,6 +313,10 @@ stargate store-info PATH [--reserve 300GiB]
 stargate runtime-policy [--storage PATH] [--json]
 stargate tokenize MODEL_DIRECTORY --text TEXT [--chat] [--json]
 stargate real-logits MODEL_DIRECTORY --text TEXT [--chat] [--top N] [--json]
+stargate moe-inspect MODEL_DIRECTORY [--no-verify] [--json]
+stargate moe-logits MODEL_DIRECTORY --text TEXT [--chat] [--top N]
+    [--cache no-cache|lru|lfu|static-hot] [--cache-bytes SIZE]
+    [--timeout-ms N] [--trace PATH] [--no-verify] [--json]
 stargate heartbeat-write PATH
 stargate version
 ```
@@ -312,8 +357,8 @@ Stargate follows these rules before performance work begins:
 7. Degrade prefetch, cache and speculation before aborting a generation.
 8. Abort a generation before risking an OS freeze, disk exhaustion or corrupt state.
 
-Both inference paths bound model dimensions, metadata, file size, context, generation
-length and timeout before allocating execution buffers. The real-model path additionally
+All inference paths bound model dimensions, metadata, file size, context and timeout
+before allocating execution buffers. Real-model paths additionally
 keeps 8 GiB of current RAM availability for the host, caps itself to half physical RAM,
 requires 300 GiB free-storage headroom and refuses the load if reservations fail. See
 [`docs/SAFETY.md`](docs/SAFETY.md).
@@ -338,14 +383,16 @@ checkpoint.
 
 ## Current limitations
 
-Alpha.3 proves one real dense CPU path, not the final Stargate research thesis.
+Alpha.4 proves one real dense path and one real synchronous CPU MoE streaming path,
+not the final Stargate research thesis.
 It currently has:
 
-- only one pinned Hugging Face adapter; no DeepSeek, MiniMax, Kimi or GGUF adapter;
+- two exact pinned Hugging Face adapters; no DeepSeek, MiniMax, Kimi or GGUF adapter;
 - no CUDA, ROCm, Vulkan or Metal inference backend;
 - no production quantized kernels;
-- no VRAM/RAM/NVMe tensor paging during token generation;
-- no MoE router or expert execution in the token path;
+- no VRAM expert tier, pinned host buffers, direct I/O or asynchronous read/compute overlap;
+- OLMoE currently exposes final-logit probes and route telemetry, not decoding/chat;
+- expert reads and CPU kernels are synchronous reference implementations;
 - no persistent KV reuse between chat turns; history is currently recomputed;
 - no local HTTP API yet.
 
@@ -360,12 +407,12 @@ research metric is not merely SSD throughput. It is:
 
 > **How few bytes must be fetched from NVMe for each accepted token?**
 
-The next technical sequence is deliberately incremental:
+The next technical sequence remains incremental:
 
-1. pinned small real OLMoE checkpoint, CPU router/expert oracle and exact route traces;
-2. bounded NVMe-to-RAM expert streaming and cache-policy baselines;
-3. CUDA dense, attention, router and packed expert kernels;
-4. exact DeepSeek V4 Flash checkpoint inspection and architecture adapter;
+1. finish OLMoE streaming fault injection and cancellation/I/O failure coverage;
+2. bounded asynchronous reads and measured read/compute overlap;
+3. exact DeepSeek V4 Flash checkpoint inspection and architecture-faithful fixture;
+4. CUDA dense, attention, router and packed expert kernels;
 5. explicit VRAM/RAM/NVMe placement with overlapped I/O and compute;
 6. adaptive placement, predictive routing and speculative expert deduplication;
 7. OpenAI-compatible local server and coding-agent integration.

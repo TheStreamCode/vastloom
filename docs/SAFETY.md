@@ -124,8 +124,11 @@ The alpha.4 OLMoE probe is fail-closed around one exact checkpoint revision:
   cap; only the 953,421,824-byte always-active trunk is reserved and loaded;
 - one streamed expert is exactly 12 MiB, and every no-cache or cache buffer is reserved
   before allocation;
-- asynchronous mode has exactly one worker, accepts prefetch depth one or two, limits
-  each request to 12 MiB and reserves every outstanding buffer against the staging cap;
+- asynchronous whole mode has exactly one worker and one 12 MiB range per miss; staged
+  mode has exactly two workers and validated 8 MiB gate/up plus 4 MiB down ranges;
+- both asynchronous modes accept prefetch depth one or two, cap the queue at four
+  requests, limit every request to at most 12 MiB and reserve every outstanding buffer
+  against the staging cap before submission;
 - Windows asynchronous range reads use a read-only Unicode-native file handle, an exact
   validated offset and a loop bounded by the already reserved request size;
 - each asynchronous request has a positive timeout capped at 60 seconds and checks the
@@ -141,8 +144,9 @@ The alpha.4 OLMoE probe is fail-closed around one exact checkpoint revision:
 
 Original checkpoint files are read-only and remain outside the repository. Expert
 traffic is produced by exact bounded reads, not pagefile/swap. Synchronous mode remains
-the default. Opt-in asynchronous mode uses one validated contiguous expert range and
-fails closed on worker failure, short read, allocation failure, cancellation or timeout.
+the default. Opt-in asynchronous mode uses either one validated contiguous expert range
+or the checkpoint's contiguous gate/up region plus separate adjacent down region. Both
+fail closed on worker failure, short read, allocation failure, cancellation or timeout.
 It is still a buffered reference pipeline, not production direct I/O.
 
 Process-I/O sampling is observability only and cannot relax a reservation or safety
@@ -183,6 +187,10 @@ integration remains required before long-running large-model inference.
   for no-cache, LRU, LFU and static-hot baselines;
 - real asynchronous OLMoE parity for logits and all 128 routed experts, bounded prefetch
   counts, telemetry parsing and positive read-service/CPU overlap;
+- staged OLMoE parity, exact 8 MiB/4 MiB accounting, bounded two-worker overlap, LRU
+  insertion/reuse and injected gate/up short-read refusal;
+- 19-field readiness traces and bounded fixed-route versus ready-order replay with
+  contiguous route/reduction-order validation;
 - deterministic worker-failure, short-read, allocation-failure, cancellation and
   request-timeout injection through both the bounded I/O unit path and real OLMoE CLI.
 - Unicode Windows shard-path reads, monotonic process-I/O deltas and platform-specific

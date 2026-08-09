@@ -77,9 +77,9 @@ requiring the complete checkpoint to reside in RAM.
 - [x] Add a bounded one-worker asynchronous path and measure read-service/CPU overlap.
 - [x] Add exact unique-expert reuse-distance reporting.
 - [x] Add process-I/O operation/byte counters with explicit platform semantics.
-- [ ] Record per-expert queue, ready and compute timestamps; compare fixed-route and
+- [x] Record per-expert queue, ready and compute timestamps; compare fixed-route and
   ready-order scheduling in the trace simulator.
-- [ ] Prototype an output-identical 8 MiB gate/up plus 4 MiB down staged read without
+- [x] Prototype an output-identical 8 MiB gate/up plus 4 MiB down staged read without
   repacking original OLMoE weights.
 - [ ] Add physical-device I/O counters and a repeatable cold-cache protocol.
 
@@ -88,7 +88,9 @@ size, with no uncontrolled paging or unreserved buffer.
 
 The ordering and acceptance gates for the two new experiments are documented in the
 [DeepSeekV4SSD review](research/DEEPSEEK_SSD_REVIEW.md). They remain research tasks,
-not current runtime claims.
+not DeepSeek runtime claims. The OLMoE staged path passed parity and improved median
+warm buffered forward time by 46.0% in three paired WSL runs; physical-device/cold-cache
+validation remains the final M5 gate.
 
 ## M6 — Exact DeepSeek inspector and architecture-faithful fixture
 

@@ -56,6 +56,8 @@ reader, counter and reuse-distance results are in the
 [`Alpha 4.3 I/O-observability report`](docs/reports/ALPHA4_IO_OBSERVABILITY_VALIDATION.md).
 The rebrand, compatibility, packaging and open-source readiness checks are recorded in the
 [`Alpha 4 open-source validation report`](docs/reports/ALPHA4_OPEN_SOURCE_REBRAND_VALIDATION.md).
+The newest staged-read and readiness results are in the
+[`M5 staged-I/O validation report`](docs/reports/M5_READINESS_STAGED_IO_VALIDATION.md).
 
 ## Reference target
 
@@ -101,18 +103,22 @@ allocation plan is derived from detected capacity and conservative headroom.
 - **Authoritative CPU graph:** Q/K RMSNorm, RoPE, causal attention, full 64-way router
   softmax, top-8 selection and routing-weighted SwiGLU experts.
 - **Bounded expert memory:** one 12 MiB active expert, an explicitly reserved cache
-  between 12 MiB and 2 GiB, and at most two reservation-backed 12 MiB prefetch buffers.
-- **Opt-in asynchronous pipeline:** one I/O worker, prefetch depth one or two, a queue
-  bounded to two requests for this adapter, per-request timeout and cancellation checks.
+  between 12 MiB and 2 GiB, and reservation-backed prefetch buffers constrained by the
+  staging governor.
+- **Opt-in asynchronous pipeline:** whole-expert mode uses one 12 MiB range and one worker;
+  staged mode uses two workers with an 8 MiB gate/up range plus a 4 MiB down range. Both
+  retain prefetch depth one or two, bounded queues, timeouts and cancellation checks.
 - **Exact telemetry:** token, layer, expert, size, routing weight, tier, hit/miss,
-  logical bytes read, I/O service time, foreground wait and measured service/CPU overlap,
-  atomically published without overwrite.
+  logical bytes read, submit/queue/ready times, compute windows, selected/reduction order
+  and measured service/CPU overlap, atomically published without overwrite.
 - **I/O observability:** Windows reports process read operations and transfer bytes from
   `GetProcessIoCounters`; Linux additionally reports the storage-layer `read_bytes`
   counter from `/proc/self/io`. The CLI keeps these meanings separate from physical-device
   traffic.
 - **Reuse telemetry:** native traces report cold/reused accesses plus mean, P50, P95 and
   maximum exact unique-expert reuse distance.
+- **Readiness replay:** `trace-sim` compares fixed-route and theoretical ready-expert
+  compute order without changing the model's selected reduction order.
 - **Independent parity:** one- and two-token native probes match Transformers 4.45.2
   for greedy token, top logits, every selected expert and every recorded route weight.
 - **Safe preflight:** metadata-only checkpoints cannot execute, full SHA-256 is the
@@ -151,7 +157,7 @@ allocation plan is derived from detected capacity and conservative headroom.
   escalation and hysteretic recovery.
 - **Bounded asynchronous I/O:** fixed worker, queue and request limits; every buffer
   holds a live reservation until released. Windows range reads use Unicode-safe native
-  file handles and one bounded request per 12 MiB expert.
+  file handles and either one bounded 12 MiB range or staged 8 MiB plus 4 MiB ranges.
 - **Weight integrity:** strict manifest parser, exact offline manifest generator,
   relative-path validation, file-size checks, SHA-256 verification and symlink-escape
   protection.
@@ -161,7 +167,8 @@ allocation plan is derived from detected capacity and conservative headroom.
   observe-only or terminate a stale runtime only when explicitly launched with
   `--enforce`.
 - **MoE trace simulator:** compares no-cache, LRU, LFU and static hot-set placement
-  while reporting VRAM/RAM hit rates, modeled NVMe bytes per token and PCIe traffic.
+  while reporting VRAM/RAM hit rates, modeled NVMe bytes per token, PCIe traffic and
+  fixed-order versus ready-order timing.
 - **Linux and Windows CI definitions**, strict compiler warnings and ASan/UBSan jobs.
 
 ## Build and validate
@@ -297,22 +304,27 @@ python tools\import_hf_model.py --model olmoe --store C:\VastloomModels
 $model = 'C:\VastloomModels\models\original\allenai-OLMoE-1B-7B-0924-Instruct--7f1c97f440f06ce36705e4f2b843edb5925f4498'
 vastloom moe-inspect $model --json
 vastloom moe-logits $model --text 'Hello' --cache no-cache --io async --prefetch-depth 2 --trace C:\VastloomModels\telemetry\hello.csv --json
+
+# Opt-in staged gate/up + down pipeline
+vastloom moe-logits $model --text 'Hello' --cache no-cache --io async --expert-read staged --prefetch-depth 2 --json
 ```
 
 `moe-logits` is a bounded correctness/telemetry probe, not an OLMoE chat or generation
 command. Full verification is enabled by default. After an immediately preceding full
 verification, `--no-verify` may be used for repeated local probes without rehashing all
 13.84 GB. Expert cache capacity is explicitly reserved and capped at 2 GiB.
-Asynchronous I/O is opt-in while the baseline remains under study. Its adapter-specific
-limits are one worker, one or two outstanding prefetch slots, 12 MiB per request and a
-30-second request timeout by default. `--inject-io-fault` is a test-only development
-option; it must not be used for normal inference.
+Asynchronous I/O is opt-in while the baseline remains under study. Whole mode uses one
+worker and one 12 MiB request per expert. `--expert-read staged` requires asynchronous
+I/O and uses two bounded workers, an 8 MiB gate/up request and a 4 MiB down request without
+repacking the immutable checkpoint. Both modes allow prefetch depth one or two and use a
+30-second request timeout by default. `--inject-io-fault` is a test-only development option;
+it must not be used for normal inference.
 
 The JSON `process_io` object identifies its operating-system source. On Windows,
 `process_read_bytes` is process transfer accounting and `storage_read_bytes` remains
 `null`; it must not be interpreted as physical SSD traffic. `trace-sim --json` reports
-exact cold/reused counts and unique-expert reuse-distance statistics for the emitted
-route trace.
+exact cold/reused counts, unique-expert reuse distance and, for current 19-field traces,
+a bounded fixed-order versus ready-order replay.
 
 ## TinyChat CLI options
 
@@ -384,7 +396,8 @@ vastloom real-logits MODEL_DIRECTORY --text TEXT [--chat] [--top N] [--json]
 vastloom moe-inspect MODEL_DIRECTORY [--no-verify] [--json]
 vastloom moe-logits MODEL_DIRECTORY --text TEXT [--chat] [--top N]
     [--cache no-cache|lru|lfu|static-hot] [--cache-bytes SIZE]
-    [--io sync|async] [--prefetch-depth 1|2] [--io-timeout-ms N]
+    [--io sync|async] [--expert-read whole|staged]
+    [--prefetch-depth 1|2] [--io-timeout-ms N]
     [--timeout-ms N] [--trace PATH] [--no-verify] [--json]
 vastloom heartbeat-write PATH
 vastloom version
@@ -452,7 +465,7 @@ checkpoint.
 
 ## Current limitations
 
-Alpha.4.4 proves one real dense path and one real CPU MoE streaming path with an
+Alpha.4 proves one real dense path and one real CPU MoE streaming path with an
 opt-in bounded asynchronous reader, not the final Vastloom research thesis.
 It currently has:
 
@@ -462,7 +475,7 @@ It currently has:
 - no VRAM expert tier, pinned host buffers or direct/unbuffered device I/O;
 - OLMoE currently exposes final-logit probes and route telemetry, not decoding/chat;
 - expert compute remains a synchronous CPU reference implementation; the asynchronous
-  reader uses ordinary buffered file I/O and one worker;
+  reader uses ordinary buffered file I/O and one or two bounded workers;
 - process transfer counters are available, but there are still no Windows physical-device
   byte counters, repeatable cold-cache protocol or SSD temperature/power telemetry;
 - no persistent KV reuse between chat turns; history is currently recomputed;

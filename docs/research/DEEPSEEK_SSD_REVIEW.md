@@ -44,26 +44,31 @@ Sources: upstream [README](https://github.com/yanun0323/deepseek_ssd),
 
 ## Vastloom adoption order
 
-These are research gates, not implemented-feature claims.
+The status below distinguishes implemented OLMoE experiments from later DeepSeek work.
 
-### P0 — finish readiness telemetry
+### P0 — readiness telemetry — implemented
 
-Extend the real OLMoE trace with submission time, queue wait, ready time, compute start/end and selected
-reduction order. The current runtime already records logical bytes, service time, foreground wait and
-overlap; these additions make a readiness scheduler measurable.
+The real OLMoE trace now records submission, queue wait, ready time, compute start/end,
+route order and reduction order. The parser remains compatible with the earlier 4-, 9-
+and 12-field formats.
 
-### P1 — trace-driven ready-expert simulator
+### P1 — trace-driven ready-expert simulator — implemented
 
-Replay real route/read timelines and compare fixed route order with ready order. The simulator must keep
-the original weighted-reduction order and report p50/p95 wait, bytes/token and theoretical overlap. Only
-then add a bounded native scheduler.
+The bounded simulator replays each token/layer group, validates contiguous unique route
+and reduction orders, and reports fixed/ready makespan, wait, savings and compute reorder
+count. A synthetic out-of-order-ready fixture demonstrates a 19 ms to 14 ms replay; the
+current real OLMoE traces produce no ready-order change, so a native scheduler is not yet
+justified.
 
-### P2 — OLMoE gate+up / down split prototype
+### P2 — OLMoE gate+up / down split prototype — accepted for OLMoE
 
-The current OLMoE checkpoint exposes three contiguous 4 MiB expert tensors. Prototype an 8 MiB gate+up
-read followed by a 4 MiB down read, without repacking or rewriting original weights. Require identical
-logits, no increase in cold-miss bytes, a bounded two-stage reservation and at least a measured 5% win
-before keeping the complexity.
+The pinned checkpoint stores down immediately before the contiguous gate/up region. The
+opt-in native path reads gate/up as 8 MiB and down as 4 MiB through two workers and a
+four-request maximum queue; every buffer is reserved independently and the original
+weights remain untouched. Greedy token, top logits, routes and 1,610,612,736 logical
+bytes match whole mode. Three alternating paired WSL runs measured 5,787.77 ms median
+for whole reads and 3,125.64 ms for staged reads, a 46.0% warm buffered-pipeline win.
+This passes the 5% research gate but is not a physical-NVMe result.
 
 ### P3 — long-prefill layer-major baseline
 

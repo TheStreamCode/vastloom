@@ -2,6 +2,18 @@
 
 ## Unreleased
 
+- Extended native OLMoE traces from 12 to 19 fields with submission, queue, ready,
+  compute-window, route-order and reduction-order telemetry while retaining all earlier
+  trace formats.
+- Added a bounded trace replay that compares fixed-route execution with theoretical
+  ready-expert compute order while preserving the authoritative reduction order.
+- Added opt-in two-stage OLMoE reads: contiguous 8 MiB gate/up plus 4 MiB down requests,
+  two workers, bounded queue/staging reservations, exact byte accounting and down-read
+  versus gate/up-compute overlap telemetry.
+- Validated staged reads against the pinned Transformers logits/routes and measured a
+  46.0% median warm buffered-pipeline improvement over whole 12 MiB reads on three paired
+  WSL runs. This is not a physical-NVMe or DeepSeek throughput claim.
+
 ## 0.4.0-alpha.4 — 2026-08-09
 
 - Renamed the public project, CLI, C++ namespace, headers, CMake targets and current

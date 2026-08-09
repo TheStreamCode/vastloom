@@ -109,8 +109,8 @@ This adapter is intentionally pinned to one revision of SmolLM2. It loads the ve
 269 MB BF16 checkpoint into reserved RAM and uses FP32 activations. It is a correctness
 oracle for subsequent backends, not a generic Llama compatibility claim.
 
-Alpha.4.3 extends the first real sparse path with a bounded prefetch and observability
-pipeline:
+The current M5 development slice extends the first real sparse path with bounded staged
+reads, readiness timing and observability:
 
 ```text
 pinned OLMoE import (3 BF16 shards, 13.84 GB tensor payload)
@@ -121,28 +121,34 @@ reserved 953,421,824-byte always-active trunk in RAM
       ▼
 native CPU attention + authoritative 64-way/top-8 router
       │
-      ├── sync bounded read, or one-worker async prefetch (depth 1-2)
-      │        └── reservation-backed 12 MiB buffers + request timeout
+      ├── sync bounded read, or async prefetch (depth 1-2)
+      │        ├── whole: one worker × 12 MiB
+      │        └── staged: two workers × (8 MiB gate/up + 4 MiB down)
+      │             reservation-backed buffers + request timeout
       └── optional reserved RAM cache (no-cache/LRU/LFU/static-hot)
       │
       ▼
 weighted SwiGLU expert accumulation → final logits
       │
       ▼
-atomic token/layer/expert/tier/bytes/service/wait/overlap trace
+atomic token/layer/expert/tier/bytes/submit/queue/ready/compute/order trace
       │
       ├── exact unique-expert reuse distance
+      ├── fixed-order versus ready-order replay
       └── process read-operation/byte deltas
 ```
 
 The model object gives every routed expert a logical `(layer, expert)` identity that is
 independent of its physical shard offset or current RAM residency. The runtime does not
 map or allocate the complete checkpoint. Synchronous reads remain the default oracle.
-The optional asynchronous mode validates each expert's three BF16 matrices as one
+The optional whole asynchronous mode validates each expert's three BF16 matrices as one
 contiguous 12 MiB shard range, reserves staging before submission, and schedules the
-next one or two routed experts on a single worker. It measures how much actual read
-service completed while foreground CPU work continued. These timings and logical byte
-counts do not substitute for physical-device counters or a cold-cache NVMe benchmark.
+next one or two routed experts on one worker. Staged mode separately validates the
+physically contiguous 8 MiB gate/up region and adjacent 4 MiB down region. Two bounded
+workers let the down range overlap gate/up compute without repacking or modifying the
+checkpoint. Every request owns a staging reservation until its buffer is consumed.
+These timings and logical byte counts do not substitute for physical-device counters or
+a cold-cache NVMe benchmark.
 
 On Windows the asynchronous worker opens each immutable shard through `CreateFileW`,
 seeks with `SetFilePointerEx` and performs a bounded `ReadFile` range. This keeps Unicode
@@ -156,7 +162,9 @@ physical-storage byte counter. Linux `/proc/self/io` supplies logical `rchar`/`s
 and storage-layer `read_bytes`. These are deliberately separate fields; neither the
 Windows transfer count nor the model's exact requested payload is called physical NVMe
 traffic. The trace simulator independently computes exact LRU stack distance in
-`O(records log records)` using bounded state.
+`O(records log records)` using bounded state. Current 19-field traces additionally
+support a bounded fixed-route versus ready-expert replay while preserving the recorded
+reduction order.
 
 ## TinyTransformer adapter boundary
 
@@ -202,7 +210,7 @@ For the pinned OLMoE probe, L1 and L2 are active explicitly:
 RAM
 ├── immutable always-active BF16 trunk (reserved before load)
 ├── bounded expert staging/cache reservation (12 MiB to 2 GiB)
-├── zero to two reservation-backed 12 MiB asynchronous read buffers
+├── reservation-backed whole or staged asynchronous read buffers
 ├── FP32 K/V cache reserved for the requested context
 └── bounded activation scratch
 
@@ -211,7 +219,8 @@ NVMe
 ```
 
 A cache hit never reads the expert again. A miss reports exactly 12 MiB of logical
-expert traffic. The current implementation does not place experts in VRAM and uses
+expert traffic whether it uses one range or 8 MiB plus 4 MiB staged ranges. The current
+implementation does not place experts in VRAM and uses
 ordinary buffered file reads, so operating-system cache hits may avoid physical NVMe.
 Process counters quantify operations and transfers, but do not remove this cache ambiguity.
 

@@ -13,6 +13,11 @@ hardware, commands, measurements and limitations.
 
 ## Current report
 
-- [`ALPHA4_OPEN_SOURCE_REBRAND_VALIDATION.md`](ALPHA4_OPEN_SOURCE_REBRAND_VALIDATION.md) —
-  Vastloom rebrand, compatibility, governance, release packaging, visual assets and final
-  cross-platform validation.
+- [`M5_READINESS_STAGED_IO_VALIDATION.md`](M5_READINESS_STAGED_IO_VALIDATION.md) —
+  readiness replay, output-identical two-stage expert reads, bounded two-worker safety,
+  paired warm-buffered measurements and the remaining physical-I/O gate.
+
+The latest release-level report remains
+[`ALPHA4_OPEN_SOURCE_REBRAND_VALIDATION.md`](ALPHA4_OPEN_SOURCE_REBRAND_VALIDATION.md),
+covering the Vastloom rebrand, compatibility, governance, release packaging, visual
+assets and cross-platform validation.

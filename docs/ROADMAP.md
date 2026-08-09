@@ -102,6 +102,7 @@ the reduced architecture-faithful fixture is the active bottleneck.
   tensor payloads.
 - [x] Generate a full immutable import catalog with per-shard size and SHA-256.
 - [x] Map exact tensor names, shapes, dtypes and shard offsets.
+- [x] Match the pinned tokenizer IDs and basic system/user/assistant chat framing.
 - [ ] Build a reduced but architecture-faithful DeepSeek fixture.
 - [ ] Export target logits, route selections and token vectors from a trusted reference.
 - [ ] Record initial routing traces.
@@ -111,6 +112,8 @@ numerical tolerance before optimization begins.
 
 The completed metadata half is recorded in the
 [M6 DeepSeek inspection report](reports/M6_DEEPSEEK_METADATA_INSPECTION_VALIDATION.md).
+Native prompt encoding is recorded separately in the
+[M6 DeepSeek tokenizer report](reports/M6_DEEPSEEK_TOKENIZER_VALIDATION.md).
 It pins official commit `60d8d70770c6776ff598c94bb586a859a38244f1`; the former
 “0731” label was only a provisional research alias and is not an official checkpoint tag.
 
@@ -118,7 +121,8 @@ It pins official commit `60d8d70770c6776ff598c94bb586a859a38244f1`; the former
 
 - [ ] Model-specific tensor loader.
 - [ ] Dense, attention/state, router and routed-expert reference kernels.
-- [ ] Checkpoint-compatible tokenizer and chat template.
+- [x] Checkpoint-compatible tokenizer and basic system/user/assistant chat template.
+- [ ] Thinking/tool-call encoding and completion parsing.
 - [ ] Incremental KV/state path.
 - [ ] Native speculative component reference path where present.
 - [ ] Quality fixture runner and regression corpus.

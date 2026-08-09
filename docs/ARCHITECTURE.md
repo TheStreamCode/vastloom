@@ -199,6 +199,25 @@ expert storage, exact 43-layer/256-expert top-6 layout, hash-routing tensors, at
 compressors and MTP block. It does not instantiate a DeepSeek graph or allocate model
 state. The fixture and reference-parity gates must pass before that boundary moves.
 
+The pinned tokenizer has a separate executable native path:
+
+```text
+verified tokenizer.json
+      │ exact Sequence + Split regex contract
+      ▼
+locale-independent Unicode category tables
+      │ 1-3 digit groups · CJK/Japanese · letters/marks · punctuation/whitespace
+      ▼
+byte-level BPE + bounded added-token trie
+      │
+      ▼
+basic system/user/assistant chat framing → exact reference token IDs
+```
+
+The added-token trie keeps literal matching proportional to the traversed prefix instead
+of scanning all 1,283 definitions at every byte. Prompt input remains capped at 16 MiB.
+This path does not imply that a DeepSeek graph or generation loop exists.
+
 ## TinyTransformer adapter boundary
 
 The alpha.2 adapter defines:

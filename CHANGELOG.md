@@ -10,6 +10,9 @@
   of weight shards.
 - Added `deepseek-inspect` with exact validation for 46 shards, 69,187 tensors,
   Safetensors shapes/offsets, FP8/FP4 storage dtypes and routed-expert byte layout.
+- Added native DeepSeek V4 Unicode pre-tokenization, its 129,280-token byte BPE,
+  bounded added-token trie and basic system/user/assistant chat framing. Exact IDs match
+  Hugging Face tokenizers 0.22.1 across committed multilingual reference vectors.
 - Added an explicit `--allow-large-download` gate for checkpoint imports containing at
   least 20 GiB of weight payload. DeepSeek execution remains unsupported and is reported
   as such by the CLI.

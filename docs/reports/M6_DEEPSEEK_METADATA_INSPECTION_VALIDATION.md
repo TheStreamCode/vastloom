@@ -2,6 +2,7 @@
 
 Validation date: 2026-08-09  
 Implementation commit: `de44029`
+Tokenizer follow-up: `c815fdb`
 
 ## Scope
 
@@ -20,8 +21,10 @@ pinned official artifact identities
 
 This is not DeepSeek inference. The command explicitly returns
 `execution_supported=false`; no model payload, activation, KV cache or GPU allocation is
-performed. The architecture-faithful fixture, reference logits/routes/tokens and native
-DeepSeek graph remain open M6/M7 work.
+performed. The architecture-faithful fixture, reference logits/routes and native
+DeepSeek graph remain open M6/M7 work. Native tokenizer/basic-chat parity landed later
+in `c815fdb` and is recorded in the companion
+[tokenizer validation report](M6_DEEPSEEK_TOKENIZER_VALIDATION.md).
 
 The former “DeepSeek V4 Flash 0731” name in the planning profile was provisional. The
 official repository exposed no matching tag at validation time, so the active profile now
@@ -138,7 +141,7 @@ but this network-dependent setup time is not a runtime performance metric.
 
 - no architecture-faithful reduced DeepSeek fixture;
 - no trusted reference logits, expert routes or output tokens;
-- no DeepSeek tokenizer/chat-template adapter in the native path;
+- no full thinking/tool-call template surface or completion parser;
 - no DeepSeek attention, hash router, MTP or packed FP4/FP8 compute kernels;
 - no full weight download or full-model probe;
 - no DeepSeek CUDA, VRAM tier or NVMe-to-VRAM execution;

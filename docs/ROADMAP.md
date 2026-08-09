@@ -92,10 +92,10 @@ not DeepSeek runtime claims. The OLMoE staged path passed parity and improved me
 warm buffered forward time by 46.0% in three paired WSL runs. Three Windows
 `direct-unbuffered-v1` runs then returned identical reference output and exactly
 1,610,743,808 whole-device bytes for 1,610,612,736 logical expert bytes per run. M5 is
-closed. The exact official DeepSeek checkpoint contract is now pinned and inspectable;
-the reduced architecture-faithful fixture is the active bottleneck.
+closed. The exact official DeepSeek checkpoint contract and reduced float graph are now
+validated; the packed checkpoint loader and incremental/MTP reference path are active.
 
-## M6 — Exact DeepSeek inspector and architecture-faithful fixture
+## M6 — Exact DeepSeek inspector and architecture-faithful fixture — complete
 
 - [x] Select and pin the exact DeepSeek V4 Flash checkpoint revision.
 - [x] Parse `config.json`, tokenizer metadata and Safetensors headers without loading
@@ -105,9 +105,9 @@ the reduced architecture-faithful fixture is the active bottleneck.
 - [x] Match the pinned tokenizer IDs and basic system/user/assistant chat framing.
 - [x] Add bounded reduced vectors and native reference primitives for RMSNorm, learned/hash
   routing, routed SwiGLU, Hyper-Connections, base RoPE and selected-latent attention.
-- [ ] Build a reduced but architecture-faithful DeepSeek fixture.
-- [ ] Export target logits, route selections and token vectors from a trusted reference.
-- [ ] Record initial routing traces.
+- [x] Build a reduced but architecture-faithful DeepSeek fixture.
+- [x] Export target logits, route selections and token vectors from a trusted reference.
+- [x] Record initial routing and raw/compressed attention-index traces.
 
 **Gate:** every fixture tensor and reference token/logit/route agrees within an explicit
 numerical tolerance before optimization begins.
@@ -118,20 +118,24 @@ Native prompt encoding is recorded separately in the
 [M6 DeepSeek tokenizer report](reports/M6_DEEPSEEK_TOKENIZER_VALIDATION.md).
 The bounded equation-level foundation is recorded in the
 [M6 reference-operator report](reports/M6_DEEPSEEK_REFERENCE_OPERATORS_VALIDATION.md).
+The completed graph gate is recorded in the
+[M6 reduced-graph report](reports/M6_DEEPSEEK_GRAPH_VALIDATION.md).
 It pins official commit `60d8d70770c6776ff598c94bb586a859a38244f1`; the former
 “0731” label was only a provisional research alias and is not an official checkpoint tag.
 
 ## M7 — DeepSeek CPU reference inference
 
-- [ ] Model-specific tensor loader.
+- [ ] Model-specific loader binding the verified shard catalog and packed FP4/FP8 weights.
 - [x] Bounded operator primitives for normalization, base RoPE, selected-latent attention,
   learned/hash routing, routed SwiGLU and Hyper-Connections.
-- [ ] Complete attention/indexer, shared-expert, MTP and layer/graph reference execution.
+- [x] Reduced float main graph with YaRN, overlapping compression, learned indexer,
+  shared expert, Hyper-Connection head and official logit/route parity.
 - [x] Checkpoint-compatible tokenizer and basic system/user/assistant chat template.
 - [ ] Thinking/tool-call encoding and completion parsing.
 - [ ] Incremental KV/state path.
 - [ ] Native speculative component reference path where present.
-- [ ] Quality fixture runner and regression corpus.
+- [x] Reduced quality fixture runner.
+- [ ] Full-checkpoint probe and regression corpus.
 
 **Gate:** end-to-end tokens, logits and expert choices match the reference implementation
 on the reduced fixture and selected full-model probes.

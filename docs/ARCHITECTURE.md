@@ -229,12 +229,31 @@ Hyper-Connection pre/Sinkhorn/post · base RoPE
 selected-latent sparse attention + attention sink
       │ strict shapes · finite values · overflow checks · 64M-element ceiling
       ▼
-operator parity only — no DeepSeek layer, logits or generation
+operator parity boundary — graph composition described below
 ```
 
 The current sparse-attention primitive consumes already-selected latent KV positions.
-Learned indexer construction, compressed-position scheduling, YaRN scaling, shared-expert
-aggregation, MTP and the Hyper-Connection LM head remain part of the reduced-graph gate.
+The graph below now supplies learned indexer construction, compressed-position scheduling,
+YaRN scaling, shared-expert aggregation and the Hyper-Connection LM head. MTP remains an
+M7 gate because the official main `Transformer.forward` does not invoke it.
+
+The completed M6 fixture composes those operators into the main prefill graph:
+
+```text
+8 token IDs -> embedding -> HC expansion
+      │
+      ├─ layer 0: sliding MLA + hash top-2 MoE + shared expert
+      └─ layer 1: sliding MLA + 4:1 overlap compressors
+                  + learned sparse indexer + learned top-2 MoE + shared expert
+      │
+      ▼
+HC head -> RMSNorm -> 16 reference logits -> greedy token
+```
+
+All 82 deterministic fixture tensors use the official parameter names and are consumed by
+the native run. The prefill oracle is batch-one FP32, capped at 4,096 tokens, 16 layers and
+64 million graph elements. It intentionally has no incremental cache mutation, MTP or packed
+checkpoint kernels, and is not selected by `deepseek-inspect` for the full checkpoint.
 
 ## TinyTransformer adapter boundary
 

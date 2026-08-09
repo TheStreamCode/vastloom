@@ -33,8 +33,10 @@ model conversion.
 > V4 Flash revision is now pinned, its 46-shard/69,187-tensor metadata is inspectable
 > from verified header snapshots, and its tokenizer/basic chat framing match the official
 > reference. Bounded CPU primitives now cover normalization, routing, expert SwiGLU,
-> Hyper-Connections, base RoPE and selected-latent attention. They are not yet a DeepSeek
-> layer or forward graph; logits, generation and CUDA remain unimplemented.
+> Hyper-Connections, YaRN, compressed attention and its learned indexer. A deterministic
+> two-layer FP32 prefill matches the pinned official graph for logits, greedy token, expert
+> routes and attention indices. Full-checkpoint DeepSeek loading, generation and CUDA remain
+> unimplemented.
 
 ## Why Vastloom exists
 
@@ -70,6 +72,8 @@ Native prompt encoding is documented in the
 [`M6 tokenizer validation report`](docs/reports/M6_DEEPSEEK_TOKENIZER_VALIDATION.md).
 The first bounded mathematical primitives are documented in the
 [`M6 reference-operator report`](docs/reports/M6_DEEPSEEK_REFERENCE_OPERATORS_VALIDATION.md).
+The completed reduced graph gate is documented in the
+[`M6 reduced-graph validation report`](docs/reports/M6_DEEPSEEK_GRAPH_VALIDATION.md).
 
 ## Reference target
 
@@ -179,11 +183,15 @@ allocation plan is derived from detected capacity and conservative headroom.
 - **Bounded CPU equations:** deterministic native vectors cover RMSNorm, learned and hash
   routing, routed-expert SwiGLU, Hyper-Connection mixing, base RoPE and selected-latent
   sparse attention, with strict shape/finite checks and an element ceiling.
+- **Architecture-level prefill:** a two-layer FP32 fixture exported from the pinned official
+  `model.py` exercises a hash router, learned router, shared expert, YaRN, overlapping 4:1
+  compression and learned attention indexer. Native logits, greedy token, all routes and
+  attention indices pass the declared parity tolerance.
 - **Large-download interlock:** a full import of at least 20 GiB requires the additional
   `--allow-large-download` flag after storage headroom has been reviewed.
-- **Honest boundary:** the inspector always reports `execution_supported=false`; the
-  equation primitives are not connected into a layer or graph. Official graph-fixture
-  logits/routes/tokens, packed kernels, CUDA and generation remain future gates.
+- **Honest boundary:** the full-checkpoint inspector still reports
+  `execution_supported=false`. The reduced graph uses only 3,293 deterministic FP32 values;
+  packed checkpoint tensors, incremental state, MTP, CUDA and generation remain future gates.
 
 ### Runtime foundation
 
@@ -536,8 +544,8 @@ Alpha.4 proves one real dense path and one real CPU MoE streaming path with an
 opt-in bounded asynchronous reader, not the final Vastloom research thesis.
 It currently has:
 
-- two executable pinned Hugging Face adapters plus a DeepSeek metadata/tokenizer/operator
-  foundation; no DeepSeek layer or inference, MiniMax, Kimi or GGUF execution adapter;
+- two executable pinned Hugging Face adapters plus a DeepSeek metadata/tokenizer and reduced
+  FP32 prefill oracle; no full-checkpoint DeepSeek, MiniMax, Kimi or GGUF execution adapter;
 - no CUDA, ROCm, Vulkan or Metal inference backend;
 - no production quantized kernels;
 - no VRAM expert tier or pinned host buffers; direct/unbuffered I/O is currently an
@@ -564,7 +572,7 @@ research metric is not merely SSD throughput. It is:
 
 The next technical sequence remains incremental:
 
-1. architecture-faithful DeepSeek V4 Flash fixture and reference logit/route parity;
+1. bind the verified DeepSeek tensor catalog, packed FP4/FP8 weights, incremental state and MTP;
 2. CUDA dense, attention, router and packed expert kernels;
 3. explicit VRAM/RAM/NVMe placement with pinned buffers and direct/overlapped I/O;
 4. adaptive placement, predictive routing and speculative expert deduplication;

@@ -1,0 +1,23 @@
+# Stargate manifest v1 — synthetic model used for planner and safety tests.
+format=stargate.manifest.v1
+model_id=stargate/synthetic-moe-320b
+revision=test-v1
+architecture=synthetic_moe
+metadata_only=true
+requires_avx2=true
+supports_speculation=true
+model_total_bytes=180GiB
+required_storage_bytes=200GiB
+dense_bytes=18GiB
+routed_expert_bytes=150GiB
+active_bytes_per_token=12GiB
+estimated_expert_bytes=48MiB
+minimum_ram_bytes=16GiB
+recommended_ram_bytes=32GiB
+minimum_vram_bytes=0
+recommended_vram_bytes=12GiB
+layer_count=48
+expert_count=256
+selected_experts_per_token=6
+max_context_tokens=131072
+chunk_count=0

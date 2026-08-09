@@ -1,0 +1,10 @@
+/build*/
+/out/
+/.cache/
+*.user
+*.log
+*.tmp
+.DS_Store
+Thumbs.db
+__pycache__/
+*.py[cod]

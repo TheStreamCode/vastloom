@@ -1,0 +1,9 @@
+#pragma once
+
+#include <string_view>
+
+namespace stargate {
+inline constexpr std::string_view kVersion = "0.2.0-alpha.2";
+inline constexpr std::string_view kManifestFormat = "stargate.manifest.v1";
+inline constexpr std::string_view kHeartbeatFormat = "SGHB1";
+}  // namespace stargate

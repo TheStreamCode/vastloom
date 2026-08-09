@@ -33,6 +33,7 @@ add_library(stargate_core STATIC
     src/inference/olmoe_runtime.cpp
     src/inference/tiny_model.cpp
     src/io/bounded_io_pool.cpp
+    src/io/process_io_counters.cpp
     src/model/imported_checkpoint.cpp
     src/model/manifest.cpp
     src/model/model_store.cpp

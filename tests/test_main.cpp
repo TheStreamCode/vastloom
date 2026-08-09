@@ -18,6 +18,7 @@
 #include "stargate/inference/olmoe_runtime.hpp"
 #include "stargate/inference/tiny_model.hpp"
 #include "stargate/io/bounded_io_pool.hpp"
+#include "stargate/io/process_io_counters.hpp"
 #include "stargate/model/manifest.hpp"
 #include "stargate/model/imported_checkpoint.hpp"
 #include "stargate/model/model_store.hpp"
@@ -368,7 +369,7 @@ void test_planner() {
 }
 
 void test_io_pool(const std::filesystem::path& root) {
-    const auto path = root / "io.bin";
+    const auto path = root / std::filesystem::path(std::u8string(u8"io-àccènt.bin"));
     {
         std::ofstream output(path, std::ios::binary);
         for (int index = 0; index < 4096; ++index) output.put(static_cast<char>(index % 251));
@@ -384,6 +385,7 @@ void test_io_pool(const std::filesystem::path& root) {
     pool_options.max_queued_requests = 4U;
     pool_options.max_request_bytes = 4U * stargate::MiB;
     stargate::io::BoundedIoPool pool(pool_options, governor);
+    auto io_before = stargate::io::sample_process_io();
     auto request = pool.submit_read(path, 1024, 2048, "test-read");
     CHECK(request);
     if (request) {
@@ -393,6 +395,21 @@ void test_io_pool(const std::filesystem::path& root) {
             CHECK(std::to_integer<unsigned char>(result.value().bytes.front()) == static_cast<unsigned char>(1024 % 251));
             CHECK(result.value().request_sequence == 1U);
             CHECK(result.value().timing.total_ms >= result.value().timing.service_ms);
+        }
+    }
+    auto io_after = stargate::io::sample_process_io();
+    CHECK(io_before && io_after);
+    if (io_before && io_after) {
+        auto delta = stargate::io::process_io_delta(io_before.value(), io_after.value());
+        CHECK(delta);
+        if (delta) {
+            CHECK(delta.value().read_operations >= 1U);
+            CHECK(delta.value().process_read_bytes >= 2048U);
+#if defined(_WIN32)
+            CHECK(!delta.value().storage_read_bytes_available);
+#elif defined(__linux__)
+            CHECK(delta.value().storage_read_bytes_available);
+#endif
         }
     }
     auto out_of_bounds = pool.submit_read(path, 4090, 64, "out-of-bounds");
@@ -458,6 +475,14 @@ void test_trace(const std::filesystem::path& root) {
         CHECK(report.value().vram_hits >= 1U);
         CHECK(report.value().storage_misses >= 3U);
         CHECK(report.value().tokens == 3U);
+        CHECK(report.value().unique_experts == 3U);
+        CHECK(report.value().cold_expert_accesses == 3U);
+        CHECK(report.value().reused_expert_accesses == 2U);
+        CHECK(std::abs(report.value().reuse_access_ratio - 0.4) < 1e-12);
+        CHECK(std::abs(report.value().average_unique_reuse_distance - 1.0) < 1e-12);
+        CHECK(report.value().p50_unique_reuse_distance == 1U);
+        CHECK(report.value().p95_unique_reuse_distance == 1U);
+        CHECK(report.value().maximum_unique_reuse_distance == 1U);
     }
     config.policy = stargate::research::CachePolicy::none;
     config.vram_cache_bytes = 0U;

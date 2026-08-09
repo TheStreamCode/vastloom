@@ -29,6 +29,13 @@ struct TraceSimulationReport {
     std::size_t records{0};
     std::size_t tokens{0};
     std::size_t unique_experts{0};
+    std::size_t cold_expert_accesses{0};
+    std::size_t reused_expert_accesses{0};
+    double reuse_access_ratio{0.0};
+    double average_unique_reuse_distance{0.0};
+    std::size_t p50_unique_reuse_distance{0};
+    std::size_t p95_unique_reuse_distance{0};
+    std::size_t maximum_unique_reuse_distance{0};
     std::size_t vram_hits{0};
     std::size_t ram_hits{0};
     std::size_t storage_misses{0};

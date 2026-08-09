@@ -8,6 +8,7 @@
 #include <limits>
 #include <map>
 #include <numeric>
+#include <new>
 #include <set>
 #include <sstream>
 #include <unordered_map>
@@ -261,10 +262,70 @@ private:
     std::unordered_map<ExpertKey, Entry> entries_;
 };
 
-ByteCount percentile_sorted(const std::vector<ByteCount>& values, double quantile) {
+template <typename Value>
+Value percentile_sorted(const std::vector<Value>& values, double quantile) {
     if (values.empty()) return 0;
     const auto index = static_cast<std::size_t>(std::ceil(quantile * static_cast<double>(values.size())) - 1.0);
     return values[std::min(index, values.size() - 1U)];
+}
+
+class FenwickTree {
+public:
+    explicit FenwickTree(std::size_t size) : tree_(size + 1U, 0) {}
+
+    void add(std::size_t position, std::int64_t delta) {
+        for (std::size_t index = position; index < tree_.size(); index += index & (~index + 1U)) {
+            tree_[index] += delta;
+        }
+    }
+
+    [[nodiscard]] std::size_t prefix_sum(std::size_t position) const {
+        std::int64_t result = 0;
+        for (std::size_t index = position; index > 0U; index -= index & (~index + 1U)) {
+            result += tree_[index];
+        }
+        return static_cast<std::size_t>(result);
+    }
+
+private:
+    std::vector<std::int64_t> tree_;
+};
+
+void populate_reuse_metrics(const std::vector<TraceRecord>& records, TraceSimulationReport& report) {
+    FenwickTree recent_positions(records.size());
+    std::unordered_map<ExpertKey, std::size_t> last_position;
+    last_position.reserve(report.unique_experts);
+    std::vector<std::size_t> distances;
+    distances.reserve(records.size() > report.unique_experts ? records.size() - report.unique_experts : 0U);
+
+    for (std::size_t index = 0U; index < records.size(); ++index) {
+        const std::size_t position = index + 1U;
+        const ExpertKey key = make_key(records[index].layer, records[index].expert);
+        const auto found = last_position.find(key);
+        if (found == last_position.end()) {
+            ++report.cold_expert_accesses;
+        } else {
+            const std::size_t active = last_position.size();
+            distances.push_back(active - recent_positions.prefix_sum(found->second));
+            recent_positions.add(found->second, -1);
+            ++report.reused_expert_accesses;
+        }
+        recent_positions.add(position, 1);
+        last_position[key] = position;
+    }
+
+    if (report.records != 0U) {
+        report.reuse_access_ratio = static_cast<double>(report.reused_expert_accesses) /
+                                    static_cast<double>(report.records);
+    }
+    if (!distances.empty()) {
+        const long double total = std::accumulate(distances.begin(), distances.end(), 0.0L);
+        report.average_unique_reuse_distance = static_cast<double>(total / static_cast<long double>(distances.size()));
+        std::sort(distances.begin(), distances.end());
+        report.p50_unique_reuse_distance = percentile_sorted(distances, 0.50);
+        report.p95_unique_reuse_distance = percentile_sorted(distances, 0.95);
+        report.maximum_unique_reuse_distance = distances.back();
+    }
 }
 
 void finalize_report(TraceSimulationReport& report, const std::map<std::uint64_t, ByteCount>& per_token) {
@@ -513,10 +574,17 @@ Result<TraceSimulationReport> simulate_trace(const std::filesystem::path& trace_
     }
     auto records = load_trace(trace_path, config.max_records);
     if (!records) return records.error();
-    if (config.policy == CachePolicy::none) return simulate_no_cache(records.value());
-    if (config.policy == CachePolicy::static_hot) return simulate_static_hot(records.value(), config);
-    if (config.policy == CachePolicy::lfu) return simulate_lfu(records.value(), config);
-    return simulate_lru(records.value(), config);
+    try {
+        TraceSimulationReport report;
+        if (config.policy == CachePolicy::none) report = simulate_no_cache(records.value());
+        else if (config.policy == CachePolicy::static_hot) report = simulate_static_hot(records.value(), config);
+        else if (config.policy == CachePolicy::lfu) report = simulate_lfu(records.value(), config);
+        else report = simulate_lru(records.value(), config);
+        populate_reuse_metrics(records.value(), report);
+        return report;
+    } catch (const std::bad_alloc&) {
+        return make_error(ErrorCode::resource_exhausted, "Unable to allocate bounded trace simulation state");
+    }
 }
 
 std::string to_text(const TraceSimulationReport& report) {
@@ -526,6 +594,13 @@ std::string to_text(const TraceSimulationReport& report) {
            << "Records:           " << report.records << '\n'
            << "Tokens:            " << report.tokens << '\n'
            << "Unique experts:    " << report.unique_experts << '\n'
+           << "Cold accesses:     " << report.cold_expert_accesses << '\n'
+           << "Reused accesses:   " << report.reused_expert_accesses << " ("
+           << report.reuse_access_ratio * 100.0 << "%)\n"
+           << "Mean reuse dist.:  " << report.average_unique_reuse_distance << " unique experts\n"
+           << "P50 reuse dist.:   " << report.p50_unique_reuse_distance << " unique experts\n"
+           << "P95 reuse dist.:   " << report.p95_unique_reuse_distance << " unique experts\n"
+           << "Max reuse dist.:   " << report.maximum_unique_reuse_distance << " unique experts\n"
            << "VRAM hits:         " << report.vram_hits << " (" << report.vram_hit_ratio * 100.0 << "%)\n"
            << "RAM hits:          " << report.ram_hits << " (" << report.ram_hit_ratio * 100.0 << "%)\n"
            << "Storage misses:    " << report.storage_misses << " (" << report.storage_miss_ratio * 100.0 << "%)\n"
@@ -547,6 +622,13 @@ std::string to_json(const TraceSimulationReport& report) {
            << "\"records\":" << report.records << ','
            << "\"tokens\":" << report.tokens << ','
            << "\"unique_experts\":" << report.unique_experts << ','
+           << "\"cold_expert_accesses\":" << report.cold_expert_accesses << ','
+           << "\"reused_expert_accesses\":" << report.reused_expert_accesses << ','
+           << "\"reuse_access_ratio\":" << report.reuse_access_ratio << ','
+           << "\"average_unique_reuse_distance\":" << report.average_unique_reuse_distance << ','
+           << "\"p50_unique_reuse_distance\":" << report.p50_unique_reuse_distance << ','
+           << "\"p95_unique_reuse_distance\":" << report.p95_unique_reuse_distance << ','
+           << "\"maximum_unique_reuse_distance\":" << report.maximum_unique_reuse_distance << ','
            << "\"vram_hits\":" << report.vram_hits << ','
            << "\"ram_hits\":" << report.ram_hits << ','
            << "\"storage_misses\":" << report.storage_misses << ','

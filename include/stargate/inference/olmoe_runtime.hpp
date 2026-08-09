@@ -16,6 +16,7 @@
 #include "stargate/inference/gpt2_tokenizer.hpp"
 #include "stargate/inference/olmoe_model.hpp"
 #include "stargate/io/bounded_io_pool.hpp"
+#include "stargate/io/process_io_counters.hpp"
 #include "stargate/model/safetensors.hpp"
 #include "stargate/safety/resource_governor.hpp"
 #include "stargate/safety/runtime_policy.hpp"
@@ -79,6 +80,9 @@ struct OlmoeForwardStats {
     std::size_t expert_prefetches{0};
     double expert_prefetch_wait_ms{0.0};
     double expert_prefetch_overlap_ms{0.0};
+    bool process_io_available{false};
+    io::ProcessIoDelta process_io;
+    std::string process_io_error;
 };
 
 struct OlmoeForwardResult {

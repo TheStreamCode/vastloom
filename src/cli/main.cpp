@@ -609,7 +609,24 @@ int command_moe_logits(const std::vector<std::string>& args) {
                   << ",\"expert_prefetch_overlap_ms\":" << forwarded.value().stats.expert_prefetch_overlap_ms
                   << ",\"load_ms\":" << forwarded.value().stats.load_ms
                   << ",\"forward_ms\":" << forwarded.value().stats.forward_ms
-                  << ",\"trace_events\":" << forwarded.value().trace.size() << "}\n";
+                  << ",\"trace_events\":" << forwarded.value().trace.size()
+                  << ",\"process_io\":{";
+        if (forwarded.value().stats.process_io_available) {
+            const auto& process_io = forwarded.value().stats.process_io;
+            std::cout << "\"available\":true,\"source\":\""
+                      << stargate::util::json_escape(process_io.source)
+                      << "\",\"read_operations\":" << process_io.read_operations
+                      << ",\"process_read_bytes\":" << process_io.process_read_bytes
+                      << ",\"storage_read_bytes_available\":"
+                      << (process_io.storage_read_bytes_available ? "true" : "false")
+                      << ",\"storage_read_bytes\":";
+            if (process_io.storage_read_bytes_available) std::cout << process_io.storage_read_bytes;
+            else std::cout << "null";
+        } else {
+            std::cout << "\"available\":false,\"error\":\""
+                      << stargate::util::json_escape(forwarded.value().stats.process_io_error) << '"';
+        }
+        std::cout << "}}\n";
     } else {
         std::cout << "Greedy token: " << greedy_id << " (" << greedy_text.value() << ")\nTop logits:\n";
         for (std::size_t index = 0U; index < top.value(); ++index) {
@@ -622,6 +639,21 @@ int command_moe_logits(const std::vector<std::string>& args) {
                   << forwarded.value().stats.expert_prefetches << ", overlap "
                   << forwarded.value().stats.expert_prefetch_overlap_ms << " ms, forward "
                   << forwarded.value().stats.forward_ms << " ms\n";
+        if (forwarded.value().stats.process_io_available) {
+            const auto& process_io = forwarded.value().stats.process_io;
+            std::cout << "Process I/O: " << stargate::format_bytes(process_io.process_read_bytes)
+                      << " read-transfer bytes via " << process_io.source;
+            if (process_io.storage_read_bytes_available) {
+                std::cout << ", storage-layer reads "
+                          << stargate::format_bytes(process_io.storage_read_bytes);
+            } else {
+                std::cout << ", storage-layer bytes unavailable";
+            }
+            std::cout << '\n';
+        } else {
+            std::cout << "Process I/O counters unavailable: "
+                      << forwarded.value().stats.process_io_error << '\n';
+        }
     }
     return 0;
 }

@@ -725,6 +725,7 @@ Result<OlmoeForwardResult> OlmoeRuntimeModel::forward(const std::vector<std::uin
     }
 
     const auto started = std::chrono::steady_clock::now();
+    auto process_io_before = io::sample_process_io();
     const auto deadline = started + options.timeout;
     OlmoeForwardResult result;
     result.stats.input_tokens = token_ids.size();
@@ -905,6 +906,18 @@ Result<OlmoeForwardResult> OlmoeRuntimeModel::forward(const std::vector<std::uin
         return make_error(ErrorCode::resource_exhausted, "Unable to allocate reserved OLMoE forward buffers");
     }
     result.stats.forward_ms = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - started).count();
+    auto process_io_after = io::sample_process_io();
+    if (!process_io_before) result.stats.process_io_error = process_io_before.error().message;
+    else if (!process_io_after) result.stats.process_io_error = process_io_after.error().message;
+    else {
+        auto measured = io::process_io_delta(process_io_before.value(), process_io_after.value());
+        if (measured) {
+            result.stats.process_io_available = true;
+            result.stats.process_io = measured.take_value();
+        } else {
+            result.stats.process_io_error = measured.error().message;
+        }
+    }
     return result;
 }
 

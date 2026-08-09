@@ -5,7 +5,18 @@
 #include <fstream>
 #include <limits>
 #include <new>
+#include <span>
 #include <thread>
+
+#if defined(_WIN32)
+#ifndef NOMINMAX
+#define NOMINMAX
+#endif
+#ifndef WIN32_LEAN_AND_MEAN
+#define WIN32_LEAN_AND_MEAN
+#endif
+#include <windows.h>
+#endif
 
 namespace stargate::io {
 namespace {
@@ -19,6 +30,61 @@ Result<bool> cancellation_requested(const std::function<bool()>& cancelled) {
     } catch (...) {
         return make_error(ErrorCode::internal_error, "I/O cancellation callback failed");
     }
+}
+
+Result<std::size_t> read_file_range(const std::filesystem::path& path,
+                                    ByteCount offset,
+                                    std::span<std::byte> destination,
+                                    std::size_t requested) {
+#if defined(_WIN32)
+    class FileHandle {
+    public:
+        explicit FileHandle(HANDLE handle) : handle_(handle) {}
+        FileHandle(const FileHandle&) = delete;
+        FileHandle& operator=(const FileHandle&) = delete;
+        ~FileHandle() {
+            if (handle_ != INVALID_HANDLE_VALUE) CloseHandle(handle_);
+        }
+        [[nodiscard]] HANDLE get() const noexcept { return handle_; }
+
+    private:
+        HANDLE handle_{INVALID_HANDLE_VALUE};
+    };
+
+    FileHandle file(CreateFileW(path.c_str(), GENERIC_READ, FILE_SHARE_READ | FILE_SHARE_DELETE,
+                                nullptr, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL | FILE_FLAG_RANDOM_ACCESS,
+                                nullptr));
+    if (file.get() == INVALID_HANDLE_VALUE) {
+        return make_error(ErrorCode::io_error, "Unable to open I/O source",
+                          path.string() + ": Windows error " + std::to_string(GetLastError()));
+    }
+    LARGE_INTEGER position{};
+    position.QuadPart = static_cast<LONGLONG>(offset);
+    if (SetFilePointerEx(file.get(), position, nullptr, FILE_BEGIN) == 0) {
+        return make_error(ErrorCode::io_error, "Unable to seek I/O source",
+                          path.string() + ": Windows error " + std::to_string(GetLastError()));
+    }
+    std::size_t total = 0U;
+    while (total < requested) {
+        const auto remaining = requested - total;
+        const DWORD chunk = static_cast<DWORD>(std::min<std::size_t>(remaining, std::numeric_limits<DWORD>::max()));
+        DWORD completed = 0U;
+        if (ReadFile(file.get(), destination.data() + total, chunk, &completed, nullptr) == 0) {
+            return make_error(ErrorCode::io_error, "Unable to read I/O source",
+                              path.string() + ": Windows error " + std::to_string(GetLastError()));
+        }
+        total += completed;
+        if (completed == 0U) break;
+    }
+    return total;
+#else
+    std::ifstream input(path, std::ios::binary);
+    if (!input) return make_error(ErrorCode::io_error, "Unable to open I/O source", path.string());
+    input.seekg(static_cast<std::streamoff>(offset), std::ios::beg);
+    if (!input) return make_error(ErrorCode::io_error, "Unable to seek I/O source", path.string());
+    input.read(reinterpret_cast<char*>(destination.data()), static_cast<std::streamsize>(requested));
+    return static_cast<std::size_t>(input.gcount());
+#endif
 }
 
 }  // namespace
@@ -176,17 +242,6 @@ void BoundedIoPool::worker_loop() {
             continue;
         }
 
-        std::ifstream input(task.path, std::ios::binary);
-        if (!input) {
-            task.promise.set_value(make_error(ErrorCode::io_error, "Unable to open I/O source", task.path.string()));
-            continue;
-        }
-        input.seekg(static_cast<std::streamoff>(task.offset), std::ios::beg);
-        if (!input) {
-            task.promise.set_value(make_error(ErrorCode::io_error, "Unable to seek I/O source", task.path.string()));
-            continue;
-        }
-
         std::vector<std::byte> bytes;
         try {
             bytes.resize(static_cast<std::size_t>(task.size));
@@ -197,8 +252,12 @@ void BoundedIoPool::worker_loop() {
         const std::size_t requested = injected && options_.fault.kind == IoFaultKind::short_read
                                           ? bytes.size() - 1U
                                           : bytes.size();
-        input.read(reinterpret_cast<char*>(bytes.data()), static_cast<std::streamsize>(requested));
-        if (input.gcount() != static_cast<std::streamsize>(bytes.size())) {
+        auto read = read_file_range(task.path, task.offset, bytes, requested);
+        if (!read) {
+            task.promise.set_value(read.error());
+            continue;
+        }
+        if (read.value() != bytes.size()) {
             task.promise.set_value(make_error(ErrorCode::io_error, "Short read from I/O source", task.path.string()));
             continue;
         }

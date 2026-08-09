@@ -78,6 +78,15 @@ def main() -> int:
                 "asynchronous expert reads did not overlap any CPU compute", process)
         require(payload["expert_bytes_read"] == ROUTES_PER_TOKEN * EXPERT_BYTES,
                 "measured expert bytes differ from the no-cache baseline", process)
+        require(payload["process_io"]["available"] is True
+                and payload["process_io"]["process_read_bytes"] >= payload["expert_bytes_read"],
+                "process I/O counters did not observe the bounded expert reads", process)
+        if payload["process_io"]["source"] == "windows-get-process-io-counters":
+            require(payload["process_io"]["storage_read_bytes_available"] is False
+                    and payload["process_io"]["storage_read_bytes"] is None,
+                    "Windows process transfer bytes were mislabeled as physical storage bytes", process)
+            require(ROUTES_PER_TOKEN <= payload["process_io"]["read_operations"] <= 2 * ROUTES_PER_TOKEN,
+                    "Windows bounded expert reads regressed to fragmented operations", process)
         require(payload["trace_events"] == ROUTES_PER_TOKEN, "native trace event count mismatch", process)
 
         native_logits = {int(item["id"]): float(item["logit"]) for item in payload["top_logits"]}
@@ -176,6 +185,11 @@ def main() -> int:
         for name, report in (("LRU", lru), ("LFU", lfu)):
             require(report["storage_misses"] == ROUTES_PER_TOKEN and report["ram_hits"] == ROUTES_PER_TOKEN,
                     f"{name} simulation did not reuse the actual routed experts")
+            require(report["cold_expert_accesses"] == ROUTES_PER_TOKEN
+                    and report["reused_expert_accesses"] == ROUTES_PER_TOKEN
+                    and report["p50_unique_reuse_distance"] == ROUTES_PER_TOKEN - 1
+                    and report["p95_unique_reuse_distance"] == ROUTES_PER_TOKEN - 1,
+                    f"{name} reuse-distance report differs from the repeated-token fixture")
         require(static_hot["ram_hits"] == 2 * ROUTES_PER_TOKEN and static_hot["storage_misses"] == 0,
                 "static-hot simulation mismatch")
 

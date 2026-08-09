@@ -57,8 +57,12 @@ std::string first_cpu_model_line() {
         }
     }
 #elif defined(_WIN32)
-    if (const char* value = std::getenv("PROCESSOR_IDENTIFIER"); value != nullptr) {
-        return value;
+    char* value = nullptr;
+    std::size_t value_size = 0;
+    if (_dupenv_s(&value, &value_size, "PROCESSOR_IDENTIFIER") == 0 && value != nullptr) {
+        const std::string result(value);
+        std::free(value);
+        return result;
     }
 #elif defined(__APPLE__)
     std::size_t size = 0;

@@ -67,11 +67,15 @@ std::array<std::uint8_t, 32> Sha256::finalize() {
         const std::uint64_t bit_length = total_bytes_ * 8ULL;
         buffer_[buffer_size_++] = 0x80U;
         if (buffer_size_ > 56U) {
-            std::fill(buffer_.begin() + static_cast<std::ptrdiff_t>(buffer_size_), buffer_.end(), 0U);
+            std::fill(buffer_.begin() + static_cast<std::ptrdiff_t>(buffer_size_),
+                      buffer_.end(),
+                      std::uint8_t{0});
             transform(buffer_.data());
             buffer_size_ = 0;
         }
-        std::fill(buffer_.begin() + static_cast<std::ptrdiff_t>(buffer_size_), buffer_.begin() + 56, 0U);
+        std::fill(buffer_.begin() + static_cast<std::ptrdiff_t>(buffer_size_),
+                  buffer_.begin() + 56,
+                  std::uint8_t{0});
         for (std::size_t index = 0; index < 8U; ++index) {
             buffer_[63U - index] = static_cast<std::uint8_t>((bit_length >> (index * 8U)) & 0xffU);
         }

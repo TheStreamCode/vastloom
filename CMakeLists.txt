@@ -9,7 +9,12 @@ project(
 
 option(STARGATE_BUILD_TESTS "Build Stargate tests" ON)
 option(STARGATE_ENABLE_SANITIZERS "Enable AddressSanitizer and UndefinedBehaviorSanitizer" OFF)
+option(STARGATE_ENABLE_THREAD_SANITIZER "Enable ThreadSanitizer" OFF)
 option(STARGATE_WARNINGS_AS_ERRORS "Treat compiler warnings as errors" OFF)
+
+if(STARGATE_ENABLE_SANITIZERS AND STARGATE_ENABLE_THREAD_SANITIZER)
+    message(FATAL_ERROR "AddressSanitizer and ThreadSanitizer must use separate builds")
+endif()
 
 list(APPEND CMAKE_MODULE_PATH "${CMAKE_CURRENT_SOURCE_DIR}/cmake")
 include(StargateWarnings)

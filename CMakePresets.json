@@ -13,7 +13,8 @@
       "binaryDir": "${sourceDir}/build/debug",
       "cacheVariables": {
         "CMAKE_BUILD_TYPE": "Debug",
-        "STARGATE_BUILD_TESTS": "ON"
+        "STARGATE_BUILD_TESTS": "ON",
+        "STARGATE_WARNINGS_AS_ERRORS": "ON"
       }
     },
     {
@@ -35,7 +36,25 @@
       "cacheVariables": {
         "CMAKE_BUILD_TYPE": "Debug",
         "STARGATE_BUILD_TESTS": "ON",
-        "STARGATE_ENABLE_SANITIZERS": "ON"
+        "STARGATE_ENABLE_SANITIZERS": "ON",
+        "STARGATE_WARNINGS_AS_ERRORS": "ON"
+      },
+      "condition": {
+        "type": "notEquals",
+        "lhs": "${hostSystemName}",
+        "rhs": "Windows"
+      }
+    },
+    {
+      "name": "tsan",
+      "displayName": "ThreadSanitizer",
+      "generator": "Ninja",
+      "binaryDir": "${sourceDir}/build/tsan",
+      "cacheVariables": {
+        "CMAKE_BUILD_TYPE": "Debug",
+        "STARGATE_BUILD_TESTS": "ON",
+        "STARGATE_ENABLE_THREAD_SANITIZER": "ON",
+        "STARGATE_WARNINGS_AS_ERRORS": "ON"
       },
       "condition": {
         "type": "notEquals",
@@ -47,7 +66,8 @@
   "buildPresets": [
     { "name": "debug", "configurePreset": "debug" },
     { "name": "release", "configurePreset": "release" },
-    { "name": "asan", "configurePreset": "asan" }
+    { "name": "asan", "configurePreset": "asan" },
+    { "name": "tsan", "configurePreset": "tsan" }
   ],
   "testPresets": [
     {
@@ -63,6 +83,11 @@
     {
       "name": "asan",
       "configurePreset": "asan",
+      "output": { "outputOnFailure": true }
+    },
+    {
+      "name": "tsan",
+      "configurePreset": "tsan",
       "output": { "outputOnFailure": true }
     }
   ]

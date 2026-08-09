@@ -48,7 +48,7 @@ float read_f32_le(const std::byte* data) noexcept {
     return std::bit_cast<float>(read_u32_le(data));
 }
 
-std::uint32_t byte_swap_u32(std::uint32_t value) noexcept {
+[[maybe_unused]] std::uint32_t byte_swap_u32(std::uint32_t value) noexcept {
     return ((value & 0x000000ffU) << 24U) |
            ((value & 0x0000ff00U) << 8U) |
            ((value & 0x00ff0000U) >> 8U) |

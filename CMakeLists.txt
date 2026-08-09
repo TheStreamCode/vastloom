@@ -27,11 +27,15 @@ add_library(stargate_core STATIC
     src/inference/tiny_model.cpp
     src/io/bounded_io_pool.cpp
     src/model/manifest.cpp
+    src/model/model_store.cpp
+    src/model/safetensors.cpp
     src/model/verifier.cpp
     src/planner/execution_planner.cpp
     src/research/trace_simulator.cpp
     src/safety/heartbeat.cpp
     src/safety/resource_governor.cpp
+    src/safety/runtime_policy.cpp
+    src/util/json.cpp
     src/util/sha256.cpp
 )
 
@@ -50,6 +54,7 @@ stargate_enable_sanitizers(stargate_core)
 
 if(WIN32)
     target_compile_definitions(stargate_core PRIVATE NOMINMAX WIN32_LEAN_AND_MEAN)
+    target_link_libraries(stargate_core PRIVATE Psapi)
 endif()
 
 add_executable(stargate
@@ -106,6 +111,11 @@ if(BUILD_TESTING AND STARGATE_BUILD_TESTS)
                 --vectors ${CMAKE_CURRENT_SOURCE_DIR}/examples/models/stargate-tinychat-v1.tests.json
         )
         set_tests_properties(stargate_cli_tiny_integration PROPERTIES TIMEOUT 60)
+        add_test(
+            NAME stargate_hf_importer_offline
+            COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/tests/test_import_hf_model.py
+        )
+        set_tests_properties(stargate_hf_importer_offline PROPERTIES TIMEOUT 30)
     else()
         message(STATUS "Python3 not found; skipping TinyChat CLI integration test")
     endif()

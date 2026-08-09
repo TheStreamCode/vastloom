@@ -15,11 +15,14 @@
 #include "stargate/hardware/hardware_probe.hpp"
 #include "stargate/io/bounded_io_pool.hpp"
 #include "stargate/model/manifest.hpp"
+#include "stargate/model/model_store.hpp"
+#include "stargate/model/safetensors.hpp"
 #include "stargate/model/verifier.hpp"
 #include "stargate/planner/execution_planner.hpp"
 #include "stargate/research/trace_simulator.hpp"
 #include "stargate/safety/heartbeat.hpp"
 #include "stargate/safety/resource_governor.hpp"
+#include "stargate/safety/runtime_policy.hpp"
 #include "stargate/util/string.hpp"
 #include "stargate/version.hpp"
 
@@ -113,8 +116,8 @@ void print_help() {
         << "      Run deterministic end-to-end generation probes against the validation model.\n\n"
         << "  doctor [--storage PATH] [--json]\n"
         << "      Detect CPU, RAM, NVIDIA VRAM and storage without allocating model memory.\n\n"
-        << "  inspect MANIFEST [--json]\n"
-        << "      Parse and validate a Stargate model manifest.\n\n"
+        << "  inspect MANIFEST_OR_SAFETENSORS [--json]\n"
+        << "      Inspect a manifest or bounded Safetensors checkpoint without loading weights.\n\n"
         << "  verify MANIFEST [--model-root PATH] [--full] [--json]\n"
         << "      Verify chunk paths and sizes; --full also checks SHA-256.\n\n"
         << "  plan MANIFEST [--profile safe|balanced|performance|low-memory|quiet]\n"
@@ -125,8 +128,12 @@ void print_help() {
         << "      Measure expert-cache hit rates, NVMe bytes/token and PCIe traffic.\n\n"
         << "  io-smoke FILE [--offset BYTES] [--size SIZE]\n"
         << "      Exercise the bounded asynchronous I/O path under the resource governor.\n\n"
-        << "  store-init PATH\n"
-        << "      Create the immutable-model/cache/scratch/state store layout.\n\n"
+        << "  store-init PATH [--reserve SIZE] [--json]\n"
+        << "      Create the immutable-model/cache/scratch/state store with a disk reserve.\n\n"
+        << "  store-info PATH [--reserve SIZE] [--json]\n"
+        << "      Validate and display an existing Stargate model store.\n\n"
+        << "  runtime-policy [--storage PATH] [--json]\n"
+        << "      Show the fail-closed RAM/VRAM/CPU/I/O policy for this host.\n\n"
         << "  heartbeat-write PATH [--state normal|pressure|critical|emergency]\n"
         << "      Atomically write one watchdog heartbeat for integration tests.\n\n"
         << "  version\n";
@@ -170,8 +177,17 @@ int command_doctor(const std::vector<std::string>& args) {
 }
 
 int command_inspect(const std::vector<std::string>& args) {
-    if (args.empty()) return print_error(stargate::make_error(stargate::ErrorCode::invalid_argument, "inspect requires a manifest path"));
+    if (args.empty()) return print_error(stargate::make_error(stargate::ErrorCode::invalid_argument, "inspect requires a manifest or checkpoint path"));
     const bool json = has_flag(args, "--json");
+    std::error_code error;
+    const std::filesystem::path path = args[0];
+    if (std::filesystem::is_directory(path, error) ||
+        stargate::util::to_lower(path.extension().string()) == ".safetensors") {
+        auto catalog = stargate::model::inspect_safetensors_checkpoint(path);
+        if (!catalog) return print_error(catalog.error(), json);
+        std::cout << (json ? stargate::model::to_json(catalog.value()) : stargate::model::to_text(catalog.value())) << '\n';
+        return 0;
+    }
     auto manifest = stargate::model::load_manifest(args[0]);
     if (!manifest) return print_error(manifest.error(), json);
     std::cout << (json ? stargate::model::to_json(manifest.value()) : stargate::model::to_text(manifest.value())) << '\n';
@@ -285,24 +301,37 @@ int command_io_smoke(const std::vector<std::string>& args) {
 
 int command_store_init(const std::vector<std::string>& args) {
     if (args.empty()) return print_error(stargate::make_error(stargate::ErrorCode::invalid_argument, "store-init requires a path"));
-    std::error_code error;
-    const auto root = std::filesystem::absolute(args[0], error).lexically_normal();
-    if (error || root == root.root_path()) {
-        return print_error(stargate::make_error(stargate::ErrorCode::unsafe_path, "Refusing unsafe model-store root", args[0]));
-    }
-    for (const auto& relative : {"models/original", "models/optimized", "cache", "scratch", "state", "telemetry"}) {
-        std::filesystem::create_directories(root / relative, error);
-        if (error) return print_error(stargate::make_error(stargate::ErrorCode::io_error, "Unable to create model-store directory", (root / relative).string()));
-    }
-    const auto marker = root / ".stargate-store";
-    if (!std::filesystem::exists(marker)) {
-        std::ofstream output(marker, std::ios::trunc);
-        if (!output) return print_error(stargate::make_error(stargate::ErrorCode::io_error, "Unable to create model-store marker", marker.string()));
-        output << "format=stargate.store.v1\n"
-               << "original_weights=immutable\n"
-               << "cache=reconstructable\n";
-    }
-    std::cout << "Initialized Stargate model store at " << root.string() << '\n';
+    const bool json = has_flag(args, "--json");
+    auto reserve = optional_bytes(args, "--reserve", 300U * stargate::GiB);
+    if (!reserve) return print_error(reserve.error(), json);
+    auto store = stargate::model::ModelStore::initialize(args[0], {reserve.value()});
+    if (!store) return print_error(store.error(), json);
+    std::cout << (json ? stargate::model::to_json(store.value().layout())
+                      : stargate::model::to_text(store.value().layout())) << '\n';
+    return 0;
+}
+
+int command_store_info(const std::vector<std::string>& args) {
+    if (args.empty()) return print_error(stargate::make_error(stargate::ErrorCode::invalid_argument, "store-info requires a path"));
+    const bool json = has_flag(args, "--json");
+    auto reserve = optional_bytes(args, "--reserve", 300U * stargate::GiB);
+    if (!reserve) return print_error(reserve.error(), json);
+    auto store = stargate::model::ModelStore::open(args[0], {reserve.value()});
+    if (!store) return print_error(store.error(), json);
+    std::cout << (json ? stargate::model::to_json(store.value().layout())
+                      : stargate::model::to_text(store.value().layout())) << '\n';
+    return 0;
+}
+
+int command_runtime_policy(const std::vector<std::string>& args) {
+    const bool json = has_flag(args, "--json");
+    const auto storage = option_value(args, "--storage").value_or(std::filesystem::current_path().string());
+    auto hardware = stargate::hardware::HardwareProbe::collect(storage);
+    if (!hardware) return print_error(hardware.error(), json);
+    auto policy = stargate::safety::make_safe_runtime_policy(hardware.value());
+    if (!policy) return print_error(policy.error(), json);
+    std::cout << (json ? stargate::safety::to_json(policy.value())
+                      : stargate::safety::to_text(policy.value())) << '\n';
     return 0;
 }
 
@@ -340,6 +369,8 @@ int dispatch_cli(const std::vector<std::string>& arguments) {
         if (command == "trace-sim") return command_trace_sim(args);
         if (command == "io-smoke") return command_io_smoke(args);
         if (command == "store-init") return command_store_init(args);
+        if (command == "store-info") return command_store_info(args);
+        if (command == "runtime-policy") return command_runtime_policy(args);
         if (command == "heartbeat-write") return command_heartbeat_write(args);
         if (command == "version" || command == "--version") {
             std::cout << stargate::kVersion << '\n';

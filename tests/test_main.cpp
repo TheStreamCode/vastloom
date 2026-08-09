@@ -15,11 +15,15 @@
 #include "stargate/inference/tiny_model.hpp"
 #include "stargate/io/bounded_io_pool.hpp"
 #include "stargate/model/manifest.hpp"
+#include "stargate/model/model_store.hpp"
+#include "stargate/model/safetensors.hpp"
 #include "stargate/model/verifier.hpp"
 #include "stargate/planner/execution_planner.hpp"
 #include "stargate/research/trace_simulator.hpp"
 #include "stargate/safety/heartbeat.hpp"
 #include "stargate/safety/resource_governor.hpp"
+#include "stargate/safety/runtime_policy.hpp"
+#include "stargate/util/json.hpp"
 #include "stargate/util/sha256.hpp"
 #include "stargate/util/string.hpp"
 
@@ -67,6 +71,99 @@ void test_json_escape() {
     CHECK(stargate::util::json_escape(valid_utf8) == valid_utf8);
     const std::string invalid_utf8{static_cast<char>(0xf1), 'x', static_cast<char>(0x80)};
     CHECK(stargate::util::json_escape(invalid_utf8) == "\\ufffdx\\ufffd");
+}
+
+void test_bounded_json() {
+    auto parsed = stargate::util::parse_json(R"({"name":"Stargate","value":42,"unicode":"\u00e8","items":[true,null]})");
+    CHECK(parsed && parsed.value().is_object());
+    if (parsed) {
+        const auto* name = parsed.value().find("name");
+        const auto* value = parsed.value().find("value");
+        const auto* unicode = parsed.value().find("unicode");
+        CHECK(name != nullptr && name->as_string() && name->as_string().value() == "Stargate");
+        CHECK(value != nullptr && value->as_u64() && value->as_u64().value() == 42U);
+        CHECK(unicode != nullptr && unicode->as_string() && unicode->as_string().value() == "è");
+    }
+    CHECK(!stargate::util::parse_json(R"({"duplicate":1,"duplicate":2})"));
+    CHECK(!stargate::util::parse_json(R"([1,])"));
+    stargate::util::JsonLimits limits;
+    limits.max_input_bytes = 4U;
+    CHECK(!stargate::util::parse_json("[1,2]", limits));
+    limits = {};
+    limits.max_depth = 2U;
+    CHECK(!stargate::util::parse_json("[[[0]]]", limits));
+}
+
+void write_u64_le(std::ofstream& output, std::uint64_t value) {
+    std::array<unsigned char, 8> bytes{};
+    for (std::size_t index = 0; index < bytes.size(); ++index) {
+        bytes[index] = static_cast<unsigned char>((value >> (index * 8U)) & 0xffU);
+    }
+    output.write(reinterpret_cast<const char*>(bytes.data()), static_cast<std::streamsize>(bytes.size()));
+}
+
+void test_safetensors(const std::filesystem::path& root) {
+    const auto checkpoint = root / "safetensors";
+    std::filesystem::create_directories(checkpoint);
+    const std::string header = R"({"weight":{"dtype":"BF16","shape":[2,2],"data_offsets":[0,8]}})";
+    {
+        std::ofstream output(checkpoint / "model.safetensors", std::ios::binary);
+        write_u64_le(output, header.size());
+        output.write(header.data(), static_cast<std::streamsize>(header.size()));
+        const std::array<unsigned char, 8> payload{0x80U, 0x3fU, 0x00U, 0x40U, 0x40U, 0x40U, 0x80U, 0x40U};
+        output.write(reinterpret_cast<const char*>(payload.data()), static_cast<std::streamsize>(payload.size()));
+    }
+    auto shard = stargate::model::SafetensorsFile::open(checkpoint / "model.safetensors");
+    CHECK(shard && shard.value().tensors().size() == 1U);
+    if (shard) {
+        const auto* tensor = shard.value().find("weight");
+        CHECK(tensor != nullptr && tensor->byte_count == 8U);
+        if (tensor != nullptr) {
+            auto bytes = shard.value().read_range(*tensor, 0U, 8U);
+            CHECK(bytes && bytes.value().size() == 8U);
+            CHECK(!shard.value().read_range(*tensor, 0U, 8U, 4U));
+        }
+    }
+    auto catalog = stargate::model::inspect_safetensors_checkpoint(checkpoint);
+    CHECK(catalog && catalog.value().shards.size() == 1U && catalog.value().tensors.size() == 1U);
+
+    const std::string invalid_header = R"({"weight":{"dtype":"BF16","shape":[2,2],"data_offsets":[0,9]}})";
+    {
+        std::ofstream output(checkpoint / "invalid.safetensors", std::ios::binary);
+        write_u64_le(output, invalid_header.size());
+        output.write(invalid_header.data(), static_cast<std::streamsize>(invalid_header.size()));
+        output.write("123456789", 9);
+    }
+    CHECK(!stargate::model::SafetensorsFile::open(checkpoint / "invalid.safetensors"));
+}
+
+void test_model_store_and_runtime_policy(const std::filesystem::path& root) {
+    auto store = stargate::model::ModelStore::initialize(root / "model-store", {20U * stargate::GiB});
+    CHECK(store);
+    if (store) {
+        CHECK(std::filesystem::is_directory(store.value().layout().original));
+        CHECK(store.value().immutable_model_path("org/model", "revision-1"));
+        CHECK(!store.value().immutable_model_path("../escape", "revision-1"));
+        CHECK(!store.value().preflight_write(std::numeric_limits<stargate::ByteCount>::max()));
+        CHECK(stargate::model::ModelStore::open(root / "model-store", {20U * stargate::GiB}));
+    }
+
+    stargate::hardware::HardwareSnapshot hardware;
+    hardware.cpu.logical_cores = 24U;
+    hardware.memory.total_bytes = 32U * stargate::GiB;
+    hardware.memory.available_bytes = 20U * stargate::GiB;
+    hardware.storage.available_bytes = 1U * stargate::TiB;
+    hardware.gpus.push_back({"CUDA", "test", "test", 12U * stargate::GiB, 10U * stargate::GiB, {}, {}});
+    auto policy = stargate::safety::make_safe_runtime_policy(hardware);
+    CHECK(policy && policy.value().resources.ram_hard_limit == 12U * stargate::GiB);
+    if (policy) {
+        CHECK(policy.value().cpu_threads == 6U);
+        CHECK(policy.value().io_workers == 2U && policy.value().max_queued_io == 4U);
+        CHECK(policy.value().max_io_request_bytes == 64U * stargate::MiB);
+        CHECK(policy.value().storage_reserve_bytes == 300U * stargate::GiB);
+    }
+    hardware.memory.available_bytes = 8U * stargate::GiB;
+    CHECK(!stargate::safety::make_safe_runtime_policy(hardware));
 }
 
 void test_manifest_and_verifier(const std::filesystem::path& root) {
@@ -391,6 +488,9 @@ int main() {
     test_bytes();
     test_sha256();
     test_json_escape();
+    test_bounded_json();
+    test_safetensors(root);
+    test_model_store_and_runtime_policy(root);
     test_manifest_and_verifier(root);
     test_governor();
     test_planner();

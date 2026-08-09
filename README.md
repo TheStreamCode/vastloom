@@ -5,15 +5,17 @@ running open-weight models that are much larger than the host's VRAM and RAM,
 especially Mixture-of-Experts models. It treats **VRAM, RAM and NVMe as an explicit
 model-memory hierarchy** instead of relying on uncontrolled operating-system swap.
 
-> **Current status — `0.4.0-alpha.1`: first real MoE streaming milestone.**
+> **Current status — `0.4.0-alpha.2`: bounded asynchronous MoE streaming slice.**
 > Stargate now runs the routed token path of the pinned 13.84 GB
 > `allenai/OLMoE-1B-7B-0924-Instruct` checkpoint on CPU while keeping only the
 > always-active trunk and a bounded expert cache in RAM. Native logits, top-8 routes
-> and routing weights match a Transformers reference. DeepSeek V4 Flash, CUDA and
-> asynchronous I/O/compute overlap are not implemented yet.
+> and routing weights match a Transformers reference. An opt-in one-worker pipeline
+> prefetches one or two 12 MiB experts with bounded staging, cancellation, per-request
+> timeouts and fail-closed fault injection. DeepSeek V4 Flash and CUDA are not implemented.
 
-Measured results and limitations are recorded in
-[`docs/reports/ALPHA4_OLMOE_VALIDATION.md`](docs/reports/ALPHA4_OLMOE_VALIDATION.md).
+Measured results and limitations are recorded in the
+[`Alpha 4 OLMoE report`](docs/reports/ALPHA4_OLMOE_VALIDATION.md) and the
+[`Alpha 4.2 async-I/O report`](docs/reports/ALPHA4_ASYNC_IO_VALIDATION.md).
 
 ## Reference target
 
@@ -28,7 +30,7 @@ The first consumer reference machine is:
 The engine is not hard-coded for that PC. Hardware is probed at runtime and every
 allocation plan is derived from detected capacity and conservative headroom.
 
-## What works in alpha.4
+## What works in alpha.4.2
 
 ### Real pretrained model path
 
@@ -58,15 +60,20 @@ allocation plan is derived from detected capacity and conservative headroom.
   exact shard/offset identity.
 - **Authoritative CPU graph:** Q/K RMSNorm, RoPE, causal attention, full 64-way router
   softmax, top-8 selection and routing-weighted SwiGLU experts.
-- **Bounded expert memory:** one 12 MiB expert staging allocation, or an explicitly
-  reserved cache between 12 MiB and 2 GiB using no-cache, LRU, LFU or static-hot.
+- **Bounded expert memory:** one 12 MiB active expert, an explicitly reserved cache
+  between 12 MiB and 2 GiB, and at most two reservation-backed 12 MiB prefetch buffers.
+- **Opt-in asynchronous pipeline:** one I/O worker, prefetch depth one or two, a queue
+  bounded to two requests for this adapter, per-request timeout and cancellation checks.
 - **Exact telemetry:** token, layer, expert, size, routing weight, tier, hit/miss,
-  bytes read and synchronous I/O latency, atomically published without overwrite.
+  logical bytes read, I/O service time, foreground wait and measured service/CPU overlap,
+  atomically published without overwrite.
 - **Independent parity:** one- and two-token native probes match Transformers 4.45.2
   for greedy token, top logits, every selected expert and every recorded route weight.
 - **Safe preflight:** metadata-only checkpoints cannot execute, full SHA-256 is the
   default, resident loading is rejected when the checkpoint exceeds the live cap, and
   timeout/Ctrl+C/headroom checks stop safely between layers.
+- **Fault injection:** worker failure, short read, allocation failure, cancellation and
+  I/O timeout are exercised through the real OLMoE path and release reservations cleanly.
 
 ### Synthetic validation path retained
 
@@ -238,13 +245,17 @@ partials and publishes only after all files match their pinned SHA-256:
 python tools\import_hf_model.py --model olmoe --store C:\StargateModels
 $model = 'C:\StargateModels\models\original\allenai-OLMoE-1B-7B-0924-Instruct--7f1c97f440f06ce36705e4f2b843edb5925f4498'
 stargate moe-inspect $model --json
-stargate moe-logits $model --text 'Hello' --cache no-cache --trace C:\StargateModels\telemetry\hello.csv --json
+stargate moe-logits $model --text 'Hello' --cache no-cache --io async --prefetch-depth 2 --trace C:\StargateModels\telemetry\hello.csv --json
 ```
 
 `moe-logits` is a bounded correctness/telemetry probe, not an OLMoE chat or generation
 command. Full verification is enabled by default. After an immediately preceding full
 verification, `--no-verify` may be used for repeated local probes without rehashing all
 13.84 GB. Expert cache capacity is explicitly reserved and capped at 2 GiB.
+Asynchronous I/O is opt-in while the baseline remains under study. Its adapter-specific
+limits are one worker, one or two outstanding prefetch slots, 12 MiB per request and a
+30-second request timeout by default. `--inject-io-fault` is a test-only development
+option; it must not be used for normal inference.
 
 ## TinyChat CLI options
 
@@ -316,6 +327,7 @@ stargate real-logits MODEL_DIRECTORY --text TEXT [--chat] [--top N] [--json]
 stargate moe-inspect MODEL_DIRECTORY [--no-verify] [--json]
 stargate moe-logits MODEL_DIRECTORY --text TEXT [--chat] [--top N]
     [--cache no-cache|lru|lfu|static-hot] [--cache-bytes SIZE]
+    [--io sync|async] [--prefetch-depth 1|2] [--io-timeout-ms N]
     [--timeout-ms N] [--trace PATH] [--no-verify] [--json]
 stargate heartbeat-write PATH
 stargate version
@@ -383,16 +395,18 @@ checkpoint.
 
 ## Current limitations
 
-Alpha.4 proves one real dense path and one real synchronous CPU MoE streaming path,
-not the final Stargate research thesis.
+Alpha.4.2 proves one real dense path and one real CPU MoE streaming path with an
+opt-in bounded asynchronous reader, not the final Stargate research thesis.
 It currently has:
 
 - two exact pinned Hugging Face adapters; no DeepSeek, MiniMax, Kimi or GGUF adapter;
 - no CUDA, ROCm, Vulkan or Metal inference backend;
 - no production quantized kernels;
-- no VRAM expert tier, pinned host buffers, direct I/O or asynchronous read/compute overlap;
+- no VRAM expert tier, pinned host buffers or direct/unbuffered device I/O;
 - OLMoE currently exposes final-logit probes and route telemetry, not decoding/chat;
-- expert reads and CPU kernels are synchronous reference implementations;
+- expert compute remains a synchronous CPU reference implementation; the asynchronous
+  reader uses ordinary buffered file I/O and one worker;
+- no physical-device I/O counters, cold-cache protocol or SSD temperature/power telemetry;
 - no persistent KV reuse between chat turns; history is currently recomputed;
 - no local HTTP API yet.
 
@@ -409,13 +423,12 @@ research metric is not merely SSD throughput. It is:
 
 The next technical sequence remains incremental:
 
-1. finish OLMoE streaming fault injection and cancellation/I/O failure coverage;
-2. bounded asynchronous reads and measured read/compute overlap;
-3. exact DeepSeek V4 Flash checkpoint inspection and architecture-faithful fixture;
-4. CUDA dense, attention, router and packed expert kernels;
-5. explicit VRAM/RAM/NVMe placement with overlapped I/O and compute;
-6. adaptive placement, predictive routing and speculative expert deduplication;
-7. OpenAI-compatible local server and coding-agent integration.
+1. add reuse-distance and physical-device I/O counters plus a repeatable cold-cache run;
+2. exact DeepSeek V4 Flash checkpoint inspection and architecture-faithful fixture;
+3. CUDA dense, attention, router and packed expert kernels;
+4. explicit VRAM/RAM/NVMe placement with pinned buffers and direct/overlapped I/O;
+5. adaptive placement, predictive routing and speculative expert deduplication;
+6. OpenAI-compatible local server and coding-agent integration.
 
 Detailed acceptance gates are in [`docs/ROADMAP.md`](docs/ROADMAP.md).
 

@@ -109,7 +109,7 @@ This adapter is intentionally pinned to one revision of SmolLM2. It loads the ve
 269 MB BF16 checkpoint into reserved RAM and uses FP32 activations. It is a correctness
 oracle for subsequent backends, not a generic Llama compatibility claim.
 
-Alpha.4 adds the first real sparse path:
+Alpha.4.2 extends the first real sparse path with an opt-in bounded prefetch pipeline:
 
 ```text
 pinned OLMoE import (3 BF16 shards, 13.84 GB tensor payload)
@@ -120,21 +120,25 @@ reserved 953,421,824-byte always-active trunk in RAM
       ▼
 native CPU attention + authoritative 64-way/top-8 router
       │
-      ├── bounded buffered file read → one 12 MiB expert staging buffer
+      ├── sync bounded read, or one-worker async prefetch (depth 1-2)
+      │        └── reservation-backed 12 MiB buffers + request timeout
       └── optional reserved RAM cache (no-cache/LRU/LFU/static-hot)
       │
       ▼
 weighted SwiGLU expert accumulation → final logits
       │
       ▼
-atomic token/layer/expert/tier/bytes/latency trace
+atomic token/layer/expert/tier/bytes/service/wait/overlap trace
 ```
 
 The model object gives every routed expert a logical `(layer, expert)` identity that is
 independent of its physical shard offset or current RAM residency. The runtime does not
-map or allocate the complete checkpoint. Reads are synchronous in this milestone, so
-the path proves placement, logical byte accounting and correctness but not physical
-device traffic or I/O/compute overlap.
+map or allocate the complete checkpoint. Synchronous reads remain the default oracle.
+The optional asynchronous mode validates each expert's three BF16 matrices as one
+contiguous 12 MiB shard range, reserves staging before submission, and schedules the
+next one or two routed experts on a single worker. It measures how much actual read
+service completed while foreground CPU work continued. These timings and logical byte
+counts do not substitute for physical-device counters or a cold-cache NVMe benchmark.
 
 ## TinyTransformer adapter boundary
 
@@ -180,6 +184,7 @@ For the pinned OLMoE probe, L1 and L2 are active explicitly:
 RAM
 ├── immutable always-active BF16 trunk (reserved before load)
 ├── bounded expert staging/cache reservation (12 MiB to 2 GiB)
+├── zero to two reservation-backed 12 MiB asynchronous read buffers
 ├── FP32 K/V cache reserved for the requested context
 └── bounded activation scratch
 
@@ -187,8 +192,9 @@ NVMe
 └── immutable expert tensors addressed by validated shard and byte offset
 ```
 
-A cache hit never reads the expert again. A miss reports exactly 12 MiB of expert
-traffic. The current implementation does not place experts in VRAM.
+A cache hit never reads the expert again. A miss reports exactly 12 MiB of logical
+expert traffic. The current implementation does not place experts in VRAM and uses
+ordinary buffered file reads, so operating-system cache hits may avoid physical NVMe.
 
 ## Model lifecycle and governor ownership
 
@@ -247,6 +253,6 @@ router decisions or accepted output tokens.
   CPU reference/streaming adapters.
 - `cli/`: interactive and one-shot model client commands.
 
-The next data-plane step is bounded asynchronous expert I/O with measured overlap and
-fault injection. DeepSeek inspection must reuse these safety and identity boundaries
-rather than bypass them.
+The next data-plane measurement step is reuse distance plus physical-device I/O and a
+repeatable cold-cache protocol. DeepSeek inspection must reuse these safety and identity
+boundaries rather than bypass them.

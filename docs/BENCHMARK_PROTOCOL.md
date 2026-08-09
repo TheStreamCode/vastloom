@@ -19,6 +19,7 @@ Every run must store:
 - TTFT, prefill tokens/s and accepted generation tokens/s;
 - peak process RAM and VRAM;
 - NVMe bytes/token and observed read bandwidth;
+- logical requested bytes separately from operating-system and physical-device bytes;
 - PCIe bytes/token;
 - VRAM/RAM expert hit ratios;
 - prefetch accuracy and wasted bytes;
@@ -39,6 +40,8 @@ Every run must store:
 - Change one independent variable per A/B run.
 - Repeat runs and publish variance, not only the best sample.
 - Separate cold-cache, warm-cache and learned-placement results.
+- Label buffered-file warm-cache probes as pipeline measurements, never as NVMe
+  bandwidth or physical bytes/token evidence.
 - Include negative results.
 - Never compare different model revisions or quantizations as if only the runtime changed.
 - Do not claim an optimization from a microbenchmark until end-to-end accepted-token

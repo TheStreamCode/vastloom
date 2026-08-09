@@ -72,10 +72,11 @@ requiring the complete checkpoint to reside in RAM.
 - [x] Separate always-active trunk weights from individually addressable experts.
 - [x] Add bounded expert reads, buffers, cancellation and exact byte accounting.
 - [x] Implement no-cache, LRU, LFU and static-hot baselines in the real token path.
-- [ ] Inject short reads, missing/corrupt shards, allocation failure and I/O timeout.
+- [x] Inject short reads, missing/corrupt shards, allocation failure and I/O timeout.
 - [x] Measure logical expert file bytes/token, cache hits and synchronous expert I/O time.
-- [ ] Add reuse-distance reporting, physical-device I/O counters and measured
-  asynchronous I/O/compute overlap.
+- [x] Add a bounded one-worker asynchronous path and measure read-service/CPU overlap.
+- [ ] Add reuse-distance reporting, physical-device I/O counters and a repeatable
+  cold-cache protocol.
 
 **Gate:** the real small MoE completes safely under a RAM cap below total checkpoint
 size, with no uncontrolled paging or unreserved buffer.

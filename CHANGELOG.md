@@ -2,6 +2,26 @@
 
 ## Unreleased
 
+## 0.4.0-alpha.2 — 2026-08-09
+
+- Connected the real OLMoE expert path to the reservation-backed bounded I/O pool.
+- Added opt-in synchronous/asynchronous selection, one-worker prefetch depth one or two,
+  12 MiB request bounds, cancellation and per-request timeouts capped at 60 seconds.
+- Coalesced each pinned expert's three validated contiguous BF16 tensors into one bounded
+  read while preserving the native gate/up/down layout and reference logits.
+- Added request queue/service/total timing plus expert prefetch count, foreground wait
+  and measured read-service/CPU overlap telemetry.
+- Extended atomic OLMoE CSV traces from nine to twelve fields while retaining compatibility
+  with four-field baselines and nine-field legacy traces.
+- Added deterministic I/O worker, short-read, allocation, cancellation and timeout fault
+  injection, including real-checkpoint fail-closed integration coverage.
+- Retained synchronous I/O as the default and capped the asynchronous OLMoE adapter to
+  one worker, two outstanding prefetch slots and Resource Governor staging reservations.
+
+This slice validates bounded buffered read/CPU overlap without changing model output. It
+does not claim physical NVMe bytes, cold-cache disk throughput, direct I/O, OLMoE text
+generation, CUDA or DeepSeek support.
+
 ## 0.4.0-alpha.1 — 2026-08-09
 
 - Pinned and fully verified `allenai/OLMoE-1B-7B-0924-Instruct` revision

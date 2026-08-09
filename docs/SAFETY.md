@@ -124,6 +124,10 @@ The alpha.4 OLMoE probe is fail-closed around one exact checkpoint revision:
   cap; only the 953,421,824-byte always-active trunk is reserved and loaded;
 - one streamed expert is exactly 12 MiB, and every no-cache or cache buffer is reserved
   before allocation;
+- asynchronous mode has exactly one worker, accepts prefetch depth one or two, limits
+  each request to 12 MiB and reserves every outstanding buffer against the staging cap;
+- each asynchronous request has a positive timeout capped at 60 seconds and checks the
+  same cancellation callback before and after its bounded read;
 - cache capacity is rounded to complete experts, must hold at least one expert and is
   hard-capped at 2 GiB;
 - FP32 K/V state and a 64 MiB activation scratch budget are reserved before forward;
@@ -134,9 +138,10 @@ The alpha.4 OLMoE probe is fail-closed around one exact checkpoint revision:
   existing traces are never overwritten.
 
 Original checkpoint files are read-only and remain outside the repository. Expert
-traffic is produced by exact bounded reads, not pagefile/swap. The current synchronous
-reader still needs injected mid-read failures and I/O timeouts before it can be called a
-production storage pipeline.
+traffic is produced by exact bounded reads, not pagefile/swap. Synchronous mode remains
+the default. Opt-in asynchronous mode uses one validated contiguous expert range and
+fails closed on worker failure, short read, allocation failure, cancellation or timeout.
+It is still a buffered reference pipeline, not production direct I/O.
 
 ## Watchdog
 
@@ -147,7 +152,7 @@ supplied explicitly before it can terminate a stale runtime.
 The alpha.2 TinyChat CLI does not yet publish a continuous generation heartbeat; that
 integration remains required before long-running large-model inference.
 
-## Tests implemented through alpha.4
+## Tests implemented through alpha.4.2
 
 - allocation oversubscription and reservation release;
 - critical/emergency state escalation and hysteretic recovery;
@@ -167,7 +172,11 @@ integration remains required before long-running large-model inference.
 - metadata-only runtime refusal, missing-shard rejection, one-millisecond timeout and
   invalid expert-cache policy rejection;
 - real no-cache byte accounting, real two-token LRU hits and native-telemetry simulation
-  for no-cache, LRU, LFU and static-hot baselines.
+  for no-cache, LRU, LFU and static-hot baselines;
+- real asynchronous OLMoE parity for logits and all 128 routed experts, bounded prefetch
+  counts, telemetry parsing and positive read-service/CPU overlap;
+- deterministic worker-failure, short-read, allocation-failure, cancellation and
+  request-timeout injection through both the bounded I/O unit path and real OLMoE CLI.
 
 ## Safety tests still required for production adapters
 

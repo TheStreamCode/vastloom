@@ -85,6 +85,22 @@ def main() -> int:
     require(invalid_cache.returncode != 0, "unknown real expert-cache policy was accepted", invalid_cache)
     invalid_io = run([executable, "moe-logits", model, "--text", "Hello", "--io", "parallel", "--json"])
     require(invalid_io.returncode != 0, "unknown real expert I/O mode was accepted", invalid_io)
+    invalid_io_cache = run([
+        executable, "moe-logits", model, "--text", "Hello", "--io-cache", "flush-everything", "--json",
+    ])
+    require(invalid_io_cache.returncode != 0, "unknown I/O cache mode was accepted", invalid_io_cache)
+    bypass_sync = run([
+        executable, "moe-logits", model, "--text", "Hello", "--cache", "no-cache",
+        "--io-cache", "bypass", "--json",
+    ])
+    require(bypass_sync.returncode != 0 and "requires --io async" in bypass_sync.stderr,
+            "cache bypass was accepted without bounded asynchronous I/O", bypass_sync)
+    bypass_cached = run([
+        executable, "moe-logits", model, "--text", "Hello", "--io", "async",
+        "--io-cache", "bypass", "--json",
+    ])
+    require(bypass_cached.returncode != 0 and "requires --cache no-cache" in bypass_cached.stderr,
+            "cache bypass was accepted with a RAM expert cache", bypass_cached)
     invalid_read = run([
         executable, "moe-logits", model, "--text", "Hello", "--expert-read", "unbounded", "--json",
     ])

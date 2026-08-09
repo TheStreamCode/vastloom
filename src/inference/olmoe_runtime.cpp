@@ -925,6 +925,15 @@ Result<OlmoeForwardResult> OlmoeRuntimeModel::forward(const std::vector<std::uin
     if (options.read_mode == ExpertReadMode::staged && options.io_mode != ExpertIoMode::asynchronous) {
         return make_error(ErrorCode::invalid_argument, "OLMoE staged expert reads require asynchronous I/O");
     }
+    if (options.io_cache_mode == io::IoCacheMode::bypass &&
+        options.io_mode != ExpertIoMode::asynchronous) {
+        return make_error(ErrorCode::invalid_argument, "OLMoE cache-bypass reads require asynchronous I/O");
+    }
+    if (options.io_cache_mode == io::IoCacheMode::bypass &&
+        options.cache_policy != ExpertCachePolicy::none) {
+        return make_error(ErrorCode::invalid_argument,
+                          "OLMoE cache-bypass protocol requires the no-cache expert policy");
+    }
     for (const auto token : token_ids) {
         if (token >= config_.vocab_size) return make_error(ErrorCode::invalid_argument, "OLMoE input token exceeds vocabulary");
     }
@@ -945,6 +954,7 @@ Result<OlmoeForwardResult> OlmoeRuntimeModel::forward(const std::vector<std::uin
                                              ? options.prefetch_depth + 2U
                                              : std::max<std::size_t>(2U, options.prefetch_depth);
         io_options.max_request_bytes = kExpertBytes;
+        io_options.cache_mode = options.io_cache_mode;
         io_options.request_timeout = options.io_request_timeout;
         io_options.cancelled = options.cancelled;
         io_options.fault = options.io_fault;
@@ -959,6 +969,12 @@ Result<OlmoeForwardResult> OlmoeRuntimeModel::forward(const std::vector<std::uin
 
     const auto started = std::chrono::steady_clock::now();
     auto process_io_before = io::sample_process_io();
+    auto device_io_before = io::sample_device_io(catalog_.root);
+    if (options.io_cache_mode == io::IoCacheMode::bypass && !device_io_before) {
+        return make_error(ErrorCode::unsupported,
+                          "OLMoE cache-bypass protocol requires a trustworthy device counter",
+                          device_io_before.error().message);
+    }
     const auto deadline = started + options.timeout;
     OlmoeForwardResult result;
     result.stats.input_tokens = token_ids.size();
@@ -1255,6 +1271,33 @@ Result<OlmoeForwardResult> OlmoeRuntimeModel::forward(const std::vector<std::uin
             result.stats.process_io = measured.take_value();
         } else {
             result.stats.process_io_error = measured.error().message;
+        }
+    }
+    if (!device_io_before) {
+        result.stats.device_io_error = device_io_before.error().message;
+    } else {
+        auto device_io_after = io::sample_device_io(catalog_.root);
+        if (!device_io_after) {
+            result.stats.device_io_error = device_io_after.error().message;
+        } else {
+            auto measured = io::device_io_delta(device_io_before.value(), device_io_after.value());
+            if (measured) {
+                result.stats.device_io_available = true;
+                result.stats.device_io = measured.take_value();
+            } else {
+                result.stats.device_io_error = measured.error().message;
+            }
+        }
+    }
+    if (options.io_cache_mode == io::IoCacheMode::bypass) {
+        if (!result.stats.device_io_available) {
+            return make_error(ErrorCode::unsupported,
+                              "OLMoE cache-bypass device measurement is unavailable",
+                              result.stats.device_io_error);
+        }
+        if (result.stats.device_io.read_bytes < result.stats.expert_bytes_read) {
+            return make_error(ErrorCode::integrity_error,
+                              "OLMoE cache-bypass device bytes are below logical expert bytes");
         }
     }
     return result;

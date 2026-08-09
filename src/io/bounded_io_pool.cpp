@@ -2,11 +2,16 @@
 
 #include <algorithm>
 #include <chrono>
+#include <cerrno>
+#include <cstdlib>
+#include <cstring>
 #include <fstream>
 #include <limits>
 #include <new>
 #include <span>
 #include <thread>
+
+#include "vastloom/util/string.hpp"
 
 #if defined(_WIN32)
 #ifndef NOMINMAX
@@ -16,6 +21,11 @@
 #define WIN32_LEAN_AND_MEAN
 #endif
 #include <windows.h>
+#include <winioctl.h>
+#include <malloc.h>
+#elif defined(__linux__)
+#include <fcntl.h>
+#include <unistd.h>
 #endif
 
 namespace vastloom::io {
@@ -35,7 +45,8 @@ Result<bool> cancellation_requested(const std::function<bool()>& cancelled) {
 Result<std::size_t> read_file_range(const std::filesystem::path& path,
                                     ByteCount offset,
                                     std::span<std::byte> destination,
-                                    std::size_t requested) {
+                                    std::size_t requested,
+                                    IoCacheMode cache_mode) {
 #if defined(_WIN32)
     class FileHandle {
     public:
@@ -51,43 +62,174 @@ Result<std::size_t> read_file_range(const std::filesystem::path& path,
         HANDLE handle_{INVALID_HANDLE_VALUE};
     };
 
+    const DWORD flags = FILE_ATTRIBUTE_NORMAL | FILE_FLAG_RANDOM_ACCESS |
+                        (cache_mode == IoCacheMode::bypass ? FILE_FLAG_NO_BUFFERING : 0U);
     FileHandle file(CreateFileW(path.c_str(), GENERIC_READ, FILE_SHARE_READ | FILE_SHARE_DELETE,
-                                nullptr, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL | FILE_FLAG_RANDOM_ACCESS,
+                                nullptr, OPEN_EXISTING, flags,
                                 nullptr));
     if (file.get() == INVALID_HANDLE_VALUE) {
         return make_error(ErrorCode::io_error, "Unable to open I/O source",
                           path.string() + ": Windows error " + std::to_string(GetLastError()));
     }
-    LARGE_INTEGER position{};
-    position.QuadPart = static_cast<LONGLONG>(offset);
-    if (SetFilePointerEx(file.get(), position, nullptr, FILE_BEGIN) == 0) {
-        return make_error(ErrorCode::io_error, "Unable to seek I/O source",
-                          path.string() + ": Windows error " + std::to_string(GetLastError()));
+    std::byte* read_destination = destination.data();
+    void* aligned_buffer = nullptr;
+    std::size_t offset_alignment = 1U;
+    std::size_t memory_alignment = 1U;
+    std::size_t prefix_bytes = 0U;
+    std::size_t read_size = requested;
+    ByteCount read_offset = offset;
+    if (cache_mode == IoCacheMode::bypass) {
+        STORAGE_PROPERTY_QUERY query{};
+        query.PropertyId = StorageAccessAlignmentProperty;
+        query.QueryType = PropertyStandardQuery;
+        STORAGE_ACCESS_ALIGNMENT_DESCRIPTOR descriptor{};
+        DWORD returned = 0U;
+        if (DeviceIoControl(file.get(), IOCTL_STORAGE_QUERY_PROPERTY,
+                            &query, static_cast<DWORD>(sizeof(query)),
+                            &descriptor, static_cast<DWORD>(sizeof(descriptor)),
+                            &returned, nullptr) != 0 &&
+            returned >= static_cast<DWORD>(sizeof(descriptor))) {
+            offset_alignment = descriptor.BytesPerLogicalSector;
+            memory_alignment = descriptor.BytesPerPhysicalSector;
+        }
+        offset_alignment = std::max<std::size_t>(offset_alignment, 512U);
+        memory_alignment = std::max<std::size_t>({memory_alignment, offset_alignment, 4096U});
+        constexpr std::size_t maximum_supported_alignment = 64U * 1024U;
+        if ((offset_alignment & (offset_alignment - 1U)) != 0U ||
+            (memory_alignment & (memory_alignment - 1U)) != 0U ||
+            offset_alignment > maximum_supported_alignment ||
+            memory_alignment > maximum_supported_alignment) {
+            return make_error(ErrorCode::unsupported,
+                              "Windows direct-I/O alignment is unsupported", path.string());
+        }
+        prefix_bytes = static_cast<std::size_t>(offset % offset_alignment);
+        read_offset = offset - prefix_bytes;
+        if (requested > std::numeric_limits<std::size_t>::max() - prefix_bytes - (offset_alignment - 1U)) {
+            return make_error(ErrorCode::invalid_argument, "Windows direct-I/O envelope overflows", path.string());
+        }
+        const std::size_t required = prefix_bytes + requested;
+        read_size = ((required + offset_alignment - 1U) / offset_alignment) * offset_alignment;
+        aligned_buffer = _aligned_malloc(read_size, memory_alignment);
+        if (aligned_buffer == nullptr) {
+            return make_error(ErrorCode::resource_exhausted,
+                              "Unable to allocate aligned unbuffered I/O memory", path.string());
+        }
+        read_destination = static_cast<std::byte*>(aligned_buffer);
     }
+
+    LARGE_INTEGER position{};
+    position.QuadPart = static_cast<LONGLONG>(read_offset);
+    if (SetFilePointerEx(file.get(), position, nullptr, FILE_BEGIN) == 0) {
+        const DWORD seek_error = GetLastError();
+        if (aligned_buffer != nullptr) _aligned_free(aligned_buffer);
+        return make_error(ErrorCode::io_error, "Unable to seek I/O source",
+                          path.string() + ": Windows error " + std::to_string(seek_error));
+    }
+
+    const auto release_aligned = [&] {
+        if (aligned_buffer != nullptr) _aligned_free(aligned_buffer);
+    };
     std::size_t total = 0U;
-    while (total < requested) {
-        const auto remaining = requested - total;
-        const DWORD chunk = static_cast<DWORD>(std::min<std::size_t>(remaining, std::numeric_limits<DWORD>::max()));
+    while (total < read_size) {
+        const auto remaining = read_size - total;
+        std::size_t maximum_chunk = std::numeric_limits<DWORD>::max();
+        if (cache_mode == IoCacheMode::bypass) maximum_chunk -= maximum_chunk % offset_alignment;
+        const DWORD chunk = static_cast<DWORD>(std::min(remaining, maximum_chunk));
         DWORD completed = 0U;
-        if (ReadFile(file.get(), destination.data() + total, chunk, &completed, nullptr) == 0) {
+        if (ReadFile(file.get(), read_destination + total, chunk, &completed, nullptr) == 0) {
+            const DWORD read_error = GetLastError();
+            release_aligned();
             return make_error(ErrorCode::io_error, "Unable to read I/O source",
-                              path.string() + ": Windows error " + std::to_string(GetLastError()));
+                              path.string() + ": Windows error " + std::to_string(read_error));
         }
         total += completed;
         if (completed == 0U) break;
     }
-    return total;
-#else
+    std::size_t delivered = total;
+    if (cache_mode == IoCacheMode::bypass) {
+        delivered = total > prefix_bytes ? std::min(requested, total - prefix_bytes) : 0U;
+        if (delivered != 0U) {
+            std::memcpy(destination.data(), read_destination + prefix_bytes, delivered);
+        }
+    }
+    release_aligned();
+    return delivered;
+#elif defined(__linux__)
+    if (cache_mode == IoCacheMode::bypass) {
+        constexpr std::size_t alignment = 4096U;
+        const std::size_t prefix_bytes = static_cast<std::size_t>(offset % alignment);
+        const ByteCount read_offset = offset - prefix_bytes;
+        if (requested > std::numeric_limits<std::size_t>::max() - prefix_bytes - (alignment - 1U)) {
+            return make_error(ErrorCode::invalid_argument, "Linux direct-I/O envelope overflows", path.string());
+        }
+        const std::size_t required = prefix_bytes + requested;
+        const std::size_t read_size = ((required + alignment - 1U) / alignment) * alignment;
+        const int descriptor = ::open(path.c_str(), O_RDONLY | O_CLOEXEC | O_DIRECT);
+        if (descriptor < 0) {
+            return make_error(ErrorCode::unsupported, "Unable to open direct I/O source",
+                              path.string() + ": errno " + std::to_string(errno));
+        }
+        void* aligned_buffer = nullptr;
+        if (posix_memalign(&aligned_buffer, alignment, read_size) != 0 || aligned_buffer == nullptr) {
+            ::close(descriptor);
+            return make_error(ErrorCode::resource_exhausted,
+                              "Unable to allocate aligned direct-I/O memory", path.string());
+        }
+        ssize_t completed = -1;
+        do {
+            completed = ::pread(descriptor, aligned_buffer, read_size, static_cast<off_t>(read_offset));
+        } while (completed < 0 && errno == EINTR);
+        const int read_error = errno;
+        ::close(descriptor);
+        if (completed < 0) {
+            std::free(aligned_buffer);
+            return make_error(ErrorCode::unsupported, "Unable to read direct I/O source",
+                              path.string() + ": errno " + std::to_string(read_error));
+        }
+        const auto total = static_cast<std::size_t>(completed);
+        const std::size_t delivered = total > prefix_bytes
+                                          ? std::min(requested, total - prefix_bytes)
+                                          : 0U;
+        if (delivered != 0U) {
+            std::memcpy(destination.data(), static_cast<std::byte*>(aligned_buffer) + prefix_bytes, delivered);
+        }
+        std::free(aligned_buffer);
+        return delivered;
+    }
     std::ifstream input(path, std::ios::binary);
     if (!input) return make_error(ErrorCode::io_error, "Unable to open I/O source", path.string());
     input.seekg(static_cast<std::streamoff>(offset), std::ios::beg);
     if (!input) return make_error(ErrorCode::io_error, "Unable to seek I/O source", path.string());
     input.read(reinterpret_cast<char*>(destination.data()), static_cast<std::streamsize>(requested));
     return static_cast<std::size_t>(input.gcount());
+#else
+    (void)path;
+    (void)offset;
+    (void)destination;
+    (void)requested;
+    (void)cache_mode;
+    return make_error(ErrorCode::unsupported, "Bounded file reads are unsupported on this operating system");
 #endif
 }
 
 }  // namespace
+
+Result<IoCacheMode> parse_io_cache_mode(std::string_view value) {
+    const auto normalized = util::to_lower(util::trim(value));
+    if (normalized == "buffered" || normalized == "system") return IoCacheMode::buffered;
+    if (normalized == "bypass" || normalized == "direct" || normalized == "unbuffered") {
+        return IoCacheMode::bypass;
+    }
+    return make_error(ErrorCode::invalid_argument, "Unknown I/O cache mode", std::string(value));
+}
+
+std::string_view to_string(IoCacheMode mode) noexcept {
+    switch (mode) {
+        case IoCacheMode::buffered: return "buffered";
+        case IoCacheMode::bypass: return "bypass";
+    }
+    return "unknown";
+}
 
 BoundedIoPool::BoundedIoPool(IoPoolOptions options, safety::ResourceGovernor& governor)
     : options_(options), governor_(governor) {
@@ -131,7 +273,16 @@ Result<std::future<Result<IoBuffer>>> BoundedIoPool::submit_read(const std::file
         return make_error(ErrorCode::unsupported, "I/O request does not fit this platform's address space", std::move(tag));
     }
 
-    auto reservation = governor_.try_reserve(safety::ResourceKind::staging, size, tag);
+    ByteCount reservation_bytes = size;
+    if (options_.cache_mode == IoCacheMode::bypass) {
+        constexpr ByteCount envelope_allowance = 128U * KiB;
+        if (size > (std::numeric_limits<ByteCount>::max() - envelope_allowance) / 2U) {
+            return make_error(ErrorCode::invalid_argument,
+                              "Unbuffered I/O staging reservation overflows", std::move(tag));
+        }
+        reservation_bytes = size * 2U + envelope_allowance;
+    }
+    auto reservation = governor_.try_reserve(safety::ResourceKind::staging, reservation_bytes, tag);
     if (!reservation) {
         return reservation.error();
     }
@@ -252,7 +403,7 @@ void BoundedIoPool::worker_loop() {
         const std::size_t requested = injected && options_.fault.kind == IoFaultKind::short_read
                                           ? bytes.size() - 1U
                                           : bytes.size();
-        auto read = read_file_range(task.path, task.offset, bytes, requested);
+        auto read = read_file_range(task.path, task.offset, bytes, requested, options_.cache_mode);
         if (!read) {
             task.promise.set_value(read.error());
             continue;

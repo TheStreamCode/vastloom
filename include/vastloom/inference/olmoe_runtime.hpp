@@ -16,6 +16,7 @@
 #include "vastloom/inference/gpt2_tokenizer.hpp"
 #include "vastloom/inference/olmoe_model.hpp"
 #include "vastloom/io/bounded_io_pool.hpp"
+#include "vastloom/io/device_io_counters.hpp"
 #include "vastloom/io/process_io_counters.hpp"
 #include "vastloom/model/safetensors.hpp"
 #include "vastloom/safety/resource_governor.hpp"
@@ -56,6 +57,7 @@ struct OlmoeForwardOptions {
     ExpertCachePolicy cache_policy{ExpertCachePolicy::lru};
     ByteCount expert_cache_bytes{256U * MiB};
     ExpertIoMode io_mode{ExpertIoMode::synchronous};
+    io::IoCacheMode io_cache_mode{io::IoCacheMode::buffered};
     ExpertReadMode read_mode{ExpertReadMode::whole};
     std::size_t prefetch_depth{1U};
     std::chrono::milliseconds io_request_timeout{std::chrono::seconds(30)};
@@ -102,6 +104,9 @@ struct OlmoeForwardStats {
     bool process_io_available{false};
     io::ProcessIoDelta process_io;
     std::string process_io_error;
+    bool device_io_available{false};
+    io::DeviceIoDelta device_io;
+    std::string device_io_error;
 };
 
 struct OlmoeForwardResult {

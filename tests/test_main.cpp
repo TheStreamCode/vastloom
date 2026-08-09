@@ -18,6 +18,7 @@
 #include "vastloom/inference/olmoe_runtime.hpp"
 #include "vastloom/inference/tiny_model.hpp"
 #include "vastloom/io/bounded_io_pool.hpp"
+#include "vastloom/io/device_io_counters.hpp"
 #include "vastloom/io/process_io_counters.hpp"
 #include "vastloom/model/manifest.hpp"
 #include "vastloom/model/imported_checkpoint.hpp"
@@ -203,6 +204,9 @@ void test_olmoe_config(const std::filesystem::path& root) {
     CHECK(vastloom::inference::parse_expert_read_mode("whole") &&
           vastloom::inference::parse_expert_read_mode("staged") &&
           !vastloom::inference::parse_expert_read_mode("unbounded"));
+    CHECK(vastloom::io::parse_io_cache_mode("buffered") &&
+          vastloom::io::parse_io_cache_mode("DIRECT") &&
+          !vastloom::io::parse_io_cache_mode("global-flush"));
 }
 
 void test_model_store_and_runtime_policy(const std::filesystem::path& root) {
@@ -474,6 +478,35 @@ void test_io_pool(const std::filesystem::path& root) {
     auto too_large = pool.submit_read(path, 0, 5U * vastloom::MiB, "too-large");
     CHECK(!too_large);
 
+    vastloom::io::IoPoolOptions bypass_options;
+    bypass_options.workers = 1U;
+    bypass_options.max_queued_requests = 1U;
+    bypass_options.max_request_bytes = 4U * vastloom::KiB;
+    bypass_options.cache_mode = vastloom::io::IoCacheMode::bypass;
+    vastloom::io::BoundedIoPool bypass_pool(bypass_options, governor);
+    auto bypass_request = bypass_pool.submit_read(path, 0U, 4U * vastloom::KiB, "cache-bypass-read");
+    CHECK(bypass_request);
+    if (bypass_request) {
+        auto bypass_result = bypass_request.value().get();
+#if defined(_WIN32)
+        CHECK(bypass_result && bypass_result.value().bytes.size() == 4U * vastloom::KiB);
+#elif defined(__linux__)
+        CHECK(bypass_result || bypass_result.error().code == vastloom::ErrorCode::unsupported);
+#endif
+    }
+    auto unaligned_bypass = bypass_pool.submit_read(
+        path, 1U, 2048U, "unaligned-cache-bypass-read");
+    CHECK(unaligned_bypass);
+    if (unaligned_bypass) {
+        auto unaligned_result = unaligned_bypass.value().get();
+#if defined(_WIN32)
+        CHECK(unaligned_result && unaligned_result.value().bytes.size() == 2048U);
+        if (unaligned_result) CHECK(std::to_integer<unsigned char>(unaligned_result.value().bytes.front()) == 1U);
+#elif defined(__linux__)
+        CHECK(unaligned_result || unaligned_result.error().code == vastloom::ErrorCode::unsupported);
+#endif
+    }
+
     const std::array fault_kinds{
         vastloom::io::IoFaultKind::fail,
         vastloom::io::IoFaultKind::short_read,
@@ -511,6 +544,52 @@ void test_io_pool(const std::filesystem::path& root) {
     if (cancelled_request) CHECK(!cancelled_request.value().get());
     cancelled_pool.shutdown();
     CHECK(governor.snapshot().reserved[2] == 0U);
+}
+
+void test_device_io_counters(const std::filesystem::path& root) {
+    const vastloom::io::DeviceIoSnapshot before{
+        "test-device-counter", "disk0", "whole-device", 17U, 4096U};
+    const vastloom::io::DeviceIoSnapshot after{
+        "test-device-counter", "disk0", "whole-device", 20U, 12'288U};
+    auto delta = vastloom::io::device_io_delta(before, after);
+    CHECK(delta);
+    if (delta) {
+        CHECK(delta.value().source == "test-device-counter");
+        CHECK(delta.value().device_id == "disk0");
+        CHECK(delta.value().scope == "whole-device");
+        CHECK(delta.value().read_operations == 3U);
+        CHECK(delta.value().read_bytes == 8192U);
+    }
+
+    auto incompatible = after;
+    incompatible.device_id = "disk1";
+    CHECK(!vastloom::io::device_io_delta(before, incompatible));
+    auto backwards = before;
+    backwards.read_operations = 16U;
+    CHECK(!vastloom::io::device_io_delta(before, backwards));
+
+    auto live_before = vastloom::io::sample_device_io(root);
+    if (live_before) {
+        CHECK(!live_before.value().source.empty());
+        CHECK(!live_before.value().device_id.empty());
+        CHECK(!live_before.value().scope.empty());
+
+        const auto path = root / "device-counter-read.bin";
+        {
+            std::ofstream output(path, std::ios::binary);
+            std::array<char, 4096> bytes{};
+            output.write(bytes.data(), static_cast<std::streamsize>(bytes.size()));
+        }
+        {
+            std::ifstream input(path, std::ios::binary);
+            std::array<char, 4096> bytes{};
+            input.read(bytes.data(), static_cast<std::streamsize>(bytes.size()));
+            CHECK(input.gcount() == static_cast<std::streamsize>(bytes.size()));
+        }
+        auto live_after = vastloom::io::sample_device_io(root);
+        CHECK(live_after);
+        if (live_after) CHECK(vastloom::io::device_io_delta(live_before.value(), live_after.value()));
+    }
 }
 
 void test_trace(const std::filesystem::path& root) {
@@ -775,6 +854,7 @@ int main() {
     test_governor();
     test_planner();
     test_io_pool(root);
+    test_device_io_counters(root);
     test_trace(root);
     test_tiny_model(root);
     test_heartbeat(root);

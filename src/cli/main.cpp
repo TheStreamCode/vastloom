@@ -234,7 +234,8 @@ void print_help() {
         << "      Validate the pinned OLMoE metadata and estimate safe streaming budgets.\n\n"
         << "  moe-logits MODEL_DIRECTORY --text TEXT [--chat] [--top N]\n"
         << "       [--cache no-cache|lru|lfu|static-hot] [--cache-bytes SIZE]\n"
-        << "       [--io sync|async] [--expert-read whole|staged] [--prefetch-depth 1|2]\n"
+        << "       [--io sync|async] [--io-cache buffered|bypass] [--expert-read whole|staged]\n"
+        << "       [--prefetch-depth 1|2]\n"
         << "       [--io-timeout-ms N]\n"
         << "       [--timeout-ms N] [--trace PATH] [--no-verify] [--json]\n"
         << "      Run the OLMoE CPU oracle with bounded NVMe expert streaming.\n\n"
@@ -502,7 +503,7 @@ Result<void> write_olmoe_trace_atomic(const std::filesystem::path& path,
 
 int command_moe_logits(const std::vector<std::string>& args) {
     auto valid = validate_options(args, 1U,
-                                  {"--text", "--top", "--cache", "--cache-bytes", "--io", "--prefetch-depth",
+                                  {"--text", "--top", "--cache", "--cache-bytes", "--io", "--io-cache", "--prefetch-depth",
                                    "--expert-read", "--io-timeout-ms", "--inject-io-fault", "--timeout-ms", "--trace"},
                                   {"--chat", "--no-verify", "--json"});
     const bool json = has_flag(args, "--json");
@@ -514,6 +515,8 @@ int command_moe_logits(const std::vector<std::string>& args) {
     auto cache_bytes = optional_bytes(args, "--cache-bytes", 256U * vastloom::MiB);
     auto cache_policy = vastloom::inference::parse_expert_cache_policy(option_value(args, "--cache").value_or("lru"));
     auto io_mode = vastloom::inference::parse_expert_io_mode(option_value(args, "--io").value_or("sync"));
+    auto io_cache_mode = vastloom::io::parse_io_cache_mode(
+        option_value(args, "--io-cache").value_or("buffered"));
     auto read_mode = vastloom::inference::parse_expert_read_mode(
         option_value(args, "--expert-read").value_or("whole"));
     auto prefetch_depth = optional_size(args, "--prefetch-depth", 1U);
@@ -524,6 +527,7 @@ int command_moe_logits(const std::vector<std::string>& args) {
     if (!cache_bytes) return print_error(cache_bytes.error(), json);
     if (!cache_policy) return print_error(cache_policy.error(), json);
     if (!io_mode) return print_error(io_mode.error(), json);
+    if (!io_cache_mode) return print_error(io_cache_mode.error(), json);
     if (!read_mode) return print_error(read_mode.error(), json);
     if (!prefetch_depth) return print_error(prefetch_depth.error(), json);
     if (!io_timeout) return print_error(io_timeout.error(), json);
@@ -545,6 +549,16 @@ int command_moe_logits(const std::vector<std::string>& args) {
         io_mode.value() != vastloom::inference::ExpertIoMode::asynchronous) {
         return print_error(vastloom::make_error(vastloom::ErrorCode::invalid_argument,
                                                 "--expert-read staged requires --io async"), json);
+    }
+    if (io_cache_mode.value() == vastloom::io::IoCacheMode::bypass &&
+        io_mode.value() != vastloom::inference::ExpertIoMode::asynchronous) {
+        return print_error(vastloom::make_error(vastloom::ErrorCode::invalid_argument,
+                                                "--io-cache bypass requires --io async"), json);
+    }
+    if (io_cache_mode.value() == vastloom::io::IoCacheMode::bypass &&
+        cache_policy.value() != vastloom::inference::ExpertCachePolicy::none) {
+        return print_error(vastloom::make_error(vastloom::ErrorCode::invalid_argument,
+                                                "--io-cache bypass requires --cache no-cache"), json);
     }
 
     auto hardware = vastloom::hardware::HardwareProbe::collect(args[0]);
@@ -572,6 +586,7 @@ int command_moe_logits(const std::vector<std::string>& args) {
     options.cache_policy = cache_policy.value();
     options.expert_cache_bytes = cache_bytes.value();
     options.io_mode = io_mode.value();
+    options.io_cache_mode = io_cache_mode.value();
     options.read_mode = read_mode.value();
     options.prefetch_depth = prefetch_depth.value();
     options.io_request_timeout = std::chrono::milliseconds(io_timeout.value());
@@ -612,6 +627,11 @@ int command_moe_logits(const std::vector<std::string>& args) {
         }
         std::cout << "],\"cache_policy\":\"" << vastloom::inference::to_string(options.cache_policy)
                    << "\",\"io_mode\":\"" << vastloom::inference::to_string(options.io_mode)
+                   << "\",\"io_cache_mode\":\"" << vastloom::io::to_string(options.io_cache_mode)
+                   << "\",\"io_cache_protocol\":\""
+                   << (options.io_cache_mode == vastloom::io::IoCacheMode::bypass
+                           ? "direct-unbuffered-v1"
+                           : "system-buffered")
                    << "\",\"expert_read_mode\":\"" << vastloom::inference::to_string(options.read_mode)
                    << "\",\"prefetch_depth\":" << options.prefetch_depth
                   << ",\"expert_cache_hits\":" << forwarded.value().stats.expert_cache_hits
@@ -645,6 +665,21 @@ int command_moe_logits(const std::vector<std::string>& args) {
             std::cout << "\"available\":false,\"error\":\""
                       << vastloom::util::json_escape(forwarded.value().stats.process_io_error) << '"';
         }
+        std::cout << "},\"device_io\":{";
+        if (forwarded.value().stats.device_io_available) {
+            const auto& device_io = forwarded.value().stats.device_io;
+            std::cout << "\"available\":true,\"source\":\""
+                      << vastloom::util::json_escape(device_io.source)
+                      << "\",\"device_id\":\""
+                      << vastloom::util::json_escape(device_io.device_id)
+                      << "\",\"scope\":\""
+                      << vastloom::util::json_escape(device_io.scope)
+                      << "\",\"read_operations\":" << device_io.read_operations
+                      << ",\"read_bytes\":" << device_io.read_bytes;
+        } else {
+            std::cout << "\"available\":false,\"error\":\""
+                      << vastloom::util::json_escape(forwarded.value().stats.device_io_error) << '"';
+        }
         std::cout << "}}\n";
     } else {
         std::cout << "Greedy token: " << greedy_id << " (" << greedy_text.value() << ")\nTop logits:\n";
@@ -655,6 +690,7 @@ int command_moe_logits(const std::vector<std::string>& args) {
                   << ", hits/misses " << forwarded.value().stats.expert_cache_hits << '/'
                    << forwarded.value().stats.expert_cache_misses << ", "
                    << vastloom::inference::to_string(options.io_mode) << '/'
+                   << vastloom::io::to_string(options.io_cache_mode) << '/'
                    << vastloom::inference::to_string(options.read_mode) << " prefetches "
                   << forwarded.value().stats.expert_prefetches << ", overlap "
                   << forwarded.value().stats.expert_prefetch_overlap_ms << " ms, forward "
@@ -673,6 +709,15 @@ int command_moe_logits(const std::vector<std::string>& args) {
         } else {
             std::cout << "Process I/O counters unavailable: "
                       << forwarded.value().stats.process_io_error << '\n';
+        }
+        if (forwarded.value().stats.device_io_available) {
+            const auto& device_io = forwarded.value().stats.device_io;
+            std::cout << "Device I/O: " << vastloom::format_bytes(device_io.read_bytes)
+                      << " read bytes via " << device_io.source << " ("
+                      << device_io.device_id << ", " << device_io.scope << ")\n";
+        } else {
+            std::cout << "Device I/O counters unavailable: "
+                      << forwarded.value().stats.device_io_error << '\n';
         }
     }
     return 0;

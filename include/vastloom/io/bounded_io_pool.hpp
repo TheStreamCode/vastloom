@@ -10,6 +10,7 @@
 #include <future>
 #include <mutex>
 #include <string>
+#include <string_view>
 #include <thread>
 #include <vector>
 
@@ -18,6 +19,14 @@
 #include "vastloom/safety/resource_governor.hpp"
 
 namespace vastloom::io {
+
+enum class IoCacheMode : std::uint8_t {
+    buffered,
+    bypass,
+};
+
+[[nodiscard]] Result<IoCacheMode> parse_io_cache_mode(std::string_view value);
+[[nodiscard]] std::string_view to_string(IoCacheMode mode) noexcept;
 
 enum class IoFaultKind : std::uint8_t {
     none,
@@ -54,6 +63,7 @@ struct IoPoolOptions {
     unsigned workers{1};
     std::size_t max_queued_requests{32};
     ByteCount max_request_bytes{512U * MiB};
+    IoCacheMode cache_mode{IoCacheMode::buffered};
     std::chrono::milliseconds request_timeout{std::chrono::seconds(30)};
     std::function<bool()> cancelled;
     IoFaultInjection fault;

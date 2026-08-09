@@ -6,6 +6,7 @@ import argparse
 import csv
 import json
 import math
+import os
 from pathlib import Path
 import shutil
 import subprocess
@@ -87,6 +88,10 @@ def main() -> int:
                     "Windows process transfer bytes were mislabeled as physical storage bytes", process)
             require(ROUTES_PER_TOKEN <= payload["process_io"]["read_operations"] <= 2 * ROUTES_PER_TOKEN,
                     "Windows bounded expert reads regressed to fragmented operations", process)
+            require(payload["device_io"]["available"] is True
+                    and payload["device_io"]["source"] == "windows-ioctl-disk-performance"
+                    and payload["device_io"]["scope"] == "whole-device",
+                    "Windows checkpoint was not mapped to a device-level counter", process)
         require(payload["trace_events"] == ROUTES_PER_TOKEN, "native trace event count mismatch", process)
 
         native_logits = {int(item["id"]): float(item["logit"]) for item in payload["top_logits"]}
@@ -169,6 +174,25 @@ def main() -> int:
         require(staged_replay["ready_order_available"] is True
                 and staged_replay["ready_order_groups"] == 16,
                 "staged readiness replay did not cover all layers")
+
+        if os.name == "nt":
+            bypass_process = run([
+                executable, "moe-logits", model, "--text", fixture["text"], "--top", "10",
+                "--cache", "no-cache", "--cache-bytes", str(EXPERT_BYTES),
+                "--io", "async", "--io-cache", "bypass", "--expert-read", "staged",
+                "--prefetch-depth", "2", "--io-timeout-ms", "30000", "--timeout-ms", "600000",
+                "--no-verify", "--json",
+            ])
+            require(bypass_process.returncode == 0,
+                    "Windows cache-bypass OLMoE forward failed", bypass_process)
+            bypass_payload = json.loads(bypass_process.stdout)
+            require(bypass_payload["greedy_id"] == fixture["greedy_token_id"]
+                    and bypass_payload["io_cache_mode"] == "bypass"
+                    and bypass_payload["io_cache_protocol"] == "direct-unbuffered-v1",
+                    "cache-bypass output/configuration differs from the reference", bypass_process)
+            require(bypass_payload["device_io"]["available"] is True
+                    and bypass_payload["device_io"]["read_bytes"] >= bypass_payload["expert_bytes_read"],
+                    "cache-bypass physical bytes are below logical expert bytes", bypass_process)
 
         multi_case = fixture["multi_token_case"]
         multi_trace = Path(temporary) / "native-multi-token-trace.csv"

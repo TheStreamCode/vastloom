@@ -28,6 +28,8 @@ Result<TensorDType> parse_dtype(std::string_view value) {
     if (value == "I16") return TensorDType::i16;
     if (value == "F16") return TensorDType::f16;
     if (value == "BF16") return TensorDType::bf16;
+    if (value == "F8_E4M3") return TensorDType::f8_e4m3;
+    if (value == "F8_E8M0") return TensorDType::f8_e8m0;
     if (value == "U32") return TensorDType::u32;
     if (value == "I32") return TensorDType::i32;
     if (value == "F32") return TensorDType::f32;
@@ -41,7 +43,9 @@ ByteCount dtype_bytes(TensorDType dtype) noexcept {
     switch (dtype) {
         case TensorDType::boolean:
         case TensorDType::u8:
-        case TensorDType::i8: return 1;
+        case TensorDType::i8:
+        case TensorDType::f8_e4m3:
+        case TensorDType::f8_e8m0: return 1;
         case TensorDType::u16:
         case TensorDType::i16:
         case TensorDType::f16:
@@ -84,6 +88,21 @@ bool has_safetensors_extension(const std::filesystem::path& path) {
 Result<SafetensorsFile> SafetensorsFile::open(const std::filesystem::path& path,
                                                ByteCount max_header_bytes,
                                                std::size_t max_tensors) {
+    return open_with_declared_size(path, 0U, false, max_header_bytes, max_tensors);
+}
+
+Result<SafetensorsFile> SafetensorsFile::open_header_snapshot(const std::filesystem::path& path,
+                                                               ByteCount declared_file_bytes,
+                                                               ByteCount max_header_bytes,
+                                                               std::size_t max_tensors) {
+    return open_with_declared_size(path, declared_file_bytes, true, max_header_bytes, max_tensors);
+}
+
+Result<SafetensorsFile> SafetensorsFile::open_with_declared_size(const std::filesystem::path& path,
+                                                                  ByteCount declared_file_bytes,
+                                                                  bool header_snapshot,
+                                                                  ByteCount max_header_bytes,
+                                                                  std::size_t max_tensors) {
     if (path.empty() || max_header_bytes < 2U || max_tensors == 0U ||
         max_tensors > (std::numeric_limits<std::size_t>::max() - 64U) / 8U) {
         return make_error(ErrorCode::invalid_argument, "Invalid Safetensors reader limits", path.string());
@@ -93,9 +112,13 @@ Result<SafetensorsFile> SafetensorsFile::open(const std::filesystem::path& path,
         return make_error(ErrorCode::unsafe_path, "Refusing a symlinked Safetensors shard", path.string());
     }
     error.clear();
-    const ByteCount file_bytes = std::filesystem::file_size(path, error);
+    const ByteCount physical_file_bytes = std::filesystem::file_size(path, error);
     if (error) return make_error(ErrorCode::io_error, "Unable to stat Safetensors shard", path.string());
-    if (file_bytes < 10U) return make_error(ErrorCode::invalid_format, "Safetensors shard is too small", path.string());
+    if (physical_file_bytes < 10U) return make_error(ErrorCode::invalid_format, "Safetensors shard is too small", path.string());
+    const ByteCount file_bytes = header_snapshot ? declared_file_bytes : physical_file_bytes;
+    if (file_bytes < physical_file_bytes) {
+        return make_error(ErrorCode::invalid_argument, "Safetensors declared size is below the header snapshot size", path.string());
+    }
 
     std::ifstream input(path, std::ios::binary);
     if (!input) return make_error(ErrorCode::io_error, "Unable to open Safetensors shard", path.string());
@@ -107,6 +130,9 @@ Result<SafetensorsFile> SafetensorsFile::open(const std::filesystem::path& path,
     const ByteCount header_bytes = read_u64_le(prefix);
     if (header_bytes < 2U || header_bytes > max_header_bytes || header_bytes > file_bytes - 8U) {
         return make_error(ErrorCode::invalid_format, "Safetensors header length is outside safe bounds", path.string());
+    }
+    if (header_snapshot && physical_file_bytes != header_bytes + 8U) {
+        return make_error(ErrorCode::invalid_format, "Safetensors header snapshot has trailing or missing bytes", path.string());
     }
     if (header_bytes > static_cast<ByteCount>(std::numeric_limits<std::size_t>::max())) {
         return make_error(ErrorCode::unsupported, "Safetensors header does not fit the platform address space", path.string());
@@ -139,6 +165,7 @@ Result<SafetensorsFile> SafetensorsFile::open(const std::filesystem::path& path,
     if (error) result.path_ = path;
     result.file_bytes_ = file_bytes;
     result.header_bytes_ = header_bytes;
+    result.header_only_ = header_snapshot;
     result.tensors_.reserve(std::min(root.value()->size(), max_tensors));
     const ByteCount data_start = 8U + header_bytes;
     const ByteCount payload_bytes = file_bytes - data_start;
@@ -216,6 +243,7 @@ Result<std::vector<std::byte>> SafetensorsFile::read_range(const TensorDescripto
                                                            ByteCount tensor_offset,
                                                            ByteCount bytes,
                                                            ByteCount max_request_bytes) const {
+    if (header_only_) return make_error(ErrorCode::unsupported, "Safetensors header snapshot has no tensor payload", tensor.name);
     const auto* owned = find(tensor.name);
     if (owned == nullptr || owned != &tensor) {
         return make_error(ErrorCode::invalid_argument, "Tensor descriptor does not belong to this shard", tensor.name);
@@ -241,6 +269,7 @@ Result<void> SafetensorsFile::read_range_into(const TensorDescriptor& tensor,
                                               ByteCount tensor_offset,
                                               std::span<std::byte> destination,
                                               ByteCount max_request_bytes) const {
+    if (header_only_) return make_error(ErrorCode::unsupported, "Safetensors header snapshot has no tensor payload", tensor.name);
     const auto* owned = find(tensor.name);
     const ByteCount bytes = static_cast<ByteCount>(destination.size());
     if (owned == nullptr || owned != &tensor) {
@@ -321,6 +350,8 @@ std::string_view to_string(TensorDType dtype) noexcept {
         case TensorDType::i16: return "I16";
         case TensorDType::f16: return "F16";
         case TensorDType::bf16: return "BF16";
+        case TensorDType::f8_e4m3: return "F8_E4M3";
+        case TensorDType::f8_e8m0: return "F8_E8M0";
         case TensorDType::u32: return "U32";
         case TensorDType::i32: return "I32";
         case TensorDType::f32: return "F32";

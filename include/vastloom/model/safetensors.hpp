@@ -21,6 +21,8 @@ enum class TensorDType : std::uint8_t {
     i16,
     f16,
     bf16,
+    f8_e4m3,
+    f8_e8m0,
     u32,
     i32,
     f32,
@@ -43,10 +45,16 @@ public:
         const std::filesystem::path& path,
         ByteCount max_header_bytes = 128U * MiB,
         std::size_t max_tensors = 1'000'000);
+    [[nodiscard]] static Result<SafetensorsFile> open_header_snapshot(
+        const std::filesystem::path& path,
+        ByteCount declared_file_bytes,
+        ByteCount max_header_bytes = 128U * MiB,
+        std::size_t max_tensors = 1'000'000);
 
     [[nodiscard]] const std::filesystem::path& path() const noexcept { return path_; }
     [[nodiscard]] ByteCount file_bytes() const noexcept { return file_bytes_; }
     [[nodiscard]] ByteCount header_bytes() const noexcept { return header_bytes_; }
+    [[nodiscard]] bool header_only() const noexcept { return header_only_; }
     [[nodiscard]] const std::vector<TensorDescriptor>& tensors() const noexcept { return tensors_; }
     [[nodiscard]] const TensorDescriptor* find(std::string_view name) const noexcept;
     [[nodiscard]] Result<std::vector<std::byte>> read_range(
@@ -60,9 +68,17 @@ public:
                                                ByteCount max_request_bytes = 64U * MiB) const;
 
 private:
+    [[nodiscard]] static Result<SafetensorsFile> open_with_declared_size(
+        const std::filesystem::path& path,
+        ByteCount declared_file_bytes,
+        bool header_snapshot,
+        ByteCount max_header_bytes,
+        std::size_t max_tensors);
+
     std::filesystem::path path_;
     ByteCount file_bytes_{0};
     ByteCount header_bytes_{0};
+    bool header_only_{false};
     std::vector<TensorDescriptor> tensors_;
     std::map<std::string, std::size_t, std::less<>> by_name_;
 };

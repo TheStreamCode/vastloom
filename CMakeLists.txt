@@ -39,6 +39,8 @@ vastloom_import_legacy_path(STARGATE_OLMOE_MODEL VASTLOOM_OLMOE_MODEL
     "Optional external pinned OLMoE checkpoint or metadata import for inspection tests")
 vastloom_import_legacy_path(STARGATE_OLMOE_FULL_MODEL VASTLOOM_OLMOE_FULL_MODEL
     "Optional complete pinned OLMoE checkpoint for streamed runtime tests")
+set(VASTLOOM_DEEPSEEK_V4_MODEL "" CACHE PATH
+    "Optional pinned DeepSeek V4 Flash metadata/header import for inspection tests")
 
 option(VASTLOOM_BUILD_TESTS "Build Vastloom tests" ON)
 option(VASTLOOM_ENABLE_SANITIZERS "Enable AddressSanitizer and UndefinedBehaviorSanitizer" OFF)
@@ -60,6 +62,7 @@ add_library(vastloom_core STATIC
     src/core/bytes.cpp
     src/hardware/hardware_probe.cpp
     src/inference/gpt2_tokenizer.cpp
+    src/inference/deepseek_v4_model.cpp
     src/inference/llama_model.cpp
     src/inference/olmoe_model.cpp
     src/inference/olmoe_runtime.cpp
@@ -190,6 +193,16 @@ if(BUILD_TESTING AND VASTLOOM_BUILD_TESTS)
                     --fixture ${CMAKE_CURRENT_SOURCE_DIR}/tests/fixtures/olmoe_reference.json
             )
             set_tests_properties(vastloom_olmoe_runtime_reference PROPERTIES TIMEOUT 1200 RUN_SERIAL TRUE)
+        endif()
+        if(VASTLOOM_DEEPSEEK_V4_MODEL)
+            add_test(
+                NAME vastloom_deepseek_v4_inspection
+                COMMAND ${Python3_EXECUTABLE}
+                    ${CMAKE_CURRENT_SOURCE_DIR}/tests/test_deepseek_v4_cli.py
+                    --vastloom $<TARGET_FILE:vastloom>
+                    --model ${VASTLOOM_DEEPSEEK_V4_MODEL}
+            )
+            set_tests_properties(vastloom_deepseek_v4_inspection PROPERTIES TIMEOUT 120 RUN_SERIAL TRUE)
         endif()
     else()
         message(STATUS "Python3 not found; skipping TinyChat CLI integration test")

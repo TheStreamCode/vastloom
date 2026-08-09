@@ -23,6 +23,7 @@
 #include "vastloom/core/bytes.hpp"
 #include "vastloom/hardware/hardware_probe.hpp"
 #include "vastloom/inference/gpt2_tokenizer.hpp"
+#include "vastloom/inference/deepseek_v4_model.hpp"
 #include "vastloom/inference/llama_model.hpp"
 #include "vastloom/inference/olmoe_model.hpp"
 #include "vastloom/inference/olmoe_runtime.hpp"
@@ -232,6 +233,8 @@ void print_help() {
         << "      Run the pinned SmolLM2 CPU reference path and report final-token logits.\n\n"
         << "  moe-inspect MODEL_DIRECTORY [--no-verify] [--json]\n"
         << "      Validate the pinned OLMoE metadata and estimate safe streaming budgets.\n\n"
+        << "  deepseek-inspect MODEL_DIRECTORY [--no-verify] [--json]\n"
+        << "      Validate pinned DeepSeek V4 Flash metadata and Safetensors header snapshots.\n\n"
         << "  moe-logits MODEL_DIRECTORY --text TEXT [--chat] [--top N]\n"
         << "       [--cache no-cache|lru|lfu|static-hot] [--cache-bytes SIZE]\n"
         << "       [--io sync|async] [--io-cache buffered|bypass] [--expert-read whole|staged]\n"
@@ -456,6 +459,25 @@ int command_moe_inspect(const std::vector<std::string>& args) {
         if (policy) safe_ram_cap = policy.value().resources.ram_hard_limit;
     }
     auto inspection = vastloom::inference::inspect_olmoe_checkpoint(
+        args[0], !has_flag(args, "--no-verify"), safe_ram_cap);
+    if (!inspection) return print_error(inspection.error(), json);
+    std::cout << (json ? vastloom::inference::to_json(inspection.value())
+                      : vastloom::inference::to_text(inspection.value())) << '\n';
+    return 0;
+}
+
+int command_deepseek_inspect(const std::vector<std::string>& args) {
+    auto valid = validate_options(args, 1U, {}, {"--no-verify", "--json"});
+    const bool json = has_flag(args, "--json");
+    if (!valid) return print_error(valid.error(), json);
+
+    ByteCount safe_ram_cap = 0U;
+    auto hardware = vastloom::hardware::HardwareProbe::collect(args[0]);
+    if (hardware) {
+        auto policy = vastloom::safety::make_safe_runtime_policy(hardware.value());
+        if (policy) safe_ram_cap = policy.value().resources.ram_hard_limit;
+    }
+    auto inspection = vastloom::inference::inspect_deepseek_v4_checkpoint(
         args[0], !has_flag(args, "--no-verify"), safe_ram_cap);
     if (!inspection) return print_error(inspection.error(), json);
     std::cout << (json ? vastloom::inference::to_json(inspection.value())
@@ -1117,6 +1139,7 @@ int dispatch_cli(const std::vector<std::string>& arguments) {
         if (command == "tokenize") return command_tokenize(args);
         if (command == "real-logits") return command_real_logits(args);
         if (command == "moe-inspect") return command_moe_inspect(args);
+        if (command == "deepseek-inspect") return command_deepseek_inspect(args);
         if (command == "moe-logits") return command_moe_logits(args);
         if (command == "heartbeat-write") return command_heartbeat_write(args);
         if (command == "version" || command == "--version") {

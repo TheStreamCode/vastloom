@@ -13,6 +13,7 @@
 #include "vastloom/core/bytes.hpp"
 #include "vastloom/hardware/hardware_probe.hpp"
 #include "vastloom/inference/gpt2_tokenizer.hpp"
+#include "vastloom/inference/deepseek_v4_model.hpp"
 #include "vastloom/inference/llama_model.hpp"
 #include "vastloom/inference/olmoe_model.hpp"
 #include "vastloom/inference/olmoe_runtime.hpp"
@@ -136,6 +137,39 @@ void test_safetensors(const std::filesystem::path& root) {
     auto catalog = vastloom::model::inspect_safetensors_checkpoint(checkpoint);
     CHECK(catalog && catalog.value().shards.size() == 1U && catalog.value().tensors.size() == 1U);
 
+    const auto snapshot_path = checkpoint / "model.safetensors.header";
+    {
+        std::ofstream output(snapshot_path, std::ios::binary);
+        write_u64_le(output, header.size());
+        output.write(header.data(), static_cast<std::streamsize>(header.size()));
+    }
+    auto snapshot = vastloom::model::SafetensorsFile::open_header_snapshot(
+        snapshot_path, 8U + header.size() + 8U);
+    CHECK(snapshot && snapshot.value().header_only() && snapshot.value().file_bytes() == 8U + header.size() + 8U);
+    if (snapshot) {
+        const auto* tensor = snapshot.value().find("weight");
+        CHECK(tensor != nullptr && tensor->byte_count == 8U);
+        if (tensor != nullptr) CHECK(!snapshot.value().read_range(*tensor, 0U, 8U));
+    }
+    CHECK(!vastloom::model::SafetensorsFile::open_header_snapshot(snapshot_path, 8U + header.size() + 7U));
+
+    const std::string fp8_header = R"({"data":{"dtype":"F8_E4M3","shape":[1],"data_offsets":[0,1]},"scale":{"dtype":"F8_E8M0","shape":[1],"data_offsets":[1,2]}})";
+    const auto fp8_snapshot_path = checkpoint / "fp8.safetensors.header";
+    {
+        std::ofstream output(fp8_snapshot_path, std::ios::binary);
+        write_u64_le(output, fp8_header.size());
+        output.write(fp8_header.data(), static_cast<std::streamsize>(fp8_header.size()));
+    }
+    auto fp8_snapshot = vastloom::model::SafetensorsFile::open_header_snapshot(
+        fp8_snapshot_path, 8U + fp8_header.size() + 2U);
+    CHECK(fp8_snapshot && fp8_snapshot.value().tensors().size() == 2U);
+    if (fp8_snapshot) {
+        CHECK(fp8_snapshot.value().find("data") != nullptr &&
+              fp8_snapshot.value().find("data")->dtype == vastloom::model::TensorDType::f8_e4m3);
+        CHECK(fp8_snapshot.value().find("scale") != nullptr &&
+              fp8_snapshot.value().find("scale")->dtype == vastloom::model::TensorDType::f8_e8m0);
+    }
+
     const std::string invalid_header = R"({"weight":{"dtype":"BF16","shape":[2,2],"data_offsets":[0,9]}})";
     {
         std::ofstream output(checkpoint / "invalid.safetensors", std::ios::binary);
@@ -207,6 +241,22 @@ void test_olmoe_config(const std::filesystem::path& root) {
     CHECK(vastloom::io::parse_io_cache_mode("buffered") &&
           vastloom::io::parse_io_cache_mode("DIRECT") &&
           !vastloom::io::parse_io_cache_mode("global-flush"));
+}
+
+void test_deepseek_v4_config(const std::filesystem::path& root) {
+    const auto path = root / "deepseek-v4-config.json";
+    {
+        std::ofstream config(path);
+        config << R"({"architectures":["DeepseekV4ForCausalLM"],"attention_bias":false,"attention_dropout":0.0,"bos_token_id":0,"compress_ratios":[0,0,4,128,4,128,4,128,4,128,4,128,4,128,4,128,4,128,4,128,4,128,4,128,4,128,4,128,4,128,4,128,4,128,4,128,4,128,4,128,4,128,4,0],"compress_rope_theta":160000,"eos_token_id":1,"expert_dtype":"fp4","hc_eps":0.000001,"hc_mult":4,"hc_sinkhorn_iters":20,"head_dim":512,"hidden_act":"silu","hidden_size":4096,"index_head_dim":128,"index_n_heads":64,"index_topk":512,"initializer_range":0.02,"max_position_embeddings":1048576,"model_type":"deepseek_v4","moe_intermediate_size":2048,"n_routed_experts":256,"n_shared_experts":1,"norm_topk_prob":true,"num_attention_heads":64,"num_experts_per_tok":6,"num_hash_layers":3,"num_hidden_layers":43,"num_key_value_heads":1,"num_nextn_predict_layers":1,"o_groups":8,"o_lora_rank":1024,"q_lora_rank":1024,"qk_rope_head_dim":64,"quantization_config":{"activation_scheme":"dynamic","fmt":"e4m3","quant_method":"fp8","scale_fmt":"ue8m0","weight_block_size":[128,128]},"rms_norm_eps":0.000001,"rope_scaling":{"beta_fast":32,"beta_slow":1,"factor":16,"original_max_position_embeddings":65536,"type":"yarn"},"rope_theta":10000,"routed_scaling_factor":1.5,"scoring_func":"sqrtsoftplus","sliding_window":128,"swiglu_limit":10.0,"tie_word_embeddings":false,"topk_method":"noaux_tc","torch_dtype":"bfloat16","transformers_version":"4.57.1","use_cache":true,"vocab_size":129280})";
+    }
+    auto loaded = vastloom::inference::load_deepseek_v4_config(path);
+    CHECK(loaded && loaded.value().num_hidden_layers == 43U && loaded.value().num_routed_experts == 256U &&
+          loaded.value().num_experts_per_token == 6U && loaded.value().max_position_embeddings == 1'048'576U);
+    {
+        std::ofstream config(path, std::ios::trunc);
+        config << R"({"architectures":["DeepseekV4ForCausalLM"],"model_type":"deepseek_v4"})";
+    }
+    CHECK(!vastloom::inference::load_deepseek_v4_config(path));
 }
 
 void test_model_store_and_runtime_policy(const std::filesystem::path& root) {
@@ -848,6 +898,7 @@ int main() {
     test_safetensors(root);
     test_imported_checkpoint_and_llama_config(root);
     test_olmoe_config(root);
+    test_deepseek_v4_config(root);
     test_model_store_and_runtime_policy(root);
     test_gpt2_tokenizer(root);
     test_manifest_and_verifier(root);

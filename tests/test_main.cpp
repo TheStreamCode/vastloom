@@ -514,6 +514,247 @@ void test_deepseek_v4_reference_operators() {
     }
 }
 
+void test_deepseek_v4_reference_graph() {
+    const auto path = std::filesystem::path(VASTLOOM_SOURCE_DIR) / "tests" / "fixtures" /
+                      "deepseek_v4_graph.json";
+    vastloom::util::JsonLimits limits;
+    limits.max_input_bytes = 2U * vastloom::MiB;
+    limits.max_nodes = 100'000U;
+    limits.max_array_elements = 100'000U;
+    auto fixture = vastloom::util::load_json_file(path, limits);
+    CHECK(fixture && fixture.value().is_object());
+    if (!fixture || !fixture.value().is_object()) return;
+
+    const auto object = [&](const vastloom::util::JsonValue& parent,
+                            std::string_view key) -> const vastloom::util::JsonValue::Object* {
+        const auto* value = parent.find(key);
+        auto parsed = value == nullptr
+                          ? vastloom::Result<const vastloom::util::JsonValue::Object*>(
+                                vastloom::make_error(vastloom::ErrorCode::invalid_format,
+                                                     "missing fixture object"))
+                          : value->as_object();
+        CHECK(parsed);
+        return parsed ? parsed.value() : nullptr;
+    };
+    const auto array = [&](const vastloom::util::JsonValue& parent,
+                           std::string_view key) -> const vastloom::util::JsonValue::Array* {
+        const auto* value = parent.find(key);
+        auto parsed = value == nullptr
+                          ? vastloom::Result<const vastloom::util::JsonValue::Array*>(
+                                vastloom::make_error(vastloom::ErrorCode::invalid_format,
+                                                     "missing fixture array"))
+                          : value->as_array();
+        CHECK(parsed);
+        return parsed ? parsed.value() : nullptr;
+    };
+    const auto size_value = [&](const vastloom::util::JsonValue& parent,
+                                std::string_view key) -> std::size_t {
+        const auto* value = parent.find(key);
+        auto parsed = value == nullptr
+                          ? vastloom::Result<std::uint64_t>(vastloom::make_error(
+                                vastloom::ErrorCode::invalid_format, "missing fixture integer"))
+                          : value->as_u64();
+        CHECK(parsed && parsed.value() <= std::numeric_limits<std::size_t>::max());
+        if (!parsed || parsed.value() > std::numeric_limits<std::size_t>::max()) return 0U;
+        return static_cast<std::size_t>(parsed.value());
+    };
+    const auto float_value = [&](const vastloom::util::JsonValue& parent,
+                                 std::string_view key) -> float {
+        const auto* value = parent.find(key);
+        auto parsed = value == nullptr
+                          ? vastloom::Result<double>(vastloom::make_error(
+                                vastloom::ErrorCode::invalid_format, "missing fixture scalar"))
+                          : value->as_double();
+        CHECK(parsed && std::isfinite(parsed.value()));
+        if (!parsed || !std::isfinite(parsed.value())) return 0.0F;
+        return static_cast<float>(parsed.value());
+    };
+    const auto floats = [&](const vastloom::util::JsonValue& value) -> std::vector<float> {
+        std::vector<float> result;
+        auto parsed = value.as_array();
+        CHECK(parsed);
+        if (!parsed) return result;
+        result.reserve(parsed.value()->size());
+        for (const auto& item : *parsed.value()) {
+            auto number = item.as_double();
+            CHECK(number && std::isfinite(number.value()));
+            if (!number || !std::isfinite(number.value())) return {};
+            result.push_back(static_cast<float>(number.value()));
+        }
+        return result;
+    };
+    const auto unsigneds = [&](const vastloom::util::JsonValue& value) {
+        std::vector<std::uint32_t> result;
+        auto parsed = value.as_array();
+        CHECK(parsed);
+        if (!parsed) return result;
+        result.reserve(parsed.value()->size());
+        for (const auto& item : *parsed.value()) {
+            auto number = item.as_u64();
+            CHECK(number && number.value() <= std::numeric_limits<std::uint32_t>::max());
+            if (!number || number.value() > std::numeric_limits<std::uint32_t>::max()) return std::vector<std::uint32_t>{};
+            result.push_back(static_cast<std::uint32_t>(number.value()));
+        }
+        return result;
+    };
+    const auto signed_indices = [&](const vastloom::util::JsonValue& value) {
+        std::vector<std::int32_t> result;
+        auto parsed = value.as_array();
+        CHECK(parsed);
+        if (!parsed) return result;
+        result.reserve(parsed.value()->size());
+        for (const auto& item : *parsed.value()) {
+            auto number = item.as_i64();
+            CHECK(number && number.value() >= std::numeric_limits<std::int32_t>::min() &&
+                  number.value() <= std::numeric_limits<std::int32_t>::max());
+            if (!number || number.value() < std::numeric_limits<std::int32_t>::min() ||
+                number.value() > std::numeric_limits<std::int32_t>::max()) {
+                return std::vector<std::int32_t>{};
+            }
+            result.push_back(static_cast<std::int32_t>(number.value()));
+        }
+        return result;
+    };
+
+    const auto* config_object = object(fixture.value(), "config");
+    const auto* tensor_object = object(fixture.value(), "tensors");
+    const auto* dtype_object = object(fixture.value(), "tensor_dtypes");
+    const auto* expected_object = object(fixture.value(), "expected");
+    if (config_object == nullptr || tensor_object == nullptr || dtype_object == nullptr ||
+        expected_object == nullptr) {
+        return;
+    }
+    const vastloom::util::JsonValue config_value(*config_object);
+    vastloom::inference::DeepseekV4ReferenceGraph graph;
+    auto& config = graph.config;
+    config.vocabulary_size = size_value(config_value, "vocabulary_size");
+    config.width = size_value(config_value, "width");
+    config.intermediate_width = size_value(config_value, "intermediate_width");
+    config.layer_count = size_value(config_value, "layers");
+    config.hash_layer_count = size_value(config_value, "hash_layers");
+    config.head_count = size_value(config_value, "heads");
+    config.expert_count = size_value(config_value, "experts");
+    config.experts_per_token = size_value(config_value, "experts_per_token");
+    config.query_lora_rank = size_value(config_value, "query_lora_rank");
+    config.head_width = size_value(config_value, "head_width");
+    config.rope_width = size_value(config_value, "rope_width");
+    config.output_groups = size_value(config_value, "output_groups");
+    config.output_lora_rank = size_value(config_value, "output_lora_rank");
+    config.window_size = size_value(config_value, "window_size");
+    const auto* ratios = array(config_value, "compression_ratios");
+    if (ratios == nullptr) return;
+    for (const auto& ratio : *ratios) {
+        auto parsed = ratio.as_u64();
+        CHECK(parsed && parsed.value() <= std::numeric_limits<std::size_t>::max());
+        if (!parsed || parsed.value() > std::numeric_limits<std::size_t>::max()) return;
+        config.compression_ratios.push_back(static_cast<std::size_t>(parsed.value()));
+    }
+    config.compression_rope_theta = float_value(config_value, "compression_rope_theta");
+    config.original_context = size_value(config_value, "original_context");
+    config.rope_theta = float_value(config_value, "rope_theta");
+    config.rope_factor = float_value(config_value, "rope_factor");
+    config.beta_fast = float_value(config_value, "beta_fast");
+    config.beta_slow = float_value(config_value, "beta_slow");
+    config.index_head_count = size_value(config_value, "index_heads");
+    config.index_head_width = size_value(config_value, "index_head_width");
+    config.index_top_k = size_value(config_value, "index_top_k");
+    config.hyper_multiplier = size_value(config_value, "hyper_multiplier");
+    config.sinkhorn_iterations = size_value(config_value, "sinkhorn_iterations");
+    config.norm_epsilon = float_value(config_value, "norm_epsilon");
+    config.hyper_epsilon = float_value(config_value, "hyper_epsilon");
+    config.route_scale = float_value(config_value, "route_scale");
+    config.swiglu_limit = float_value(config_value, "swiglu_limit");
+
+    for (const auto& [name, value] : *tensor_object) {
+        const auto dtype = dtype_object->find(name);
+        CHECK(dtype != dtype_object->end());
+        if (dtype == dtype_object->end()) return;
+        auto type = dtype->second.as_string();
+        CHECK(type);
+        if (!type) return;
+        if (type.value() == "F32") graph.float_tensors.emplace(name, floats(value));
+        else if (type.value() == "I32") graph.integer_tensors.emplace(name, unsigneds(value));
+        else CHECK(false);
+    }
+    const auto* token_value = fixture.value().find("token_ids");
+    CHECK(token_value != nullptr);
+    if (token_value == nullptr) return;
+    const auto token_ids = unsigneds(*token_value);
+    auto result = vastloom::inference::deepseek_v4_reference_prefill(graph, token_ids);
+    CHECK(result);
+    if (!result) {
+        std::cerr << "DeepSeek graph reference error: " << result.error().message << " ("
+                  << result.error().context << ")\n";
+        return;
+    }
+    const float tolerance = float_value(fixture.value(), "absolute_tolerance");
+    const auto expected_logits_value = expected_object->find("logits");
+    CHECK(expected_logits_value != expected_object->end());
+    if (expected_logits_value == expected_object->end()) return;
+    const auto expected_logits = floats(expected_logits_value->second);
+    CHECK(result.value().logits.size() == expected_logits.size());
+    for (std::size_t index = 0U;
+         index < std::min(result.value().logits.size(), expected_logits.size()); ++index) {
+        if (std::abs(result.value().logits[index] - expected_logits[index]) > tolerance) {
+            std::cerr << "DeepSeek graph logit mismatch at " << index << ": "
+                      << result.value().logits[index] << " versus " << expected_logits[index]
+                      << '\n';
+            ++failures;
+            break;
+        }
+    }
+    const vastloom::util::JsonValue expected_value(*expected_object);
+    CHECK(result.value().greedy_token_id == size_value(expected_value, "greedy_token_id"));
+    const auto* expected_routes = array(expected_value, "routes");
+    const auto* expected_attention = array(expected_value, "attention_indices");
+    if (expected_routes == nullptr || expected_attention == nullptr) return;
+    CHECK(result.value().layers.size() == expected_routes->size());
+    CHECK(result.value().layers.size() == expected_attention->size());
+    for (std::size_t layer = 0U;
+         layer < std::min(result.value().layers.size(), expected_routes->size()); ++layer) {
+        auto route_object = (*expected_routes)[layer].as_object();
+        auto attention_object = (*expected_attention)[layer].as_object();
+        CHECK(route_object && attention_object);
+        if (!route_object || !attention_object) return;
+        const vastloom::util::JsonValue route_value(*route_object.value());
+        const vastloom::util::JsonValue attention_value(*attention_object.value());
+        const auto* route_indices_value = route_value.find("indices");
+        const auto* route_weights_value = route_value.find("weights");
+        const auto* attention_indices_value = attention_value.find("indices");
+        CHECK(route_indices_value != nullptr && route_weights_value != nullptr &&
+              attention_indices_value != nullptr);
+        if (route_indices_value == nullptr || route_weights_value == nullptr ||
+            attention_indices_value == nullptr) {
+            return;
+        }
+        CHECK(result.value().layers[layer].route.indices == unsigneds(*route_indices_value));
+        const auto expected_weights = floats(*route_weights_value);
+        CHECK(result.value().layers[layer].route.weights.size() == expected_weights.size());
+        for (std::size_t index = 0U;
+             index < std::min(result.value().layers[layer].route.weights.size(),
+                              expected_weights.size()); ++index) {
+            CHECK(std::abs(result.value().layers[layer].route.weights[index] -
+                           expected_weights[index]) <= tolerance);
+        }
+        CHECK(result.value().layers[layer].attention_indices ==
+              signed_indices(*attention_indices_value));
+    }
+
+    auto malformed = graph;
+    malformed.float_tensors.erase("head.weight");
+    CHECK(!vastloom::inference::deepseek_v4_reference_prefill(malformed, token_ids));
+    malformed = graph;
+    malformed.float_tensors["embed.weight"][0] =
+        std::numeric_limits<float>::quiet_NaN();
+    CHECK(!vastloom::inference::deepseek_v4_reference_prefill(malformed, token_ids));
+    auto invalid_tokens = token_ids;
+    invalid_tokens[0] = static_cast<std::uint32_t>(config.vocabulary_size);
+    CHECK(!vastloom::inference::deepseek_v4_reference_prefill(graph, invalid_tokens));
+    malformed = graph;
+    malformed.config.head_count = std::numeric_limits<std::size_t>::max();
+    CHECK(!vastloom::inference::deepseek_v4_reference_prefill(malformed, token_ids));
+}
+
 void test_model_store_and_runtime_policy(const std::filesystem::path& root) {
     auto store = vastloom::model::ModelStore::initialize(root / "model-store", {20U * vastloom::GiB});
     CHECK(store);
@@ -1155,6 +1396,7 @@ int main() {
     test_olmoe_config(root);
     test_deepseek_v4_config(root);
     test_deepseek_v4_reference_operators();
+    test_deepseek_v4_reference_graph();
     test_model_store_and_runtime_policy(root);
     test_gpt2_tokenizer(root);
     test_manifest_and_verifier(root);

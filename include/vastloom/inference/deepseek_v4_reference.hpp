@@ -2,7 +2,11 @@
 
 #include <cstddef>
 #include <cstdint>
+#include <functional>
+#include <map>
 #include <span>
+#include <string>
+#include <string_view>
 #include <vector>
 
 #include "vastloom/core/status.hpp"
@@ -28,6 +32,58 @@ struct DeepseekV4HyperConnectionPreResult {
     std::vector<float> reduced;
     DeepseekV4HyperConnectionSplit split;
     std::size_t width{0};
+};
+
+struct DeepseekV4ReferenceConfig {
+    std::size_t vocabulary_size{0};
+    std::size_t width{0};
+    std::size_t intermediate_width{0};
+    std::size_t layer_count{0};
+    std::size_t hash_layer_count{0};
+    std::size_t head_count{0};
+    std::size_t expert_count{0};
+    std::size_t experts_per_token{0};
+    std::size_t query_lora_rank{0};
+    std::size_t head_width{0};
+    std::size_t rope_width{0};
+    std::size_t output_groups{0};
+    std::size_t output_lora_rank{0};
+    std::size_t window_size{0};
+    std::vector<std::size_t> compression_ratios;
+    float compression_rope_theta{0.0F};
+    std::size_t original_context{0};
+    float rope_theta{0.0F};
+    float rope_factor{0.0F};
+    float beta_fast{0.0F};
+    float beta_slow{0.0F};
+    std::size_t index_head_count{0};
+    std::size_t index_head_width{0};
+    std::size_t index_top_k{0};
+    std::size_t hyper_multiplier{0};
+    std::size_t sinkhorn_iterations{0};
+    float norm_epsilon{0.0F};
+    float hyper_epsilon{0.0F};
+    float route_scale{0.0F};
+    float swiglu_limit{0.0F};
+};
+
+struct DeepseekV4ReferenceGraph {
+    DeepseekV4ReferenceConfig config;
+    std::map<std::string, std::vector<float>, std::less<>> float_tensors;
+    std::map<std::string, std::vector<std::uint32_t>, std::less<>> integer_tensors;
+};
+
+struct DeepseekV4LayerTrace {
+    std::size_t layer{0};
+    DeepseekV4RouteResult route;
+    std::vector<std::int32_t> attention_indices;
+    std::size_t attention_selected_per_token{0};
+};
+
+struct DeepseekV4ReferenceForwardResult {
+    std::vector<float> logits;
+    std::vector<DeepseekV4LayerTrace> layers;
+    std::uint32_t greedy_token_id{0};
 };
 
 [[nodiscard]] Result<std::vector<float>> deepseek_v4_rms_norm(
@@ -117,5 +173,11 @@ struct DeepseekV4HyperConnectionPreResult {
     std::size_t head_width,
     std::size_t selected_per_query,
     float softmax_scale);
+
+// Bounded single-batch prefill oracle for reduced float fixtures. This deliberately
+// excludes incremental cache mutation, quantized checkpoint kernels and MTP execution.
+[[nodiscard]] Result<DeepseekV4ReferenceForwardResult> deepseek_v4_reference_prefill(
+    const DeepseekV4ReferenceGraph& graph,
+    std::span<const std::uint32_t> token_ids);
 
 }  // namespace vastloom::inference

@@ -13,6 +13,13 @@ hardware, commands, measurements and limitations.
 
 ## Current report
 
+- [`M6_DEEPSEEK_METADATA_INSPECTION_VALIDATION.md`](M6_DEEPSEEK_METADATA_INSPECTION_VALIDATION.md) —
+  exact official DeepSeek V4 Flash revision, bounded header-only import, native
+  69,187-tensor inspection and the remaining non-execution boundary.
+
+M6 is still open: the architecture-faithful fixture, reference outputs and inference
+graph have not passed their gates. The latest completed milestone remains M5:
+
 - [`M5_DEVICE_IO_CACHE_BYPASS_VALIDATION.md`](M5_DEVICE_IO_CACHE_BYPASS_VALIDATION.md) —
   device-level Windows/Linux counters, bounded direct/unbuffered reads, repeatable
   Windows physical-byte measurements and the completed M5 gate.

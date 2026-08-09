@@ -92,21 +92,27 @@ not DeepSeek runtime claims. The OLMoE staged path passed parity and improved me
 warm buffered forward time by 46.0% in three paired WSL runs. Three Windows
 `direct-unbuffered-v1` runs then returned identical reference output and exactly
 1,610,743,808 whole-device bytes for 1,610,612,736 logical expert bytes per run. M5 is
-closed; exact DeepSeek checkpoint inspection is now the active bottleneck.
+closed. The exact official DeepSeek checkpoint contract is now pinned and inspectable;
+the reduced architecture-faithful fixture is the active bottleneck.
 
 ## M6 — Exact DeepSeek inspector and architecture-faithful fixture
 
-- [ ] Select and pin the exact DeepSeek V4 Flash checkpoint revision.
-- [ ] Parse `config.json`, tokenizer metadata and Safetensors headers without loading
+- [x] Select and pin the exact DeepSeek V4 Flash checkpoint revision.
+- [x] Parse `config.json`, tokenizer metadata and Safetensors headers without loading
   tensor payloads.
-- [ ] Generate a full manifest with per-shard size and SHA-256.
-- [ ] Map exact tensor names, shapes, dtypes and shard offsets.
+- [x] Generate a full immutable import catalog with per-shard size and SHA-256.
+- [x] Map exact tensor names, shapes, dtypes and shard offsets.
 - [ ] Build a reduced but architecture-faithful DeepSeek fixture.
 - [ ] Export target logits, route selections and token vectors from a trusted reference.
 - [ ] Record initial routing traces.
 
 **Gate:** every fixture tensor and reference token/logit/route agrees within an explicit
 numerical tolerance before optimization begins.
+
+The completed metadata half is recorded in the
+[M6 DeepSeek inspection report](reports/M6_DEEPSEEK_METADATA_INSPECTION_VALIDATION.md).
+It pins official commit `60d8d70770c6776ff598c94bb586a859a38244f1`; the former
+“0731” label was only a provisional research alias and is not an official checkpoint tag.
 
 ## M7 — DeepSeek CPU reference inference
 

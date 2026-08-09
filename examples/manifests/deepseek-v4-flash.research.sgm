@@ -1,0 +1,26 @@
+# Verified metadata/header planning profile, not a runnable weight manifest.
+# Identity and byte counts come from the official pinned checkpoint inspected in M6.
+format=vastloom.manifest.v1
+model_id=deepseek-ai/DeepSeek-V4-Flash
+revision=60d8d70770c6776ff598c94bb586a859a38244f1
+architecture=deepseek_v4
+metadata_only=true
+requires_avx2=true
+supports_speculation=true
+model_total_bytes=159617149040
+required_storage_bytes=159628890287
+dense_bytes=9017195080
+routed_expert_bytes=150592290816
+active_bytes_per_token=3449290752
+estimated_expert_bytes=13369344
+minimum_ram_bytes=16GiB
+recommended_ram_bytes=32GiB
+minimum_vram_bytes=0
+recommended_vram_bytes=12GiB
+layer_count=43
+expert_count=256
+selected_experts_per_token=6
+max_context_tokens=1048576
+chunk_count=0
+profile_status=verified-metadata-header-catalog
+profile_purpose=capacity-planning-only

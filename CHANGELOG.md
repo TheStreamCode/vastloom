@@ -2,6 +2,17 @@
 
 ## Unreleased
 
+- Pinned the official `deepseek-ai/DeepSeek-V4-Flash` checkpoint at immutable revision
+  `60d8d70770c6776ff598c94bb586a859a38244f1`; removed the unsupported provisional
+  “0731” identity from the active planning manifest.
+- Added a 19,404,391-byte metadata/header import that uses exact HTTP ranges, pinned
+  SHA-256 values and atomic publication instead of downloading 159,617,149,040 bytes
+  of weight shards.
+- Added `deepseek-inspect` with exact validation for 46 shards, 69,187 tensors,
+  Safetensors shapes/offsets, FP8/FP4 storage dtypes and routed-expert byte layout.
+- Added an explicit `--allow-large-download` gate for checkpoint imports containing at
+  least 20 GiB of weight payload. DeepSeek execution remains unsupported and is reported
+  as such by the CLI.
 - Added path-scoped device-I/O snapshots: Windows maps the checkpoint volume to
   `PhysicalDriveN` and samples `IOCTL_DISK_PERFORMANCE`; Linux accepts non-virtual
   `/sys/dev/block/.../stat` mappings and otherwise reports the counter unavailable.

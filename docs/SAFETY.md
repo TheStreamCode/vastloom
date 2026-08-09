@@ -112,6 +112,28 @@ A direct `.sgtm` path receives structural validation but no cryptographic identi
 A metadata-only research profile cannot verify weights and must never be treated as a
 runnable model manifest.
 
+## DeepSeek metadata and large-download interlocks
+
+The pinned DeepSeek V4 Flash inspection path is intentionally non-executing:
+
+- metadata-only import selects five ordinary metadata files and 46 header snapshots,
+  totaling exactly 19,404,391 bytes;
+- every header request is bounded to its pinned prefix, must return HTTP `206` with the
+  exact source-file `Content-Range`, and must match a separately pinned SHA-256;
+- a server that ignores or widens the range is rejected before its response can be
+  accepted as an artifact;
+- downloads retain the existing 1 MiB copy buffer, rate limit, partial-resume validation,
+  disk reserve, lock, temporary publication and read-only immutable target;
+- `deepseek-inspect` caps one header at 1 MiB and 2,000 tensors, validates all data ranges
+  against the declared original shard size and refuses payload reads from snapshots;
+- the CLI always reports `execution_supported=false`; it performs no model-weight, KV,
+  activation or VRAM allocation;
+- selecting a checkpoint with at least 20 GiB of weight files requires the separate
+  `--allow-large-download` opt-in in addition to storage headroom checks.
+
+The opt-in authorizes only an immutable download. It does not imply that the runtime can
+execute the checkpoint, and it does not relax the 300 GiB default free-space reserve.
+
 ## Real OLMoE streaming bounds
 
 The alpha.4 OLMoE probe is fail-closed around one exact checkpoint revision:
@@ -209,6 +231,8 @@ integration remains required before long-running large-model inference.
   explicit unavailable behavior and rejection of virtual Linux block devices;
 - aligned cache-bypass reads for aligned and unaligned ranges, doubled staging
   reservation, full-model output parity and physical-byte coverage enforcement;
+- DeepSeek exact-revision identity, bounded HTTP header ranges, 46 verified header
+  snapshots, 69,187 tensor/shard mappings, FP8 dtype parsing and large-download refusal;
 - regression protection against fragmented Windows expert reads and exact reuse-distance
   results for synthetic and real repeated-route traces.
 

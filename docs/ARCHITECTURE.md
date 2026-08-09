@@ -171,6 +171,34 @@ The trace simulator independently computes exact LRU stack distance in
 support a bounded fixed-route versus ready-expert replay while preserving the recorded
 reduction order.
 
+M6 adds a non-executing DeepSeek V4 Flash adapter boundary:
+
+```text
+official commit 60d8d707…
+      │ pinned sizes + SHA-256
+      ▼
+5 metadata files + 46 bounded Safetensors header snapshots (19.4 MB total)
+      │ exact HTTP 206/Content-Range + atomic immutable import
+      ▼
+DeepSeek config + 69,187-entry weight index
+      │ exact name → shard map
+      ▼
+bounded native header parser
+shape · dtype · data offset · overlap/overflow checks
+      │
+      ▼
+46-shard / 69,187-tensor / expert-layout inspection report
+execution_supported=false
+```
+
+The snapshots contain the original eight-byte Safetensors header length and JSON header,
+but no payload. The reader receives the pinned original shard size so it can validate
+every data range against the real payload boundary while refusing tensor reads from a
+header-only object. The adapter recognizes the checkpoint's FP8 formats and packed I8
+expert storage, exact 43-layer/256-expert top-6 layout, hash-routing tensors, attention
+compressors and MTP block. It does not instantiate a DeepSeek graph or allocate model
+state. The fixture and reference-parity gates must pass before that boundary moves.
+
 ## TinyTransformer adapter boundary
 
 The alpha.2 adapter defines:
@@ -182,9 +210,9 @@ The alpha.2 adapter defines:
 - model-specific self-test vectors;
 - hard format and dimension limits.
 
-It deliberately does not generalize tensor names or quantization. The production
-DeepSeek adapter will be separate while reusing the core governor, integrity and I/O
-modules.
+It deliberately does not generalize tensor names or quantization. The DeepSeek metadata
+adapter is separate and reuses the core integrity/model-store modules; its future
+execution graph will also reuse the governor and bounded I/O infrastructure.
 
 ## Memory hierarchy
 

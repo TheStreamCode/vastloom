@@ -23,14 +23,15 @@ consumer hardware—without uncontrolled swapping, surprise resource exhaustion 
 model conversion.
 
 > [!IMPORTANT]
-> **Current status — `0.4.0-alpha.4`: open-source rebrand and compatibility release.**
+> **Current source — `0.4.0-alpha.4` plus the unreleased M6 metadata slice.**
 > Vastloom now runs the routed token path of the pinned 13.84 GB
 > `allenai/OLMoE-1B-7B-0924-Instruct` checkpoint on CPU while keeping only the
 > always-active trunk and a bounded expert cache in RAM. Native logits, top-8 routes
 > and routing weights match a Transformers reference. The bounded reader now exposes
 > process-I/O deltas without labeling Windows transfer counters as physical NVMe traffic,
-> and trace simulation reports exact unique-expert reuse distance. DeepSeek V4 Flash and
-> CUDA are not implemented.
+> and trace simulation reports exact unique-expert reuse distance. The official DeepSeek
+> V4 Flash revision is now pinned and its 46-shard/69,187-tensor metadata is inspectable
+> from verified header snapshots, but DeepSeek inference and CUDA are not implemented.
 
 ## Why Vastloom exists
 
@@ -60,6 +61,8 @@ The newest staged-read and readiness results are in the
 [`M5 staged-I/O validation report`](docs/reports/M5_READINESS_STAGED_IO_VALIDATION.md).
 The completed physical-counter and cache-bypass gate is documented in the
 [`M5 device-I/O validation report`](docs/reports/M5_DEVICE_IO_CACHE_BYPASS_VALIDATION.md).
+The first DeepSeek-specific slice is documented in the
+[`M6 metadata inspection report`](docs/reports/M6_DEEPSEEK_METADATA_INSPECTION_VALIDATION.md).
 
 ## Reference target
 
@@ -74,7 +77,7 @@ The first consumer reference machine is:
 The engine is not hard-coded for that PC. Hardware is probed at runtime and every
 allocation plan is derived from detected capacity and conservative headroom.
 
-## What works in alpha.4
+## What works in the current source
 
 ### Real pretrained model path
 
@@ -151,6 +154,22 @@ allocation plan is derived from detected capacity and conservative headroom.
 - **Manifest integrity by default:** `.sgm` inputs are fully SHA-256 verified before
   weights are loaded. Direct `.sgtm` files remain available for development and are
   clearly reported as unverified.
+
+### DeepSeek V4 Flash inspection path
+
+- **Official pinned identity:** `deepseek-ai/DeepSeek-V4-Flash` revision
+  `60d8d70770c6776ff598c94bb586a859a38244f1`; the former “0731” name was a
+  provisional project alias, not an official checkpoint tag.
+- **No payload required:** a 19,404,391-byte metadata import contains the config,
+  tokenizer, index and 7,663,144 bytes of exact Safetensors header snapshots instead of
+  159,617,149,040 bytes of weight shards.
+- **Exact native catalog:** `deepseek-inspect` verifies 46 shard identities, 69,187
+  tensor names/mappings, shapes, offsets, dtype totals and the 150,592,290,816-byte
+  routed-expert layout.
+- **Large-download interlock:** a full import of at least 20 GiB requires the additional
+  `--allow-large-download` flag after storage headroom has been reviewed.
+- **Honest boundary:** the command always reports `execution_supported=false`; tokenizer,
+  fixture/reference parity, DeepSeek kernels, CUDA and generation remain future gates.
 
 ### Runtime foundation
 
@@ -343,6 +362,21 @@ delta and can include concurrent activity from other processes. `trace-sim --jso
 exact cold/reused counts, unique-expert reuse distance and, for current 19-field traces,
 a bounded fixed-order versus ready-order replay.
 
+## Inspect DeepSeek V4 Flash without downloading the weights
+
+The M6 metadata path downloads only bounded, independently hashed metadata and header
+ranges. It is the safe default for architecture work:
+
+```powershell
+python tools\import_hf_model.py --model deepseek-v4-flash --store C:\VastloomModels --metadata-only
+$model = 'C:\VastloomModels\models\original\deepseek-ai-DeepSeek-V4-Flash--60d8d70770c6776ff598c94bb586a859a38244f1--metadata'
+vastloom deepseek-inspect $model --json
+```
+
+The inspector allocates metadata structures only and never treats the snapshot as a
+runnable checkpoint. Do not add `--allow-large-download` merely to try the command: the
+complete checkpoint still has no Vastloom inference path.
+
 ## TinyChat CLI options
 
 ```text
@@ -411,6 +445,7 @@ vastloom runtime-policy [--storage PATH] [--json]
 vastloom tokenize MODEL_DIRECTORY --text TEXT [--chat] [--json]
 vastloom real-logits MODEL_DIRECTORY --text TEXT [--chat] [--top N] [--json]
 vastloom moe-inspect MODEL_DIRECTORY [--no-verify] [--json]
+vastloom deepseek-inspect MODEL_DIRECTORY [--no-verify] [--json]
 vastloom moe-logits MODEL_DIRECTORY --text TEXT [--chat] [--top N]
     [--cache no-cache|lru|lfu|static-hot] [--cache-bytes SIZE]
     [--io sync|async] [--io-cache buffered|bypass] [--expert-read whole|staged]
@@ -430,9 +465,9 @@ Examples:
 ./build/vastloom inspect examples/models/vastloom-tinychat-v1.sgm
 ./build/vastloom verify examples/models/vastloom-tinychat-v1.sgm --full
 
-# Generate the provisional plan for the consumer reference PC
+# Generate the verified-metadata research plan for the consumer reference PC
 ./build/vastloom plan \
-  examples/manifests/deepseek-v4-flash-0731.research.sgm \
+  examples/manifests/deepseek-v4-flash.research.sgm \
   --reference-pc \
   --profile balanced
 
@@ -464,7 +499,7 @@ require 300 GiB free-storage headroom and refuse the load if reservations fail. 
 
 ## Reference planning result
 
-Using the provisional DeepSeek V4 Flash research profile and the target PC, the balanced
+Using the exact-revision DeepSeek V4 Flash research profile and the target PC, the balanced
 planner currently reserves:
 
 | Budget | Planned value |
@@ -476,9 +511,9 @@ planner currently reserves:
 | Maximum Vastloom VRAM | 10.22 GiB |
 | Storage free-space reserve | 100 GiB |
 
-These are planning outputs, not performance claims. The DeepSeek manifest remains a
-metadata-only research profile until it is generated from an exact supported
-checkpoint.
+These are planning outputs, not performance claims. The DeepSeek manifest is now derived
+from an exact checkpoint/header catalog but remains metadata-only because execution has
+not passed the fixture and reference-parity gates.
 
 ## Current limitations
 
@@ -486,7 +521,8 @@ Alpha.4 proves one real dense path and one real CPU MoE streaming path with an
 opt-in bounded asynchronous reader, not the final Vastloom research thesis.
 It currently has:
 
-- two exact pinned Hugging Face adapters; no DeepSeek, MiniMax, Kimi or GGUF adapter;
+- two executable pinned Hugging Face adapters plus one DeepSeek metadata/header
+  inspector; no DeepSeek inference, MiniMax, Kimi or GGUF execution adapter;
 - no CUDA, ROCm, Vulkan or Metal inference backend;
 - no production quantized kernels;
 - no VRAM expert tier or pinned host buffers; direct/unbuffered I/O is currently an
@@ -513,7 +549,7 @@ research metric is not merely SSD throughput. It is:
 
 The next technical sequence remains incremental:
 
-1. exact DeepSeek V4 Flash checkpoint inspection and architecture-faithful fixture;
+1. architecture-faithful DeepSeek V4 Flash fixture and reference token/logit/route parity;
 2. CUDA dense, attention, router and packed expert kernels;
 3. explicit VRAM/RAM/NVMe placement with pinned buffers and direct/overlapped I/O;
 4. adaptive placement, predictive routing and speculative expert deduplication;

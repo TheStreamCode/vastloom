@@ -84,11 +84,17 @@ Do not transfer the upstream full-layer strategy blindly: OLMoE and DeepSeek hav
 counts and compute balance. First simulate memory cost and bytes saved from real traces, then reserve the
 entire temporary layer before any read. The Safety Governor may reject the path regardless of speed.
 
-### Later — DeepSeek-specific adapter
+### DeepSeek-specific adapter — metadata contract pinned
 
-When the exact pinned DeepSeek contract is inspected, re-evaluate hash-layer exact prefetch,
-prefill-to-decode handoff and region-aware cache admission. Learned prediction remains after native
-correctness, real route traces and required-vs-speculative I/O priority exist.
+Official commit `60d8d70770c6776ff598c94bb586a859a38244f1` is now inspectable through
+46 verified header snapshots without downloading tensor payloads. The catalog confirms
+three hash-routing layers, 43 main layers, 256 routed experts, top-6 selection and one
+MTP block. This closes the metadata prerequisite but does not validate runtime semantics.
+
+After the architecture-faithful fixture and native correctness gates, re-evaluate
+hash-layer exact prefetch, prefill-to-decode handoff and region-aware cache admission.
+Learned prediction remains after real route traces and required-vs-speculative I/O
+priority exist.
 
 ## What Vastloom should not copy
 

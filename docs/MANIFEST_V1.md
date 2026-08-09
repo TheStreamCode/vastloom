@@ -28,12 +28,12 @@ metadata_only=false
 requires_avx2=true
 supports_speculation=true
 
-model_total_bytes=156GiB
-required_storage_bytes=180GiB
-dense_bytes=20GiB
-routed_expert_bytes=136GiB
-active_bytes_per_token=13GiB
-estimated_expert_bytes=48MiB
+model_total_bytes=159617149040
+required_storage_bytes=159628890287
+dense_bytes=9017195080
+routed_expert_bytes=150592290816
+active_bytes_per_token=3449290752
+estimated_expert_bytes=13369344
 minimum_ram_bytes=16GiB
 recommended_ram_bytes=32GiB
 minimum_vram_bytes=0
@@ -42,7 +42,7 @@ recommended_vram_bytes=12GiB
 layer_count=43
 expert_count=256
 selected_experts_per_token=6
-max_context_tokens=131072
+max_context_tokens=1048576
 chunk_count=96
 ```
 
@@ -83,8 +83,8 @@ Use the offline standard-library tool against a completed local checkpoint:
 ```bash
 python tools/generate_manifest.py /models/deepseek-v4-flash \
   --output /models/deepseek-v4-flash/model.sgm \
-  --model-id deepseek-ai/DeepSeek-V4-Flash-0731 \
-  --architecture deepseek_v4_flash \
+  --model-id deepseek-ai/DeepSeek-V4-Flash \
+  --architecture deepseek_v4 \
   --revision exact-revision \
   --minimum-ram 16GiB \
   --recommended-ram 32GiB \

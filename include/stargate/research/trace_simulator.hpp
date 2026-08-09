@@ -11,7 +11,9 @@
 namespace stargate::research {
 
 enum class CachePolicy {
+    none,
     lru,
+    lfu,
     static_hot,
 };
 

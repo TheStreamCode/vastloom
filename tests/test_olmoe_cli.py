@@ -72,6 +72,11 @@ def main() -> int:
             "explicit quick inspection failed", quick)
     invalid = run([executable, "moe-inspect", model, "--unknown"])
     require(invalid.returncode != 0, "unknown OLMoE option was accepted", invalid)
+    metadata_run = run([executable, "moe-logits", model, "--text", "Hello", "--no-verify", "--json"])
+    require(metadata_run.returncode != 0 and "complete verified checkpoint" in metadata_run.stderr,
+            "metadata-only checkpoint reached OLMoE execution", metadata_run)
+    invalid_cache = run([executable, "moe-logits", model, "--text", "Hello", "--cache", "random", "--json"])
+    require(invalid_cache.returncode != 0, "unknown real expert-cache policy was accepted", invalid_cache)
 
     with tempfile.TemporaryDirectory(prefix="stargate-olmoe-corrupt-") as temporary:
         copy = Path(temporary) / "model"

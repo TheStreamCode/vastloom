@@ -25,6 +25,7 @@
 #include "stargate/inference/gpt2_tokenizer.hpp"
 #include "stargate/inference/llama_model.hpp"
 #include "stargate/inference/olmoe_model.hpp"
+#include "stargate/inference/olmoe_runtime.hpp"
 #include "stargate/io/bounded_io_pool.hpp"
 #include "stargate/model/manifest.hpp"
 #include "stargate/model/imported_checkpoint.hpp"
@@ -200,7 +201,7 @@ void print_help() {
         << "       [--storage PATH] [--reference-pc] [--simulate-ram SIZE]\n"
         << "       [--simulate-vram SIZE] [--simulate-storage SIZE] [--simulate-free SIZE] [--json]\n"
         << "      Build a fail-closed VRAM/RAM/NVMe execution plan.\n\n"
-        << "  trace-sim TRACE.csv --vram SIZE --ram SIZE [--policy lru|static-hot] [--json]\n"
+        << "  trace-sim TRACE.csv --vram SIZE --ram SIZE [--policy no-cache|lru|lfu|static-hot] [--json]\n"
         << "      Measure expert-cache hit rates, NVMe bytes/token and PCIe traffic.\n\n"
         << "  io-smoke FILE [--offset BYTES] [--size SIZE]\n"
         << "      Exercise the bounded asynchronous I/O path under the resource governor.\n\n"
@@ -216,6 +217,10 @@ void print_help() {
         << "      Run the pinned SmolLM2 CPU reference path and report final-token logits.\n\n"
         << "  moe-inspect MODEL_DIRECTORY [--no-verify] [--json]\n"
         << "      Validate the pinned OLMoE metadata and estimate safe streaming budgets.\n\n"
+        << "  moe-logits MODEL_DIRECTORY --text TEXT [--chat] [--top N]\n"
+        << "       [--cache no-cache|lru|lfu|static-hot] [--cache-bytes SIZE]\n"
+        << "       [--timeout-ms N] [--trace PATH] [--no-verify] [--json]\n"
+        << "      Run the OLMoE CPU oracle with bounded NVMe expert streaming.\n\n"
         << "  heartbeat-write PATH [--state normal|pressure|critical|emergency]\n"
         << "      Atomically write one watchdog heartbeat for integration tests.\n\n"
         << "  version\n";
@@ -433,6 +438,137 @@ int command_moe_inspect(const std::vector<std::string>& args) {
     if (!inspection) return print_error(inspection.error(), json);
     std::cout << (json ? stargate::inference::to_json(inspection.value())
                       : stargate::inference::to_text(inspection.value())) << '\n';
+    return 0;
+}
+
+Result<void> write_olmoe_trace_atomic(const std::filesystem::path& path,
+                                      const std::vector<stargate::inference::ExpertTraceEvent>& events) {
+    if (path.empty()) return stargate::make_error(stargate::ErrorCode::invalid_argument, "OLMoE trace path is empty");
+    std::error_code error;
+    if (std::filesystem::exists(path, error)) {
+        return stargate::make_error(stargate::ErrorCode::permission_denied, "Refusing to overwrite an existing OLMoE trace", path.string());
+    }
+    const auto partial = path.string() + ".partial-" + std::to_string(current_pid());
+    {
+        std::ofstream output(partial, std::ios::binary | std::ios::trunc);
+        if (!output) return stargate::make_error(stargate::ErrorCode::io_error, "Unable to create OLMoE trace staging file", partial);
+        output << "token,layer,expert,size_bytes,routing_weight,tier,hit,bytes_read,io_ms\n";
+        output.precision(9);
+        for (const auto& event : events) {
+            output << event.token_position << ',' << event.layer << ',' << event.expert << ',' << (12U * stargate::MiB) << ','
+                   << event.routing_weight << ',' << (event.ram_cache_hit ? "ram" : "nvme") << ','
+                   << (event.ram_cache_hit ? 1 : 0) << ',' << event.bytes_read << ',' << event.io_ms << '\n';
+        }
+        output.flush();
+        if (!output) {
+            std::filesystem::remove(partial, error);
+            return stargate::make_error(stargate::ErrorCode::io_error, "Unable to flush OLMoE trace staging file", partial);
+        }
+    }
+    std::filesystem::rename(partial, path, error);
+    if (error) {
+        std::filesystem::remove(partial, error);
+        return stargate::make_error(stargate::ErrorCode::io_error, "Unable to publish OLMoE trace atomically", path.string());
+    }
+    return {};
+}
+
+int command_moe_logits(const std::vector<std::string>& args) {
+    auto valid = validate_options(args, 1U,
+                                  {"--text", "--top", "--cache", "--cache-bytes", "--timeout-ms", "--trace"},
+                                  {"--chat", "--no-verify", "--json"});
+    const bool json = has_flag(args, "--json");
+    if (!valid) return print_error(valid.error(), json);
+    const auto text = option_value(args, "--text");
+    if (!text) return print_error(stargate::make_error(stargate::ErrorCode::invalid_argument, "moe-logits requires --text"), json);
+    auto top = optional_size(args, "--top", 10U);
+    auto timeout = optional_size(args, "--timeout-ms", 600'000U);
+    auto cache_bytes = optional_bytes(args, "--cache-bytes", 256U * stargate::MiB);
+    auto cache_policy = stargate::inference::parse_expert_cache_policy(option_value(args, "--cache").value_or("lru"));
+    if (!top) return print_error(top.error(), json);
+    if (!timeout) return print_error(timeout.error(), json);
+    if (!cache_bytes) return print_error(cache_bytes.error(), json);
+    if (!cache_policy) return print_error(cache_policy.error(), json);
+    if (top.value() == 0U || top.value() > 100U || timeout.value() == 0U || timeout.value() > 3'600'000U) {
+        return print_error(stargate::make_error(stargate::ErrorCode::invalid_argument, "OLMoE top/timeout option is outside safe bounds"), json);
+    }
+
+    auto hardware = stargate::hardware::HardwareProbe::collect(args[0]);
+    if (!hardware) return print_error(hardware.error(), json);
+    auto policy = stargate::safety::make_safe_runtime_policy(hardware.value());
+    if (!policy) return print_error(policy.error(), json);
+    auto guard = stargate::safety::ProcessSafetyGuard::apply(policy.value());
+    if (!guard) return print_error(guard.error(), json);
+    stargate::safety::ResourceGovernor governor(policy.value().resources);
+    auto model = stargate::inference::OlmoeRuntimeModel::load(
+        args[0], governor, {!has_flag(args, "--no-verify"), policy.value().cpu_threads});
+    if (!model) return print_error(model.error(), json);
+    auto checked = guard.value().sample_and_check();
+    if (!checked) return print_error(checked.error(), json);
+
+    std::string input = *text;
+    if (has_flag(args, "--chat")) {
+        auto formatted = model.value().tokenizer().apply_olmoe_chat_template({{"user", input}}, true);
+        if (!formatted) return print_error(formatted.error(), json);
+        input = formatted.take_value();
+    }
+    auto tokens = model.value().tokenizer().encode(input);
+    if (!tokens) return print_error(tokens.error(), json);
+    stargate::inference::OlmoeForwardOptions options;
+    options.cache_policy = cache_policy.value();
+    options.expert_cache_bytes = cache_bytes.value();
+    options.timeout = std::chrono::milliseconds(timeout.value());
+    options.cancelled = [] { return real_generation_cancelled != 0; };
+    real_generation_cancelled = 0;
+    const auto previous_handler = std::signal(SIGINT, handle_real_interrupt);
+    auto forwarded = model.value().forward(tokens.value(), options, governor, &guard.value());
+    std::signal(SIGINT, previous_handler);
+    if (!forwarded) return print_error(forwarded.error(), json);
+
+    const auto trace_path = option_value(args, "--trace");
+    if (trace_path) {
+        auto written = write_olmoe_trace_atomic(*trace_path, forwarded.value().trace);
+        if (!written) return print_error(written.error(), json);
+    }
+    std::vector<std::size_t> order(forwarded.value().logits.size());
+    std::iota(order.begin(), order.end(), 0U);
+    std::partial_sort(order.begin(), order.begin() + static_cast<std::ptrdiff_t>(top.value()), order.end(),
+                      [&](std::size_t left, std::size_t right) {
+                          if (forwarded.value().logits[left] != forwarded.value().logits[right]) {
+                              return forwarded.value().logits[left] > forwarded.value().logits[right];
+                          }
+                          return left < right;
+                      });
+    const auto greedy_id = static_cast<std::uint32_t>(order.front());
+    auto greedy_text = model.value().tokenizer().decode({greedy_id}, false);
+    if (!greedy_text) return print_error(greedy_text.error(), json);
+    if (json) {
+        std::cout << "{\"ok\":true,\"input_tokens\":" << tokens.value().size()
+                  << ",\"greedy_id\":" << greedy_id << ",\"greedy_text\":\""
+                  << stargate::util::json_escape(greedy_text.value()) << "\",\"top_logits\":[";
+        for (std::size_t index = 0U; index < top.value(); ++index) {
+            if (index != 0U) std::cout << ',';
+            std::cout << "{\"id\":" << order[index] << ",\"logit\":"
+                      << forwarded.value().logits[order[index]] << '}';
+        }
+        std::cout << "],\"cache_policy\":\"" << stargate::inference::to_string(options.cache_policy)
+                  << "\",\"expert_cache_hits\":" << forwarded.value().stats.expert_cache_hits
+                  << ",\"expert_cache_misses\":" << forwarded.value().stats.expert_cache_misses
+                  << ",\"expert_bytes_read\":" << forwarded.value().stats.expert_bytes_read
+                  << ",\"expert_io_ms\":" << forwarded.value().stats.expert_io_ms
+                  << ",\"load_ms\":" << forwarded.value().stats.load_ms
+                  << ",\"forward_ms\":" << forwarded.value().stats.forward_ms
+                  << ",\"trace_events\":" << forwarded.value().trace.size() << "}\n";
+    } else {
+        std::cout << "Greedy token: " << greedy_id << " (" << greedy_text.value() << ")\nTop logits:\n";
+        for (std::size_t index = 0U; index < top.value(); ++index) {
+            std::cout << "  " << order[index] << "  " << forwarded.value().logits[order[index]] << '\n';
+        }
+        std::cout << "Expert I/O: " << stargate::format_bytes(forwarded.value().stats.expert_bytes_read)
+                  << ", hits/misses " << forwarded.value().stats.expert_cache_hits << '/'
+                  << forwarded.value().stats.expert_cache_misses << ", forward "
+                  << forwarded.value().stats.forward_ms << " ms\n";
+    }
     return 0;
 }
 
@@ -830,6 +966,7 @@ int dispatch_cli(const std::vector<std::string>& arguments) {
         if (command == "tokenize") return command_tokenize(args);
         if (command == "real-logits") return command_real_logits(args);
         if (command == "moe-inspect") return command_moe_inspect(args);
+        if (command == "moe-logits") return command_moe_logits(args);
         if (command == "heartbeat-write") return command_heartbeat_write(args);
         if (command == "version" || command == "--version") {
             std::cout << stargate::kVersion << '\n';

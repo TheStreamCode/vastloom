@@ -51,6 +51,15 @@ jobs:
         with:
           python-version: "3.12"
       - name: Compile Python tools and integration tests
-        run: python3 -m py_compile tools/generate_manifest.py tools/train_tiny_chat.py tests/test_tiny_chat_cli.py
+        run: >-
+          python3 -m py_compile
+          tools/generate_manifest.py
+          tools/import_hf_model.py
+          tools/reference_olmoe_probe.py
+          tools/train_tiny_chat.py
+          tests/test_olmoe_cli.py
+          tests/test_olmoe_runtime_cli.py
+          tests/test_smollm2_cli.py
+          tests/test_tiny_chat_cli.py
       - name: Test offline manifest generator
         run: python3 -m unittest tests/test_manifest_tool.py -v

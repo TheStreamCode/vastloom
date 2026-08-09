@@ -15,6 +15,7 @@
 #include "stargate/inference/gpt2_tokenizer.hpp"
 #include "stargate/inference/llama_model.hpp"
 #include "stargate/inference/olmoe_model.hpp"
+#include "stargate/inference/olmoe_runtime.hpp"
 #include "stargate/inference/tiny_model.hpp"
 #include "stargate/io/bounded_io_pool.hpp"
 #include "stargate/model/manifest.hpp"
@@ -183,6 +184,10 @@ void test_olmoe_config(const std::filesystem::path& root) {
         invalid << R"({"architectures":["OlmoeForCausalLM"],"model_type":"olmoe","hidden_act":"silu","torch_dtype":"bfloat16"})";
     }
     CHECK(!stargate::inference::load_olmoe_config(path));
+    CHECK(stargate::inference::parse_expert_cache_policy("no-cache") &&
+          stargate::inference::parse_expert_cache_policy("LFU") &&
+          stargate::inference::parse_expert_cache_policy("static-hot") &&
+          !stargate::inference::parse_expert_cache_policy("random"));
 }
 
 void test_model_store_and_runtime_policy(const std::filesystem::path& root) {
@@ -408,6 +413,30 @@ void test_trace(const std::filesystem::path& root) {
         CHECK(report.value().storage_misses >= 3U);
         CHECK(report.value().tokens == 3U);
     }
+    config.policy = stargate::research::CachePolicy::none;
+    config.vram_cache_bytes = 0U;
+    config.ram_cache_bytes = 0U;
+    auto no_cache = stargate::research::simulate_trace(path, config);
+    CHECK(no_cache && no_cache.value().storage_misses == 5U && no_cache.value().nvme_bytes == 320U * stargate::MiB);
+    config.policy = stargate::research::CachePolicy::lfu;
+    config.ram_cache_bytes = 128U * stargate::MiB;
+    auto lfu = stargate::research::simulate_trace(path, config);
+    CHECK(lfu && lfu.value().records == 5U);
+
+    const auto telemetry_path = root / "telemetry-trace.csv";
+    std::ofstream telemetry(telemetry_path);
+    telemetry << "token,layer,expert,size_bytes,routing_weight,tier,hit,bytes_read,io_ms\n"
+              << "0,0,1,12MiB,0.2,nvme,0,12582912,1.5\n";
+    telemetry.close();
+    auto telemetry_report = stargate::research::simulate_trace(telemetry_path, config);
+    CHECK(telemetry_report && telemetry_report.value().records == 1U);
+    const auto malformed_telemetry_path = root / "malformed-telemetry-trace.csv";
+    std::ofstream malformed_telemetry(malformed_telemetry_path);
+    malformed_telemetry << "# actual trace\n"
+                        << "token,layer,expert,size_bytes,routing_weight,tier,hit,bytes_read,io_ms\n"
+                        << "0,0,1,12MiB,0.2,ram,1,12582912,1.5\n";
+    malformed_telemetry.close();
+    CHECK(!stargate::research::simulate_trace(malformed_telemetry_path, config));
 }
 
 

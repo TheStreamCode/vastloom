@@ -1,6 +1,7 @@
 # M6 DeepSeek V4 Flash tokenizer validation
 
-Validation date: 2026-08-09  
+Validation date: 2026-08-09
+
 Implementation commit: `c815fdb`
 
 ## Scope

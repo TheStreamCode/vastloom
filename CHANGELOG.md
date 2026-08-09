@@ -1,5 +1,14 @@
 # Changelog
 
+## Unreleased
+
+- Added a bounded JSON parser and defensive Safetensors catalog/reader.
+- Added a 300 GiB-reserve model store, immutable atomic Hugging Face importer,
+  and host-derived real-model runtime policy.
+- Added Windows process memory Job Object support and live commit/headroom checks
+  for real-model execution paths.
+- Added `store-info`, `runtime-policy`, and Safetensors-aware `inspect` commands.
+
 ## 0.2.0-alpha.2 — 2026-08-09
 
 - Added the first native end-to-end token-generation path.

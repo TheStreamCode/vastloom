@@ -12,6 +12,11 @@ model-memory hierarchy** instead of relying on uncontrolled operating-system swa
 > it validates the runtime path but is not a general-purpose LLM. DeepSeek V4 Flash,
 > CUDA and NVMe expert streaming are not implemented yet.
 
+The development branch after alpha.2 also contains a bounded Safetensors inspector,
+an immutable external model store and a pinned importer for the first real-model
+target. These are storage/metadata foundations only; real SmolLM2 generation is not
+claimed until its native adapter passes reference parity.
+
 ## Reference target
 
 The first consumer reference machine is:
@@ -221,12 +226,14 @@ stargate chat MODEL_OR_MANIFEST
 stargate model-info MODEL_OR_MANIFEST
 stargate self-test MODEL_OR_MANIFEST
 stargate doctor
-stargate inspect MANIFEST
+stargate inspect MANIFEST_OR_SAFETENSORS
 stargate verify MANIFEST [--full]
 stargate plan MANIFEST
 stargate trace-sim TRACE.csv
 stargate io-smoke FILE
-stargate store-init PATH
+stargate store-init PATH [--reserve 300GiB]
+stargate store-info PATH [--reserve 300GiB]
+stargate runtime-policy [--storage PATH] [--json]
 stargate heartbeat-write PATH
 stargate version
 ```

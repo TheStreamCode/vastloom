@@ -9,6 +9,7 @@
 #include "vastloom/core/bytes.hpp"
 #include "vastloom/core/status.hpp"
 #include "vastloom/inference/deepseek_v4_gguf.hpp"
+#include "vastloom/model/bound_range_loader.hpp"
 #include "vastloom/model/range_artifact.hpp"
 
 namespace vastloom::inference {
@@ -50,6 +51,19 @@ bind_deepseek_v4_trunk_range_artifact(
     const DeepseekV4GgufCatalogReport& report,
     const DeepseekV4LayerProbePlan& plan,
     const DeepseekV4GgufCheckpointSpec& checkpoint_spec);
+
+[[nodiscard]] Result<std::string> deepseek_v4_bound_trunk_range_logical_id(
+    const DeepseekV4TrunkArtifactBinding& binding,
+    std::size_t range_index);
+
+// Revalidates the selected binding identity and loads exactly one local range through a governed
+// RAM transaction. The in-memory bytes are hashed again before RAM_READY is published.
+[[nodiscard]] Result<model::LoadedBoundRange> load_deepseek_v4_bound_trunk_range(
+    const DeepseekV4TrunkArtifactBinding& binding,
+    std::size_t range_index,
+    model::ResidencyObject& residency,
+    safety::ResourceGovernor& governor,
+    const model::BoundRangeLoadOptions& options = {});
 
 [[nodiscard]] std::string to_json(const DeepseekV4TrunkArtifactBinding& binding);
 [[nodiscard]] std::string to_text(const DeepseekV4TrunkArtifactBinding& binding);

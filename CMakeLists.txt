@@ -87,9 +87,10 @@ add_library(vastloom_core STATIC
     src/io/bounded_io_pool.cpp
     src/io/device_io_counters.cpp
     src/io/process_io_counters.cpp
-    src/model/imported_checkpoint.cpp
+    src/model/bound_range_loader.cpp
     src/model/expert_loader.cpp
     src/model/gguf.cpp
+    src/model/imported_checkpoint.cpp
     src/model/layer_streaming.cpp
     src/model/manifest.cpp
     src/model/model_store.cpp

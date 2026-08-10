@@ -175,6 +175,48 @@ Result<DeepseekV4TrunkArtifactBinding> bind_deepseek_v4_trunk_range_artifact(
     }
 }
 
+Result<std::string> deepseek_v4_bound_trunk_range_logical_id(
+    const DeepseekV4TrunkArtifactBinding& binding,
+    std::size_t range_index) {
+    if (!binding.metadata_catalog_hashes_verified || !binding.local_range_hashes_verified ||
+        !binding.exact_source_binding_verified || binding.complete_checkpoint_verified ||
+        binding.execution_supported || binding.model_id.empty() || binding.revision.empty() ||
+        range_index >= binding.ranges.size()) {
+        return make_error(ErrorCode::integrity_error,
+                          "DeepSeek bound trunk load requires an exact non-executing binding",
+                          binding.artifact_root.string());
+    }
+    const auto& range = binding.ranges[range_index];
+    if (range.artifact_index != range_index || range.tensor_name.empty() ||
+        range.local_source.shard.empty() || range.local_source.offset != 0U ||
+        range.local_source.bytes == 0U ||
+        range.local_source.bytes != range.original_source.bytes ||
+        !util::is_sha256_hex(range.local_sha256)) {
+        return make_error(ErrorCode::integrity_error,
+                          "DeepSeek bound trunk local range identity is invalid",
+                          range.tensor_name);
+    }
+    return "deepseek/" + binding.model_id + "/layer/" +
+           std::to_string(binding.layer) + "/trunk-range/" +
+           std::to_string(range_index) + "/" + range.tensor_name;
+}
+
+Result<model::LoadedBoundRange> load_deepseek_v4_bound_trunk_range(
+    const DeepseekV4TrunkArtifactBinding& binding,
+    std::size_t range_index,
+    model::ResidencyObject& residency,
+    safety::ResourceGovernor& governor,
+    const model::BoundRangeLoadOptions& options) {
+    auto logical_id = deepseek_v4_bound_trunk_range_logical_id(binding, range_index);
+    if (!logical_id) return logical_id.error();
+    const auto& range = binding.ranges[range_index];
+    return model::load_bound_range(
+        model::BoundRangeIdentity{logical_id.take_value(), range.local_source, range.local_sha256},
+        residency,
+        governor,
+        options);
+}
+
 std::string to_json(const DeepseekV4TrunkArtifactBinding& binding) {
     std::ostringstream output;
     output << "{\"ok\":true,\"format\":\"vastloom.deepseek_v4.trunk_artifact_binding.v1\""

@@ -17,6 +17,7 @@
 namespace vastloom::model {
 
 class LoadedExpert;
+class LoadedBoundRange;
 class LoadedTensorTile;
 
 enum class ResidencyState : std::uint8_t {
@@ -79,6 +80,7 @@ public:
 
 private:
     friend class LoadedExpert;
+    friend class LoadedBoundRange;
     friend class LoadedTensorTile;
 
     ResidentByteBuffer(ResidencyUse lease, std::vector<std::byte> bytes)

@@ -9,13 +9,18 @@
 #include <optional>
 #include <sstream>
 #include <span>
+#include <stdexcept>
 #include <string>
 #include <vector>
 
 #include "vastloom/inference/deepseek_v4_gguf.hpp"
 #include "vastloom/inference/deepseek_v4_range_artifact.hpp"
+#include "vastloom/inference/ggml_quantization.hpp"
+#include "vastloom/model/bound_range_loader.hpp"
 #include "vastloom/model/range_artifact.hpp"
+#include "vastloom/model/residency.hpp"
 #include "vastloom/model/tensor_catalog.hpp"
+#include "vastloom/safety/resource_governor.hpp"
 #include "vastloom/util/sha256.hpp"
 
 namespace {
@@ -129,6 +134,10 @@ Fixture make_fixture(const std::filesystem::path& root) {
     for (std::size_t index = 0U; index < source_bytes.size(); ++index) {
         source_bytes[index] = static_cast<std::byte>(index);
     }
+    source_bytes[36U] = std::byte{0x00U};
+    source_bytes[37U] = std::byte{0x00U};
+    source_bytes[38U] = std::byte{0xc0U};
+    source_bytes[39U] = std::byte{0x3fU};
     write_bytes(fixture.source, source_bytes);
     auto source_hash = vastloom::util::sha256_file(fixture.source);
     CHECK(source_hash);
@@ -142,6 +151,9 @@ Fixture make_fixture(const std::filesystem::path& root) {
         {"blk.0.attn.weight", vastloom::model::TensorDType::f32, {10U},
          vastloom::model::TensorRole::attention, 0U, std::nullopt, false,
          {fixture.source, 4U, 10U}, 0U},
+        {"blk.0.ffn_norm.weight", vastloom::model::TensorDType::f32, {1U},
+         vastloom::model::TensorRole::normalization, 0U, std::nullopt, false,
+         {fixture.source, 36U, 4U}, 0U},
         {"blk.0.ffn_gate_exps.weight.expert.0", vastloom::model::TensorDType::f32, {4U},
          vastloom::model::TensorRole::routed_expert, 0U, 0U, false,
          {fixture.source, 20U, 4U}, 0U},
@@ -189,18 +201,18 @@ Fixture make_fixture(const std::filesystem::path& root) {
 
 void test_range_artifact(const std::filesystem::path& root) {
     auto fixture = make_fixture(root);
-    CHECK(fixture.plan.trunk_ranges.size() == 3U && fixture.plan.trunk_bytes == 10U);
+    CHECK(fixture.plan.trunk_ranges.size() == 4U && fixture.plan.trunk_bytes == 14U);
 
     auto verified = vastloom::model::verify_range_artifact(fixture.artifact);
     CHECK(verified && verified.value().full_hash_verified &&
-          verified.value().ranges.size() == 3U && verified.value().payload_bytes == 10U &&
+          verified.value().ranges.size() == 4U && verified.value().payload_bytes == 14U &&
           !verified.value().complete_checkpoint_verified &&
           !verified.value().execution_supported);
     if (!verified) return;
     auto binding = vastloom::inference::bind_deepseek_v4_trunk_range_artifact(
         verified.value(), fixture.report, fixture.plan, fixture.spec);
     CHECK(binding && binding.value().exact_source_binding_verified &&
-          binding.value().local_range_hashes_verified && binding.value().ranges.size() == 3U &&
+          binding.value().local_range_hashes_verified && binding.value().ranges.size() == 4U &&
           binding.value().maximum_local_range_bytes == 4U &&
           binding.value().ranges.front().local_source.offset == 0U &&
           binding.value().ranges.front().local_source.bytes == 4U &&
@@ -210,6 +222,155 @@ void test_range_artifact(const std::filesystem::path& root) {
                   "\"exact_source_binding_verified\":true") != std::string::npos);
         CHECK(vastloom::inference::to_text(binding.value()).find(
                   "Execution:            unsupported") != std::string::npos);
+
+        const auto range_index = binding.value().ranges.size() - 1U;
+        auto logical_id = vastloom::inference::deepseek_v4_bound_trunk_range_logical_id(
+            binding.value(), range_index);
+        CHECK(logical_id);
+        vastloom::safety::ResourceLimits limits;
+        limits.host_memory_hard_limit = 8U;
+        limits.ram_hard_limit = 4U;
+        limits.vram_hard_limit = 4U;
+        limits.staging_hard_limit = 4U;
+        limits.scratch_hard_limit = 4U;
+        vastloom::safety::ResourceGovernor governor(limits);
+        auto residency = logical_id
+            ? vastloom::model::ResidencyObject::create(logical_id.value(), 4U)
+            : vastloom::Result<vastloom::model::ResidencyObject>(
+                  vastloom::make_error(vastloom::ErrorCode::internal_error, "missing id"));
+        CHECK(residency);
+        if (residency) {
+            std::shared_ptr<const vastloom::model::ResidentByteBuffer> retained;
+            {
+                vastloom::model::BoundRangeLoadOptions load_options;
+                load_options.max_range_bytes = 4U;
+                load_options.measure_process_io = false;
+                auto loaded = vastloom::inference::load_deepseek_v4_bound_trunk_range(
+                    binding.value(), range_index, residency.value(), governor, load_options);
+                CHECK(loaded && loaded.value().bytes().size() == 4U &&
+                      loaded.value().telemetry().logical_bytes == 4U);
+                if (loaded) {
+                    std::array<float, 1U> input{2.0F};
+                    std::array<float, 1U> scratch{};
+                    std::array<float, 1U> output{-1.0F};
+                    CHECK(vastloom::inference::matvec_ggml_f32_transactional(
+                        vastloom::inference::kGgmlTypeF32,
+                        loaded.value().bytes(), 1U, 1U, input, scratch, output));
+                    CHECK(output[0] == 3.0F);
+                    retained = loaded.value().retain_buffer();
+                }
+            }
+            auto ready = residency.value().snapshot();
+            CHECK(ready && ready.value().state == vastloom::model::ResidencyState::ram_ready &&
+                  ready.value().active_uses == 1U &&
+                  ready.value().ram_reserved_bytes == 4U &&
+                  ready.value().staging_reserved_bytes == 0U);
+            CHECK(!residency.value().evict_ram());
+            retained.reset();
+            CHECK(residency.value().evict_ram());
+            CHECK(governor.snapshot().reserved[0] == 0U &&
+                  governor.snapshot().reserved[2] == 0U);
+        }
+
+        vastloom::safety::ResourceLimits small_limits = limits;
+        small_limits.host_memory_hard_limit = 7U;
+        vastloom::safety::ResourceGovernor small_governor(small_limits);
+        auto refused_residency = vastloom::model::ResidencyObject::create(
+            logical_id.value(), 4U);
+        vastloom::model::BoundRangeLoadOptions load_options;
+        load_options.max_range_bytes = 4U;
+        load_options.measure_process_io = false;
+        CHECK(refused_residency &&
+              !vastloom::inference::load_deepseek_v4_bound_trunk_range(
+                  binding.value(), range_index, refused_residency.value(), small_governor,
+                  load_options));
+        CHECK(small_governor.snapshot().reserved[0] == 0U &&
+              small_governor.snapshot().reserved[2] == 0U);
+
+        auto oversized_options = load_options;
+        oversized_options.max_range_bytes =
+            vastloom::model::kMaximumBoundRangeLoadBytes + 1U;
+        auto oversized_residency = vastloom::model::ResidencyObject::create(
+            logical_id.value(), 4U);
+        CHECK(oversized_residency &&
+              !vastloom::inference::load_deepseek_v4_bound_trunk_range(
+                  binding.value(), range_index, oversized_residency.value(), governor,
+                  oversized_options));
+        auto wrong_identity_residency = vastloom::model::ResidencyObject::create(
+            "deepseek/wrong-range", 4U);
+        CHECK(wrong_identity_residency &&
+              !vastloom::inference::load_deepseek_v4_bound_trunk_range(
+                  binding.value(), range_index, wrong_identity_residency.value(), governor,
+                  load_options));
+
+        auto cancelled_residency = vastloom::model::ResidencyObject::create(
+            logical_id.value(), 4U);
+        auto cancelled_options = load_options;
+        cancelled_options.cancelled = [] { return true; };
+        CHECK(cancelled_residency &&
+              !vastloom::inference::load_deepseek_v4_bound_trunk_range(
+                  binding.value(), range_index, cancelled_residency.value(), governor,
+                  cancelled_options));
+        CHECK(cancelled_residency && cancelled_residency.value().snapshot() &&
+              cancelled_residency.value().snapshot().value().state ==
+                  vastloom::model::ResidencyState::nvme);
+
+        auto callback_failure_residency = vastloom::model::ResidencyObject::create(
+            logical_id.value(), 4U);
+        auto callback_failure_options = load_options;
+        callback_failure_options.cancelled = []() -> bool {
+            throw std::runtime_error("synthetic cancellation callback fault");
+        };
+        auto callback_failure = callback_failure_residency
+            ? vastloom::inference::load_deepseek_v4_bound_trunk_range(
+                  binding.value(), range_index, callback_failure_residency.value(), governor,
+                  callback_failure_options)
+            : vastloom::Result<vastloom::model::LoadedBoundRange>(
+                  vastloom::make_error(vastloom::ErrorCode::internal_error, "missing residency"));
+        CHECK(!callback_failure &&
+              callback_failure.error().code == vastloom::ErrorCode::internal_error &&
+              callback_failure_residency && callback_failure_residency.value().snapshot() &&
+              callback_failure_residency.value().snapshot().value().state ==
+                  vastloom::model::ResidencyState::nvme);
+
+        unsigned cancellation_checks = 0U;
+        auto late_options = load_options;
+        late_options.cancelled = [&] { return ++cancellation_checks >= 2U; };
+        auto late_residency = vastloom::model::ResidencyObject::create(logical_id.value(), 4U);
+        CHECK(late_residency &&
+              !vastloom::inference::load_deepseek_v4_bound_trunk_range(
+                  binding.value(), range_index, late_residency.value(), governor, late_options));
+        CHECK(late_residency && late_residency.value().snapshot() &&
+              late_residency.value().snapshot().value().state ==
+                  vastloom::model::ResidencyState::failed &&
+              late_residency.value().snapshot().value().ram_reserved_bytes == 0U &&
+              late_residency.value().snapshot().value().staging_reserved_bytes == 0U);
+
+        const auto local_path = binding.value().ranges[range_index].local_source.shard;
+        const auto original_payload = read_range(fixture.source, 36U, 4U);
+        auto corrupted_payload = original_payload;
+        corrupted_payload[0] ^= std::byte{1U};
+        write_bytes(local_path, corrupted_payload);
+        auto corrupt_residency = vastloom::model::ResidencyObject::create(logical_id.value(), 4U);
+        CHECK(corrupt_residency &&
+              !vastloom::inference::load_deepseek_v4_bound_trunk_range(
+                  binding.value(), range_index, corrupt_residency.value(), governor,
+                  load_options));
+        CHECK(corrupt_residency && corrupt_residency.value().snapshot() &&
+              corrupt_residency.value().snapshot().value().state ==
+                  vastloom::model::ResidencyState::failed &&
+              governor.snapshot().reserved[0] == 0U && governor.snapshot().reserved[2] == 0U);
+        write_bytes(local_path, original_payload);
+
+        write_bytes(local_path, std::span<const std::byte>(original_payload).first(3U));
+        auto short_residency = vastloom::model::ResidencyObject::create(logical_id.value(), 4U);
+        CHECK(short_residency &&
+              !vastloom::inference::load_deepseek_v4_bound_trunk_range(
+                  binding.value(), range_index, short_residency.value(), governor, load_options));
+        CHECK(short_residency && short_residency.value().snapshot() &&
+              short_residency.value().snapshot().value().state ==
+                  vastloom::model::ResidencyState::nvme);
+        write_bytes(local_path, original_payload);
     }
     CHECK(vastloom::model::to_json(verified.value()).find(
               "\"local_range_hashes_verified\":true") != std::string::npos);
@@ -227,7 +388,7 @@ void test_range_artifact(const std::filesystem::path& root) {
     invalid_bounds.max_ranges = 0U;
     CHECK(!vastloom::model::verify_range_artifact(fixture.artifact, invalid_bounds));
     auto tiny_bound = quick_options;
-    tiny_bound.max_payload_bytes = 9U;
+    tiny_bound.max_payload_bytes = 13U;
     CHECK(!vastloom::model::verify_range_artifact(fixture.artifact, tiny_bound));
 
     const auto first_path = fixture.artifact / range_name(0U);
@@ -246,7 +407,7 @@ void test_range_artifact(const std::filesystem::path& root) {
     CHECK(!vastloom::model::verify_range_artifact(fixture.artifact));
     std::filesystem::remove(fixture.artifact / "ranges" / "extra.bin");
 
-    write_manifest(fixture, artifact_manifest(fixture, 32U));
+    write_manifest(fixture, artifact_manifest(fixture, 44U));
     auto shifted = vastloom::model::verify_range_artifact(fixture.artifact);
     CHECK(shifted);
     if (shifted) {

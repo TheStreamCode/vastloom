@@ -13,6 +13,16 @@ hardware, commands, measurements and limitations.
 
 ## Current report
 
+- [`M9_DEEPSEEK_ASYNC_COMPUTE_OVERLAP_VALIDATION.md`](M9_DEEPSEEK_ASYNC_COMPUTE_OVERLAP_VALIDATION.md) —
+  bounded selected-miss begin/acquire batches, deterministic reduction order, controlled positive
+  read-service/CPU-compute overlap, real-expert async ownership, abandoned-load accounting and
+  cross-platform sanitizer/compiler evidence without a physical-NVMe speed claim.
+- [`M9_DEEPSEEK_REAL_SELECTED_EXPERT_VALIDATION.md`](M9_DEEPSEEK_REAL_SELECTED_EXPERT_VALIDATION.md) —
+  canonical 0731 W1/W2/W3 catalog binding, one complete 6,488,064-byte real mixed-format expert,
+  governed cache miss/hit semantics and bit-identical ggml output.
+- [`M9_DEEPSEEK_SELECTED_EXPERT_STREAMING_VALIDATION.md`](M9_DEEPSEEK_SELECTED_EXPERT_STREAMING_VALIDATION.md) —
+  router-first selected-bundle acquisition, bounded synchronous RAM LRU behavior, exact logical
+  byte/hit/eviction telemetry and unchanged reduced packed-layer parity.
 - [`M9_DEEPSEEK_GOVERNED_LAYER_VALIDATION.md`](M9_DEEPSEEK_GOVERNED_LAYER_VALIDATION.md) —
   ownership-preserving resident buffers, 12 file-backed trunk tiles, four indivisible expert
   bundles, exact 5,364-byte Governor accounting, eviction interlocks, failure rollback and full

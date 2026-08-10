@@ -59,8 +59,12 @@ model conversion.
 > IDs and resolve only those complete file-backed bundles through a two-entry governed RAM LRU.
 > Three one-token steps prove a 2-miss load, a 2-hit reuse and a 2-eviction replacement while
 > preserving packed-oracle logits, routes, attention indices and transactional state.
+> An opt-in bounded batch now submits all selected misses, acquires each expert only at its
+> deterministic compute turn and preserves the same oracle while a controlled fixture records a
+> positive read-service/CPU-compute intersection. The real 6.49 MB expert passes that asynchronous
+> future/cache/kernel boundary too; a single real expert cannot by itself prove useful overlap.
 > The complete 82.54 GB payload has not been downloaded or executed; storage-format coverage is not a
-> complete DeepSeek layer/token path, generation or CUDA implementation.
+> complete DeepSeek layer/token path, physical-NVMe performance, generation or CUDA implementation.
 
 ## Why Vastloom exists
 
@@ -131,6 +135,8 @@ Its router-first bounded selected-expert execution is documented in the
 [`M9 selected-expert streaming report`](docs/reports/M9_DEEPSEEK_SELECTED_EXPERT_STREAMING_VALIDATION.md).
 The canonical real-expert catalog/cache/kernel bridge is documented in the
 [`M9 real selected-expert report`](docs/reports/M9_DEEPSEEK_REAL_SELECTED_EXPERT_VALIDATION.md).
+The bounded router-to-future-to-compute scheduler and controlled overlap result are documented in
+the [`M9 asynchronous overlap report`](docs/reports/M9_DEEPSEEK_ASYNC_COMPUTE_OVERLAP_VALIDATION.md).
 The pinned importer and immutable full-source admission boundary are documented in the
 [`M7 checkpoint-binding report`](docs/reports/M7_DEEPSEEK_GGUF_CHECKPOINT_BINDING_VALIDATION.md).
 Current and candidate model support is kept explicit in the
@@ -281,8 +287,12 @@ portability target, not a validated platform claim.
   selected complete bundles through a bounded synchronous RAM cache and emits exact access
   telemetry. Canonical 0731 GGUF identities can now feed one real IQ1_S/IQ3_XXS selected expert
   through that same cache/consumer boundary with exact miss/hit accounting and retained leases.
+  An optional one-to-four-worker batch submits all selected misses and acquires each result at its
+  fixed numerical compute turn. A controlled reduced fixture proves a positive read-service/
+  compute intersection without changing the oracle, and the real expert passes the same async
+  boundary. This is scheduling correctness, not a physical-device speed result.
   A verified complete official-payload layer/token consumer, target-verified speculative
-  generation, asynchronous overlap and CUDA remain future gates.
+  generation, useful official-payload overlap and CUDA remain future gates.
 - **Official 0731 GGUF catalog:** the separate Unsloth revision
   `fbbb5b93fb787c21338159b0af3318bb3f4d9768` now has a bounded GGUF v3 header reader and
   DeepSeek-specific packed-expert mapper. The reviewed `UD-IQ1_S` split exposes 1,328 physical
@@ -332,7 +342,10 @@ portability target, not a validated platform claim.
   fixed-capacity asynchronous pool. The full gate/up/down path is now exercised on one real
   DeepSeek 0731 expert, including canonical catalog binding and the bounded cache/consumer bridge.
   The reduced DeepSeek layer consumes selected file-backed fixture bundles through the same cache
-  abstraction; complete verified 0731 shards and an official mixed-format layer are not connected.
+  abstraction. Its optional async batch overlaps later read service with earlier CPU expert
+  compute in a controlled fixture while preserving reduction order; successful abandoned reads
+  are drained and counted as wasted prefetch. Complete verified 0731 shards and an official
+  mixed-format layer are not connected.
 - **Governed trunk tile:** one non-routed source tile is identity-checked against the catalog,
   destination and staging are reserved before allocation, metadata-only catalogs are refused and
   an RAII lease protects the resulting buffer through use/eviction.
@@ -739,13 +752,14 @@ It currently has:
   selected-expert cache/kernel bridge, but no official-payload complete quantized layer/token,
   SIMD/fused production kernel or CUDA path;
 - complete metadata-derived trunk plans and storage-type coverage plus a governed
-  tile/expert-to-DeepSeek fixture consumer and reduced router-first bounded expert cache, but no
-  official trunk payload read, asynchronous production layer scheduler or full-model loop;
+  tile/expert-to-DeepSeek fixture consumer and reduced router-first bounded expert cache with an
+  opt-in single-owner asynchronous batch, but no official trunk payload read or full-model loop;
 - no VRAM expert tier or pinned host buffers; direct/unbuffered I/O is currently an
   opt-in OLMoE measurement protocol, not the production path for every adapter;
 - OLMoE currently exposes final-logit probes and route telemetry, not decoding/chat;
-- expert compute remains a synchronous CPU reference implementation; the asynchronous
-  reader uses one or two bounded workers and defaults to ordinary buffered file I/O;
+- expert kernels remain scalar CPU reference implementations; the asynchronous selected-expert
+  scheduler uses one to four bounded workers, permits one active batch per cache and defaults to
+  ordinary buffered file I/O;
 - device counters and a repeatable OS-cache-bypass protocol are available where the
   checkpoint has an unambiguous local-device mapping, but whole-device deltas can include
   unrelated traffic and SSD temperature/power telemetry is not implemented;
@@ -768,11 +782,10 @@ merely SSD throughput. It is:
 
 The next technical sequence remains incremental:
 
-1. connect the bounded asynchronous loader to the now-validated canonical mixed-format
-   selected-expert bridge and measure useful expert-read/compute overlap without
-   changing authoritative reduction order;
-2. compose one complete mixed-format layer/token probe from bounded trunk tiles plus routed real
+1. compose one complete mixed-format layer/token probe from bounded trunk tiles plus routed real
    experts and require exact logits/routes before scaling beyond pinned slices;
+2. measure useful physical-device expert-read/compute overlap on that bounded probe with declared
+   cache state and exact logical, process-visible and device bytes;
 3. only after explicit approval and a fresh capacity check, import and fully hash the real pinned
    shards and run the same bounded layer probe on official source ranges;
 4. connect a target-verified MTP decoding loop, then add CUDA dense, attention, router and packed

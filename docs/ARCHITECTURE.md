@@ -372,19 +372,32 @@ indivisible three-matrix expert bundles, then destroys every loader wrapper befo
 16 residency objects remain non-evictable until the graph releases its final reference. This
 eliminates payload copies at the loader/graph boundary.
 
-The next reduced-fixture slice now stops after authoritative routing, deduplicates expert IDs and
+The router-first reduced slice stops after authoritative routing, deduplicates expert IDs and
 calls a block-scoped provider before expert compute. The reusable synchronous baseline owns a
 fixed-capacity RAM LRU of complete three-matrix bundles. Misses execute the existing governed
 file loader, hits retain the same immutable backing, and eviction is refused while an inference
-result still shares that buffer. The graph executes only the returned packed W1/W2/W3 matrices
-and emits per-expert resident bytes, logical bytes read and hit state. An oversized selected set is
-rejected before the provider runs.
+result still shares that buffer. An optional asynchronous binding begins one bounded batch for the
+selected set, submits every miss to the fixed-worker pool, and acquires expert N only immediately
+before its fixed numerical compute turn. Later read service can therefore overlap earlier CPU
+expert compute without changing router choice or accumulation order. The graph executes only the
+returned packed W1/W2/W3 matrices and emits per-expert resident bytes, logical bytes read, hit
+state, request sequence, load/wait/compute timing and the intersection between prior compute
+windows and each asynchronous service interval. An oversized selected set is rejected before the
+provider runs.
+
+The current cache allows one asynchronous batch owner. A second batch, synchronous resolution or
+clear fails closed while it is active. Destruction drains unacquired futures, evicts unpublished
+RAM and counts every successfully completed unused load as wasted prefetch. Queue capacity must
+hold the entire configured maximum selected set, workers remain capped at four and every request
+is independently reserved through the Governor before enqueue.
 
 This closes router-first acquisition for the deterministic Q8_0 layer. A second adapter now maps
 canonical official 0731 GGUF expert identities to strict W1/W2/W3 descriptors and sends one
 extracted real IQ1_S/IQ3_XXS bundle through the same cache/consumer boundary. It does not compose
-that expert with official trunk payload. Asynchronous reads, compute/I/O overlap, VRAM placement
-and production prefill chunking remain separate gates.
+that expert with official trunk payload. The real bundle also passes the asynchronous
+future/cache/kernel boundary, while a controlled two-expert reduced fixture proves positive
+read-service/CPU-compute overlap with exact oracle parity. Physical-NVMe performance, VRAM
+placement and production prefill chunking remain separate gates.
 
 ```text
 pinned importer manifest + exact object identities
@@ -411,11 +424,13 @@ fixed 256-float scratch and performs scalar FP64-accumulated matvecs. The trunk 
 the same bounded/transactional rules for Q8_0, Q5_K, Q6_K, BF16 and F32, while I32 remains a
 typed lookup-table decoder.
 One exact DeepSeek 0731 layer-0/expert-0 gate/up/down bundle is loaded through the shared bounded
-worker and `RAM_READY` lease, then resolved through a one-entry router-first RAM cache. Canonical
+worker and `RAM_READY` lease, then resolved through a one-entry router-first RAM cache. The same
+bundle also passes the optional asynchronous begin/acquire path. Canonical
 GGUF names determine W1/W2/W3 instead of test-defined slice positions. The mixed-format bridge
 executes FP32 SwiGLU and matches pinned ggml bit for bit across all 4,096 final outputs; a second
 resolution is a zero-read cache hit. The test uses three hash-pinned extracted ranges rather than
-an unverified full shard, so this is not registered as a generic GGUF model execution backend.
+an unverified full shard, so this is not registered as a generic GGUF model execution backend or
+an overlap benchmark.
 
 ```text
 verified gate/up/down ranges (6,488,064 bytes)
@@ -469,9 +484,12 @@ RAII use lease. A transfer lease additionally gives one worker exclusive ownersh
 read/copy transaction and prevents concurrent failure cleanup from freeing its buffers. The
 synchronous oracle and a fixed-worker, fixed-capacity asynchronous pool both connect canonical
 ranges to physical packed RAM buffers, destroy scratch before ready-state publication and keep a
-use lease alive until the buffer is destroyed. The asynchronous result exposes queue, service and
-total timing so a future execution loop can overlap expert N+1 with compute on expert N. Actual
-compute coupling, shared direct I/O and CUDA copy events are not connected yet.
+use lease alive until the buffer is destroyed. The router-first reduced execution loop now uses
+those futures: it submits the selected misses as one bounded batch, waits at each expert's compute
+boundary and records queue, service, total, acquire-wait, compute and overlap timing. A controlled
+fixture proves positive overlap without changing its oracle; one real expert proves the same
+future/cache/kernel ownership path. Shared direct I/O, physical-device overlap evidence and CUDA
+copy events are not connected yet.
 
 The layer-tile loader uses the same residency contract for one non-routed source range. It checks
 the planned identity against the immutable catalog, reserves both destination and staging before

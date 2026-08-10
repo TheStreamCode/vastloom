@@ -83,6 +83,14 @@
   the second is a zero-read hit, retained leases block premature eviction, malformed mixed-format
   descriptors publish no output and every Governor reservation returns to zero. This connects one
   real selected expert to the cache/kernel boundary, not a complete DeepSeek layer or generation.
+- Connected selected DeepSeek misses to a bounded asynchronous batch/acquire scheduler. The
+  reduced graph submits every deduplicated complete bundle, waits only at that expert's fixed
+  compute turn and preserves numerical reduction order while recording load, wait, compute and
+  read-service/compute-intersection timing. A controlled fixture proves positive overlap with
+  exact oracle parity; the real 6,488,064-byte expert passes the same future/cache/kernel boundary.
+  One active batch per cache, full-request queue capacity, drain-on-abandon and exact successful
+  wasted-prefetch accounting keep this correctness slice bounded. This is not a physical-NVMe,
+  complete-layer or throughput result.
 - Documented the tested platform boundary explicitly: Windows/MSVC and Linux GCC/Clang CPU paths
   are validated, while macOS and Metal remain unvalidated targets.
 - Added a public reference-PC admission gate: a model must fit one complete expert plus the

@@ -66,6 +66,14 @@ second capacity check rolls those reservations back if another submitter filled 
 shutdown began. Shutdown fails queued requests, completes their futures, releases their
 reservations and joins any already-running bounded transaction.
 
+The router-first DeepSeek cache further requires asynchronous queue capacity to hold its entire
+configured maximum selected-expert set. It permits one active batch owner: another batch,
+synchronous resolution and clearing fail closed until release. Every miss is submitted only after
+the selected set and eviction plan validate; acquisition waits at the corresponding deterministic
+compute turn. Destruction drains any unacquired futures, evicts unpublished RAM and counts
+successfully completed unused reads as abandoned loads and wasted-prefetch bytes. A telemetry
+overflow makes later requests fail closed rather than wrapping safety/accounting counters.
+
 ## Headroom
 
 The planner creates separate reserves for:
@@ -120,9 +128,10 @@ retains Governor-owned trunk/expert buffers and blocks eviction. Its router-firs
 only the two unique complete bundles selected by each one-token route through a two-entry RAM
 cache. Requests above the bound, insufficient reservations and eviction of an in-flight bundle are
 rejected. One extracted real 0731 expert now also traverses strict catalog binding, the same
-cache boundary and the mixed-format scalar consumer; the complete 6,488,064-byte bundle remains
-indivisible and lease-protected. This does not make the absent complete official 0731 payload
-executable and does not validate a production asynchronous or VRAM path.
+cache boundary and the mixed-format scalar consumer through both synchronous and asynchronous
+resolution; the complete 6,488,064-byte bundle remains indivisible and lease-protected. A
+controlled reduced fixture proves scheduling overlap, but this does not make the absent complete
+official 0731 payload executable or validate physical-NVMe performance or a VRAM path.
 
 ## State machine
 

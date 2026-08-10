@@ -474,7 +474,8 @@ Result<CatalogSummary> validate_headers(const std::filesystem::path& root,
                           root.string());
     }
     for (const auto& expert : summary.logical_catalog.experts) {
-        if (expert.bytes != kBytesPerExpert || expert.tensor_indices.size() != 6U || expert.read_ranges.empty()) {
+        if (expert.bytes != kBytesPerExpert || expert.tensor_indices.size() != 6U ||
+            expert.tensor_slices.size() != 6U || expert.read_ranges.empty()) {
             return make_error(ErrorCode::integrity_error,
                               "DeepSeek logical expert bundle differs from the pinned revision",
                               root.string());

@@ -280,6 +280,7 @@ Result<std::vector<ResidencyObject>> make_expert_residencies(const LogicalTensor
         std::size_t range_count = 0U;
         for (const auto& expert : catalog.experts) {
             if (expert.bytes == 0U || expert.tensor_indices.empty() || expert.read_ranges.empty() ||
+                expert.tensor_slices.size() != expert.tensor_indices.size() ||
                 expert.bytes > std::numeric_limits<ByteCount>::max() - total ||
                 range_count > std::numeric_limits<std::size_t>::max() - expert.read_ranges.size()) {
                 return make_error(ErrorCode::invalid_format,

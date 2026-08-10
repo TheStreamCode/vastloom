@@ -73,6 +73,7 @@ add_library(vastloom_core STATIC
     src/io/device_io_counters.cpp
     src/io/process_io_counters.cpp
     src/model/imported_checkpoint.cpp
+    src/model/expert_loader.cpp
     src/model/manifest.cpp
     src/model/model_store.cpp
     src/model/residency.cpp

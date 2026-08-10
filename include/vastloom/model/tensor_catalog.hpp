@@ -33,6 +33,12 @@ struct TensorSourceRange {
     ByteCount bytes{0};
 };
 
+struct ExpertTensorSlice {
+    std::size_t tensor_index{0};
+    ByteCount packed_offset{0};
+    ByteCount bytes{0};
+};
+
 struct LogicalTensorDescriptor {
     std::string name;
     TensorDType dtype{TensorDType::f32};
@@ -51,6 +57,7 @@ struct ExpertBundle {
     ByteCount bytes{0};
     std::vector<std::size_t> tensor_indices;
     std::vector<TensorSourceRange> read_ranges;
+    std::vector<ExpertTensorSlice> tensor_slices;
 };
 
 struct LogicalTensorCatalog {

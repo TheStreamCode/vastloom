@@ -9,6 +9,7 @@
 #include <functional>
 #include <future>
 #include <mutex>
+#include <span>
 #include <string>
 #include <string_view>
 #include <thread>
@@ -27,6 +28,9 @@ enum class IoCacheMode : std::uint8_t {
 
 [[nodiscard]] Result<IoCacheMode> parse_io_cache_mode(std::string_view value);
 [[nodiscard]] std::string_view to_string(IoCacheMode mode) noexcept;
+[[nodiscard]] Result<void> read_buffered_range_into(const std::filesystem::path& path,
+                                                     ByteCount offset,
+                                                     std::span<std::byte> destination);
 
 enum class IoFaultKind : std::uint8_t {
     none,

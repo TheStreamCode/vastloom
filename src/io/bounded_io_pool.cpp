@@ -231,6 +231,39 @@ std::string_view to_string(IoCacheMode mode) noexcept {
     return "unknown";
 }
 
+Result<void> read_buffered_range_into(const std::filesystem::path& path,
+                                      ByteCount offset,
+                                      std::span<std::byte> destination) {
+    if (path.empty() || destination.empty()) {
+        return make_error(ErrorCode::invalid_argument, "Buffered range read requires a path and destination");
+    }
+    const ByteCount bytes = static_cast<ByteCount>(destination.size());
+    if (offset > std::numeric_limits<ByteCount>::max() - bytes ||
+        destination.size() > static_cast<std::size_t>(std::numeric_limits<std::streamsize>::max()) ||
+        offset > static_cast<ByteCount>(std::numeric_limits<std::streamoff>::max())) {
+        return make_error(ErrorCode::unsupported, "Buffered range read exceeds platform limits", path.string());
+    }
+    std::error_code error;
+    const bool symlink = std::filesystem::is_symlink(path, error);
+    if (error) {
+        return make_error(ErrorCode::io_error, "Unable to inspect buffered I/O source", path.string());
+    }
+    if (symlink) {
+        return make_error(ErrorCode::unsafe_path, "Refusing a symlinked buffered I/O source", path.string());
+    }
+    const auto file_size = std::filesystem::file_size(path, error);
+    if (error) return make_error(ErrorCode::io_error, "Unable to stat buffered I/O source", path.string());
+    if (offset > file_size || bytes > file_size - offset) {
+        return make_error(ErrorCode::invalid_argument, "Buffered range read exceeds file bounds", path.string());
+    }
+    auto read = read_file_range(path, offset, destination, destination.size(), IoCacheMode::buffered);
+    if (!read) return read.error();
+    if (read.value() != destination.size()) {
+        return make_error(ErrorCode::io_error, "Short buffered range read", path.string());
+    }
+    return {};
+}
+
 BoundedIoPool::BoundedIoPool(IoPoolOptions options, safety::ResourceGovernor& governor)
     : options_(options), governor_(governor) {
     options_.workers = std::max(1U, options_.workers);

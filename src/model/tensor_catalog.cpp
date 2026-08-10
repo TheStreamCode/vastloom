@@ -83,7 +83,7 @@ Result<void> finalize_catalog(LogicalTensorCatalog& catalog,
 
         const ExpertKey key{tensor.speculative, *tensor.layer, *tensor.expert};
         auto [iterator, inserted] = bundles.try_emplace(
-            key, ExpertBundle{*tensor.layer, *tensor.expert, tensor.speculative, 0U, {}, {}});
+            key, ExpertBundle{*tensor.layer, *tensor.expert, tensor.speculative, 0U, {}, {}, {}});
         if (inserted && bundles.size() > max_experts) {
             return make_error(ErrorCode::resource_exhausted,
                               "Logical tensor catalog exceeds the configured expert limit",
@@ -132,6 +132,35 @@ Result<void> finalize_catalog(LogicalTensorCatalog& catalog,
                               catalog.model_id);
         }
         read_range_count += merged.size();
+        ByteCount packed_base = 0U;
+        bundle.tensor_slices.reserve(bundle.tensor_indices.size());
+        for (const auto tensor_index : bundle.tensor_indices) {
+            const auto& source = catalog.tensors[tensor_index].source;
+            ByteCount range_base = 0U;
+            bool found = false;
+            for (const auto& range : merged) {
+                if (source.shard == range.shard && source.offset >= range.offset &&
+                    source.offset - range.offset <= range.bytes &&
+                    source.bytes <= range.bytes - (source.offset - range.offset)) {
+                    bundle.tensor_slices.push_back(ExpertTensorSlice{
+                        tensor_index, range_base + (source.offset - range.offset), source.bytes});
+                    found = true;
+                    break;
+                }
+                range_base += range.bytes;
+            }
+            if (!found) {
+                return make_error(ErrorCode::internal_error,
+                                  "Logical expert tensor is outside its coalesced read ranges",
+                                  catalog.tensors[tensor_index].name);
+            }
+        }
+        for (const auto& range : merged) packed_base += range.bytes;
+        if (packed_base != bundle.bytes || bundle.tensor_slices.size() != bundle.tensor_indices.size()) {
+            return make_error(ErrorCode::internal_error,
+                              "Logical expert packed layout differs from its tensor identity",
+                              catalog.model_id);
+        }
         bundle.read_ranges = std::move(merged);
         finalized_bundles.push_back(std::move(bundle));
     }

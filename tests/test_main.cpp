@@ -26,6 +26,7 @@
 #include "vastloom/io/process_io_counters.hpp"
 #include "vastloom/model/manifest.hpp"
 #include "vastloom/model/imported_checkpoint.hpp"
+#include "vastloom/model/expert_loader.hpp"
 #include "vastloom/model/model_store.hpp"
 #include "vastloom/model/residency.hpp"
 #include "vastloom/model/safetensors.hpp"
@@ -213,10 +214,17 @@ void test_logical_tensor_catalog() {
         CHECK(catalog.experts[0].layer == 2U && catalog.experts[0].expert == 7U &&
               !catalog.experts[0].speculative && catalog.experts[0].bytes == 10U);
         CHECK(catalog.experts[0].tensor_indices.size() == 3U && catalog.experts[0].read_ranges.size() == 2U);
+        CHECK(catalog.experts[0].tensor_slices.size() == 3U);
         if (catalog.experts[0].read_ranges.size() == 2U) {
             CHECK(catalog.experts[0].read_ranges[0].shard == "shard-a" &&
                   catalog.experts[0].read_ranges[0].offset == 8U &&
                   catalog.experts[0].read_ranges[0].bytes == 8U);
+        }
+        if (catalog.experts[0].tensor_slices.size() == 3U) {
+            CHECK(catalog.experts[0].tensor_slices[0].tensor_index == 1U &&
+                  catalog.experts[0].tensor_slices[0].packed_offset == 0U &&
+                  catalog.experts[0].tensor_slices[1].packed_offset == 4U &&
+                  catalog.experts[0].tensor_slices[2].packed_offset == 8U);
         }
     }
     CHECK(vastloom::model::to_string(TensorRole::routed_expert) == "routed_expert");
@@ -396,6 +404,103 @@ void test_residency_state_machine() {
     CHECK(governor.snapshot().reserved[0] == 0U && governor.snapshot().reserved[1] == 0U &&
           governor.snapshot().reserved[2] == 0U);
     CHECK(vastloom::model::to_string(ResidencyState::copying_to_vram) == "COPYING_TO_VRAM");
+}
+
+void test_packed_expert_loader(const std::filesystem::path& root) {
+    const auto path = root / std::filesystem::path(std::u8string(u8"expert-àccènt.bin"));
+    {
+        std::ofstream output(path, std::ios::binary);
+        for (unsigned value = 0U; value < 32U; ++value) output.put(static_cast<char>(value));
+    }
+
+    vastloom::model::ExpertBundle bundle;
+    bundle.layer = 2U;
+    bundle.expert = 7U;
+    bundle.bytes = 10U;
+    bundle.tensor_indices = {1U, 2U};
+    bundle.read_ranges = {{path, 4U, 6U}, {path, 16U, 4U}};
+    bundle.tensor_slices = {{1U, 0U, 6U}, {2U, 6U, 4U}};
+
+    vastloom::safety::ResourceLimits limits;
+    limits.ram_hard_limit = 1U * vastloom::MiB;
+    limits.vram_hard_limit = 1U * vastloom::MiB;
+    limits.staging_hard_limit = 1U * vastloom::MiB;
+    limits.scratch_hard_limit = 1U * vastloom::MiB;
+    vastloom::safety::ResourceGovernor governor(limits);
+    auto residency = vastloom::model::ResidencyObject::create("test/layer/2/expert/7", bundle.bytes);
+    CHECK(residency);
+    if (!residency) return;
+
+    vastloom::model::ExpertLoadOptions options;
+    options.max_expert_bytes = 64U;
+    options.max_range_bytes = 32U;
+    options.max_ranges = 4U;
+    options.measure_process_io = false;
+    {
+        auto loaded = vastloom::model::load_expert_bundle(bundle, residency.value(), governor, options);
+        CHECK(loaded && loaded.value().bytes().size() == 10U);
+        if (loaded && loaded.value().bytes().size() == 10U) {
+            for (std::size_t index = 0U; index < 6U; ++index) {
+                CHECK(std::to_integer<unsigned char>(loaded.value().bytes()[index]) ==
+                      static_cast<unsigned char>(index + 4U));
+            }
+            for (std::size_t index = 0U; index < 4U; ++index) {
+                CHECK(std::to_integer<unsigned char>(loaded.value().bytes()[index + 6U]) ==
+                      static_cast<unsigned char>(index + 16U));
+            }
+            CHECK(loaded.value().telemetry().logical_bytes == 10U &&
+                  loaded.value().telemetry().range_count == 2U &&
+                  loaded.value().telemetry().elapsed_ms >= 0.0);
+            auto first_tensor = loaded.value().tensor(1U);
+            auto second_tensor = loaded.value().tensor(2U);
+            CHECK(first_tensor && first_tensor.value().size() == 6U &&
+                  std::to_integer<unsigned char>(first_tensor.value().front()) == 4U);
+            CHECK(second_tensor && second_tensor.value().size() == 4U &&
+                  std::to_integer<unsigned char>(second_tensor.value().front()) == 16U);
+            CHECK(!loaded.value().tensor(999U));
+        }
+        auto ready = residency.value().snapshot();
+        CHECK(ready && ready.value().state == vastloom::model::ResidencyState::ram_ready &&
+              ready.value().ram_reserved_bytes == 10U && ready.value().staging_reserved_bytes == 0U &&
+              ready.value().active_uses == 1U && !ready.value().evictable);
+        CHECK(!residency.value().evict_ram());
+    }
+    CHECK(residency.value().snapshot() && residency.value().snapshot().value().active_uses == 0U);
+    CHECK(residency.value().evict_ram());
+    CHECK(governor.snapshot().reserved[0] == 0U && governor.snapshot().reserved[2] == 0U);
+
+    auto limited_residency = vastloom::model::ResidencyObject::create("limited", bundle.bytes);
+    auto limited_options = options;
+    limited_options.max_expert_bytes = 9U;
+    CHECK(limited_residency &&
+          !vastloom::model::load_expert_bundle(bundle, limited_residency.value(), governor, limited_options));
+    CHECK(limited_residency && limited_residency.value().snapshot() &&
+          limited_residency.value().snapshot().value().state == vastloom::model::ResidencyState::nvme);
+
+    auto invalid_bundle = bundle;
+    invalid_bundle.read_ranges[1] = {path, 10U, 4U};
+    auto invalid_residency = vastloom::model::ResidencyObject::create("invalid", invalid_bundle.bytes);
+    CHECK(invalid_residency &&
+          !vastloom::model::load_expert_bundle(invalid_bundle, invalid_residency.value(), governor, options));
+
+    auto short_bundle = bundle;
+    short_bundle.read_ranges = {{path, 30U, 10U}};
+    auto short_residency = vastloom::model::ResidencyObject::create("short", short_bundle.bytes);
+    CHECK(short_residency &&
+          !vastloom::model::load_expert_bundle(short_bundle, short_residency.value(), governor, options));
+    CHECK(short_residency && short_residency.value().snapshot() &&
+          short_residency.value().snapshot().value().state == vastloom::model::ResidencyState::failed &&
+          short_residency.value().snapshot().value().ram_reserved_bytes == 0U &&
+          short_residency.value().snapshot().value().staging_reserved_bytes == 0U);
+
+    auto cancelled_residency = vastloom::model::ResidencyObject::create("cancelled", bundle.bytes);
+    auto cancelled_options = options;
+    cancelled_options.cancelled = [] { return true; };
+    CHECK(cancelled_residency &&
+          !vastloom::model::load_expert_bundle(bundle, cancelled_residency.value(), governor, cancelled_options));
+    CHECK(cancelled_residency && cancelled_residency.value().snapshot() &&
+          cancelled_residency.value().snapshot().value().state == vastloom::model::ResidencyState::failed);
+    CHECK(governor.snapshot().reserved[0] == 0U && governor.snapshot().reserved[2] == 0U);
 }
 
 void test_imported_checkpoint_and_llama_config(const std::filesystem::path& root) {
@@ -1818,6 +1923,7 @@ int main() {
     test_safetensors(root);
     test_logical_tensor_catalog();
     test_residency_state_machine();
+    test_packed_expert_loader(root);
     test_imported_checkpoint_and_llama_config(root);
     test_olmoe_config(root);
     test_deepseek_v4_config(root);

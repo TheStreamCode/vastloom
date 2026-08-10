@@ -54,6 +54,170 @@ Result<void> validate_binding(const DeepseekV4ExpertBundleBinding& binding,
 
 }  // namespace
 
+Result<std::vector<DeepseekV4ExpertBundleBinding>>
+deepseek_v4_make_gguf_expert_bindings(
+    const model::LogicalTensorCatalog& catalog,
+    std::uint32_t layer,
+    std::uint32_t expected_experts,
+    std::size_t hidden_width,
+    std::size_t intermediate_width,
+    std::size_t max_experts) {
+    if (catalog.model_id.empty() || catalog.revision.empty() || catalog.metadata_only ||
+        expected_experts == 0U || expected_experts > max_experts ||
+        hidden_width == 0U || intermediate_width == 0U) {
+        return make_error(ErrorCode::invalid_argument,
+                          "DeepSeek GGUF expert binding request is not executable",
+                          catalog.model_id);
+    }
+    try {
+        std::vector<DeepseekV4ExpertBundleBinding> result;
+        result.reserve(expected_experts);
+        for (const auto& bundle : catalog.experts) {
+            if (bundle.layer != layer || bundle.speculative) continue;
+            if (bundle.expert >= expected_experts || bundle.tensor_indices.size() != 3U ||
+                bundle.tensor_slices.size() != 3U) {
+                return make_error(ErrorCode::invalid_format,
+                                  "DeepSeek GGUF layer has an invalid expert bundle",
+                                  std::to_string(bundle.expert));
+            }
+
+            DeepseekV4ExpertBundleBinding binding;
+            binding.expert_id = bundle.expert;
+            binding.bundle = bundle;
+            std::array<bool, 3U> roles{};
+            const std::string prefix =
+                "blk." + std::to_string(layer) + ".ffn_";
+            const std::string suffix =
+                ".weight.expert." + std::to_string(bundle.expert);
+            for (const auto tensor_index : bundle.tensor_indices) {
+                if (tensor_index >= catalog.tensors.size()) {
+                    return make_error(ErrorCode::invalid_format,
+                                      "DeepSeek GGUF expert tensor index is out of range",
+                                      std::to_string(bundle.expert));
+                }
+                const auto& descriptor = catalog.tensors[tensor_index];
+                DeepseekV4ExpertWeight weight{};
+                std::size_t rows = 0U;
+                std::size_t logical_columns = 0U;
+                if (descriptor.name == prefix + "gate_exps" + suffix) {
+                    weight = DeepseekV4ExpertWeight::w1;
+                    rows = intermediate_width;
+                    logical_columns = hidden_width;
+                } else if (descriptor.name == prefix + "down_exps" + suffix) {
+                    weight = DeepseekV4ExpertWeight::w2;
+                    rows = hidden_width;
+                    logical_columns = intermediate_width;
+                } else if (descriptor.name == prefix + "up_exps" + suffix) {
+                    weight = DeepseekV4ExpertWeight::w3;
+                    rows = intermediate_width;
+                    logical_columns = hidden_width;
+                } else {
+                    return make_error(ErrorCode::invalid_format,
+                                      "DeepSeek GGUF expert tensor name is not canonical",
+                                      descriptor.name);
+                }
+                const auto role = static_cast<std::size_t>(weight);
+                if (roles[role] || descriptor.role != model::TensorRole::routed_expert ||
+                    descriptor.layer != layer || descriptor.expert != bundle.expert ||
+                    descriptor.speculative || descriptor.shape.size() != 2U ||
+                    !descriptor.ggml_type.has_value() ||
+                    descriptor.shape[0] >
+                        static_cast<std::uint64_t>(std::numeric_limits<std::size_t>::max()) ||
+                    descriptor.shape[1] != rows) {
+                    return make_error(ErrorCode::invalid_format,
+                                      "DeepSeek GGUF expert tensor metadata is inconsistent",
+                                      descriptor.name);
+                }
+                const auto storage_columns =
+                    static_cast<std::size_t>(descriptor.shape[0]);
+                if (storage_columns < logical_columns) {
+                    return make_error(ErrorCode::invalid_format,
+                                      "DeepSeek GGUF expert storage columns are truncated",
+                                      descriptor.name);
+                }
+                auto required = ggml_storage_bytes(
+                    *descriptor.ggml_type, rows, storage_columns);
+                if (!required || required.value() != descriptor.source.bytes) {
+                    return make_error(ErrorCode::integrity_error,
+                                      "DeepSeek GGUF expert encoded bytes do not match its shape",
+                                      descriptor.name);
+                }
+                roles[role] = true;
+                binding.matrices[role] = DeepseekV4ExpertMatrixBinding{
+                    weight, tensor_index, *descriptor.ggml_type, rows,
+                    logical_columns, storage_columns};
+            }
+            if (!std::all_of(roles.begin(), roles.end(), [](bool present) {
+                    return present;
+                })) {
+                return make_error(ErrorCode::invalid_format,
+                                  "DeepSeek GGUF expert bundle is incomplete",
+                                  std::to_string(bundle.expert));
+            }
+            DeepseekV4ExpertCacheOptions validation_options;
+            validation_options.load.max_expert_bytes =
+                std::numeric_limits<ByteCount>::max();
+            auto valid = validate_binding(binding, validation_options);
+            if (!valid) return valid.error();
+            result.push_back(std::move(binding));
+        }
+        std::sort(result.begin(), result.end(), [](const auto& left, const auto& right) {
+            return left.expert_id < right.expert_id;
+        });
+        if (result.size() != expected_experts) {
+            return make_error(ErrorCode::integrity_error,
+                              "DeepSeek GGUF layer has the wrong complete expert count",
+                              std::to_string(layer));
+        }
+        for (std::size_t expert = 0U; expert < result.size(); ++expert) {
+            if (result[expert].expert_id != expert) {
+                return make_error(ErrorCode::integrity_error,
+                                  "DeepSeek GGUF layer expert identities are not contiguous",
+                                  std::to_string(layer));
+            }
+        }
+        return result;
+    } catch (const std::bad_alloc&) {
+        return make_error(ErrorCode::resource_exhausted,
+                          "Unable to allocate DeepSeek GGUF expert bindings",
+                          catalog.model_id);
+    }
+}
+
+Result<void> deepseek_v4_execute_resolved_iq1_s_iq3_xxs_f32(
+    const DeepseekV4ResolvedExpert& expert,
+    std::span<const float> input,
+    RoutedExpertScratch scratch,
+    std::span<float> output,
+    const QuantizedKernelLimits& limits) {
+    const std::size_t intermediate_width = scratch.gate.size();
+    if (expert.w1.ggml_type != kGgmlTypeIq1S ||
+        expert.w3.ggml_type != kGgmlTypeIq1S ||
+        expert.w2.ggml_type != kGgmlTypeIq3Xxs || input.empty() || output.empty() ||
+        input.size() != output.size() || scratch.up.size() != intermediate_width ||
+        scratch.down.size() != output.size() ||
+        expert.w1.rows != intermediate_width ||
+        expert.w3.rows != intermediate_width || expert.w2.rows != output.size() ||
+        expert.w1.logical_columns != input.size() ||
+        expert.w3.logical_columns != input.size() ||
+        expert.w2.logical_columns != intermediate_width ||
+        expert.w1.storage_columns != expert.w1.logical_columns ||
+        expert.w3.storage_columns != expert.w3.logical_columns ||
+        expert.w2.storage_columns != expert.w2.logical_columns) {
+        return make_error(ErrorCode::invalid_format,
+                          "Resolved DeepSeek IQ1_S/IQ3_XXS expert has invalid storage dimensions",
+                          std::to_string(expert.expert_id));
+    }
+    auto gate = deepseek_v4_packed_matrix_payload(expert.w1, "resolved expert gate");
+    if (!gate) return gate.error();
+    auto up = deepseek_v4_packed_matrix_payload(expert.w3, "resolved expert up");
+    if (!up) return up.error();
+    auto down = deepseek_v4_packed_matrix_payload(expert.w2, "resolved expert down");
+    if (!down) return down.error();
+    return routed_expert_iq1_s_iq3_xxs_f32(
+        gate.value(), up.value(), down.value(), input, scratch, output, limits);
+}
+
 Result<std::shared_ptr<DeepseekV4BoundedExpertCache>>
 DeepseekV4BoundedExpertCache::create(
     std::vector<DeepseekV4ExpertBundleBinding> bindings,

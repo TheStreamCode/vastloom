@@ -100,6 +100,12 @@ struct DeepseekV4PackedMatrix {
     std::size_t resident_bytes{0U};
 };
 
+// Returns the exact encoded view owned by this descriptor. The matrix must outlive the returned
+// span; resident-backed descriptors retain their immutable payload through a shared lease.
+[[nodiscard]] Result<std::span<const std::byte>> deepseek_v4_packed_matrix_payload(
+    const DeepseekV4PackedMatrix& matrix,
+    std::string_view identity);
+
 struct DeepseekV4PackedIntegerTensor {
     DeepseekV4PackedIntegerTensor() = default;
     DeepseekV4PackedIntegerTensor(std::size_t element_count,

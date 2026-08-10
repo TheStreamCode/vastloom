@@ -1,6 +1,8 @@
 #include <algorithm>
+#include <array>
 #include <bit>
 #include <chrono>
+#include <cmath>
 #include <cstddef>
 #include <cstdint>
 #include <filesystem>
@@ -10,6 +12,7 @@
 #include <string_view>
 #include <vector>
 
+#include "vastloom/inference/deepseek_v4_expert_provider.hpp"
 #include "vastloom/inference/ggml_quantization.hpp"
 #include "vastloom/model/expert_loader.hpp"
 #include "vastloom/model/residency.hpp"
@@ -32,12 +35,6 @@ constexpr std::size_t kGateTensor = 0U;
 constexpr std::size_t kUpTensor = 1U;
 constexpr std::size_t kDownTensor = 2U;
 constexpr std::uint64_t kExpectedOutputFnv64 = UINT64_C(0x90388543cbcbab52);
-
-struct SourceTensor {
-    std::filesystem::path path;
-    std::size_t tensor_index{0U};
-    vastloom::ByteCount bytes{0U};
-};
 
 int fail(std::string_view message) {
     std::cerr << "DeepSeek real-expert test failed: " << message << '\n';
@@ -69,23 +66,36 @@ std::uint64_t output_fingerprint(std::span<const float> values) {
     return hash;
 }
 
-vastloom::model::ExpertBundle make_bundle(std::vector<SourceTensor> sources) {
-    std::sort(sources.begin(), sources.end(), [](const auto& left, const auto& right) {
-        return left.path < right.path;
-    });
+vastloom::model::LogicalTensorCatalog make_catalog(
+    const std::filesystem::path& gate_path,
+    const std::filesystem::path& up_path,
+    const std::filesystem::path& down_path) {
+    using vastloom::model::LogicalTensorDescriptor;
+    using vastloom::model::TensorDType;
+    using vastloom::model::TensorRole;
+    using vastloom::model::TensorSourceRange;
 
-    vastloom::model::ExpertBundle bundle;
-    bundle.layer = 0U;
-    bundle.expert = 0U;
-    bundle.bytes = kBundleBytes;
-    vastloom::ByteCount packed_offset = 0U;
-    for (const auto& source : sources) {
-        bundle.tensor_indices.push_back(source.tensor_index);
-        bundle.read_ranges.push_back({source.path, 0U, source.bytes});
-        bundle.tensor_slices.push_back({source.tensor_index, packed_offset, source.bytes});
-        packed_offset += source.bytes;
-    }
-    return bundle;
+    vastloom::model::LogicalTensorCatalog catalog;
+    catalog.model_id = "unsloth/DeepSeek-V4-Flash-0731-GGUF";
+    catalog.revision = "fbbb5b93fb787c21338159b0af3318bb3f4d9768";
+    catalog.tensors = {
+        LogicalTensorDescriptor{
+            "blk.0.ffn_gate_exps.weight.expert.0", TensorDType::quantized,
+            {kHiddenSize, kExpertWidth}, TensorRole::routed_expert, 0U, 0U, false,
+            TensorSourceRange{gate_path, 0U, kIq1SBytes},
+            vastloom::inference::kGgmlTypeIq1S},
+        LogicalTensorDescriptor{
+            "blk.0.ffn_up_exps.weight.expert.0", TensorDType::quantized,
+            {kHiddenSize, kExpertWidth}, TensorRole::routed_expert, 0U, 0U, false,
+            TensorSourceRange{up_path, 0U, kIq1SBytes},
+            vastloom::inference::kGgmlTypeIq1S},
+        LogicalTensorDescriptor{
+            "blk.0.ffn_down_exps.weight.expert.0", TensorDType::quantized,
+            {kExpertWidth, kHiddenSize}, TensorRole::routed_expert, 0U, 0U, false,
+            TensorSourceRange{down_path, 0U, kIq3XxsBytes},
+            vastloom::inference::kGgmlTypeIq3Xxs},
+    };
+    return catalog;
 }
 
 vastloom::safety::ResourceLimits make_limits(vastloom::ByteCount ram_limit) {
@@ -127,11 +137,19 @@ int main(int argc, char** argv) {
         return fail("a slice is not the pinned regular file with the expected size and SHA-256");
     }
 
-    const auto bundle = make_bundle({
-        {gate_path, kGateTensor, kIq1SBytes},
-        {up_path, kUpTensor, kIq1SBytes},
-        {down_path, kDownTensor, kIq3XxsBytes},
-    });
+    auto catalog = make_catalog(gate_path, up_path, down_path);
+    auto finalized = vastloom::model::finalize_logical_tensor_catalog(catalog);
+    if (!finalized || catalog.experts.size() != 1U) {
+        return fail(finalized ? "real expert catalog has the wrong bundle count"
+                              : finalized.error().message);
+    }
+    auto bindings = vastloom::inference::deepseek_v4_make_gguf_expert_bindings(
+        catalog, 0U, 1U, kHiddenSize, kExpertWidth);
+    if (!bindings || bindings.value().size() != 1U) {
+        return fail(bindings ? "real expert binding count is wrong"
+                             : bindings.error().message);
+    }
+    const auto& bundle = bindings.value().front().bundle;
 
     // A one-byte RAM shortfall must reject the request synchronously, before the
     // worker can allocate or read any model payload.
@@ -247,6 +265,100 @@ int main(int argc, char** argv) {
     if (final_governor.reserved[0] != 0U || final_governor.reserved[2] != 0U ||
         final_governor.reserved[3] != 0U) {
         return fail("expert execution leaked a Governor reservation");
+    }
+
+    // Re-run the exact immutable bundle through the production router-first cache boundary.
+    // The adapter derives W1/W2/W3 from canonical GGUF identities instead of hard-coded slice
+    // positions, and the mixed-format consumer receives only retained packed descriptors.
+    {
+        vastloom::safety::ResourceGovernor cache_governor(make_limits(8U * vastloom::MiB));
+        vastloom::inference::DeepseekV4ExpertCacheOptions cache_options;
+        cache_options.block_prefix = "blk.0.ffn";
+        cache_options.max_cached_experts = 1U;
+        cache_options.max_experts_per_request = 1U;
+        cache_options.load = make_pool_options().load;
+        auto cache_result =
+            vastloom::inference::DeepseekV4BoundedExpertCache::create(
+                bindings.value(), cache_governor, cache_options);
+        if (!cache_result) return fail(cache_result.error().message);
+        auto cache = cache_result.take_value();
+        auto provider = cache->provider_binding();
+        const std::array<std::uint32_t, 1U> selected{0U};
+        {
+            auto resolved = provider.resolve("blk.0.ffn", selected);
+            if (!resolved || resolved.value().size() != 1U) {
+                return fail(resolved ? "selected expert count is wrong"
+                                     : resolved.error().message);
+            }
+            const auto first_snapshot = cache->snapshot();
+            if (first_snapshot.cached_experts != 1U || first_snapshot.misses != 1U ||
+                first_snapshot.hits != 0U || first_snapshot.evictions != 0U ||
+                first_snapshot.resident_bytes != kBundleBytes ||
+                first_snapshot.logical_bytes_read != kBundleBytes) {
+                return fail("real selected-expert miss telemetry is inconsistent");
+            }
+
+            constexpr vastloom::ByteCount kComputeBytes =
+                (3U * kHiddenSize + 2U * kExpertWidth) * sizeof(float);
+            auto compute_reservation = cache_governor.try_reserve(
+                vastloom::safety::ResourceKind::scratch, kComputeBytes,
+                "deepseek-v4 resolved expert input, output and scratch");
+            if (!compute_reservation) return fail(compute_reservation.error().message);
+            std::vector<float> input(kHiddenSize);
+            std::vector<float> gate_scratch(kExpertWidth);
+            std::vector<float> up_scratch(kExpertWidth);
+            std::vector<float> down_scratch(kHiddenSize);
+            std::vector<float> output(
+                kHiddenSize, std::numeric_limits<float>::quiet_NaN());
+            for (std::size_t column = 0U; column < input.size(); ++column) {
+                const int centered = static_cast<int>(column % 29U) - 14;
+                input[column] = static_cast<float>(centered) * 0.03125F +
+                                static_cast<float>(column % 3U) * 0.0078125F;
+            }
+            auto executed =
+                vastloom::inference::deepseek_v4_execute_resolved_iq1_s_iq3_xxs_f32(
+                    resolved.value().front(), input,
+                    {gate_scratch, up_scratch, down_scratch}, output);
+            if (!executed || output_fingerprint(output) != kExpectedOutputFnv64 ||
+                output.front() != -0.0709934607F || output.back() != 0.105151489F) {
+                return fail(executed ? "resolved expert differs from the pinned ggml oracle"
+                                     : executed.error().message);
+            }
+
+            auto malformed = resolved.value().front();
+            malformed.w2.ggml_type = vastloom::inference::kGgmlTypeIq1S;
+            std::fill(output.begin(), output.end(),
+                      std::numeric_limits<float>::quiet_NaN());
+            if (vastloom::inference::deepseek_v4_execute_resolved_iq1_s_iq3_xxs_f32(
+                    malformed, input, {gate_scratch, up_scratch, down_scratch}, output) ||
+                !std::all_of(output.begin(), output.end(),
+                             [](float value) { return std::isnan(value); })) {
+                return fail("malformed mixed-format expert published output");
+            }
+
+            auto hit = provider.resolve("blk.0.ffn", selected);
+            if (!hit || hit.value().size() != 1U ||
+                !hit.value().front().cache_hit ||
+                hit.value().front().logical_bytes_read != 0U) {
+                return fail(hit ? "real selected-expert hit telemetry is wrong"
+                                : hit.error().message);
+            }
+            const auto hit_snapshot = cache->snapshot();
+            if (hit_snapshot.misses != 1U || hit_snapshot.hits != 1U ||
+                hit_snapshot.logical_bytes_read != kBundleBytes || cache->clear()) {
+                return fail("in-flight real expert was evicted or cache telemetry changed");
+            }
+        }
+        auto cleared = cache->clear();
+        if (!cleared || cache->snapshot().resident_bytes != 0U) {
+            return fail(cleared ? "cleared real cache retained bytes"
+                                : cleared.error().message);
+        }
+        const auto cache_final = cache_governor.snapshot();
+        if (cache_final.reserved[0] != 0U || cache_final.reserved[2] != 0U ||
+            cache_final.reserved[3] != 0U) {
+            return fail("real selected-expert cache leaked a Governor reservation");
+        }
     }
 
     std::cout << "DeepSeek V4 Flash 0731 full real expert: PASS"

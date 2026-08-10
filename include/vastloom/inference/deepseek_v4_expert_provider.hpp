@@ -14,6 +14,7 @@
 #include "vastloom/core/bytes.hpp"
 #include "vastloom/core/status.hpp"
 #include "vastloom/inference/deepseek_v4_reference.hpp"
+#include "vastloom/inference/ggml_quantization.hpp"
 #include "vastloom/model/expert_loader.hpp"
 #include "vastloom/model/tensor_catalog.hpp"
 #include "vastloom/safety/resource_governor.hpp"
@@ -58,6 +59,27 @@ struct DeepseekV4ExpertCacheSnapshot {
     std::size_t evictions{0U};
     ByteCount logical_bytes_read{0U};
 };
+
+// Converts one executable DeepSeek GGUF layer from the universal catalog into strict W1/W2/W3
+// bindings. Physical columns may include quantization padding, but logical graph dimensions and
+// complete expert count must match exactly.
+[[nodiscard]] Result<std::vector<DeepseekV4ExpertBundleBinding>>
+deepseek_v4_make_gguf_expert_bindings(
+    const model::LogicalTensorCatalog& catalog,
+    std::uint32_t layer,
+    std::uint32_t expected_experts,
+    std::size_t hidden_width,
+    std::size_t intermediate_width,
+    std::size_t max_experts = 1'024U);
+
+// Architecture-specific bridge from one cache-resolved official IQ1_S/IQ3_XXS bundle to the
+// existing caller-buffered reference kernel. No allocation or routing decision occurs here.
+[[nodiscard]] Result<void> deepseek_v4_execute_resolved_iq1_s_iq3_xxs_f32(
+    const DeepseekV4ResolvedExpert& expert,
+    std::span<const float> input,
+    RoutedExpertScratch scratch,
+    std::span<float> output,
+    const QuantizedKernelLimits& limits = {});
 
 // Synchronous correctness baseline for router-first expert acquisition. The cache owns complete,
 // indivisible RAM bundles and never splits one across tiers. Its callback is bounded by both the

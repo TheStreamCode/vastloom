@@ -271,9 +271,7 @@ Result<std::vector<float>> linear_packed_matrix(
     auto storage_count = bounded_product({matrix.rows, matrix.storage_columns},
                                          std::string(name) + " storage shape");
     if (!storage_count) return storage_count.error();
-    auto payload = packed_payload(
-        matrix.encoded, matrix.resident, matrix.resident_offset,
-        matrix.resident_bytes, name);
+    auto payload = deepseek_v4_packed_matrix_payload(matrix, name);
     if (!payload) return payload.error();
     if (input.size() != input_count.value()) {
         return make_error(ErrorCode::invalid_argument,
@@ -1926,6 +1924,13 @@ Result<void> validate_reference_state(const DeepseekV4ReferenceGraph& graph,
 }
 
 }  // namespace
+
+Result<std::span<const std::byte>> deepseek_v4_packed_matrix_payload(
+    const DeepseekV4PackedMatrix& matrix,
+    std::string_view identity) {
+    return packed_payload(matrix.encoded, matrix.resident, matrix.resident_offset,
+                          matrix.resident_bytes, identity);
+}
 
 Result<DeepseekV4PackedMatrix> deepseek_v4_bind_packed_matrix(
     const model::LoadedTensorTile& tile,

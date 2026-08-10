@@ -1341,6 +1341,94 @@ void test_logical_tensor_catalog() {
     CHECK(!vastloom::model::finalize_logical_tensor_catalog(catalog, 2U, 1U));
 }
 
+void test_deepseek_v4_gguf_expert_bindings() {
+    using vastloom::model::LogicalTensorDescriptor;
+    using vastloom::model::TensorDType;
+    using vastloom::model::TensorRole;
+    using vastloom::model::TensorSourceRange;
+
+    constexpr std::size_t hidden_width = 8U;
+    constexpr std::size_t intermediate_width = 6U;
+    constexpr std::size_t storage_columns =
+        vastloom::inference::kQ8_0BlockElements;
+    auto gate_bytes = vastloom::inference::ggml_storage_bytes(
+        vastloom::inference::kGgmlTypeQ8_0, intermediate_width,
+        storage_columns);
+    auto down_bytes = vastloom::inference::ggml_storage_bytes(
+        vastloom::inference::kGgmlTypeQ8_0, hidden_width, storage_columns);
+    CHECK(gate_bytes && down_bytes);
+    if (!gate_bytes || !down_bytes) return;
+
+    vastloom::model::LogicalTensorCatalog catalog;
+    catalog.model_id = "test/deepseek-gguf-bindings";
+    catalog.revision = "fixture";
+    catalog.tensors = {
+        LogicalTensorDescriptor{
+            "blk.0.ffn_gate_exps.weight.expert.0", TensorDType::quantized,
+            {storage_columns, intermediate_width}, TensorRole::routed_expert,
+            0U, 0U, false, TensorSourceRange{"gate.bin", 0U, gate_bytes.value()},
+            vastloom::inference::kGgmlTypeQ8_0},
+        LogicalTensorDescriptor{
+            "blk.0.ffn_up_exps.weight.expert.0", TensorDType::quantized,
+            {storage_columns, intermediate_width}, TensorRole::routed_expert,
+            0U, 0U, false, TensorSourceRange{"up.bin", 0U, gate_bytes.value()},
+            vastloom::inference::kGgmlTypeQ8_0},
+        LogicalTensorDescriptor{
+            "blk.0.ffn_down_exps.weight.expert.0", TensorDType::quantized,
+            {storage_columns, hidden_width}, TensorRole::routed_expert,
+            0U, 0U, false, TensorSourceRange{"down.bin", 0U, down_bytes.value()},
+            vastloom::inference::kGgmlTypeQ8_0},
+    };
+    CHECK(vastloom::model::finalize_logical_tensor_catalog(catalog));
+    auto bindings = vastloom::inference::deepseek_v4_make_gguf_expert_bindings(
+        catalog, 0U, 1U, hidden_width, intermediate_width);
+    CHECK(bindings && bindings.value().size() == 1U);
+    if (bindings && bindings.value().size() == 1U) {
+        const auto& binding = bindings.value().front();
+        CHECK(binding.expert_id == 0U && binding.bundle.bytes ==
+                  2U * gate_bytes.value() + down_bytes.value());
+        const auto& w1 = binding.matrices[static_cast<std::size_t>(
+            vastloom::inference::DeepseekV4ExpertWeight::w1)];
+        const auto& w2 = binding.matrices[static_cast<std::size_t>(
+            vastloom::inference::DeepseekV4ExpertWeight::w2)];
+        const auto& w3 = binding.matrices[static_cast<std::size_t>(
+            vastloom::inference::DeepseekV4ExpertWeight::w3)];
+        CHECK(w1.catalog_tensor_index == 0U &&
+              w1.rows == intermediate_width &&
+              w1.logical_columns == hidden_width &&
+              w1.storage_columns == storage_columns);
+        CHECK(w2.catalog_tensor_index == 2U && w2.rows == hidden_width &&
+              w2.logical_columns == intermediate_width &&
+              w2.storage_columns == storage_columns);
+        CHECK(w3.catalog_tensor_index == 1U &&
+              w3.rows == intermediate_width &&
+              w3.logical_columns == hidden_width &&
+              w3.storage_columns == storage_columns);
+    }
+
+    auto metadata_only = catalog;
+    metadata_only.metadata_only = true;
+    CHECK(!vastloom::inference::deepseek_v4_make_gguf_expert_bindings(
+        metadata_only, 0U, 1U, hidden_width, intermediate_width));
+    CHECK(!vastloom::inference::deepseek_v4_make_gguf_expert_bindings(
+        catalog, 0U, 2U, hidden_width, intermediate_width));
+    CHECK(!vastloom::inference::deepseek_v4_make_gguf_expert_bindings(
+        catalog, 0U, 1U, hidden_width, intermediate_width, 0U));
+
+    auto malformed_name = catalog;
+    malformed_name.tensors[0].name = "blk.0.ffn_gate.weight.expert.0";
+    CHECK(!vastloom::inference::deepseek_v4_make_gguf_expert_bindings(
+        malformed_name, 0U, 1U, hidden_width, intermediate_width));
+    auto malformed_shape = catalog;
+    malformed_shape.tensors[2].shape[1] = hidden_width - 1U;
+    CHECK(!vastloom::inference::deepseek_v4_make_gguf_expert_bindings(
+        malformed_shape, 0U, 1U, hidden_width, intermediate_width));
+    auto malformed_bytes = catalog;
+    --malformed_bytes.tensors[1].source.bytes;
+    CHECK(!vastloom::inference::deepseek_v4_make_gguf_expert_bindings(
+        malformed_bytes, 0U, 1U, hidden_width, intermediate_width));
+}
+
 void test_residency_state_machine() {
     using vastloom::model::ResidencyState;
     CHECK(!vastloom::model::ResidencyObject::create("", 8U));
@@ -4282,6 +4370,7 @@ int main() {
     test_iq3_xxs_reference_kernel();
     test_quantized_routed_expert_contract();
     test_logical_tensor_catalog();
+    test_deepseek_v4_gguf_expert_bindings();
     test_residency_state_machine();
     test_packed_expert_loader(root);
     test_layer_streaming(root);

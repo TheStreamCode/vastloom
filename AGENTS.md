@@ -28,7 +28,11 @@ three-object importer and full-hash/single-tier source-binding gate are implemen
 82.54 GB payload has not been imported or executed. A non-executing checkpoint-shaped layer
 planner now combines the exact layer-0 trunk and six caller-supplied complete bundles into
 39 immutable-source ranges / 177,795,544 logical bytes. Those IDs have no verified routing
-authority and none of the planned payload was fetched. All 43 layers now expose deterministic
+authority and none of the planned payload was fetched. A separate explicit-authority range
+importer now validates the plan, exact HTTP spans and per-range hashes, then publishes only a
+read-only non-executable derived artifact. The real 138,867,160-byte trunk passed dry-run only;
+selected-expert import remains blocked and no native artifact binder exists. All 43 layers now
+expose deterministic
 non-routed trunk plans (1,193 tensors/tiles at a 64 MiB ceiling), and a synthetic governed tile
 transaction validates payload reads and cleanup. Scalar Q8_0/Q5_K/Q6_K/BF16/F32 references plus
 typed I32 router decoding cover all 1,193 layer-trunk storage types in metadata, but no official

@@ -50,6 +50,15 @@
 - Corrected metadata-only logical sources to name the immutable complete GGUF shard objects rather
   than local `.header` snapshots. Loaders still reject metadata-only catalogs, so this preserves
   accurate future range identity without widening execution authority.
+- Added `tools/import_hf_ranges.py` for explicit-authority partial payload acquisition. It accepts
+  only the pinned DeepSeek 0731 profile, strictly validates a hash-verified plan, enforces selected
+  byte/range/disk bounds, requires exact HTTP 206/content ranges, hashes every payload and
+  atomically publishes a read-only `vastloom.range-artifact.v1` under `models/optimized`.
+- Kept partial artifacts fail-closed: their manifest declares the complete checkpoint unverified
+  and execution unsupported; caller-supplied expert/all scopes are rejected before network access.
+  Offline Windows/Linux tests cover exact ranges, malformed plans, explicit authorization, wrong
+  HTTP ranges, crash cleanup and immutable reuse. The real 138,867,160-byte trunk passed dry-run
+  only and no official payload was downloaded.
 - Preserved exact `blk.N.*` identity for all non-routed GGUF tensors and added deterministic
   per-layer trunk plans with a 64 MiB ceiling. The real 0731 metadata maps all 43 layers into
   1,193 tensor tiles; a new governed fixture loader covers immutable identity, Unicode paths,

@@ -258,6 +258,20 @@ The 0731 GGUF reader adds a metadata-only safety boundary:
   unverified, routing authority false, plan-only true and execution unsupported. The current
   layer-0 plan's 177,795,544 logical bytes are neither downloaded bytes nor physical-device
   telemetry and do not relax the single-tier expert gate;
+- partial range import is a separate derived-artifact path under `models/optimized`. It requires
+  `--allow-range-download` for any network access, defaults to a 256 MiB selected-payload cap and
+  300 GiB free-space reserve, and refuses plans larger than 16 MiB, more than 4,096 ranges or any
+  individual range above 1 GiB;
+- only revision-pinned object URLs are constructed. HTTP 206, exact start/end/complete-object
+  `Content-Range`, exact `Content-Length`, bounded reads, fsync and a second local SHA-256 pass are
+  mandatory. A response partial is removed on failure and never resumed across responses;
+- range artifacts record the pinned complete-source SHA-256 as identity but explicitly state that
+  the complete checkpoint is unverified. They retain `execution_supported=false`, are revalidated
+  before read-only atomic rename and cannot be consumed by the current native runtime;
+- selected-expert/all range scopes fail before network while routing authority is caller-supplied.
+  A future authoritative source must be named explicitly; a forged flag/source combination is
+  rejected. Target-scoped locks clean only their own stale partial/incoming artifacts after a
+  crash and rehash any completed cached range before reuse;
 - the scalar IQ1_S/IQ3_XXS expert and Q8_0/Q5_K/Q6_K/BF16/F32 trunk paths accept caller-supplied
   bounded spans only, prevalidate dimensions, encoded size, all applicable block scales, finite
   inputs and non-overlapping scratch, and have a 64-million-element default ceiling;

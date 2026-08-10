@@ -69,6 +69,10 @@ model conversion.
 > 39 immutable source ranges, with a 35,651,584-byte maximum range and a 6,488,064-byte
 > single-expert tier floor. The supplied expert IDs are not yet an authoritative `tid2eid` route,
 > and none of these payload bytes was downloaded or executed.
+> A separate bounded range importer can now validate that plan, enforce an explicit download flag,
+> request exact revision-pinned HTTP spans, hash each result and atomically publish a read-only
+> partial artifact under `models/optimized`. The real 138,867,160-byte layer-0 trunk passed only a
+> no-network dry-run; selected-expert imports remain blocked until routing authority is verified.
 > The complete 82.54 GB payload has not been downloaded or executed; storage-format coverage is not a
 > complete DeepSeek layer/token path, physical-NVMe performance, generation or CUDA implementation.
 
@@ -148,6 +152,8 @@ The complete reduced Q8_0/IQ1_S/IQ3_XXS layer composition is documented in the
 The first exact checkpoint-shaped range plan and its explicit non-execution/routing boundary are
 documented in the
 [`M9 layer probe plan report`](docs/reports/M9_DEEPSEEK_LAYER_PROBE_PLAN_VALIDATION.md).
+The bounded immutable range importer and its real-metadata no-network gate are documented in the
+[`M9 range artifact import report`](docs/reports/M9_DEEPSEEK_RANGE_ARTIFACT_IMPORT_VALIDATION.md).
 The pinned importer and immutable full-source admission boundary are documented in the
 [`M7 checkpoint-binding report`](docs/reports/M7_DEEPSEEK_GGUF_CHECKPOINT_BINDING_VALIDATION.md).
 Current and candidate model support is kept explicit in the
@@ -341,6 +347,12 @@ portability target, not a validated platform claim.
   shard identity. The current IDs are caller-supplied and explicitly unverified; the official
   hash-route table must execute before these offsets can be treated as an authoritative token
   route.
+- **Bounded partial artifact import:** `tools/import_hf_ranges.py` accepts only the pinned plan and
+  model identity, defaults to a 256 MiB total cap and 300 GiB free-space reserve, requires explicit
+  `--allow-range-download`, validates exact HTTP 206/content ranges and publishes per-range hashes
+  atomically under `models/optimized`. Current expert/all scopes fail before network access because
+  routing authority is false. The real layer-0 trunk has passed dry-run only; no official payload
+  range has been downloaded.
 
 ### Runtime foundation
 
@@ -594,8 +606,14 @@ python tools\import_hf_model.py `
 
 $model = 'C:\VastloomModels\models\original\deepseek-v4-flash-0731-iq1s-fbbb5b93--metadata'
 vastloom deepseek-gguf-checkpoint $model --context 4096 --batch-size 1 --json
+$plan = Join-Path $env:TEMP 'vastloom-deepseek-layer-0-plan.json'
 vastloom deepseek-gguf-probe-plan $model `
-  --layer 0 --experts 0,1,2,3,4,5 --context 4096 --batch-size 1 --json
+  --layer 0 --experts 0,1,2,3,4,5 --context 4096 --batch-size 1 --json |
+  Out-File -LiteralPath $plan -Encoding utf8
+
+python tools\import_hf_ranges.py `
+  --model deepseek-v4-flash-0731-gguf-iq1s `
+  --plan $plan --store C:\VastloomModels --scope trunk --dry-run --json
 ```
 
 The command requires the exact model ID, 40-character revision, paths, sizes and SHA-256 values.
@@ -609,6 +627,11 @@ The probe command is also metadata-only. The example IDs `0..5` demonstrate exac
 capacity accounting; they are not the route of a real token. Its JSON therefore reports
 `plan_only=true`, `execution_supported=false` and `routing_authority_verified=false`. No listed
 range is fetched by this command.
+
+The importer example is deliberately a dry-run. A real range transfer also needs
+`--allow-range-download`, enforces the selected-byte cap and publishes only a non-executable
+derived artifact. Do not add that flag yet: the native range-artifact consumer is the next
+correctness gate. UTF-8 and UTF-8-BOM plan files are accepted; UTF-16 shell redirection is not.
 
 ## TinyChat CLI options
 
@@ -769,6 +792,9 @@ implemented.
 The exact layer-0 range plan adds 138,867,160 trunk bytes and six 6,488,064-byte expert bundles:
 177,795,544 logical bytes in 39 ranges. It is a metadata result, not a download or device-traffic
 measurement, and its caller-supplied expert IDs are not authoritative routing output.
+The bounded range importer accepted the 21-range trunk scope in dry-run mode and confirmed the
+138,867,160-byte disk plan without creating an artifact or opening a payload connection. Expert
+and complete scopes remain fail-closed while routing authority is unverified.
 
 ## Current limitations
 
@@ -787,7 +813,8 @@ It currently has:
   production kernel or CUDA path;
 - complete metadata-derived trunk plans and storage-type coverage plus a governed
   tile/expert-to-DeepSeek fixture consumer and reduced router-first bounded expert cache with an
-  opt-in single-owner asynchronous batch, but no official trunk payload read or full-model loop;
+  opt-in single-owner asynchronous batch; partial immutable range publication exists, but no
+  native range-artifact binder, official trunk payload read or full-model loop;
 - no VRAM expert tier or pinned host buffers; direct/unbuffered I/O is currently an
   opt-in OLMoE measurement protocol, not the production path for every adapter;
 - OLMoE currently exposes final-logit probes and route telemetry, not decoding/chat;
@@ -816,20 +843,21 @@ merely SSD throughput. It is:
 
 The next technical sequence remains incremental:
 
-1. implement a bounded immutable range-artifact importer and, only after explicit approval,
-   acquire the exact 138,867,160-byte layer-0 trunk plan with temporary publication, range
-   validation, checksums and atomic rename;
-2. decode the official `tid2eid` route for a pinned input, then acquire only its six complete
+1. add a native bounded reader/binder for `vastloom.range-artifact.v1`, rehash every local range
+   and match its model/revision/source span back to the verified GGUF catalog;
+2. only after that synthetic consumer passes and the user explicitly approves, use the completed
+   importer to acquire the exact 138,867,160-byte layer-0 trunk plan;
+3. decode the official `tid2eid` route for a pinned input, then acquire only its six complete
    selected expert bundles (38,928,384 bytes for layer 0) and match the official layer output;
-3. measure useful physical-device expert-read/compute overlap with declared cache state and exact
+4. measure useful physical-device expert-read/compute overlap with declared cache state and exact
    logical, process-visible and device bytes;
-4. only after explicit approval and a fresh capacity check, import and fully hash complete pinned
+5. only after explicit approval and a fresh capacity check, import and fully hash complete pinned
    shards when a later gate actually requires them;
-5. connect a target-verified MTP decoding loop, then add CUDA dense, attention, router and packed
+6. connect a target-verified MTP decoding loop, then add CUDA dense, attention, router and packed
    expert kernels;
-6. explicit VRAM/RAM/NVMe placement with pinned buffers and direct/overlapped I/O;
-7. adaptive placement, predictive routing and speculative expert deduplication;
-8. OpenAI-compatible local server and coding-agent integration.
+7. explicit VRAM/RAM/NVMe placement with pinned buffers and direct/overlapped I/O;
+8. adaptive placement, predictive routing and speculative expert deduplication;
+9. OpenAI-compatible local server and coding-agent integration.
 
 Detailed acceptance gates are in [`docs/ROADMAP.md`](docs/ROADMAP.md).
 The reference-PC working-set rule is defined in

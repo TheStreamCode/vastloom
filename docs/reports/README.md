@@ -13,6 +13,10 @@ hardware, commands, measurements and limitations.
 
 ## Current report
 
+- [`M9_DEEPSEEK_RANGE_ARTIFACT_IMPORT_VALIDATION.md`](M9_DEEPSEEK_RANGE_ARTIFACT_IMPORT_VALIDATION.md) —
+  explicit-authority bounded HTTP range import, strict plan/source validation, per-range hashes,
+  crash cleanup and read-only atomic publication, plus a real 138,867,160-byte trunk dry-run with
+  no official payload download.
 - [`M9_DEEPSEEK_LAYER_PROBE_PLAN_VALIDATION.md`](M9_DEEPSEEK_LAYER_PROBE_PLAN_VALIDATION.md) —
   exact non-executing layer-0 trunk+top-6 range planning from verified real metadata,
   177,795,544 logical bytes across 39 immutable source ranges, strict caller-ID/routing-authority

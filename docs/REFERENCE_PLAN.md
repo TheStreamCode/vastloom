@@ -105,6 +105,10 @@ The reduced graph and checkpoint-shaped real expert remain separate dimension do
 still not an official-payload layer/token result.
 The pinned importer/checkpoint gate can now bind complete shards only after full SHA-256 and this
 same live single-tier admission; its real validation used only the 5,343,584-byte metadata import.
+The bounded partial-range importer has separately accepted the 21-range / 138,867,160-byte trunk
+scope in dry-run mode. It created no target and made no payload request. A real transfer requires
+explicit authorization, remains capped and publishes a non-executable derived artifact; the
+native reader/binder must pass before asking for that authorization.
 
 Kimi K3 is not a reference-PC execution target. The project treats it as metadata/capacity-only
 because no exact profile has proved that its complete expert bundle fits one real tier on the

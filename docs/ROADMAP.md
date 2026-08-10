@@ -199,6 +199,9 @@ The complete reduced Q8_0/IQ1_S/IQ3_XXS layer composition is recorded in the
 [M9 mixed-format layer report](reports/M9_DEEPSEEK_MIXED_FORMAT_LAYER_VALIDATION.md).
 The exact non-executing checkpoint-shaped range boundary is recorded in the
 [M9 layer probe plan report](reports/M9_DEEPSEEK_LAYER_PROBE_PLAN_VALIDATION.md).
+The explicit-authority bounded downloader and immutable partial-artifact publication gate are
+recorded in the
+[M9 range artifact import report](reports/M9_DEEPSEEK_RANGE_ARTIFACT_IMPORT_VALIDATION.md).
 The first real packed-matrix parity gate is recorded in the
 [M7 IQ1_S kernel report](reports/M7_DEEPSEEK_IQ1S_KERNEL_VALIDATION.md).
 The completed one-expert gate/up/SwiGLU/down path is recorded in the
@@ -247,6 +250,11 @@ unbounded allocation and clean recovery from injected CUDA failures.
 - [x] Define a bounded checkpoint-shaped layer-0 range plan from verified official metadata:
   21 trunk plus 18 selected-expert ranges, 177,795,544 logical bytes total. The six caller-supplied
   IDs validate layout/capacity only and do not claim authoritative routing or payload execution.
+- [x] Add an explicit-authority bounded range importer with exact HTTP range/length validation,
+  per-range SHA-256, crash cleanup and read-only atomic publication. The real 138,867,160-byte
+  trunk plan passed dry-run only; no official payload was downloaded.
+- [ ] Bind `vastloom.range-artifact.v1` back to exact catalog tensors in the native bounded reader
+  and exercise the trunk consumer on synthetic partial artifacts.
 - [ ] Execute that probe by acquiring the bounded official trunk ranges, decoding the real
   `tid2eid` route and loading only its six selected complete expert bundles.
 - [ ] Pinned host buffers.

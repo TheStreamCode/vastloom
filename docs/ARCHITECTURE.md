@@ -372,6 +372,37 @@ complete 6,488,064-byte bundles add 38,928,384 bytes in 18 ranges, producing a 1
 IDs only to validate layout and capacity, always emits `routing_authority_verified=false`, and
 performs no payload read or execution.
 
+### Immutable partial range artifacts
+
+The offline Python range importer consumes that JSON as an untrusted bounded input. It rechecks
+the pinned model/revision, verified-metadata provenance, counts, totals, non-overlap and every
+complete source-object identity before selecting a scope. The current plan can authorize only its
+21-range trunk scope; expert/all scopes stop before network access because routing authority is
+false.
+
+```text
+validated plan + explicit --allow-range-download
+  -> selected payload cap + model-store free-space reserve
+  -> exact revision/object HTTP Range request
+  -> exact 206 + Content-Range + Content-Length
+  -> fsynced range + local SHA-256
+  -> target-specific verified cache
+  -> same-filesystem .incoming directory
+  -> complete manifest/range revalidation
+  -> read-only atomic rename into models/optimized
+```
+
+`vastloom.range-artifact.v1` maps short local `ranges/NNNN.bin` paths back to the source object,
+complete source size/SHA-256 identity, original offset, exact bytes, role and local range hash. It
+always declares the full checkpoint unverified and execution unsupported. The source-object hash
+is recorded from the pinned catalog; only the partial payload receives a local hash in this path.
+This prevents a small derived artifact from masquerading as the complete shard.
+
+Crash recovery is target-scoped under the same exclusive import lock. Process-unique partial
+responses are discarded instead of resumed across servers, stale unpublished trees are removed,
+and already complete cached ranges are rehashed before reuse. A native artifact reader/catalog
+binder does not exist yet, so even a successfully published range package cannot reach inference.
+
 The scalar storage layer now recognizes every GGML type present in those 1,193 layer tensors.
 Q8_0, Q5_K and Q6_K follow the exact pinned ggml block layouts; BF16 and F32 are decoded from
 explicit little-endian bytes; and the three `ffn_gate_tid2eid` I32 routing tables use a separate
@@ -615,6 +646,7 @@ router decisions or accepted output tokens.
   reference/streaming, DeepSeek Safetensors/GGUF inspection and the reduced router-first
   selected-expert reference path.
 - `cli/`: interactive and one-shot model client commands.
+- `tools/`: pinned full/metadata import plus bounded non-executable range-artifact publication.
 
 The data plane now has device-level I/O plus a repeatable operating-system cache-bypass
 protocol. DeepSeek inspection must reuse these safety and identity boundaries rather

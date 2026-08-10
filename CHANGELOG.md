@@ -62,7 +62,14 @@
   file-backed reduced DeepSeek layer now binds 12 complete trunk tiles and four indivisible expert
   bundles directly into the graph, retains exactly 5,364 governed payload bytes across prefill and
   decode, blocks eviction while referenced, and returns all reservations to zero on release.
-  Dynamic selected-expert loading and official payload execution remain open.
+  Official payload execution remains open.
+- Split the reduced DeepSeek MoE graph at its authoritative router boundary and added a reusable
+  bounded selected-expert cache. The graph deduplicates routed IDs, requests only complete selected
+  bundles, executes their retained packed matrices and records hit/miss/logical-byte telemetry. A
+  two-entry synchronous RAM LRU loads experts 2/3 on the first token, reuses them on the next and
+  replaces them with 0/1 on the third while matching the quantized oracle. Oversized batches,
+  malformed providers, insufficient budgets and eviction of in-flight bundles fail closed. This is
+  a reduced fixture path, not official-payload DeepSeek generation or an SSD-speed result.
 - Added a bounded scalar IQ1_S dequantization/matvec reference kernel derived from pinned ggml
   equations and licensed codebook data. Synthetic vectors and one exact 1,638,400-byte real
   DeepSeek 0731 expert-gate slice match the upstream oracle bit for bit across all 2,048 rows.

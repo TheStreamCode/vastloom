@@ -14,8 +14,9 @@ MTP block now match the pinned preview graph for prefill and five incremental ra
 cache steps. Verified headers populate a universal tensor/expert catalog, and a buffer-free
 governed state machine validates legal NVMe/RAM/VRAM reservation transitions. Synchronous and
 bounded asynchronous fixture paths now load canonical ranges into governed packed RAM buffers
-with exact tensor slices and exclusive transfer leases. Compute-coupled shared streaming,
-speculative generation and CUDA do not exist yet. The newer
+with exact tensor slices and exclusive transfer leases. A synchronous router-first reduced
+fixture is compute-coupled; asynchronous overlap, speculative generation and CUDA do not exist
+yet. The newer
 official 0731 Unsloth `UD-IQ1_S` GGUF profile now has a bounded v3/split-header reader and a
 metadata-only packed-expert catalog: 1,328 physical tensors map to 11,008 logical expert bundles.
 A bounded scalar IQ1_S dequantization/matvec oracle matches pinned ggml output on one exact real
@@ -30,8 +31,10 @@ trunk tile was read. A deterministic reduced layer now consumes 23 packed Q8_0 m
 I32 hash table through those storage kernels; prefill and incremental results match an independently
 dequantized oracle. A file-backed repetition loads 12 complete trunk tiles and four indivisible
 expert bundles, then retains all 5,364 payload bytes through 16 Governor-backed immutable buffers
-without copying them into the graph. Dynamic selected-expert loading, a complete 0731 quantized
-layer/token path, generation and CUDA remain unvalidated.
+without copying them into the graph. The reduced MoE graph now routes first and resolves only the
+deduplicated selected complete bundles through a bounded synchronous two-entry RAM LRU with exact
+hit/miss/eviction/logical-byte telemetry. A complete 0731 quantized layer/token path, asynchronous
+compute/I/O overlap, generation and CUDA remain unvalidated.
 Windows and Linux CPU paths are tested; macOS/Metal remain unvalidated. Laguna S 2.1 remains a
 reviewed compatibility target, not a validated execution path.
 

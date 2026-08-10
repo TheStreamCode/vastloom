@@ -370,9 +370,19 @@ expert loaders. Each buffer owns its `ResidencyUse`; graph descriptors hold a sh
 an exact checked subrange. The reduced file-backed test loads 12 complete trunk tensors and four
 indivisible three-matrix expert bundles, then destroys every loader wrapper before inference. Its
 16 residency objects remain non-evictable until the graph releases its final reference. This
-eliminates payload copies at the loader/graph boundary. It does not yet schedule experts after
-routing: all four tiny fixture experts are resident together, which is not the production MoE
-policy.
+eliminates payload copies at the loader/graph boundary.
+
+The next reduced-fixture slice now stops after authoritative routing, deduplicates expert IDs and
+calls a block-scoped provider before expert compute. The reusable synchronous baseline owns a
+fixed-capacity RAM LRU of complete three-matrix bundles. Misses execute the existing governed
+file loader, hits retain the same immutable backing, and eviction is refused while an inference
+result still shares that buffer. The graph executes only the returned packed W1/W2/W3 matrices
+and emits per-expert resident bytes, logical bytes read and hit state. An oversized selected set is
+rejected before the provider runs.
+
+This closes router-first acquisition for the deterministic Q8_0 layer, not for the official 0731
+checkpoint. The official mixed-format bundle mapping, asynchronous reads, compute/I/O overlap,
+VRAM placement and production prefill chunking remain separate gates.
 
 ```text
 pinned importer manifest + exact object identities
@@ -549,7 +559,8 @@ router decisions or accepted output tokens.
 - `research/`: native-telemetry-driven no-cache/LRU/LFU/static-hot simulation and exact
   unique-expert reuse distance.
 - `inference/`: TinyTransformer, pinned SmolLM2 generation, pinned OLMoE routed CPU
-  reference/streaming and non-executing DeepSeek Safetensors/GGUF adapters.
+  reference/streaming, DeepSeek Safetensors/GGUF inspection and the reduced router-first
+  selected-expert reference path.
 - `cli/`: interactive and one-shot model client commands.
 
 The data plane now has device-level I/O plus a repeatable operating-system cache-bypass

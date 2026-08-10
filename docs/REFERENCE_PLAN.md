@@ -87,8 +87,9 @@ verification on the official local objects, official-payload trunk compute and a
 remain absent. Scalar storage handling now covers every type in the 1,193 planned layer tensors,
 and a reduced first layer now composes Q8_0/I32 packed storage through the architecture graph.
 A file-backed repetition retains the bounded trunk/expert loader buffers and their Governor leases
-directly through execution. It still preloads every tiny fixture expert and does not bind official
-0731 payload ranges, so it is not a 0731 execution result.
+directly through execution. A subsequent router-first reduced test loads only two selected complete
+bundles at a time through a two-entry governed RAM cache, including reuse and safe LRU eviction.
+It still does not bind official 0731 payload ranges, so it is not a 0731 execution result.
 The pinned importer/checkpoint gate can now bind complete shards only after full SHA-256 and this
 same live single-tier admission; its real validation used only the 5,343,584-byte metadata import.
 

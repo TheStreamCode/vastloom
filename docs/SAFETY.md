@@ -116,9 +116,11 @@ The DeepSeek GGUF inspector additionally derives both trunk profiles from exact 
 the retained bounded compression schedule and encoded tensor ranges. It never adds RAM and VRAM
 together to make an oversized expert appear admissible. It now also verifies deterministic plans
 for all 43 real layers. A reduced layer now consumes file-backed Q8_0/I32 bytes while its graph
-retains the 16 Governor-owned trunk/expert buffers and blocks eviction. It still preloads all four
-tiny fixture experts, and no dynamic or official DeepSeek trunk/expert streaming token path exists
-yet.
+retains Governor-owned trunk/expert buffers and blocks eviction. Its router-first test now loads
+only the two unique complete bundles selected by each one-token route through a two-entry RAM
+cache. Requests above the bound, insufficient reservations and eviction of an in-flight bundle are
+rejected. This does not make the absent official 0731 payload executable and does not validate a
+production asynchronous or VRAM path.
 
 ## State machine
 

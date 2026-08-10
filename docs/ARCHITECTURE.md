@@ -356,8 +356,15 @@ integer decoder instead of being forced through a floating matvec. The real meta
 Floating matrix formats share a transactional dispatcher: the caller reserves disjoint input,
 scratch and output spans, the complete operation writes scratch first, and public output is copied
 only after every encoded block and row succeeds. Quantized matrices are never expanded in full;
-one fixed block of at most 256 floats is decoded at a time. This is a storage/math boundary, not
-the architecture consumer that sequences norms, routing, attention, shared experts and state.
+one fixed block of at most 256 floats is decoded at a time.
+
+The reduced DeepSeek graph is now the first architecture consumer of that boundary. Its first
+main layer replaces all 23 float matrices with deterministic Q8_0 storage and its hash table with
+I32 bytes. The graph distinguishes logical columns from a block-aligned physical stride, pads
+activations with zeros, dispatches transactional matvecs, and feeds raw router projections into
+the unchanged sqrt-softplus/top-k equations. Full prefill and one incremental step match the
+independently dequantized oracle for main/MTP logits, routes and attention indices. The fixture
+owns its bytes in memory; loader-backed ownership is the remaining boundary before file payloads.
 
 ```text
 pinned importer manifest + exact object identities
@@ -366,7 +373,7 @@ pinned importer manifest + exact object identities
   -> runtime state fits safe host RAM
   -> one complete expert fits RAM OR VRAM, never their sum
   -> immutable source binding
-  -> execution_supported=false until a layer/token consumer exists
+  -> execution_supported=false until a verified full-checkpoint layer/token consumer exists
 ```
 
 The primary GGUF metadata shard also supplies the exact compression schedule through an explicit

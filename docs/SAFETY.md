@@ -115,8 +115,8 @@ profile is a capacity result, not authorization to execute unverified weights.
 The DeepSeek GGUF inspector additionally derives both trunk profiles from exact scalar metadata,
 the retained bounded compression schedule and encoded tensor ranges. It never adds RAM and VRAM
 together to make an oversized expert appear admissible. It now also verifies deterministic plans
-for all 43 real layers, but only the synthetic tile transaction has consumed payload bytes. No
-official DeepSeek trunk-streaming token path exists yet.
+for all 43 real layers. A reduced layer consumes fixture-owned Q8_0/I32 bytes, but no
+Governor-owned official DeepSeek trunk-streaming token path exists yet.
 
 ## State machine
 
@@ -231,8 +231,8 @@ The 0731 GGUF reader adds a metadata-only safety boundary:
 - a header-prefix path cannot be used as an executable tensor source. Full source paths are
   exposed only for a complete immutable import after every full-file SHA-256 succeeds and one
   expert bundle fits wholly in safe RAM or wholly in safe VRAM. `--no-verify` forces metadata-only
-  behavior, and the command still reports `execution_supported=false` because no layer/token
-  consumer exists;
+  behavior, and the command still reports `execution_supported=false` because no verified
+  full-checkpoint layer/token consumer exists;
 - the scalar IQ1_S/IQ3_XXS expert and Q8_0/Q5_K/Q6_K/BF16/F32 trunk paths accept caller-supplied
   bounded spans only, prevalidate dimensions, encoded size, all applicable block scales, finite
   inputs and non-overlapping scratch, and have a 64-million-element default ceiling;

@@ -40,7 +40,8 @@
   gate. Metadata-only mode downloads and verifies 5,343,584 bytes; full source ranges require an
   immutable manifest, every complete-file SHA-256 and live single-tier expert admission.
   `--no-verify` remains metadata-only, the official 82.54 GB payload was not downloaded, and the
-  CLI still reports `execution_supported=false` until a layer/token consumer exists.
+  CLI still reports `execution_supported=false` until a verified full-checkpoint layer/token
+  consumer exists.
 - Preserved exact `blk.N.*` identity for all non-routed GGUF tensors and added deterministic
   per-layer trunk plans with a 64 MiB ceiling. The real 0731 metadata maps all 43 layers into
   1,193 tensor tiles; a new governed fixture loader covers immutable identity, Unicode paths,
@@ -50,14 +51,20 @@
   router-table decoder. Synthetic raw blocks match the pinned ggml oracle, caller output is
   transactional through bounded scratch, and the real 0731 metadata now reports native storage
   handling for all 1,193 layer-trunk tensors / 6,390,088,008 encoded bytes. This is storage/math
-  coverage only: the 82.54 GB payload remains absent and `execution_supported=false`.
+  coverage only for the official payload: the 82.54 GB payload remains absent and
+  `execution_supported=false`.
+- Added deterministic ggml-compatible Q8_0 reference encoding and connected packed matrix/I32
+  storage directly to the reduced DeepSeek graph. All 23 matrices in main layer 0 now execute
+  through transactional storage dispatch; prefill and incremental main/MTP logits, routes and
+  attention indices match an independently dequantized oracle. File-backed governed ownership,
+  official payload execution and generation remain open.
 - Added a bounded scalar IQ1_S dequantization/matvec reference kernel derived from pinned ggml
   equations and licensed codebook data. Synthetic vectors and one exact 1,638,400-byte real
   DeepSeek 0731 expert-gate slice match the upstream oracle bit for bit across all 2,048 rows.
 - Added exact scalar IQ3_XXS decode/matvec plus a transactional IQ1_S gate/up, FP32 SwiGLU and
   IQ3_XXS down expert path. Three pinned real ranges totaling 6,488,064 bytes now pass through a
   one-worker governed packed-RAM load and match the ggml oracle bit for bit across all 4,096 final
-  outputs; complete layer/token execution and model generation remain open.
+  outputs; complete official-payload layer/token execution and model generation remain open.
 - Documented the tested platform boundary explicitly: Windows/MSVC and Linux GCC/Clang CPU paths
   are validated, while macOS and Metal remain unvalidated targets.
 - Added a public reference-PC admission gate: a model must fit one complete expert plus the

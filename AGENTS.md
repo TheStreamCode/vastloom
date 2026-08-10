@@ -26,9 +26,12 @@ three-object importer and full-hash/single-tier source-binding gate are implemen
 non-routed trunk plans (1,193 tensors/tiles at a 64 MiB ceiling), and a synthetic governed tile
 transaction validates payload reads and cleanup. Scalar Q8_0/Q5_K/Q6_K/BF16/F32 references plus
 typed I32 router decoding cover all 1,193 layer-trunk storage types in metadata, but no official
-trunk tile was read. A complete 0731 quantized layer/token path, generation and CUDA remain
-unvalidated. Windows and Linux CPU paths are tested; macOS/Metal remain unvalidated. Laguna S 2.1
-remains a reviewed compatibility target, not a validated execution path.
+trunk tile was read. A deterministic reduced layer now consumes 23 packed Q8_0 matrices and one
+I32 hash table through those storage kernels; prefill and incremental results match an independently
+dequantized oracle. Its bytes are still fixture-owned rather than retained through Governor-backed
+loader leases. A complete 0731 quantized layer/token path, generation and CUDA remain unvalidated.
+Windows and Linux CPU paths are tested; macOS/Metal remain unvalidated. Laguna S 2.1 remains a
+reviewed compatibility target, not a validated execution path.
 
 Reference-PC execution targets must pass the public minimum-working-set gate: one complete routed
 expert, the required always-active block, KV, scratch and staging must fit live post-reserve

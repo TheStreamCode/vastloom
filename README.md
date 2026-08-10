@@ -47,6 +47,10 @@ model conversion.
 > only a fully hashed payload that passes the single-tier expert gate can expose executable source
 > ranges. Bounded scalar Q8_0, Q5_K, Q6_K, BF16 and F32 reference kernels plus an I32 router-table
 > decoder now cover the storage types of all 1,193 per-layer trunk tensors in the real metadata.
+> The reduced DeepSeek graph now consumes all 23 matrices of its first main layer as Q8_0 plus
+> its hash router as I32. Prefill and incremental main/MTP logits, routes and attention indices
+> match the independently dequantized packed oracle; the original official FP32 gate remains
+> unchanged. These tiny bytes are fixture-owned, not yet bound to Governor-backed file loaders.
 > The real 82.54 GB payload has not been downloaded or executed; storage-format coverage is not a
 > complete DeepSeek layer/token path, generation or CUDA implementation.
 
@@ -111,6 +115,8 @@ The first model-independent per-layer trunk plan and governed tile transaction a
 the [`M9 layer-trunk streaming report`](docs/reports/M9_LAYER_TRUNK_STREAMING_VALIDATION.md).
 The complete layer-trunk storage-type kernel gate is documented in the
 [`M9 trunk storage-kernel report`](docs/reports/M9_DEEPSEEK_TRUNK_STORAGE_KERNEL_VALIDATION.md).
+The first architecture-level packed layer is documented in the
+[`M9 packed-layer report`](docs/reports/M9_DEEPSEEK_PACKED_LAYER_VALIDATION.md).
 The pinned importer and immutable full-source admission boundary are documented in the
 [`M7 checkpoint-binding report`](docs/reports/M7_DEEPSEEK_GGUF_CHECKPOINT_BINDING_VALIDATION.md).
 Current and candidate model support is kept explicit in the
@@ -254,9 +260,10 @@ portability target, not a validated platform claim.
 - **Large-download interlock:** a full import of at least 20 GiB requires the additional
   `--allow-large-download` flag after storage headroom has been reviewed.
 - **Honest boundary:** the full-checkpoint inspector still reports
-  `execution_supported=false`. The expanded reduced graph uses only 4,750 deterministic FP32
-  values; packed checkpoint tensors, target-verified speculative generation and CUDA remain
-  future gates.
+  `execution_supported=false`. The reduced graph now executes all 23 matrices in its first main
+  layer from deterministic Q8_0 bytes and its hash table from I32 bytes, while the remaining
+  fixture tensors stay FP32. Those packed bytes are fixture-owned: a verified official-payload
+  layer/token consumer, target-verified speculative generation and CUDA remain future gates.
 - **Official 0731 GGUF catalog:** the separate Unsloth revision
   `fbbb5b93fb787c21338159b0af3318bb3f4d9768` now has a bounded GGUF v3 header reader and
   DeepSeek-specific packed-expert mapper. The reviewed `UD-IQ1_S` split exposes 1,328 physical
@@ -267,20 +274,22 @@ portability target, not a validated platform claim.
 - **First complete real quantized expert:** exact gate and up IQ1_S slices plus the IQ3_XXS down
   slice total 6,488,064 bytes. A one-worker/one-entry governed loader reserves and packs all three,
   then a bounded scalar CPU path executes SwiGLU and matches pinned ggml for all 4,096 final
-  outputs bit for bit. This is one expert, not a complete layer, routed token or model path.
+  outputs bit for bit. This is one official-payload expert, not a complete official-payload layer,
+  routed token or model path.
 - **GGUF safety boundary:** `deepseek-gguf-inspect` reads metadata only. Header prefixes cannot
   become executable sources. The real-expert test uses three separately hash-pinned extracted
   ranges; it does not promote a header prefix or unverified full shard into an executable source.
   `deepseek-gguf-checkpoint` accepts only the pinned immutable import identity. A complete import
   must pass full-file SHA-256 and the live single-tier expert admission gate before it can expose
-  executable source ranges; even then, `execution_supported=false` until a layer/token consumer
-  exists.
+  executable source ranges; even then, `execution_supported=false` until a verified
+  full-checkpoint layer/token consumer exists.
 - **Bounded layer-trunk plan:** every non-routed `blk.N.*` tensor now keeps its exact layer
   identity. The real 0731 metadata yields 43/43 deterministic plans, 1,193 tensors/tiles and a
   35,651,584-byte largest tile under a 64 MiB cap. A governed fixture proves one immutable tile
   read and fault cleanup. Exact scalar storage handling now covers all 1,193 tensors /
-  6,390,088,008 encoded bytes through Q8_0, Q5_K, Q6_K, BF16, F32 and I32 paths. No official
-  payload tile or complete layer was executed.
+  6,390,088,008 encoded bytes through Q8_0, Q5_K, Q6_K, BF16, F32 and I32 paths. The reduced
+  packed layer validates their architecture boundary, but no complete official-payload layer was
+  executed.
 
 ### Runtime foundation
 
@@ -684,8 +693,9 @@ profiles from exact metadata. The streamed-trunk floor is 124,905,496 bytes incl
 low-memory contract explicit: trunk weights may remain immutable on SSD and move through bounded
 tiles, but one expert is never split across RAM and VRAM. The 43 layer plans use 1,193 tiles with
 a 35,651,584-byte maximum. Every layer-trunk storage type now has a bounded scalar decoder and
-the floating matrix types have transactional reference matvecs, but only a synthetic tile payload
-has been loaded. The DeepSeek trunk-streaming token path is not implemented.
+the floating matrix types have transactional reference matvecs. A reduced first layer consumes
+fixture-owned Q8_0/I32 storage, but the official-payload, Governor-owned DeepSeek trunk-streaming
+token path is not implemented.
 
 ## Current limitations
 
@@ -695,11 +705,11 @@ It currently has:
 
 - two executable pinned Hugging Face adapters plus a DeepSeek metadata/tokenizer, reduced
   FP32 prefill oracle, official 0731 GGUF metadata catalog and verified source-binding boundary;
-  no full-checkpoint DeepSeek, MiniMax, Kimi or GGUF layer/token execution adapter;
+  no full-checkpoint DeepSeek, MiniMax, Kimi or file-backed GGUF layer/token execution adapter;
 - no CUDA, ROCm, Vulkan or Metal inference backend;
 - scalar IQ1_S/IQ3_XXS expert and Q8_0/Q5_K/Q6_K/BF16/F32 trunk reference kernels, plus bounded
-  I32 router-table decoding, but no architecture-specific complete quantized layer/token,
-  SIMD/fused production kernel or CUDA quantized path;
+  I32 router-table decoding and one deterministic Q8_0 reduced-layer composition, but no
+  official-payload complete quantized layer/token, SIMD/fused production kernel or CUDA path;
 - complete metadata-derived trunk plans and storage-type coverage with a fixture-only tile loader,
   but no official trunk payload read or tile-to-DeepSeek-operator consumer;
 - no VRAM expert tier or pinned host buffers; direct/unbuffered I/O is currently an
@@ -729,8 +739,8 @@ merely SSD throughput. It is:
 
 The next technical sequence remains incremental:
 
-1. bind the completed trunk storage kernels, reference operators, incremental state and governed
-   expert loader in one quantized one-layer fixture, then match the pinned reference graph;
+1. retain packed tensor views through the governed trunk/expert loader leases and execute the
+   completed Q8_0 one-layer fixture from bounded file-backed ranges without unaccounted copies;
 2. only after explicit approval and a fresh capacity check, import and fully hash the real pinned
    shards and run the same bounded layer probe on official source ranges;
 3. connect a target-verified MTP decoding loop, then add CUDA dense, attention, router and packed

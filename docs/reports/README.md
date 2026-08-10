@@ -13,6 +13,10 @@ hardware, commands, measurements and limitations.
 
 ## Current report
 
+- [`M9_DEEPSEEK_PACKED_LAYER_VALIDATION.md`](M9_DEEPSEEK_PACKED_LAYER_VALIDATION.md) —
+  ggml-verified deterministic Q8_0 encoding, all 23 matrices of one reduced DeepSeek main layer,
+  I32 hash routing, full prefill/incremental graph parity and transactional malformed-input tests;
+  the fixture is still memory-owned rather than bound to governed file-loader leases.
 - [`M9_DEEPSEEK_TRUNK_STORAGE_KERNEL_VALIDATION.md`](M9_DEEPSEEK_TRUNK_STORAGE_KERNEL_VALIDATION.md) —
   pinned-ggml Q8_0/Q5_K/Q6_K parity, bounded BF16/F32 matvec and I32 router-table handling,
   transactional output, and real metadata coverage for all 1,193 layer-trunk tensors while

@@ -128,7 +128,7 @@ It pins official commit `60d8d70770c6776ff598c94bb586a859a38244f1`; the former
 “0731” label was provisional for that preview. A newer official 0731 repository now exists and
 is tracked as a separate target in the [model compatibility matrix](MODEL_COMPATIBILITY.md). Its
 derived `UD-IQ1_S` GGUF headers and one expert are now validated in M7; the official full
-Safetensors payload and complete layer/token remain unvalidated.
+Safetensors payload and complete official-payload layer/token remain unvalidated.
 
 ## M7 — DeepSeek CPU reference inference
 
@@ -183,11 +183,13 @@ The bounded per-layer trunk plan and tile transaction are recorded in the
 [M9 layer-trunk streaming report](reports/M9_LAYER_TRUNK_STREAMING_VALIDATION.md).
 The complete scalar layer-trunk storage-type gate is recorded in the
 [M9 trunk storage-kernel report](reports/M9_DEEPSEEK_TRUNK_STORAGE_KERNEL_VALIDATION.md).
+The first reduced architecture-level packed Q8_0 layer is recorded in the
+[M9 packed-layer report](reports/M9_DEEPSEEK_PACKED_LAYER_VALIDATION.md).
 The first real packed-matrix parity gate is recorded in the
 [M7 IQ1_S kernel report](reports/M7_DEEPSEEK_IQ1S_KERNEL_VALIDATION.md).
 The completed one-expert gate/up/SwiGLU/down path is recorded in the
 [M7 real-expert report](reports/M7_DEEPSEEK_REAL_EXPERT_VALIDATION.md); it does not yet execute a
-complete layer or token.
+complete official-payload layer or token.
 The capacity-only resident/streamed trunk derivation is recorded in the
 [M7 working-set report](reports/M7_DEEPSEEK_WORKING_SET_VALIDATION.md).
 
@@ -215,8 +217,10 @@ unbounded allocation and clean recovery from injected CUDA failures.
   cancellation-aware single-tile RAM load with fault cleanup.
 - [x] Add transactional scalar handling for every GGML storage type used by those 1,193 trunk
   tensors, including a separate non-matvec I32 router-table path.
-- [ ] Bind streamed tensor identities to one architecture-specific quantized DeepSeek layer
-  fixture and match the pinned reference graph before reading official trunk payloads.
+- [x] Bind packed tensor identities to one architecture-specific quantized DeepSeek layer
+  fixture and match an independently dequantized oracle before reading official trunk payloads.
+- [ ] Retain those packed views through Governor-owned trunk/expert loader leases and repeat the
+  layer test from bounded file-backed ranges without unaccounted payload copies.
 - [ ] Connect those futures to expert compute and measure real compute/I/O overlap.
 - [ ] Pinned host buffers.
 - [ ] Direct/overlapped NVMe reads where supported.

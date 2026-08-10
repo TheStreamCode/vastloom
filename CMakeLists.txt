@@ -75,6 +75,7 @@ add_library(vastloom_core STATIC
     src/inference/ggml_quantization.cpp
     src/inference/deepseek_v4_gguf.cpp
     src/inference/deepseek_v4_probe.cpp
+    src/inference/deepseek_v4_range_artifact.cpp
     src/inference/deepseek_v4_model.cpp
     src/inference/deepseek_v4_graph.cpp
     src/inference/deepseek_v4_expert_provider.cpp
@@ -92,6 +93,7 @@ add_library(vastloom_core STATIC
     src/model/layer_streaming.cpp
     src/model/manifest.cpp
     src/model/model_store.cpp
+    src/model/range_artifact.cpp
     src/model/residency.cpp
     src/model/safetensors.cpp
     src/model/tensor_catalog.cpp
@@ -150,6 +152,14 @@ if(BUILD_TESTING AND VASTLOOM_BUILD_TESTS)
     vastloom_set_project_warnings(vastloom_tests)
     vastloom_enable_sanitizers(vastloom_tests)
     add_test(NAME vastloom_tests COMMAND vastloom_tests)
+    add_executable(vastloom_range_artifact_test
+        tests/test_range_artifact.cpp
+    )
+    target_link_libraries(vastloom_range_artifact_test PRIVATE Vastloom::Core)
+    target_compile_features(vastloom_range_artifact_test PRIVATE cxx_std_20)
+    vastloom_set_project_warnings(vastloom_range_artifact_test)
+    vastloom_enable_sanitizers(vastloom_range_artifact_test)
+    add_test(NAME vastloom_range_artifact COMMAND vastloom_range_artifact_test)
     if(VASTLOOM_DEEPSEEK_V4_IQ1S_SLICE)
         add_executable(vastloom_iq1s_slice_test tests/test_iq1s_slice.cpp)
         target_link_libraries(vastloom_iq1s_slice_test PRIVATE Vastloom::Core)
@@ -261,6 +271,13 @@ if(BUILD_TESTING AND VASTLOOM_BUILD_TESTS)
                 --vastloom $<TARGET_FILE:vastloom>
         )
         set_tests_properties(vastloom_deepseek_v4_gguf_cli PROPERTIES TIMEOUT 60)
+        add_test(
+            NAME vastloom_range_artifact_cli
+            COMMAND ${Python3_EXECUTABLE}
+                ${CMAKE_CURRENT_SOURCE_DIR}/tests/test_range_artifact_cli.py
+                --vastloom $<TARGET_FILE:vastloom>
+        )
+        set_tests_properties(vastloom_range_artifact_cli PROPERTIES TIMEOUT 30)
         if(VASTLOOM_SMOLLM2_MODEL)
             add_test(
                 NAME vastloom_smollm2_reference

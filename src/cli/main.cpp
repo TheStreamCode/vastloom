@@ -24,6 +24,7 @@
 #include "vastloom/hardware/hardware_probe.hpp"
 #include "vastloom/inference/gpt2_tokenizer.hpp"
 #include "vastloom/inference/deepseek_v4_gguf.hpp"
+#include "vastloom/inference/deepseek_v4_range_artifact.hpp"
 #include "vastloom/inference/deepseek_v4_model.hpp"
 #include "vastloom/inference/llama_model.hpp"
 #include "vastloom/inference/olmoe_model.hpp"
@@ -33,6 +34,7 @@
 #include "vastloom/model/imported_checkpoint.hpp"
 #include "vastloom/model/gguf.hpp"
 #include "vastloom/model/model_store.hpp"
+#include "vastloom/model/range_artifact.hpp"
 #include "vastloom/model/safetensors.hpp"
 #include "vastloom/model/verifier.hpp"
 #include "vastloom/planner/execution_planner.hpp"
@@ -262,6 +264,11 @@ void print_help() {
         << "  deepseek-gguf-probe-plan MODEL_DIRECTORY --layer N --experts CSV"
            " [--tile-size SIZE] [--context N] [--batch-size N] [--no-verify] [--json]\n"
         << "      Plan exact trunk and caller-supplied selected-expert ranges; never fetch or execute them.\n\n"
+        << "  range-artifact-inspect ARTIFACT_DIRECTORY [--no-verify] [--json]\n"
+        << "      Validate a bounded immutable range artifact; never promotes it to execution.\n\n"
+        << "  deepseek-gguf-range-bind MODEL_DIRECTORY ARTIFACT_DIRECTORY --layer N --experts CSV"
+           " [--tile-size SIZE] [--context N] [--batch-size N] [--json]\n"
+        << "      Rehash and bind a trunk artifact to pinned DeepSeek metadata; still non-executing.\n\n"
         << "  moe-logits MODEL_DIRECTORY --text TEXT [--chat] [--top N]\n"
         << "       [--cache no-cache|lru|lfu|static-hot] [--cache-bytes SIZE]\n"
         << "       [--io sync|async] [--io-cache buffered|bypass] [--expert-read whole|staged]\n"
@@ -788,6 +795,103 @@ int command_deepseek_gguf_probe_plan(const std::vector<std::string>& args) {
     if (!plan) return print_error(plan.error(), json);
     std::cout << (json ? vastloom::inference::to_json(plan.value())
                       : vastloom::inference::to_text(plan.value())) << '\n';
+    return 0;
+}
+
+int command_range_artifact_inspect(const std::vector<std::string>& args) {
+    const bool json = has_flag(args, "--json");
+    auto valid = validate_options(args, 1U, {}, {"--no-verify", "--json"});
+    if (!valid) return print_error(valid.error(), json);
+    if (args.empty() || vastloom::util::starts_with(args.front(), "--")) {
+        return print_error(
+            vastloom::make_error(vastloom::ErrorCode::invalid_argument,
+                                 "range-artifact-inspect requires one artifact directory"),
+            json);
+    }
+    vastloom::model::RangeArtifactVerificationOptions options;
+    options.verify_hashes = !has_flag(args, "--no-verify");
+    auto artifact = vastloom::model::verify_range_artifact(cli_path(args.front()), options);
+    if (!artifact) return print_error(artifact.error(), json);
+    std::cout << (json ? vastloom::model::to_json(artifact.value())
+                      : vastloom::model::to_text(artifact.value())) << '\n';
+    return 0;
+}
+
+int command_deepseek_gguf_range_bind(const std::vector<std::string>& args) {
+    const bool json = has_flag(args, "--json");
+    auto valid = validate_options(
+        args,
+        2U,
+        {"--layer", "--experts", "--tile-size", "--context", "--batch-size"},
+        {"--json"});
+    if (!valid) return print_error(valid.error(), json);
+    if (args.size() < 2U || vastloom::util::starts_with(args[0], "--") ||
+        vastloom::util::starts_with(args[1], "--")) {
+        return print_error(
+            vastloom::make_error(
+                vastloom::ErrorCode::invalid_argument,
+                "deepseek-gguf-range-bind requires checkpoint and artifact directories"),
+            json);
+    }
+    const auto layer_option = option_value(args, "--layer");
+    const auto expert_option = option_value(args, "--experts");
+    if (!layer_option.has_value() || !expert_option.has_value()) {
+        return print_error(
+            vastloom::make_error(
+                vastloom::ErrorCode::invalid_argument,
+                "deepseek-gguf-range-bind requires --layer and the plan's --experts IDs"),
+            json);
+    }
+    auto layer = optional_size(args, "--layer", 0U);
+    auto experts = parse_expert_ids(*expert_option);
+    auto tile_size = optional_bytes(
+        args, "--tile-size", vastloom::model::kDefaultLayerStreamingTileBytes);
+    auto context = optional_size(args, "--context", 4'096U);
+    auto batch_size = optional_size(args, "--batch-size", 1U);
+    if (!layer) return print_error(layer.error(), json);
+    if (!experts) return print_error(experts.error(), json);
+    if (!tile_size) return print_error(tile_size.error(), json);
+    if (!context) return print_error(context.error(), json);
+    if (!batch_size) return print_error(batch_size.error(), json);
+    if (layer.value() > std::numeric_limits<std::uint32_t>::max() ||
+        tile_size.value() == 0U || tile_size.value() > 1U * vastloom::GiB ||
+        context.value() == 0U || context.value() > 1'048'576U ||
+        batch_size.value() == 0U || batch_size.value() > 8U) {
+        return print_error(
+            vastloom::make_error(vastloom::ErrorCode::invalid_argument,
+                                 "DeepSeek range binding bounds are invalid"),
+            json);
+    }
+
+    const auto checkpoint_root = cli_path(args[0]);
+    auto hardware = vastloom::hardware::HardwareProbe::collect(checkpoint_root);
+    if (!hardware) return print_error(hardware.error(), json);
+    auto policy = vastloom::safety::make_safe_runtime_policy(hardware.value());
+    if (!policy) return print_error(policy.error(), json);
+
+    vastloom::inference::DeepseekV4GgufCheckpointInspectOptions inspect_options;
+    inspect_options.verify_hashes = true;
+    inspect_options.context_tokens = static_cast<std::uint32_t>(context.value());
+    inspect_options.batch_size = static_cast<std::uint32_t>(batch_size.value());
+    inspect_options.safe_ram_cap_bytes = policy.value().resources.host_memory_hard_limit;
+    inspect_options.safe_vram_cap_bytes = policy.value().resources.vram_hard_limit;
+    const auto& spec = vastloom::inference::pinned_deepseek_v4_flash_0731_iq1s_checkpoint();
+    auto report = vastloom::inference::inspect_deepseek_v4_gguf_checkpoint(
+        checkpoint_root, spec, inspect_options);
+    if (!report) return print_error(report.error(), json);
+    auto plan = vastloom::inference::build_deepseek_v4_layer_probe_plan(
+        report.value(),
+        static_cast<std::uint32_t>(layer.value()),
+        experts.value(),
+        tile_size.value());
+    if (!plan) return print_error(plan.error(), json);
+    auto artifact = vastloom::model::verify_range_artifact(cli_path(args[1]));
+    if (!artifact) return print_error(artifact.error(), json);
+    auto binding = vastloom::inference::bind_deepseek_v4_trunk_range_artifact(
+        artifact.value(), report.value(), plan.value(), spec);
+    if (!binding) return print_error(binding.error(), json);
+    std::cout << (json ? vastloom::inference::to_json(binding.value())
+                      : vastloom::inference::to_text(binding.value())) << '\n';
     return 0;
 }
 
@@ -1464,6 +1568,8 @@ int dispatch_cli(const std::vector<std::string>& arguments) {
         if (command == "deepseek-gguf-inspect") return command_deepseek_gguf_inspect(args);
         if (command == "deepseek-gguf-checkpoint") return command_deepseek_gguf_checkpoint(args);
         if (command == "deepseek-gguf-probe-plan") return command_deepseek_gguf_probe_plan(args);
+        if (command == "range-artifact-inspect") return command_range_artifact_inspect(args);
+        if (command == "deepseek-gguf-range-bind") return command_deepseek_gguf_range_bind(args);
         if (command == "moe-logits") return command_moe_logits(args);
         if (command == "heartbeat-write") return command_heartbeat_write(args);
         if (command == "version" || command == "--version") {

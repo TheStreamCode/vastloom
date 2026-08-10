@@ -92,8 +92,9 @@ not DeepSeek runtime claims. The OLMoE staged path passed parity and improved me
 warm buffered forward time by 46.0% in three paired WSL runs. Three Windows
 `direct-unbuffered-v1` runs then returned identical reference output and exactly
 1,610,743,808 whole-device bytes for 1,610,612,736 logical expert bytes per run. M5 is
-closed. The exact official DeepSeek checkpoint contract and reduced float graph are now
-validated; the packed checkpoint loader and incremental/MTP reference path are active.
+closed. The exact official DeepSeek checkpoint contract, reduced float main graph and one
+checkpoint-shaped MTP block are now validated; the packed checkpoint loader, incremental state
+and speculative verification loop remain M7 work.
 
 ## M6 — Exact DeepSeek inspector and architecture-faithful fixture — complete
 
@@ -133,12 +134,17 @@ It pins official commit `60d8d70770c6776ff598c94bb586a859a38244f1`; the former
 - [x] Checkpoint-compatible tokenizer and basic system/user/assistant chat template.
 - [ ] Thinking/tool-call encoding and completion parsing.
 - [ ] Incremental KV/state path.
-- [ ] Native speculative component reference path where present.
+- [x] Native single-block MTP reference path with official logit/route/index parity.
 - [x] Reduced quality fixture runner.
 - [ ] Full-checkpoint probe and regression corpus.
 
 **Gate:** end-to-end tokens, logits and expert choices match the reference implementation
 on the reduced fixture and selected full-model probes.
+
+The completed reduced MTP slice is recorded in the
+[M7 MTP validation report](reports/M7_DEEPSEEK_MTP_VALIDATION.md). It validates the
+checkpoint-compatible component equations, not speculative decoding or full-checkpoint
+execution.
 
 ## M8 — CUDA path for the RTX 4070 Super
 

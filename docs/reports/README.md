@@ -25,10 +25,13 @@ hardware, commands, measurements and limitations.
 - [`M6_DEEPSEEK_GRAPH_VALIDATION.md`](M6_DEEPSEEK_GRAPH_VALIDATION.md) — official-source
   deterministic two-layer graph with native logit, greedy-token, expert-route and
   raw/compressed attention-index parity.
+- [`M7_DEEPSEEK_MTP_VALIDATION.md`](M7_DEEPSEEK_MTP_VALIDATION.md) — checkpoint-shaped
+  single-block MTP reference execution with native draft-logit, proposed-token, route and
+  sparse-attention-index parity.
 
-M6 is complete for its reduced float correctness gate. Full-checkpoint DeepSeek execution,
-packed kernels, incremental state, MTP and CUDA remain M7/M8 work. The preceding completed
-storage milestone is M5:
+M6 is complete for its reduced float correctness gate, and the first M7 MTP component gate is
+complete. Full-checkpoint DeepSeek execution, packed kernels, incremental state, speculative
+verification and CUDA remain M7/M8 work. The preceding completed storage milestone is M5:
 
 - [`M5_DEVICE_IO_CACHE_BYPASS_VALIDATION.md`](M5_DEVICE_IO_CACHE_BYPASS_VALIDATION.md) —
   device-level Windows/Linux counters, bounded direct/unbuffered reads, repeatable

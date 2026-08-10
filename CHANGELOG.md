@@ -16,10 +16,11 @@
 - Added bounded native DeepSeek reference equations and deterministic vectors for RMSNorm,
   learned/hash routing, routed SwiGLU, Hyper-Connections, base RoPE and selected-latent
   sparse attention. These are operator tests, not a DeepSeek forward or generation claim.
-- Added a deterministic 102,104-byte graph exported from the SHA-256-pinned official
-  `model.py` and a bounded native two-layer FP32 prefill. All logits, the greedy token,
-  learned/hash expert routes and raw/compressed attention indices pass the declared parity
-  gate; full-checkpoint DeepSeek execution remains unsupported.
+- Added a deterministic 147,136-byte graph exported from the SHA-256-pinned official
+  `model.py`, a bounded native two-layer FP32 prefill and one checkpoint-shaped MTP block.
+  Main and MTP logits, proposed tokens, learned/hash expert routes and raw/compressed attention
+  indices pass the declared parity gate; full-checkpoint and speculative DeepSeek execution
+  remain unsupported.
 - Added an explicit `--allow-large-download` gate for checkpoint imports containing at
   least 20 GiB of weight payload. DeepSeek execution remains unsupported and is reported
   as such by the CLI.

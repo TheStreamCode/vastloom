@@ -74,6 +74,8 @@ The first bounded mathematical primitives are documented in the
 [`M6 reference-operator report`](docs/reports/M6_DEEPSEEK_REFERENCE_OPERATORS_VALIDATION.md).
 The completed reduced graph gate is documented in the
 [`M6 reduced-graph validation report`](docs/reports/M6_DEEPSEEK_GRAPH_VALIDATION.md).
+The checkpoint-shaped MTP reference gate is documented in the
+[`M7 MTP validation report`](docs/reports/M7_DEEPSEEK_MTP_VALIDATION.md).
 
 ## Reference target
 
@@ -187,11 +189,16 @@ allocation plan is derived from detected capacity and conservative headroom.
   `model.py` exercises a hash router, learned router, shared expert, YaRN, overlapping 4:1
   compression and learned attention indexer. Native logits, greedy token, all routes and
   attention indices pass the declared parity tolerance.
+- **Checkpoint-shaped MTP reference:** the same oracle now executes one native MTP block,
+  including embedding/hidden preprocessing, Hyper-Connections, learned MoE, sparse attention
+  and its own HC output head. Its logits, proposed token, routes and indices match the official
+  graph, but no speculative verification loop exists yet.
 - **Large-download interlock:** a full import of at least 20 GiB requires the additional
   `--allow-large-download` flag after storage headroom has been reviewed.
 - **Honest boundary:** the full-checkpoint inspector still reports
-  `execution_supported=false`. The reduced graph uses only 3,293 deterministic FP32 values;
-  packed checkpoint tensors, incremental state, MTP, CUDA and generation remain future gates.
+  `execution_supported=false`. The expanded reduced graph uses only 4,750 deterministic FP32
+  values; packed checkpoint tensors, incremental state, speculative generation and CUDA remain
+  future gates.
 
 ### Runtime foundation
 
@@ -572,7 +579,8 @@ research metric is not merely SSD throughput. It is:
 
 The next technical sequence remains incremental:
 
-1. bind the verified DeepSeek tensor catalog, packed FP4/FP8 weights, incremental state and MTP;
+1. bind the verified DeepSeek tensor catalog and packed FP4/FP8 weights, then add incremental
+   state and a target-verified MTP decoding loop;
 2. CUDA dense, attention, router and packed expert kernels;
 3. explicit VRAM/RAM/NVMe placement with pinned buffers and direct/overlapped I/O;
 4. adaptive placement, predictive routing and speculative expert deduplication;

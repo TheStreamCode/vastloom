@@ -233,9 +233,9 @@ operator parity boundary — graph composition described below
 ```
 
 The current sparse-attention primitive consumes already-selected latent KV positions.
-The graph below now supplies learned indexer construction, compressed-position scheduling,
-YaRN scaling, shared-expert aggregation and the Hyper-Connection LM head. MTP remains an
-M7 gate because the official main `Transformer.forward` does not invoke it.
+The graph below supplies learned indexer construction, compressed-position scheduling,
+YaRN scaling, shared-expert aggregation and the Hyper-Connection LM head. A separate reduced
+MTP invocation is required because the official main `Transformer.forward` does not invoke it.
 
 The completed M6 fixture composes those operators into the main prefill graph:
 
@@ -248,12 +248,17 @@ The completed M6 fixture composes those operators into the main prefill graph:
       │
       ▼
 HC head -> RMSNorm -> 16 reference logits -> greedy token
+      │
+      └─ MTP: normalized embedding + normalized main hidden
+              -> learned sparse-attention/MoE block
+              -> MTP HC head -> 16 draft logits -> proposed token
 ```
 
-All 82 deterministic fixture tensors use the official parameter names and are consumed by
-the native run. The prefill oracle is batch-one FP32, capped at 4,096 tokens, 16 layers and
-64 million graph elements. It intentionally has no incremental cache mutation, MTP or packed
-checkpoint kernels, and is not selected by `deepseek-inspect` for the full checkpoint.
+All 123 deterministic fixture tensors use the official parameter names and are consumed by
+the native run. The prefill/MTP oracle is batch-one FP32, capped at 4,096 tokens, 16 total
+layers, one MTP layer and 64 million graph elements. It intentionally has no incremental cache
+mutation, target-verification loop or packed checkpoint kernels, and is not selected by
+`deepseek-inspect` for the full checkpoint.
 
 ## TinyTransformer adapter boundary
 

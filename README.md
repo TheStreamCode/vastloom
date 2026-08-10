@@ -49,11 +49,12 @@ model conversion.
 > only a fully hashed payload that passes the single-tier expert gate can expose executable source
 > ranges. Bounded scalar Q8_0, Q5_K, Q6_K, BF16 and F32 reference kernels plus an I32 router-table
 > decoder now cover the storage types of all 1,193 per-layer trunk tensors in the real metadata.
-> The reduced DeepSeek graph now consumes all 23 matrices of its first main layer as Q8_0 plus
-> its hash router as I32. Prefill and incremental main/MTP logits, routes and attention indices
-> match the independently dequantized packed oracle; the original official FP32 gate remains
-> unchanged. A second pass reads the same 5,364-byte payload from a Unicode file as 12 bounded
-> trunk tiles and four indivisible expert bundles. The graph retains their 16 Governor-backed
+> The reduced DeepSeek graph now consumes 11 Q8_0 trunk/shared matrices, eight IQ1_S routed
+> gate/up matrices, four IQ3_XXS routed down matrices and its hash router as I32. Prefill and
+> incremental main/MTP logits, routes and attention indices match the independently dequantized
+> packed oracle; the original official FP32 gate remains unchanged. A second pass reads the same
+> 8,180-byte payload from a Unicode file as 12 bounded trunk tiles and four indivisible
+> mixed-format expert bundles. The graph retains their 16 Governor-backed
 > immutable buffers directly, blocks eviction while in use and releases every reservation after
 > execution. The reduced MoE graph can now stop after authoritative routing, deduplicate selected
 > IDs and resolve only those complete file-backed bundles through a two-entry governed RAM LRU.
@@ -137,6 +138,8 @@ The canonical real-expert catalog/cache/kernel bridge is documented in the
 [`M9 real selected-expert report`](docs/reports/M9_DEEPSEEK_REAL_SELECTED_EXPERT_VALIDATION.md).
 The bounded router-to-future-to-compute scheduler and controlled overlap result are documented in
 the [`M9 asynchronous overlap report`](docs/reports/M9_DEEPSEEK_ASYNC_COMPUTE_OVERLAP_VALIDATION.md).
+The complete reduced Q8_0/IQ1_S/IQ3_XXS layer composition is documented in the
+[`M9 mixed-format layer report`](docs/reports/M9_DEEPSEEK_MIXED_FORMAT_LAYER_VALIDATION.md).
 The pinned importer and immutable full-source admission boundary are documented in the
 [`M7 checkpoint-binding report`](docs/reports/M7_DEEPSEEK_GGUF_CHECKPOINT_BINDING_VALIDATION.md).
 Current and candidate model support is kept explicit in the
@@ -280,12 +283,13 @@ portability target, not a validated platform claim.
 - **Large-download interlock:** a full import of at least 20 GiB requires the additional
   `--allow-large-download` flag after storage headroom has been reviewed.
 - **Honest boundary:** the full-checkpoint inspector still reports
-  `execution_supported=false`. The reduced graph now executes all 23 matrices in its first main
-  layer from deterministic Q8_0 bytes and its hash table from I32 bytes, while the remaining
-  fixture tensors stay FP32. The packed layer now binds file-backed trunk/expert loader buffers
-  without payload copies into the graph. Its new router-first provider loads only deduplicated
-  selected complete bundles through a bounded synchronous RAM cache and emits exact access
-  telemetry. Canonical 0731 GGUF identities can now feed one real IQ1_S/IQ3_XXS selected expert
+  `execution_supported=false`. The reduced graph now executes 11 Q8_0 trunk/shared matrices,
+  eight IQ1_S routed W1/W3 matrices and four IQ3_XXS routed W2 matrices in its first main layer,
+  plus an I32 hash table; remaining fixture tensors stay FP32. The packed layer binds file-backed
+  trunk/expert loader buffers without payload copies into the graph. Its router-first provider
+  loads only deduplicated selected complete mixed-format bundles through a bounded RAM cache and
+  emits exact access telemetry. Canonical 0731 GGUF identities can feed one real
+  IQ1_S/IQ3_XXS selected expert
   through that same cache/consumer boundary with exact miss/hit accounting and retained leases.
   An optional one-to-four-worker batch submits all selected misses and acquires each result at its
   fixed numerical compute turn. A controlled reduced fixture proves a positive read-service/
@@ -344,8 +348,9 @@ portability target, not a validated platform claim.
   The reduced DeepSeek layer consumes selected file-backed fixture bundles through the same cache
   abstraction. Its optional async batch overlaps later read service with earlier CPU expert
   compute in a controlled fixture while preserving reduction order; successful abandoned reads
-  are drained and counted as wasted prefetch. Complete verified 0731 shards and an official
-  mixed-format layer are not connected.
+  are drained and counted as wasted prefetch. That reduced layer now uses IQ1_S W1/W3 and
+  IQ3_XXS W2 for all four routed bundles. Complete verified 0731 shards and a checkpoint-shaped
+  official-payload layer are not connected.
 - **Governed trunk tile:** one non-routed source tile is identity-checked against the catalog,
   destination and staging are reserved before allocation, metadata-only catalogs are refused and
   an RAII lease protects the resulting buffer through use/eviction.
@@ -748,9 +753,9 @@ It currently has:
   verified source-binding boundary; no full-checkpoint DeepSeek, MiniMax or Kimi execution adapter;
 - no CUDA, ROCm, Vulkan or Metal inference backend;
 - scalar IQ1_S/IQ3_XXS expert and Q8_0/Q5_K/Q6_K/BF16/F32 trunk reference kernels, plus bounded
-  I32 router-table decoding, one deterministic Q8_0 reduced-layer composition and one real
-  selected-expert cache/kernel bridge, but no official-payload complete quantized layer/token,
-  SIMD/fused production kernel or CUDA path;
+  I32 router-table decoding, one deterministic reduced mixed-format layer composition and one
+  separately validated real selected-expert cache/kernel bridge, but no checkpoint-shaped
+  official-payload layer/token, SIMD/fused production kernel or CUDA path;
 - complete metadata-derived trunk plans and storage-type coverage plus a governed
   tile/expert-to-DeepSeek fixture consumer and reduced router-first bounded expert cache with an
   opt-in single-owner asynchronous batch, but no official trunk payload read or full-model loop;
@@ -782,9 +787,10 @@ merely SSD throughput. It is:
 
 The next technical sequence remains incremental:
 
-1. compose one complete mixed-format layer/token probe from bounded trunk tiles plus routed real
-   experts and require exact logits/routes before scaling beyond pinned slices;
-2. measure useful physical-device expert-read/compute overlap on that bounded probe with declared
+1. define a checkpoint-shaped single-token layer probe and derive the smallest exact official
+   trunk and selected-expert range set without downloading the full checkpoint;
+2. after explicit approval, execute that bounded range set with exact logit/route parity and
+   measure useful physical-device expert-read/compute overlap with declared
    cache state and exact logical, process-visible and device bytes;
 3. only after explicit approval and a fresh capacity check, import and fully hash the real pinned
    shards and run the same bounded layer probe on official source ranges;

@@ -183,7 +183,7 @@ The bounded per-layer trunk plan and tile transaction are recorded in the
 [M9 layer-trunk streaming report](reports/M9_LAYER_TRUNK_STREAMING_VALIDATION.md).
 The complete scalar layer-trunk storage-type gate is recorded in the
 [M9 trunk storage-kernel report](reports/M9_DEEPSEEK_TRUNK_STORAGE_KERNEL_VALIDATION.md).
-The first reduced architecture-level packed Q8_0 layer is recorded in the
+The first reduced architecture-level packed Q8_0 baseline is recorded in the
 [M9 packed-layer report](reports/M9_DEEPSEEK_PACKED_LAYER_VALIDATION.md).
 The ownership-preserving file-backed repetition is recorded in the
 [M9 governed-layer report](reports/M9_DEEPSEEK_GOVERNED_LAYER_VALIDATION.md).
@@ -193,6 +193,8 @@ The canonical 0731 catalog-to-cache mixed-format expert bridge is recorded in th
 [M9 real selected-expert report](reports/M9_DEEPSEEK_REAL_SELECTED_EXPERT_VALIDATION.md).
 The bounded selected-miss batch and controlled read-service/CPU-compute overlap are recorded in
 the [M9 asynchronous overlap report](reports/M9_DEEPSEEK_ASYNC_COMPUTE_OVERLAP_VALIDATION.md).
+The complete reduced Q8_0/IQ1_S/IQ3_XXS layer composition is recorded in the
+[M9 mixed-format layer report](reports/M9_DEEPSEEK_MIXED_FORMAT_LAYER_VALIDATION.md).
 The first real packed-matrix parity gate is recorded in the
 [M7 IQ1_S kernel report](reports/M7_DEEPSEEK_IQ1S_KERNEL_VALIDATION.md).
 The completed one-expert gate/up/SwiGLU/down path is recorded in the
@@ -236,6 +238,10 @@ unbounded allocation and clean recovery from injected CUDA failures.
 - [x] Connect selected-expert futures to deterministic CPU compute and measure controlled
   read-service/compute overlap with exact oracle parity; physical official-payload overlap remains
   a later performance gate.
+- [x] Compose a complete reduced layer/token with Q8_0/I32 trunk, IQ1_S W1/W3 and IQ3_XXS W2
+  selected bundles through governed file-backed synchronous/asynchronous cache paths.
+- [ ] Define and execute a checkpoint-shaped single-token probe from the smallest exact set of
+  verified official trunk and selected-expert ranges.
 - [ ] Pinned host buffers.
 - [ ] Direct/overlapped NVMe reads where supported.
 - [ ] Resident-trunk and bounded streamed-trunk placement profiles.

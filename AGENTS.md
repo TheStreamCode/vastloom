@@ -29,18 +29,20 @@ three-object importer and full-hash/single-tier source-binding gate are implemen
 non-routed trunk plans (1,193 tensors/tiles at a 64 MiB ceiling), and a synthetic governed tile
 transaction validates payload reads and cleanup. Scalar Q8_0/Q5_K/Q6_K/BF16/F32 references plus
 typed I32 router decoding cover all 1,193 layer-trunk storage types in metadata, but no official
-trunk tile was read. A deterministic reduced layer now consumes 23 packed Q8_0 matrices and one
-I32 hash table through those storage kernels; prefill and incremental results match an independently
-dequantized oracle. A file-backed repetition loads 12 complete trunk tiles and four indivisible
-expert bundles, then retains all 5,364 payload bytes through 16 Governor-backed immutable buffers
-without copying them into the graph. The reduced MoE graph now routes first and resolves only the
+trunk tile was read. A deterministic reduced layer now consumes 11 packed Q8_0 trunk/shared
+matrices, eight IQ1_S routed W1/W3 matrices, four IQ3_XXS routed W2 matrices and one I32 hash table;
+prefill and incremental results match an independently dequantized oracle. A file-backed
+repetition loads 12 complete trunk tiles and four indivisible mixed-format expert bundles, then
+retains all 8,180 payload bytes through 16 Governor-backed immutable buffers without copying them
+into the graph. The reduced MoE graph now routes first and resolves only the
 deduplicated selected complete bundles through a bounded synchronous two-entry RAM LRU with exact
 hit/miss/eviction/logical-byte telemetry. Canonical 0731 GGUF identities now bind one complete
 6,488,064-byte extracted IQ1_S/IQ3_XXS expert into the same one-entry cache/consumer boundary;
 first-miss/second-hit telemetry, pinned ggml output and lease cleanup pass across tested compilers.
 The same real expert also passes the asynchronous future/cache/kernel boundary, although one
-expert alone cannot prove useful overlap. A complete 0731 quantized layer/token path, physical
-NVMe overlap, generation and CUDA remain unvalidated.
+expert alone cannot prove useful overlap. The mixed-format layer uses reduced synthetic IQ bytes;
+the real 4,096/2,048 expert is not yet composed with official trunk payload. A complete 0731
+quantized layer/token path, physical NVMe overlap, generation and CUDA remain unvalidated.
 Windows and Linux CPU paths are tested; macOS/Metal remain unvalidated. Laguna S 2.1 remains a
 reviewed compatibility target, not a validated execution path.
 

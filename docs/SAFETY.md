@@ -123,11 +123,12 @@ profile is a capacity result, not authorization to execute unverified weights.
 The DeepSeek GGUF inspector additionally derives both trunk profiles from exact scalar metadata,
 the retained bounded compression schedule and encoded tensor ranges. It never adds RAM and VRAM
 together to make an oversized expert appear admissible. It now also verifies deterministic plans
-for all 43 real layers. A reduced layer now consumes file-backed Q8_0/I32 bytes while its graph
-retains Governor-owned trunk/expert buffers and blocks eviction. Its router-first test now loads
-only the two unique complete bundles selected by each one-token route through a two-entry RAM
-cache. Requests above the bound, insufficient reservations and eviction of an in-flight bundle are
-rejected. One extracted real 0731 expert now also traverses strict catalog binding, the same
+for all 43 real layers. A reduced layer now consumes file-backed Q8_0/I32 trunk plus
+IQ1_S/IQ3_XXS routed bytes while its graph retains Governor-owned trunk/expert buffers and blocks
+eviction. Its router-first test loads only the two unique complete mixed-format bundles selected by
+each one-token route through a two-entry RAM cache. Requests above the bound, insufficient
+reservations, malformed mixed-format descriptors and eviction of an in-flight bundle are rejected.
+One extracted real 0731 expert also traverses strict catalog binding, the same
 cache boundary and the mixed-format scalar consumer through both synchronous and asynchronous
 resolution; the complete 6,488,064-byte bundle remains indivisible and lease-protected. A
 controlled reduced fixture proves scheduling overlap, but this does not make the absent complete

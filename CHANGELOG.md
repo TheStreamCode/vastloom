@@ -54,15 +54,16 @@
   coverage only for the official payload: the 82.54 GB payload remains absent and
   `execution_supported=false`.
 - Added deterministic ggml-compatible Q8_0 reference encoding and connected packed matrix/I32
-  storage directly to the reduced DeepSeek graph. All 23 matrices in main layer 0 now execute
-  through transactional storage dispatch; prefill and incremental main/MTP logits, routes and
-  attention indices match an independently dequantized oracle. File-backed governed ownership,
-  official payload execution and generation remain open.
+  storage directly to the reduced DeepSeek graph. Its 11 trunk/shared matrices use Q8_0, routed
+  W1/W3 now use eight IQ1_S matrices and routed W2 uses four IQ3_XXS matrices. All 23 matrices in
+  main layer 0 execute through transactional storage dispatch; prefill and incremental main/MTP
+  logits, routes and attention indices match an independently dequantized oracle. Official
+  payload execution and generation remain open.
 - Added immutable resident byte buffers shared by the bounded trunk and expert loaders. A
   file-backed reduced DeepSeek layer now binds 12 complete trunk tiles and four indivisible expert
-  bundles directly into the graph, retains exactly 5,364 governed payload bytes across prefill and
-  decode, blocks eviction while referenced, and returns all reservations to zero on release.
-  Official payload execution remains open.
+  bundles directly into the graph, retains exactly 8,180 governed mixed-format payload bytes
+  across prefill and decode, blocks eviction while referenced, and returns all reservations to
+  zero on release. Official payload execution remains open.
 - Split the reduced DeepSeek MoE graph at its authoritative router boundary and added a reusable
   bounded selected-expert cache. The graph deduplicates routed IDs, requests only complete selected
   bundles, executes their retained packed matrices and records hit/miss/logical-byte telemetry. A
@@ -91,6 +92,12 @@
   One active batch per cache, full-request queue capacity, drain-on-abandon and exact successful
   wasted-prefetch accounting keep this correctness slice bounded. This is not a physical-NVMe,
   complete-layer or throughput result.
+- Extended the complete reduced layer/token gate to the real 0731 expert format combination:
+  Q8_0 trunk/shared tensors, I32 hash routing, IQ1_S W1/W3 and IQ3_XXS W2. The 8,180-byte
+  file-backed fixture produces four 1,384-byte indivisible expert bundles; synchronous and
+  asynchronous cache execution matches the dequantized oracle for prefill/decode, and selected IQ
+  truncation plus malformed W2 format fail transactionally. These are deterministic reduced
+  bytes, not official checkpoint payload or a performance result.
 - Documented the tested platform boundary explicitly: Windows/MSVC and Linux GCC/Clang CPU paths
   are validated, while macOS and Metal remain unvalidated targets.
 - Added a public reference-PC admission gate: a model must fit one complete expert plus the

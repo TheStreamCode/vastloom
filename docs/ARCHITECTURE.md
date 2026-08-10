@@ -359,18 +359,20 @@ only after every encoded block and row succeeds. Quantized matrices are never ex
 one fixed block of at most 256 floats is decoded at a time.
 
 The reduced DeepSeek graph is now the first architecture consumer of that boundary. Its first
-main layer replaces all 23 float matrices with deterministic Q8_0 storage and its hash table with
-I32 bytes. The graph distinguishes logical columns from a block-aligned physical stride, pads
-activations with zeros, dispatches transactional matvecs, and feeds raw router projections into
-the unchanged sqrt-softplus/top-k equations. Full prefill and one incremental step match the
-independently dequantized oracle for main/MTP logits, routes and attention indices.
+main layer replaces 11 trunk/shared float matrices with deterministic Q8_0 storage, eight routed
+W1/W3 matrices with IQ1_S, four routed W2 matrices with IQ3_XXS and its hash table with I32 bytes.
+The graph distinguishes logical columns from a block-aligned physical stride, pads activations
+with zeros, dispatches transactional matvecs, and feeds raw router projections into the unchanged
+sqrt-softplus/top-k equations. Full prefill and incremental steps match the independently
+dequantized oracle for main/MTP logits, routes and attention indices.
 
 The same graph now accepts immutable resident byte buffers created only by the bounded trunk and
 expert loaders. Each buffer owns its `ResidencyUse`; graph descriptors hold a shared reference plus
-an exact checked subrange. The reduced file-backed test loads 12 complete trunk tensors and four
-indivisible three-matrix expert bundles, then destroys every loader wrapper before inference. Its
-16 residency objects remain non-evictable until the graph releases its final reference. This
-eliminates payload copies at the loader/graph boundary.
+an exact checked subrange. The reduced file-backed test loads 12 complete Q8_0/I32 trunk tensors
+and four indivisible IQ1_S/IQ3_XXS three-matrix expert bundles, then destroys every loader wrapper
+before inference. Its 16 residency objects retain exactly 8,180 bytes and remain non-evictable
+until the graph releases its final reference. This eliminates payload copies at the loader/graph
+boundary.
 
 The router-first reduced slice stops after authoritative routing, deduplicates expert IDs and
 calls a block-scoped provider before expert compute. The reusable synchronous baseline owns a
@@ -391,10 +393,12 @@ RAM and counts every successfully completed unused load as wasted prefetch. Queu
 hold the entire configured maximum selected set, workers remain capped at four and every request
 is independently reserved through the Governor before enqueue.
 
-This closes router-first acquisition for the deterministic Q8_0 layer. A second adapter now maps
+This closes router-first acquisition for the deterministic mixed-format reduced layer. A second
+adapter maps
 canonical official 0731 GGUF expert identities to strict W1/W2/W3 descriptors and sends one
 extracted real IQ1_S/IQ3_XXS bundle through the same cache/consumer boundary. It does not compose
-that expert with official trunk payload. The real bundle also passes the asynchronous
+that checkpoint-shaped expert with the reduced graph or official trunk payload. The real bundle
+also passes the asynchronous
 future/cache/kernel boundary, while a controlled two-expert reduced fixture proves positive
 read-service/CPU-compute overlap with exact oracle parity. Physical-NVMe performance, VRAM
 placement and production prefill chunking remain separate gates.

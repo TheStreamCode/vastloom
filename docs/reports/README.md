@@ -13,6 +13,10 @@ hardware, commands, measurements and limitations.
 
 ## Current report
 
+- [`M9_DEEPSEEK_MIXED_FORMAT_LAYER_VALIDATION.md`](M9_DEEPSEEK_MIXED_FORMAT_LAYER_VALIDATION.md) —
+  one complete reduced DeepSeek main-layer/token composition with Q8_0/I32 trunk data,
+  IQ1_S W1/W3 and IQ3_XXS W2 expert bundles, governed synchronous/asynchronous file-backed
+  residency, deterministic FP32 parity and transactional selected-expert failure coverage.
 - [`M9_DEEPSEEK_ASYNC_COMPUTE_OVERLAP_VALIDATION.md`](M9_DEEPSEEK_ASYNC_COMPUTE_OVERLAP_VALIDATION.md) —
   bounded selected-miss begin/acquire batches, deterministic reduction order, controlled positive
   read-service/CPU-compute overlap, real-expert async ownership, abandoned-load accounting and

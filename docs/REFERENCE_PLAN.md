@@ -85,10 +85,11 @@ streamed-trunk CPU floor is 124,905,496 bytes, and the resident-trunk CPU floor 
 bytes. This proves metadata-level capacity accounting, not DeepSeek execution; full payload
 verification on the official local objects, official-payload trunk compute and a layer/token path
 remain absent. Scalar storage handling now covers every type in the 1,193 planned layer tensors,
-and a reduced first layer now composes Q8_0/I32 packed storage through the architecture graph.
-A file-backed repetition retains the bounded trunk/expert loader buffers and their Governor leases
-directly through execution. A subsequent router-first reduced test loads only two selected complete
-bundles at a time through a two-entry governed RAM cache, including reuse and safe LRU eviction.
+and a reduced first layer now composes Q8_0/I32 trunk with IQ1_S/IQ3_XXS routed storage through
+the architecture graph. An 8,180-byte file-backed repetition retains the bounded trunk/expert
+loader buffers and their Governor leases directly through execution. A subsequent router-first
+reduced test loads only two selected complete mixed-format bundles at a time through a two-entry
+governed RAM cache, including reuse and safe LRU eviction.
 The separately pinned 6,488,064-byte real expert now also binds its canonical 0731 GGUF identities
 to that cache/kernel boundary: one miss reads the complete bundle and the following hit reads zero
 logical bytes. It still does not compose official trunk payload into a complete layer/token, so it
@@ -96,6 +97,8 @@ is not a full DeepSeek execution result. The same complete bundle now passes a o
 asynchronous begin/acquire path. A controlled reduced two-expert fixture demonstrates that later
 read service can overlap earlier CPU expert compute without changing numerical reduction order;
 this is not measured physical-device overlap or evidence that the 82.54 GB profile is interactive.
+The reduced graph and checkpoint-shaped real expert remain separate dimension domains, so this is
+still not an official-payload layer/token result.
 The pinned importer/checkpoint gate can now bind complete shards only after full SHA-256 and this
 same live single-tier admission; its real validation used only the 5,343,584-byte metadata import.
 

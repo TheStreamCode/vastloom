@@ -14,7 +14,7 @@ or matching tensor dimensions is never enough to enable execution automatically.
 | OLMoE-1B-7B-0924-Instruct | Pinned shards, top-k routes, expert streaming and I/O telemetry | Validated CPU expert streaming |
 | `deepseek-ai/DeepSeek-V4-Flash` preview at `60d8d707...` | Header catalog, tokenizer, reduced main+MTP prefill and five incremental cache steps | Reduced FP32 reference execution only |
 | `deepseek-ai/DeepSeek-V4-Flash-0731` at `7872f01b...` | Public metadata/config reviewed on 2026-08-10 | Not imported, inspected or executed by Vastloom yet |
-| `unsloth/DeepSeek-V4-Flash-0731-GGUF` at `fbbb5b93...` | Pinned atomic importer, verified metadata binding, 43 bounded layer-trunk plans, all trunk storage types covered by scalar references, one router-first governed file-backed reduced Q8_0 layer, plus canonical synchronous/asynchronous cache-to-kernel IQ1_S/IQ3_XXS parity on one real expert | One extracted selected expert executes through the bounded RAM cache; complete shards, official mixed-format layer/token and generation remain unvalidated |
+| `unsloth/DeepSeek-V4-Flash-0731-GGUF` at `fbbb5b93...` | Pinned atomic importer, verified metadata binding, 43 bounded layer-trunk plans, all trunk storage types covered by scalar references, one router-first governed reduced Q8_0/IQ1_S/IQ3_XXS layer, plus canonical synchronous/asynchronous cache-to-kernel parity on one real expert | Reduced synthetic mixed-format layer and one separate extracted expert execute; complete shards, checkpoint-shaped official layer/token and generation remain unvalidated |
 | `unsloth/Laguna-S-2.1` at `1a646907...` | Public config, custom-code and shard metadata reviewed on 2026-08-10 | Adapter and execution not implemented |
 | Kimi K3-class profiles | Public-roadmap capacity/traffic study only | Not a reference-PC execution target unless one exact complete expert passes the single-tier gate |
 
@@ -127,15 +127,17 @@ All non-routed `blk.N.*` tensors now retain their layer identity and feed a shar
 planner/loader. The real 0731 metadata produces 43 complete layer plans, 1,193 tensors/tiles and a
 35,651,584-byte maximum tile under the 64 MiB ceiling. Scalar storage handling covers every type
 and encoded byte in those layer plans. A reduced architecture consumer now composes Q8_0/I32
-packed bytes from governed file-backed trunk tiles and complete expert bundles without copying
-payloads into the graph. The reduced graph now routes first, deduplicates the selected IDs and
-loads only those complete bundles through a bounded synchronous RAM LRU with access telemetry.
+trunk bytes with IQ1_S W1/W3 and IQ3_XXS W2 bytes from governed file-backed trunk tiles and
+complete expert bundles without copying payloads into the graph. The reduced graph routes first,
+deduplicates the selected IDs and loads only those complete mixed-format bundles through a bounded
+synchronous RAM LRU with access telemetry.
 An opt-in bounded batch now submits the reduced graph's selected misses and acquires each result
 at its fixed numerical compute turn; a controlled fixture reports positive read-service/CPU-
 compute overlap while preserving the oracle. The real extracted 0731 expert uses the same async
 cache boundary after strict canonical catalog binding, but is not composed with official trunk
-payload. Official full-shard import, the mixed-format 0731 layer/token scheduler, useful physical-
-device overlap, optimized kernels and the Laguna adapter remain open.
+payload or the reduced graph because its checkpoint dimensions differ. Official full-shard
+import, a checkpoint-shaped 0731 layer/token probe, useful physical-device overlap, optimized
+kernels and the Laguna adapter remain open.
 
 The shared runtime may then place a tensor or expert bundle in one of these explicit states:
 
@@ -204,9 +206,11 @@ per-tensor slices and `RAM_READY` publication. In addition to synthetic fault co
 one-worker/one-entry configuration feeds one real DeepSeek 0731 expert through canonical catalog
 binding, both synchronous and asynchronous RAM-cache resolution and the scalar mixed-format
 kernel. A first miss and second hit validate exact logical-byte accounting and lease-protected
-residency. The reduced Q8_0 graph connects router output to a two-entry RAM LRU and can submit all
-selected misses before acquiring them at each expert's fixed compute turn. A controlled fixture
-proves positive service/compute intersection with exact output parity. The general pool supports
+residency. The reduced mixed-format graph connects router output to a two-entry RAM LRU and can
+submit all selected misses before acquiring them at each expert's fixed compute turn. Its four
+synthetic bundles use the same IQ1_S gate/up plus IQ3_XXS down format combination as the real
+profile. A controlled fixture proves positive service/compute intersection with exact output
+parity. The general pool supports
 one to four workers, a queue of at most 64 requests, pre-enqueue reservations and safe queued-work
 cancellation; the current cache permits one active asynchronous batch and drains/counts successful
 unused loads as wasted prefetch. No test yet overlaps real official-payload multi-expert I/O with

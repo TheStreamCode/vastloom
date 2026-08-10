@@ -13,6 +13,7 @@ struct ResidencyControl {
     ResidencyState state{ResidencyState::nvme};
     ByteCount object_bytes{0};
     std::size_t active_uses{0};
+    std::size_t active_transfers{0};
     bool pinned{false};
     std::string failure;
     safety::Reservation ram;
@@ -61,6 +62,34 @@ void ResidencyUse::release() noexcept {
     }
 }
 
+ResidencyTransfer::ResidencyTransfer(std::shared_ptr<ResidencyControl> control)
+    : control_(std::move(control)) {}
+
+ResidencyTransfer::ResidencyTransfer(ResidencyTransfer&& other) noexcept
+    : control_(std::move(other.control_)) {}
+
+ResidencyTransfer& ResidencyTransfer::operator=(ResidencyTransfer&& other) noexcept {
+    if (this != &other) {
+        release();
+        control_ = std::move(other.control_);
+    }
+    return *this;
+}
+
+ResidencyTransfer::~ResidencyTransfer() {
+    release();
+}
+
+void ResidencyTransfer::release() noexcept {
+    if (control_ != nullptr) {
+        {
+            std::scoped_lock lock(control_->mutex);
+            if (control_->active_transfers != 0U) --control_->active_transfers;
+        }
+        control_.reset();
+    }
+}
+
 ResidencyObject::ResidencyObject(std::shared_ptr<ResidencyControl> control)
     : control_(std::move(control)) {}
 
@@ -102,8 +131,10 @@ Result<ResidencySnapshot> ResidencyObject::snapshot() const {
         control.vram.bytes(),
         control.staging.bytes(),
         control.active_uses,
+        control.active_transfers,
         control.pinned,
-        ready_state(control.state) && !control.pinned && control.active_uses == 0U,
+        ready_state(control.state) && !control.pinned && control.active_uses == 0U &&
+            control.active_transfers == 0U,
         control.failure,
     };
 }
@@ -154,7 +185,8 @@ Result<void> ResidencyObject::begin_vram_copy(safety::ResourceGovernor& governor
     if (!required) return required.error();
     auto& control = *required.value();
     std::scoped_lock lock(control.mutex);
-    if (control.state != ResidencyState::ram_ready || !control.ram.valid() || control.active_uses != 0U) {
+    if (control.state != ResidencyState::ram_ready || !control.ram.valid() ||
+        control.active_uses != 0U || control.active_transfers != 0U) {
         return state_error(control, "begin_vram_copy");
     }
     auto vram = governor.try_reserve(safety::ResourceKind::vram,
@@ -191,6 +223,20 @@ Result<ResidencyUse> ResidencyObject::acquire_use() {
     return ResidencyUse(required.take_value());
 }
 
+Result<ResidencyTransfer> ResidencyObject::acquire_transfer() {
+    auto required = require_control();
+    if (!required) return required.error();
+    auto& control = *required.value();
+    std::scoped_lock lock(control.mutex);
+    if ((control.state != ResidencyState::reading &&
+         control.state != ResidencyState::copying_to_vram) ||
+        control.active_transfers != 0U) {
+        return state_error(control, "acquire_transfer");
+    }
+    ++control.active_transfers;
+    return ResidencyTransfer(required.take_value());
+}
+
 Result<void> ResidencyObject::set_pinned(bool pinned) {
     auto required = require_control();
     if (!required) return required.error();
@@ -206,7 +252,8 @@ Result<void> ResidencyObject::evict_ram() {
     if (!required) return required.error();
     auto& control = *required.value();
     std::scoped_lock lock(control.mutex);
-    if (control.pinned || control.active_uses != 0U || !control.ram.valid() ||
+    if (control.pinned || control.active_uses != 0U || control.active_transfers != 0U ||
+        !control.ram.valid() ||
         (control.state != ResidencyState::ram_ready && control.state != ResidencyState::vram_ready)) {
         return state_error(control, "evict_ram");
     }
@@ -221,7 +268,7 @@ Result<void> ResidencyObject::evict_vram() {
     auto& control = *required.value();
     std::scoped_lock lock(control.mutex);
     if (control.state != ResidencyState::vram_ready || control.pinned ||
-        control.active_uses != 0U || !control.vram.valid()) {
+        control.active_uses != 0U || control.active_transfers != 0U || !control.vram.valid()) {
         return state_error(control, "evict_vram");
     }
     control.vram.release();
@@ -237,7 +284,7 @@ Result<void> ResidencyObject::fail(std::string reason) {
     if (reason.empty()) {
         return make_error(ErrorCode::invalid_argument, "Residency failure requires a reason", control.logical_id);
     }
-    if (control.active_uses != 0U) return state_error(control, "fail");
+    if (control.active_uses != 0U || control.active_transfers != 0U) return state_error(control, "fail");
     control.staging.release();
     control.ram.release();
     control.vram.release();
@@ -253,6 +300,7 @@ Result<void> ResidencyObject::retry() {
     auto& control = *required.value();
     std::scoped_lock lock(control.mutex);
     if (control.state != ResidencyState::failed || control.active_uses != 0U ||
+        control.active_transfers != 0U ||
         control.ram.valid() || control.vram.valid() || control.staging.valid()) {
         return state_error(control, "retry");
     }

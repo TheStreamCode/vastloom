@@ -379,6 +379,21 @@ void test_residency_state_machine() {
     }
     CHECK(governor.snapshot().reserved[0] == 0U && governor.snapshot().reserved[2] == 0U);
 
+    auto transferring = vastloom::model::ResidencyObject::create("exclusive-transfer", 2U * vastloom::MiB);
+    CHECK(transferring && transferring.value().begin_read(governor, 1U * vastloom::MiB));
+    if (transferring) {
+        auto transfer = transferring.value().acquire_transfer();
+        CHECK(transfer);
+        auto snapshot = transferring.value().snapshot();
+        CHECK(snapshot && snapshot.value().active_transfers == 1U &&
+              !snapshot.value().evictable);
+        CHECK(!transferring.value().acquire_transfer());
+        CHECK(!transferring.value().fail("must not release an active transfer"));
+        if (transfer) transfer.value().release();
+        CHECK(transferring.value().fail("injected transfer failure"));
+    }
+    CHECK(governor.snapshot().reserved[0] == 0U && governor.snapshot().reserved[2] == 0U);
+
     vastloom::safety::ResourceGovernor pressure_governor(limits);
     CHECK(pressure_governor.update_pressure(
               {1U, 16U * vastloom::MiB, limits.minimum_storage_available * 4U}) ==
@@ -500,6 +515,126 @@ void test_packed_expert_loader(const std::filesystem::path& root) {
           !vastloom::model::load_expert_bundle(bundle, cancelled_residency.value(), governor, cancelled_options));
     CHECK(cancelled_residency && cancelled_residency.value().snapshot() &&
           cancelled_residency.value().snapshot().value().state == vastloom::model::ResidencyState::failed);
+    CHECK(governor.snapshot().reserved[0] == 0U && governor.snapshot().reserved[2] == 0U);
+
+    std::atomic<bool> worker_entered{false};
+    std::atomic<bool> release_worker{false};
+    auto asynchronous_options = options;
+    asynchronous_options.cancelled = [&] {
+        worker_entered.store(true, std::memory_order_release);
+        while (!release_worker.load(std::memory_order_acquire)) std::this_thread::yield();
+        return false;
+    };
+    vastloom::model::ExpertLoadPoolOptions pool_options;
+    pool_options.workers = 1U;
+    pool_options.max_queued_requests = 1U;
+    pool_options.load = asynchronous_options;
+    vastloom::model::BoundedExpertLoadPool pool(pool_options, governor);
+
+    auto first_residency = vastloom::model::ResidencyObject::create("async-first", bundle.bytes);
+    auto second_residency = vastloom::model::ResidencyObject::create("async-second", bundle.bytes);
+    auto rejected_residency = vastloom::model::ResidencyObject::create("async-rejected", bundle.bytes);
+    CHECK(first_residency && second_residency && rejected_residency);
+    if (!first_residency || !second_residency || !rejected_residency) return;
+
+    auto first_submission = pool.submit(bundle, first_residency.value(), "first");
+    CHECK(first_submission);
+    const auto wait_deadline = std::chrono::steady_clock::now() + std::chrono::seconds(2);
+    while (!worker_entered.load(std::memory_order_acquire) &&
+           std::chrono::steady_clock::now() < wait_deadline) {
+        std::this_thread::yield();
+    }
+    CHECK(worker_entered.load(std::memory_order_acquire));
+    auto active = first_residency.value().snapshot();
+    CHECK(active && active.value().state == vastloom::model::ResidencyState::reading &&
+          active.value().active_transfers == 1U && active.value().ram_reserved_bytes == bundle.bytes);
+    CHECK(!first_residency.value().fail("must not fail an active asynchronous read"));
+
+    auto second_submission = pool.submit(bundle, second_residency.value(), "second");
+    CHECK(second_submission && pool.pending_requests() == 1U);
+    auto rejected_submission = pool.submit(bundle, rejected_residency.value(), "rejected");
+    CHECK(!rejected_submission);
+    auto rejected = rejected_residency.value().snapshot();
+    CHECK(rejected && rejected.value().state == vastloom::model::ResidencyState::nvme &&
+          rejected.value().ram_reserved_bytes == 0U && rejected.value().staging_reserved_bytes == 0U);
+
+    release_worker.store(true, std::memory_order_release);
+    if (first_submission && second_submission) {
+        {
+            auto first_loaded = first_submission.value().get();
+            auto second_loaded = second_submission.value().get();
+            CHECK(first_loaded && second_loaded);
+            if (first_loaded) {
+                const auto& telemetry = first_loaded.value().telemetry();
+                CHECK(telemetry.request_sequence == 1U && telemetry.queue_ms >= 0.0 &&
+                      telemetry.service_ms >= 0.0 && telemetry.total_ms >= telemetry.queue_ms &&
+                      telemetry.total_ms >= telemetry.service_ms);
+            }
+            if (second_loaded) {
+                const auto& telemetry = second_loaded.value().telemetry();
+                CHECK(telemetry.request_sequence == 2U && telemetry.queue_ms >= 0.0 &&
+                      telemetry.service_ms >= 0.0 && telemetry.total_ms >= telemetry.queue_ms &&
+                      telemetry.total_ms >= telemetry.service_ms);
+            }
+            auto first_ready = first_residency.value().snapshot();
+            auto second_ready = second_residency.value().snapshot();
+            CHECK(first_ready && first_ready.value().active_transfers == 0U &&
+                  first_ready.value().active_uses == 1U);
+            CHECK(second_ready && second_ready.value().active_transfers == 0U &&
+                  second_ready.value().active_uses == 1U);
+        }
+        CHECK(first_residency.value().evict_ram());
+        CHECK(second_residency.value().evict_ram());
+    }
+    pool.shutdown();
+    CHECK(governor.snapshot().reserved[0] == 0U && governor.snapshot().reserved[2] == 0U);
+
+    std::atomic<bool> shutdown_worker_entered{false};
+    std::atomic<bool> shutdown_release_worker{false};
+    auto shutdown_options = options;
+    shutdown_options.cancelled = [&] {
+        shutdown_worker_entered.store(true, std::memory_order_release);
+        while (!shutdown_release_worker.load(std::memory_order_acquire)) std::this_thread::yield();
+        return false;
+    };
+    pool_options.load = shutdown_options;
+    vastloom::model::BoundedExpertLoadPool shutdown_pool(pool_options, governor);
+    auto running_residency = vastloom::model::ResidencyObject::create("shutdown-running", bundle.bytes);
+    auto queued_residency = vastloom::model::ResidencyObject::create("shutdown-queued", bundle.bytes);
+    CHECK(running_residency && queued_residency);
+    if (!running_residency || !queued_residency) return;
+    auto running_submission = shutdown_pool.submit(bundle, running_residency.value(), "running");
+    CHECK(running_submission);
+    const auto shutdown_wait_deadline = std::chrono::steady_clock::now() + std::chrono::seconds(2);
+    while (!shutdown_worker_entered.load(std::memory_order_acquire) &&
+           std::chrono::steady_clock::now() < shutdown_wait_deadline) {
+        std::this_thread::yield();
+    }
+    CHECK(shutdown_worker_entered.load(std::memory_order_acquire));
+    auto queued_submission = shutdown_pool.submit(bundle, queued_residency.value(), "queued");
+    CHECK(queued_submission && shutdown_pool.pending_requests() == 1U);
+
+    std::thread shutdown_thread([&] { shutdown_pool.shutdown(); });
+    if (queued_submission) {
+        CHECK(queued_submission.value().wait_for(std::chrono::seconds(2)) == std::future_status::ready);
+    }
+    shutdown_release_worker.store(true, std::memory_order_release);
+    shutdown_thread.join();
+    if (queued_submission) {
+        auto queued_result = queued_submission.value().get();
+        CHECK(!queued_result);
+    }
+    auto queued_snapshot = queued_residency.value().snapshot();
+    CHECK(queued_snapshot && queued_snapshot.value().state == vastloom::model::ResidencyState::failed &&
+          queued_snapshot.value().ram_reserved_bytes == 0U &&
+          queued_snapshot.value().staging_reserved_bytes == 0U);
+    if (running_submission) {
+        {
+            auto running_result = running_submission.value().get();
+            CHECK(running_result);
+        }
+        CHECK(running_residency.value().evict_ram());
+    }
     CHECK(governor.snapshot().reserved[0] == 0U && governor.snapshot().reserved[2] == 0U);
 }
 

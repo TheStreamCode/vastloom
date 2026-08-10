@@ -6,7 +6,9 @@
 #include <exception>
 #include <limits>
 #include <new>
+#include <stdexcept>
 #include <string_view>
+#include <thread>
 #include <utility>
 
 #include "vastloom/io/bounded_io_pool.hpp"
@@ -92,37 +94,11 @@ Result<ByteCount> validate_bundle(const ExpertBundle& bundle, const ExpertLoadOp
 
 }  // namespace
 
-LoadedExpert::LoadedExpert(ResidencyUse lease,
-                           std::vector<std::byte> bytes,
-                           std::vector<ExpertTensorSlice> tensor_slices,
-                           ExpertLoadTelemetry telemetry)
-    : lease_(std::move(lease)),
-      bytes_(std::move(bytes)),
-      tensor_slices_(std::move(tensor_slices)),
-      telemetry_(std::move(telemetry)) {}
-
-Result<std::span<const std::byte>> LoadedExpert::tensor(std::size_t catalog_tensor_index) const {
-    const auto iterator = std::find_if(tensor_slices_.begin(), tensor_slices_.end(),
-                                       [&](const ExpertTensorSlice& slice) {
-                                           return slice.tensor_index == catalog_tensor_index;
-                                       });
-    if (iterator == tensor_slices_.end() || iterator->packed_offset > bytes_.size() ||
-        iterator->bytes > bytes_.size() - iterator->packed_offset) {
-        return make_error(ErrorCode::not_found, "Packed expert tensor is unavailable");
-    }
-    return std::span<const std::byte>(bytes_.data() + static_cast<std::size_t>(iterator->packed_offset),
-                                      static_cast<std::size_t>(iterator->bytes));
-}
-
-Result<LoadedExpert> load_expert_bundle(const ExpertBundle& bundle,
-                                        ResidencyObject& residency,
-                                        safety::ResourceGovernor& governor,
-                                        const ExpertLoadOptions& options) {
-    auto largest = validate_bundle(bundle, options);
-    if (!largest) return largest.error();
-    auto begun = residency.begin_read(governor, largest.value());
-    if (!begun) return begun.error();
-
+Result<LoadedExpert> load_prepared_expert_bundle(const ExpertBundle& bundle,
+                                                  ResidencyObject& residency,
+                                                  ResidencyTransfer& transfer,
+                                                  const ExpertLoadOptions& options,
+                                                  ByteCount largest_range) {
     const auto started = std::chrono::steady_clock::now();
     std::optional<io::ProcessIoSnapshot> process_before;
     std::optional<io::DeviceIoSnapshot> device_before;
@@ -138,7 +114,7 @@ Result<LoadedExpert> load_expert_bundle(const ExpertBundle& bundle,
     auto loaded = [&]() -> Result<LoadedExpert> {
         try {
             std::vector<std::byte> destination(static_cast<std::size_t>(bundle.bytes));
-            std::vector<std::byte> scratch(static_cast<std::size_t>(largest.value()));
+            std::vector<std::byte> scratch(static_cast<std::size_t>(largest_range));
             std::size_t cursor = 0U;
             for (const auto& range : bundle.read_ranges) {
                 auto cancelled = cancellation_requested(options.cancelled);
@@ -173,6 +149,8 @@ Result<LoadedExpert> load_expert_bundle(const ExpertBundle& bundle,
             telemetry.elapsed_ms = std::chrono::duration<double, std::milli>(
                                        std::chrono::steady_clock::now() - started)
                                        .count();
+            telemetry.service_ms = telemetry.elapsed_ms;
+            telemetry.total_ms = telemetry.elapsed_ms;
             if (process_before.has_value()) {
                 auto after = io::sample_process_io();
                 if (after) {
@@ -191,14 +169,254 @@ Result<LoadedExpert> load_expert_bundle(const ExpertBundle& bundle,
                                 std::move(telemetry));
         } catch (const std::bad_alloc&) {
             return make_error(ErrorCode::resource_exhausted, "Unable to allocate bounded expert-load buffers");
+        } catch (const std::exception& exception) {
+            return make_error(ErrorCode::internal_error,
+                              "Unexpected expert-load failure",
+                              exception.what());
+        } catch (...) {
+            return make_error(ErrorCode::internal_error, "Unexpected expert-load failure");
         }
     }();
 
+    transfer.release();
     if (!loaded) {
         auto failed = residency.fail(loaded.error().message);
         if (!failed) return failed.error();
     }
     return loaded;
+}
+
+LoadedExpert::LoadedExpert(ResidencyUse lease,
+                           std::vector<std::byte> bytes,
+                           std::vector<ExpertTensorSlice> tensor_slices,
+                           ExpertLoadTelemetry telemetry)
+    : lease_(std::move(lease)),
+      bytes_(std::move(bytes)),
+      tensor_slices_(std::move(tensor_slices)),
+      telemetry_(std::move(telemetry)) {}
+
+Result<std::span<const std::byte>> LoadedExpert::tensor(std::size_t catalog_tensor_index) const {
+    const auto iterator = std::find_if(tensor_slices_.begin(), tensor_slices_.end(),
+                                       [&](const ExpertTensorSlice& slice) {
+                                           return slice.tensor_index == catalog_tensor_index;
+                                       });
+    if (iterator == tensor_slices_.end() || iterator->packed_offset > bytes_.size() ||
+        iterator->bytes > bytes_.size() - iterator->packed_offset) {
+        return make_error(ErrorCode::not_found, "Packed expert tensor is unavailable");
+    }
+    return std::span<const std::byte>(bytes_.data() + static_cast<std::size_t>(iterator->packed_offset),
+                                      static_cast<std::size_t>(iterator->bytes));
+}
+
+Result<LoadedExpert> load_expert_bundle(const ExpertBundle& bundle,
+                                        ResidencyObject& residency,
+                                        safety::ResourceGovernor& governor,
+                                        const ExpertLoadOptions& options) {
+    auto largest = validate_bundle(bundle, options);
+    if (!largest) return largest.error();
+    auto begun = residency.begin_read(governor, largest.value());
+    if (!begun) return begun.error();
+    auto transfer = residency.acquire_transfer();
+    if (!transfer) {
+        auto failed = residency.fail(transfer.error().message);
+        return failed ? Result<LoadedExpert>(transfer.error()) : Result<LoadedExpert>(failed.error());
+    }
+    return load_prepared_expert_bundle(bundle, residency, transfer.value(), options, largest.value());
+}
+
+struct BoundedExpertLoadPool::Task {
+    Task(ExpertBundle source_bundle,
+         ResidencyObject source_residency,
+         ResidencyTransfer source_transfer,
+         ExpertLoadOptions source_options,
+         std::string source_tag)
+        : bundle(std::move(source_bundle)),
+          residency(std::move(source_residency)),
+          transfer(std::move(source_transfer)),
+          options(std::move(source_options)),
+          tag(std::move(source_tag)) {}
+
+    ExpertBundle bundle;
+    ResidencyObject residency;
+    ResidencyTransfer transfer;
+    ExpertLoadOptions options;
+    std::string tag;
+    ByteCount largest_range{0U};
+    std::size_t sequence{0U};
+    std::chrono::steady_clock::time_point submitted;
+    std::promise<Result<LoadedExpert>> promise;
+};
+
+BoundedExpertLoadPool::BoundedExpertLoadPool(ExpertLoadPoolOptions options,
+                                             safety::ResourceGovernor& governor)
+    : options_(std::move(options)), governor_(governor) {
+    options_.workers = std::clamp(options_.workers, 1U, 4U);
+    options_.max_queued_requests = std::clamp<std::size_t>(options_.max_queued_requests, 1U, 64U);
+    try {
+        workers_.reserve(options_.workers);
+        for (unsigned index = 0U; index < options_.workers; ++index) {
+            workers_.emplace_back([this] { worker_loop(); });
+        }
+    } catch (...) {
+        {
+            std::scoped_lock lock(mutex_);
+            stopping_ = true;
+        }
+        condition_.notify_all();
+        workers_.clear();
+        throw;
+    }
+}
+
+BoundedExpertLoadPool::~BoundedExpertLoadPool() {
+    shutdown();
+}
+
+Result<std::future<Result<LoadedExpert>>> BoundedExpertLoadPool::submit(
+    const ExpertBundle& bundle,
+    ResidencyObject& residency,
+    std::string tag) {
+    if (tag.empty()) return make_error(ErrorCode::invalid_argument, "Expert-load task tag is empty");
+    auto largest = validate_bundle(bundle, options_.load);
+    if (!largest) return largest.error();
+    {
+        std::scoped_lock lock(mutex_);
+        if (stopping_) return make_error(ErrorCode::internal_error, "Expert-load pool is shutting down", tag);
+        if (queue_.size() >= options_.max_queued_requests) {
+            return make_error(ErrorCode::resource_exhausted, "Expert-load queue is full", tag);
+        }
+    }
+
+    auto begun = residency.begin_read(governor_, largest.value());
+    if (!begun) return begun.error();
+    auto transfer = residency.acquire_transfer();
+    if (!transfer) {
+        auto failed = residency.fail(transfer.error().message);
+        return failed ? Result<std::future<Result<LoadedExpert>>>(transfer.error())
+                      : Result<std::future<Result<LoadedExpert>>>(failed.error());
+    }
+
+    std::unique_ptr<Task> task;
+    std::future<Result<LoadedExpert>> future;
+    try {
+        task = std::make_unique<Task>(bundle, residency, transfer.take_value(), options_.load, tag);
+        task->largest_range = largest.value();
+        task->submitted = std::chrono::steady_clock::now();
+        future = task->promise.get_future();
+    } catch (const std::bad_alloc&) {
+        if (task != nullptr) task->transfer.release();
+        else transfer.value().release();
+        auto failed = residency.fail("Unable to allocate bounded expert-load task");
+        return failed ? Result<std::future<Result<LoadedExpert>>>(make_error(
+                            ErrorCode::resource_exhausted, "Unable to allocate bounded expert-load task", tag))
+                      : Result<std::future<Result<LoadedExpert>>>(failed.error());
+    } catch (const std::future_error& error) {
+        if (task != nullptr) task->transfer.release();
+        else transfer.value().release();
+        auto failed = residency.fail("Unable to create expert-load future");
+        return failed ? Result<std::future<Result<LoadedExpert>>>(make_error(
+                            ErrorCode::internal_error, "Unable to create expert-load future", error.what()))
+                      : Result<std::future<Result<LoadedExpert>>>(failed.error());
+    } catch (const std::exception& error) {
+        if (task != nullptr) task->transfer.release();
+        else transfer.value().release();
+        auto failed = residency.fail("Unable to create bounded expert-load task");
+        return failed ? Result<std::future<Result<LoadedExpert>>>(make_error(
+                            ErrorCode::internal_error,
+                            "Unable to create bounded expert-load task",
+                            error.what()))
+                      : Result<std::future<Result<LoadedExpert>>>(failed.error());
+    } catch (...) {
+        if (task != nullptr) task->transfer.release();
+        else transfer.value().release();
+        auto failed = residency.fail("Unable to create bounded expert-load task");
+        return failed ? Result<std::future<Result<LoadedExpert>>>(make_error(
+                            ErrorCode::internal_error, "Unable to create bounded expert-load task", tag))
+                      : Result<std::future<Result<LoadedExpert>>>(failed.error());
+    }
+
+    try {
+        {
+            std::scoped_lock lock(mutex_);
+            if (stopping_ || queue_.size() >= options_.max_queued_requests) {
+                task->transfer.release();
+                auto failed = task->residency.fail(stopping_ ? "Expert-load pool is shutting down"
+                                                             : "Expert-load queue became full");
+                return failed ? Result<std::future<Result<LoadedExpert>>>(make_error(
+                                    stopping_ ? ErrorCode::internal_error : ErrorCode::resource_exhausted,
+                                    stopping_ ? "Expert-load pool is shutting down" : "Expert-load queue is full",
+                                    tag))
+                              : Result<std::future<Result<LoadedExpert>>>(failed.error());
+            }
+            task->sequence = next_sequence_++;
+            queue_.push_back(std::move(task));
+        }
+    } catch (const std::bad_alloc&) {
+        if (task != nullptr) task->transfer.release();
+        auto failed = residency.fail("Unable to enqueue bounded expert-load task");
+        return failed ? Result<std::future<Result<LoadedExpert>>>(make_error(
+                            ErrorCode::resource_exhausted, "Unable to enqueue bounded expert-load task", tag))
+                      : Result<std::future<Result<LoadedExpert>>>(failed.error());
+    }
+    condition_.notify_one();
+    return future;
+}
+
+void BoundedExpertLoadPool::shutdown() noexcept {
+    std::deque<std::unique_ptr<Task>> cancelled;
+    {
+        std::scoped_lock lock(mutex_);
+        if (stopping_) return;
+        stopping_ = true;
+        cancelled.swap(queue_);
+    }
+    for (auto& task : cancelled) {
+        task->transfer.release();
+        static_cast<void>(task->residency.fail("Expert-load pool stopped before task execution"));
+        try {
+            task->promise.set_value(make_error(ErrorCode::internal_error,
+                                               "Expert-load pool stopped before task execution",
+                                               task->tag));
+        } catch (...) {
+            // Destroying the promise below still wakes a waiter with a broken-promise error.
+        }
+    }
+    condition_.notify_all();
+    workers_.clear();
+}
+
+std::size_t BoundedExpertLoadPool::pending_requests() const {
+    std::scoped_lock lock(mutex_);
+    return queue_.size();
+}
+
+void BoundedExpertLoadPool::worker_loop() {
+    while (true) {
+        std::unique_ptr<Task> task;
+        {
+            std::unique_lock lock(mutex_);
+            condition_.wait(lock, [this] { return stopping_ || !queue_.empty(); });
+            if (stopping_ && queue_.empty()) return;
+            task = std::move(queue_.front());
+            queue_.pop_front();
+        }
+        const auto service_started = std::chrono::steady_clock::now();
+        auto loaded = load_prepared_expert_bundle(
+            task->bundle, task->residency, task->transfer, task->options, task->largest_range);
+        const auto completed = std::chrono::steady_clock::now();
+        if (loaded) {
+            auto& telemetry = loaded.value().telemetry_;
+            telemetry.request_sequence = task->sequence;
+            telemetry.queue_ms = std::chrono::duration<double, std::milli>(service_started - task->submitted).count();
+            telemetry.service_ms = std::chrono::duration<double, std::milli>(completed - service_started).count();
+            telemetry.total_ms = std::chrono::duration<double, std::milli>(completed - task->submitted).count();
+        }
+        try {
+            task->promise.set_value(std::move(loaded));
+        } catch (...) {
+            // Keep the bounded worker alive. Promise destruction reports a broken promise.
+        }
+    }
 }
 
 }  // namespace vastloom::model

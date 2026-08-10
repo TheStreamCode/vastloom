@@ -1,9 +1,16 @@
 #pragma once
 
 #include <cstddef>
+#include <condition_variable>
+#include <deque>
 #include <functional>
+#include <future>
+#include <memory>
+#include <mutex>
 #include <optional>
 #include <span>
+#include <string>
+#include <thread>
 #include <vector>
 
 #include "vastloom/core/bytes.hpp"
@@ -28,6 +35,10 @@ struct ExpertLoadOptions {
 struct ExpertLoadTelemetry {
     ByteCount logical_bytes{0};
     std::size_t range_count{0};
+    std::size_t request_sequence{0};
+    double queue_ms{0.0};
+    double service_ms{0.0};
+    double total_ms{0.0};
     double elapsed_ms{0.0};
     std::optional<io::ProcessIoDelta> process_io;
     std::optional<io::DeviceIoDelta> device_io;
@@ -46,10 +57,16 @@ public:
     [[nodiscard]] const ExpertLoadTelemetry& telemetry() const noexcept { return telemetry_; }
 
 private:
+    friend class BoundedExpertLoadPool;
     friend Result<LoadedExpert> load_expert_bundle(const ExpertBundle&,
                                                     ResidencyObject&,
                                                     safety::ResourceGovernor&,
                                                     const ExpertLoadOptions&);
+    friend Result<LoadedExpert> load_prepared_expert_bundle(const ExpertBundle&,
+                                                             ResidencyObject&,
+                                                             ResidencyTransfer&,
+                                                             const ExpertLoadOptions&,
+                                                             ByteCount);
     LoadedExpert(ResidencyUse lease,
                  std::vector<std::byte> bytes,
                  std::vector<ExpertTensorSlice> tensor_slices,
@@ -68,5 +85,40 @@ private:
     ResidencyObject& residency,
     safety::ResourceGovernor& governor,
     const ExpertLoadOptions& options = {});
+
+struct ExpertLoadPoolOptions {
+    unsigned workers{1U};
+    std::size_t max_queued_requests{4U};
+    ExpertLoadOptions load;
+};
+
+class BoundedExpertLoadPool {
+public:
+    // The governor must outlive the pool and every LoadedExpert returned by it.
+    BoundedExpertLoadPool(ExpertLoadPoolOptions options, safety::ResourceGovernor& governor);
+    BoundedExpertLoadPool(const BoundedExpertLoadPool&) = delete;
+    BoundedExpertLoadPool& operator=(const BoundedExpertLoadPool&) = delete;
+    ~BoundedExpertLoadPool();
+
+    [[nodiscard]] Result<std::future<Result<LoadedExpert>>> submit(
+        const ExpertBundle& bundle,
+        ResidencyObject& residency,
+        std::string tag);
+    void shutdown() noexcept;
+    [[nodiscard]] std::size_t pending_requests() const;
+
+private:
+    struct Task;
+    void worker_loop();
+
+    ExpertLoadPoolOptions options_;
+    safety::ResourceGovernor& governor_;
+    mutable std::mutex mutex_;
+    std::condition_variable condition_;
+    std::deque<std::unique_ptr<Task>> queue_;
+    std::vector<std::jthread> workers_;
+    std::size_t next_sequence_{1U};
+    bool stopping_{false};
+};
 
 }  // namespace vastloom::model

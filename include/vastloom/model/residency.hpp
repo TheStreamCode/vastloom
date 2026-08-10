@@ -31,6 +31,7 @@ struct ResidencySnapshot {
     ByteCount vram_reserved_bytes{0};
     ByteCount staging_reserved_bytes{0};
     std::size_t active_uses{0};
+    std::size_t active_transfers{0};
     bool pinned{false};
     bool evictable{false};
     std::string failure;
@@ -57,11 +58,30 @@ private:
     std::shared_ptr<ResidencyControl> control_;
 };
 
+class ResidencyTransfer {
+public:
+    ResidencyTransfer() = default;
+    ResidencyTransfer(const ResidencyTransfer&) = delete;
+    ResidencyTransfer& operator=(const ResidencyTransfer&) = delete;
+    ResidencyTransfer(ResidencyTransfer&& other) noexcept;
+    ResidencyTransfer& operator=(ResidencyTransfer&& other) noexcept;
+    ~ResidencyTransfer();
+
+    [[nodiscard]] bool valid() const noexcept { return control_ != nullptr; }
+    void release() noexcept;
+
+private:
+    friend class ResidencyObject;
+    explicit ResidencyTransfer(std::shared_ptr<ResidencyControl> control);
+
+    std::shared_ptr<ResidencyControl> control_;
+};
+
 class ResidencyObject {
 public:
     // Residency transitions reserve capacity but do not allocate or expose tensor buffers.
     // Any ResourceGovernor passed to a transition must outlive every copy of this object
-    // and every ResidencyUse lease that can retain its reservations.
+    // and every use/transfer lease that can retain its reservations.
     [[nodiscard]] static Result<ResidencyObject> create(std::string logical_id, ByteCount bytes);
 
     ResidencyObject(const ResidencyObject&) = default;
@@ -76,6 +96,7 @@ public:
     [[nodiscard]] Result<void> begin_vram_copy(safety::ResourceGovernor& governor);
     [[nodiscard]] Result<void> publish_vram_ready(bool keep_ram_copy);
     [[nodiscard]] Result<ResidencyUse> acquire_use();
+    [[nodiscard]] Result<ResidencyTransfer> acquire_transfer();
     [[nodiscard]] Result<void> set_pinned(bool pinned);
     [[nodiscard]] Result<void> evict_ram();
     [[nodiscard]] Result<void> evict_vram();

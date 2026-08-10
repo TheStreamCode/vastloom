@@ -122,18 +122,21 @@ The bounded equation-level foundation is recorded in the
 The completed graph gate is recorded in the
 [M6 reduced-graph report](reports/M6_DEEPSEEK_GRAPH_VALIDATION.md).
 It pins official commit `60d8d70770c6776ff598c94bb586a859a38244f1`; the former
-“0731” label was only a provisional research alias and is not an official checkpoint tag.
+“0731” label was provisional for that preview. A newer official 0731 repository now exists and
+is tracked as a separate, not-yet-validated target in the
+[model compatibility matrix](MODEL_COMPATIBILITY.md).
 
 ## M7 — DeepSeek CPU reference inference
 
-- [ ] Model-specific loader binding the verified shard catalog and packed FP4/FP8 weights.
+- [ ] Adapter binding verified shard/GGUF catalogs to universal tensor/expert roles and packed
+  FP4/FP8 weights.
 - [x] Bounded operator primitives for normalization, base RoPE, selected-latent attention,
   learned/hash routing, routed SwiGLU and Hyper-Connections.
 - [x] Reduced float main graph with YaRN, overlapping compression, learned indexer,
   shared expert, Hyper-Connection head and official logit/route parity.
 - [x] Checkpoint-compatible tokenizer and basic system/user/assistant chat template.
 - [ ] Thinking/tool-call encoding and completion parsing.
-- [ ] Incremental KV/state path.
+- [x] Transactional raw/compressed incremental KV/state path with five-step official parity.
 - [x] Native single-block MTP reference path with official logit/route/index parity.
 - [x] Reduced quality fixture runner.
 - [ ] Full-checkpoint probe and regression corpus.
@@ -145,6 +148,8 @@ The completed reduced MTP slice is recorded in the
 [M7 MTP validation report](reports/M7_DEEPSEEK_MTP_VALIDATION.md). It validates the
 checkpoint-compatible component equations, not speculative decoding or full-checkpoint
 execution.
+The cache-state slice is recorded in the
+[M7 incremental validation report](reports/M7_DEEPSEEK_INCREMENTAL_VALIDATION.md).
 
 ## M8 — CUDA path for the RTX 4070 Super
 
@@ -160,7 +165,7 @@ unbounded allocation and clean recovery from injected CUDA failures.
 
 ## M9 — Explicit multitier execution
 
-- [ ] Tensor placement table and legal state transitions.
+- [ ] Universal logical tensor/expert catalog and legal NVMe/RAM/VRAM state transitions.
 - [ ] Pinned host buffers.
 - [ ] Direct/overlapped NVMe reads where supported.
 - [ ] Dense-trunk-first placement.
@@ -216,6 +221,9 @@ and the server binds to loopback unless remote access is explicitly configured.
 
 ## M14 — Model and backend expansion
 
+- [ ] Pin and implement the official DeepSeek V4 Flash 0731/DSpark profile.
+- [ ] Add bounded GGUF metadata/tensor import with explicit quantization identity.
+- [ ] Laguna S 2.1 architecture adapter and expert-streaming parity.
 - [ ] MiniMax-class MoE adapter.
 - [ ] Kimi K3 capacity and traffic benchmark.
 - [ ] Vulkan, ROCm and Metal backends according to measured demand.

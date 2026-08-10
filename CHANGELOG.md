@@ -21,6 +21,14 @@
   Main and MTP logits, proposed tokens, learned/hash expert routes and raw/compressed attention
   indices pass the declared parity gate; full-checkpoint and speculative DeepSeek execution
   remain unsupported.
+- Extended the fixture to 159,533 bytes with five official single-token decode steps. Native
+  main/MTP logits, routes and raw/compressed attention indices match across circular-window and
+  overlapping 4:1 cache updates; state mutation is transactional and aggregate-budgeted before
+  allocation.
+- Recorded, without downloading weights, the newer official DeepSeek V4 Flash 0731 release,
+  its Unsloth GGUF profiles and Laguna S 2.1 as separate compatibility targets. None inherits
+  the preview checkpoint's execution claims; the universal tensor/expert residency contract
+  and per-adapter acceptance ladder are now explicit.
 - Added an explicit `--allow-large-download` gate for checkpoint imports containing at
   least 20 GiB of weight payload. DeepSeek execution remains unsupported and is reported
   as such by the CLI.

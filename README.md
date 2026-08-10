@@ -76,6 +76,10 @@ The completed reduced graph gate is documented in the
 [`M6 reduced-graph validation report`](docs/reports/M6_DEEPSEEK_GRAPH_VALIDATION.md).
 The checkpoint-shaped MTP reference gate is documented in the
 [`M7 MTP validation report`](docs/reports/M7_DEEPSEEK_MTP_VALIDATION.md).
+The five-step raw/compressed cache gate is documented in the
+[`M7 incremental-state report`](docs/reports/M7_DEEPSEEK_INCREMENTAL_VALIDATION.md).
+Current and candidate model support is kept explicit in the
+[`model compatibility matrix`](docs/MODEL_COMPATIBILITY.md).
 
 ## Reference target
 
@@ -170,9 +174,10 @@ allocation plan is derived from detected capacity and conservative headroom.
 
 ### DeepSeek V4 Flash inspection and reference foundation
 
-- **Official pinned identity:** `deepseek-ai/DeepSeek-V4-Flash` revision
-  `60d8d70770c6776ff598c94bb586a859a38244f1`; the former “0731” name was a
-  provisional project alias, not an official checkpoint tag.
+- **Pinned preview identity:** `deepseek-ai/DeepSeek-V4-Flash` revision
+  `60d8d70770c6776ff598c94bb586a859a38244f1` remains the oracle for the evidence below.
+  The newer official `DeepSeek-V4-Flash-0731` release is tracked separately and has not
+  inherited those validation claims.
 - **No payload required:** a 19,404,391-byte metadata import contains the config,
   tokenizer, index and 7,663,144 bytes of exact Safetensors header snapshots instead of
   159,617,149,040 bytes of weight shards.
@@ -193,11 +198,15 @@ allocation plan is derived from detected capacity and conservative headroom.
   including embedding/hidden preprocessing, Hyper-Connections, learned MoE, sparse attention
   and its own HC output head. Its logits, proposed token, routes and indices match the official
   graph, but no speculative verification loop exists yet.
+- **Incremental cache parity:** five official decode steps match for main/MTP logits, tokens,
+  routes and indices while exercising the circular raw window, independent attention/indexer
+  caches and a newly completed overlapping 4:1 compressed entry. State publication is
+  transactional and total cache size is rejected before allocation when over budget.
 - **Large-download interlock:** a full import of at least 20 GiB requires the additional
   `--allow-large-download` flag after storage headroom has been reviewed.
 - **Honest boundary:** the full-checkpoint inspector still reports
   `execution_supported=false`. The expanded reduced graph uses only 4,750 deterministic FP32
-  values; packed checkpoint tensors, incremental state, speculative generation and CUDA remain
+  values; packed checkpoint tensors, target-verified speculative generation and CUDA remain
   future gates.
 
 ### Runtime foundation
@@ -579,8 +588,8 @@ research metric is not merely SSD throughput. It is:
 
 The next technical sequence remains incremental:
 
-1. bind the verified DeepSeek tensor catalog and packed FP4/FP8 weights, then add incremental
-   state and a target-verified MTP decoding loop;
+1. bind the verified DeepSeek tensor catalog and packed FP4/FP8 weights through the universal
+   tensor/expert residency contract, then add a target-verified MTP decoding loop;
 2. CUDA dense, attention, router and packed expert kernels;
 3. explicit VRAM/RAM/NVMe placement with pinned buffers and direct/overlapped I/O;
 4. adaptive placement, predictive routing and speculative expert deduplication;

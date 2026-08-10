@@ -255,10 +255,21 @@ HC head -> RMSNorm -> 16 reference logits -> greedy token
 ```
 
 All 123 deterministic fixture tensors use the official parameter names and are consumed by
-the native run. The prefill/MTP oracle is batch-one FP32, capped at 4,096 tokens, 16 total
-layers, one MTP layer and 64 million graph elements. It intentionally has no incremental cache
-mutation, target-verification loop or packed checkpoint kernels, and is not selected by
-`deepseek-inspect` for the full checkpoint.
+the native run. Five subsequent official decode positions now exercise transactional main/MTP
+state mutation:
+
+```text
+raw KV -> fixed circular window
+layer input -> attention compressor state -> committed compressed KV
+            -> indexer compressor state   -> committed scoring KV
+                                          -> exact raw/compressed selection indices
+```
+
+Position 11 completes a new overlapping 4:1 entry and position 12 consumes it. Every complete
+state is aggregate-budgeted before allocation and published only after the full step succeeds.
+The prefill/MTP oracle is batch-one FP32, capped at 4,096 tokens, 16 total layers, one MTP layer
+and 64 million state elements. It intentionally has no target-verification loop or packed
+checkpoint kernels, and is not selected by `deepseek-inspect` for the full checkpoint.
 
 ## TinyTransformer adapter boundary
 
@@ -285,6 +296,12 @@ L2  NVMe   immutable weight backing, cold experts, persistent KV
 
 Vastloom does not ask the OS to discover this hierarchy through page faults. Placement
 is model-aware and explicit. NVMe is a backing tier, not fake RAM.
+
+Architecture adapters map exact checkpoint tensors into the shared role/tier contract described
+in [`MODEL_COMPATIBILITY.md`](MODEL_COMPATIBILITY.md). Always-active trunk and live state receive
+residency before expert cache capacity. Selected expert bundles move through explicit bounded
+NVMe→RAM→VRAM transitions; scheduling can change readiness order but not authoritative routing
+or numerical reduction order.
 
 For TinyChat only L1 is active:
 

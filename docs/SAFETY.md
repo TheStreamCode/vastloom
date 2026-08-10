@@ -114,7 +114,7 @@ runnable model manifest.
 
 ## DeepSeek metadata and large-download interlocks
 
-The pinned DeepSeek V4 Flash inspection path is intentionally non-executing:
+The pinned DeepSeek V4 Flash preview inspection path is intentionally non-executing:
 
 - metadata-only import selects five ordinary metadata files and 46 header snapshots,
   totaling exactly 19,404,391 bytes;
@@ -133,6 +133,9 @@ The pinned DeepSeek V4 Flash inspection path is intentionally non-executing:
 
 The opt-in authorizes only an immutable download. It does not imply that the runtime can
 execute the checkpoint, and it does not relax the 300 GiB default free-space reserve.
+The newer official 0731 release, Unsloth GGUF variants and Laguna S 2.1 have separate
+identities and no import authorization or execution support. A user-supplied URL never bypasses
+revision pinning, license review, exact size/hash catalogs or the large-download interlock.
 
 ## Real OLMoE streaming bounds
 

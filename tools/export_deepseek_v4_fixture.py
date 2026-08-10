@@ -161,7 +161,7 @@ def build_fixture(official_model: Path) -> dict:
     official.rotate_activation = lambda value: value
     args = official.ModelArgs(
         max_batch_size=1,
-        max_seq_len=8,
+        max_seq_len=16,
         dtype="bf16",
         scale_fmt=None,
         expert_dtype=None,
@@ -244,6 +244,47 @@ def build_fixture(official_model: Path) -> dict:
         )
         mtp_logits = model.mtp[0](hidden, 0, token_ids)
 
+        decode_token_ids = [10, 12, 13, 14, 15]
+        incremental = []
+        for start_pos, token_id in enumerate(decode_token_ids, start=token_ids.numel()):
+            next_ids = torch.tensor([[token_id]], dtype=torch.long)
+            route_start = len(route_trace)
+            mtp_route_start = len(mtp_route_trace)
+            attention_start = len(sys.modules["kernel"].sparse_attn_records)
+            next_hidden = model.embed(next_ids)
+            next_hidden = next_hidden.unsqueeze(2).repeat(1, 1, model.hc_mult, 1)
+            for layer in model.layers:
+                next_hidden = layer(next_hidden, start_pos, next_ids)
+            next_logits = model.head(
+                next_hidden,
+                model.hc_head_fn,
+                model.hc_head_scale,
+                model.hc_head_base,
+                model.norm,
+            )
+            next_mtp_logits = model.mtp[0](next_hidden, start_pos, next_ids)
+            attention_records = sys.modules["kernel"].sparse_attn_records[attention_start:]
+            incremental.append(
+                {
+                    "position": start_pos,
+                    "token_id": token_id,
+                    "logits": flattened(next_logits),
+                    "greedy_token_id": int(next_logits.argmax(dim=-1).item()),
+                    "routes": route_trace[route_start:],
+                    "attention_indices": [
+                        {"layer": layer, "indices": values}
+                        for layer, values in enumerate(attention_records[:args.n_layers])
+                    ],
+                    "mtp_logits": flattened(next_mtp_logits),
+                    "mtp_greedy_token_id": int(next_mtp_logits.argmax(dim=-1).item()),
+                    "mtp_routes": mtp_route_trace[mtp_route_start:],
+                    "mtp_attention_indices": [
+                        {"layer": layer, "indices": values}
+                        for layer, values in enumerate(attention_records[args.n_layers:])
+                    ],
+                }
+            )
+
     tensors: dict[str, list[float] | list[int]] = {}
     tensor_dtypes: dict[str, str] = {}
     for name, parameter in model.named_parameters():
@@ -291,19 +332,20 @@ def build_fixture(official_model: Path) -> dict:
         "swiglu_limit": args.swiglu_limit,
     }
     return {
-        "format": "vastloom.deepseek_v4.graph_fixture.v1",
+        "format": "vastloom.deepseek_v4.graph_fixture.v2",
         "official_revision": OFFICIAL_REVISION,
         "official_model_sha256": OFFICIAL_MODEL_SHA256,
         "reference_mode": "official-model.py-fp32-with-equivalent-cpu-kernel-stubs",
         "absolute_tolerance": 8e-5,
         "config": configuration,
         "token_ids": [int(value) for value in token_ids.reshape(-1).tolist()],
+        "decode_token_ids": decode_token_ids,
         "tensor_dtypes": tensor_dtypes,
         "tensors": tensors,
         "expected": {
             "logits": flattened(logits),
             "greedy_token_id": int(logits.argmax(dim=-1).item()),
-            "routes": route_trace,
+            "routes": route_trace[:args.n_layers],
             "attention_indices": [
                 {"layer": layer, "indices": values}
                 for layer, values in enumerate(
@@ -312,13 +354,16 @@ def build_fixture(official_model: Path) -> dict:
             ],
             "mtp_logits": flattened(mtp_logits),
             "mtp_greedy_token_id": int(mtp_logits.argmax(dim=-1).item()),
-            "mtp_routes": mtp_route_trace,
+            "mtp_routes": mtp_route_trace[:args.n_mtp_layers],
             "mtp_attention_indices": [
                 {"layer": layer, "indices": values}
                 for layer, values in enumerate(
-                    sys.modules["kernel"].sparse_attn_records[args.n_layers:]
+                    sys.modules["kernel"].sparse_attn_records[
+                        args.n_layers:args.n_layers + args.n_mtp_layers
+                    ]
                 )
             ],
+            "incremental": incremental,
         },
     }
 
@@ -329,7 +374,7 @@ def render(official_model: Path) -> str:
 
 def validate_committed_fixture(output: Path) -> None:
     payload = json.loads(output.read_text(encoding="utf-8"))
-    if payload.get("format") != "vastloom.deepseek_v4.graph_fixture.v1":
+    if payload.get("format") != "vastloom.deepseek_v4.graph_fixture.v2":
         raise RuntimeError("unexpected DeepSeek graph fixture format")
     if payload.get("official_revision") != OFFICIAL_REVISION:
         raise RuntimeError("DeepSeek graph fixture revision is not pinned")
@@ -357,6 +402,25 @@ def validate_committed_fixture(output: Path) -> None:
         raise RuntimeError("DeepSeek graph fixture MTP logits do not match the vocabulary")
     if len(payload.get("token_ids", [])) != 8:
         raise RuntimeError("DeepSeek graph fixture prompt length changed unexpectedly")
+    decode_token_ids = payload.get("decode_token_ids")
+    incremental = expected.get("incremental")
+    if not isinstance(decode_token_ids, list) or len(decode_token_ids) != 5:
+        raise RuntimeError("DeepSeek graph fixture decode tokens are incomplete")
+    if not isinstance(incremental, list) or len(incremental) != len(decode_token_ids):
+        raise RuntimeError("DeepSeek graph fixture incremental references are incomplete")
+    for step in incremental:
+        if len(step.get("routes", [])) != config.get("layers"):
+            raise RuntimeError("DeepSeek graph fixture incremental routes are incomplete")
+        if len(step.get("attention_indices", [])) != config.get("layers"):
+            raise RuntimeError("DeepSeek graph fixture incremental attention is incomplete")
+        if len(step.get("mtp_routes", [])) != config.get("mtp_layers"):
+            raise RuntimeError("DeepSeek graph fixture incremental MTP routes are incomplete")
+        if len(step.get("mtp_attention_indices", [])) != config.get("mtp_layers"):
+            raise RuntimeError("DeepSeek graph fixture incremental MTP attention is incomplete")
+        if len(step.get("logits", [])) != config.get("vocabulary_size"):
+            raise RuntimeError("DeepSeek graph fixture incremental logits are incomplete")
+        if len(step.get("mtp_logits", [])) != config.get("vocabulary_size"):
+            raise RuntimeError("DeepSeek graph fixture incremental MTP logits are incomplete")
 
 
 def main() -> int:

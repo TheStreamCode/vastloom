@@ -689,13 +689,16 @@ void test_deepseek_v4_reference_graph() {
     CHECK(token_value != nullptr);
     if (token_value == nullptr) return;
     const auto token_ids = unsigneds(*token_value);
-    auto result = vastloom::inference::deepseek_v4_reference_prefill(graph, token_ids);
+    vastloom::inference::DeepseekV4ReferenceState incremental_state;
+    auto result = vastloom::inference::deepseek_v4_reference_prefill(
+        graph, token_ids, &incremental_state);
     CHECK(result);
     if (!result) {
         std::cerr << "DeepSeek graph reference error: " << result.error().message << " ("
                   << result.error().context << ")\n";
         return;
     }
+    CHECK(incremental_state.next_position == token_ids.size());
     const float tolerance = float_value(fixture.value(), "absolute_tolerance");
     const auto expected_logits_value = expected_object->find("logits");
     CHECK(expected_logits_value != expected_object->end());
@@ -801,6 +804,123 @@ void test_deepseek_v4_reference_graph() {
               signed_indices(*attention_indices_value));
     }
 
+    const auto compare_incremental_logits = [&](std::span<const float> actual,
+                                                const vastloom::util::JsonValue& step,
+                                                std::string_view key,
+                                                std::string_view label) {
+        const auto* expected_item = step.find(key);
+        CHECK(expected_item != nullptr);
+        if (expected_item == nullptr) return;
+        const auto expected_items = floats(*expected_item);
+        CHECK(actual.size() == expected_items.size());
+        for (std::size_t index = 0U;
+             index < std::min(actual.size(), expected_items.size()); ++index) {
+            if (std::abs(actual[index] - expected_items[index]) > tolerance) {
+                std::cerr << "DeepSeek incremental " << label << " mismatch at " << index
+                          << ": " << actual[index] << " versus " << expected_items[index]
+                          << '\n';
+                ++failures;
+                break;
+            }
+        }
+    };
+    const auto compare_incremental_layers = [&] (
+        const std::vector<vastloom::inference::DeepseekV4LayerTrace>& actual,
+        const vastloom::util::JsonValue& step,
+        std::string_view route_key,
+        std::string_view attention_key) {
+        const auto* routes = array(step, route_key);
+        const auto* attention = array(step, attention_key);
+        CHECK(routes != nullptr && attention != nullptr);
+        if (routes == nullptr || attention == nullptr) return;
+        CHECK(actual.size() == routes->size());
+        CHECK(actual.size() == attention->size());
+        for (std::size_t layer = 0U;
+             layer < std::min(actual.size(), routes->size()); ++layer) {
+            auto route_object = (*routes)[layer].as_object();
+            auto attention_object = (*attention)[layer].as_object();
+            CHECK(route_object && attention_object);
+            if (!route_object || !attention_object) return;
+            const vastloom::util::JsonValue route_value(*route_object.value());
+            const vastloom::util::JsonValue attention_value(*attention_object.value());
+            const auto* route_indices = route_value.find("indices");
+            const auto* route_weights = route_value.find("weights");
+            const auto* attention_indices = attention_value.find("indices");
+            CHECK(route_indices != nullptr && route_weights != nullptr &&
+                  attention_indices != nullptr);
+            if (route_indices == nullptr || route_weights == nullptr ||
+                attention_indices == nullptr) {
+                return;
+            }
+            CHECK(actual[layer].route.indices == unsigneds(*route_indices));
+            const auto weights = floats(*route_weights);
+            CHECK(actual[layer].route.weights.size() == weights.size());
+            for (std::size_t index = 0U;
+                 index < std::min(actual[layer].route.weights.size(), weights.size()); ++index) {
+                CHECK(std::abs(actual[layer].route.weights[index] - weights[index]) <= tolerance);
+            }
+            CHECK(actual[layer].attention_indices == signed_indices(*attention_indices));
+        }
+    };
+    const auto* decode_tokens_value = fixture.value().find("decode_token_ids");
+    const auto* incremental_expected = array(expected_value, "incremental");
+    CHECK(decode_tokens_value != nullptr && incremental_expected != nullptr);
+    if (decode_tokens_value == nullptr || incremental_expected == nullptr) return;
+    const auto decode_tokens = unsigneds(*decode_tokens_value);
+    CHECK(decode_tokens.size() == incremental_expected->size());
+    for (std::size_t step_index = 0U;
+         step_index < std::min(decode_tokens.size(), incremental_expected->size()); ++step_index) {
+        auto step_object = (*incremental_expected)[step_index].as_object();
+        CHECK(step_object);
+        if (!step_object) return;
+        const vastloom::util::JsonValue step(*step_object.value());
+        CHECK(size_value(step, "position") == incremental_state.next_position);
+        CHECK(size_value(step, "token_id") == decode_tokens[step_index]);
+        auto decoded = vastloom::inference::deepseek_v4_reference_decode(
+            graph, decode_tokens[step_index], incremental_state);
+        CHECK(decoded);
+        if (!decoded) {
+            std::cerr << "DeepSeek incremental reference error: "
+                      << decoded.error().message << " (" << decoded.error().context << ")\n";
+            return;
+        }
+        CHECK(incremental_state.next_position == token_ids.size() + step_index + 1U);
+        compare_incremental_logits(decoded.value().logits, step, "logits", "logit");
+        compare_incremental_logits(decoded.value().mtp_logits, step, "mtp_logits",
+                                   "MTP logit");
+        CHECK(decoded.value().greedy_token_id == size_value(step, "greedy_token_id"));
+        CHECK(decoded.value().mtp_greedy_token_id ==
+              size_value(step, "mtp_greedy_token_id"));
+        compare_incremental_layers(decoded.value().layers, step, "routes",
+                                   "attention_indices");
+        compare_incremental_layers(decoded.value().mtp_layers, step, "mtp_routes",
+                                   "mtp_attention_indices");
+    }
+
+    const auto state_before_failure = incremental_state;
+    auto failing_decode_graph = graph;
+    failing_decode_graph.float_tensors.erase("head.weight");
+    CHECK(!vastloom::inference::deepseek_v4_reference_decode(
+        failing_decode_graph, decode_tokens.back(), incremental_state));
+    CHECK(incremental_state.next_position == state_before_failure.next_position);
+    CHECK(incremental_state.layers.size() == state_before_failure.layers.size());
+    for (std::size_t layer = 0U;
+         layer < std::min(incremental_state.layers.size(),
+                          state_before_failure.layers.size()); ++layer) {
+        CHECK(incremental_state.layers[layer].window_key_values ==
+              state_before_failure.layers[layer].window_key_values);
+        CHECK(incremental_state.layers[layer].compressor.compressed ==
+              state_before_failure.layers[layer].compressor.compressed);
+        CHECK(incremental_state.layers[layer].indexer.compressed ==
+              state_before_failure.layers[layer].indexer.compressed);
+    }
+    auto malformed_state = incremental_state;
+    malformed_state.layers[0].window_key_values.clear();
+    const auto malformed_position = malformed_state.next_position;
+    CHECK(!vastloom::inference::deepseek_v4_reference_decode(
+        graph, decode_tokens.back(), malformed_state));
+    CHECK(malformed_state.next_position == malformed_position);
+
     auto malformed = graph;
     malformed.float_tensors.erase("head.weight");
     CHECK(!vastloom::inference::deepseek_v4_reference_prefill(malformed, token_ids));
@@ -836,6 +956,11 @@ void test_deepseek_v4_reference_graph() {
     malformed = graph;
     malformed.config.head_count = std::numeric_limits<std::size_t>::max();
     CHECK(!vastloom::inference::deepseek_v4_reference_prefill(malformed, token_ids));
+    malformed = graph;
+    malformed.config.window_size = std::numeric_limits<std::size_t>::max();
+    vastloom::inference::DeepseekV4ReferenceState oversized_state;
+    CHECK(!vastloom::inference::deepseek_v4_reference_prefill(
+        malformed, token_ids, &oversized_state));
 }
 
 void test_model_store_and_runtime_policy(const std::filesystem::path& root) {

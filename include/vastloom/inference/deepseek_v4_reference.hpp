@@ -75,6 +75,24 @@ struct DeepseekV4ReferenceGraph {
     std::map<std::string, std::vector<std::uint32_t>, std::less<>> integer_tensors;
 };
 
+struct DeepseekV4ReferenceCompressorState {
+    std::vector<float> key_values;
+    std::vector<float> scores;
+    std::vector<float> compressed;
+};
+
+struct DeepseekV4ReferenceAttentionState {
+    std::vector<float> window_key_values;
+    DeepseekV4ReferenceCompressorState compressor;
+    DeepseekV4ReferenceCompressorState indexer;
+};
+
+struct DeepseekV4ReferenceState {
+    std::size_t next_position{0};
+    std::vector<DeepseekV4ReferenceAttentionState> layers;
+    std::vector<DeepseekV4ReferenceAttentionState> mtp_layers;
+};
+
 struct DeepseekV4LayerTrace {
     std::size_t layer{0};
     DeepseekV4RouteResult route;
@@ -179,10 +197,17 @@ struct DeepseekV4ReferenceForwardResult {
     std::size_t selected_per_query,
     float softmax_scale);
 
-// Bounded single-batch prefill oracle for reduced float fixtures. This deliberately
-// excludes incremental cache mutation, quantized checkpoint kernels and MTP execution.
+// Bounded single-batch oracle for reduced float fixtures. Passing a state captures the
+// raw/compressed caches needed by deepseek_v4_reference_decode. Quantized checkpoint
+// kernels remain outside this reference path.
 [[nodiscard]] Result<DeepseekV4ReferenceForwardResult> deepseek_v4_reference_prefill(
     const DeepseekV4ReferenceGraph& graph,
-    std::span<const std::uint32_t> token_ids);
+    std::span<const std::uint32_t> token_ids,
+    DeepseekV4ReferenceState* state = nullptr);
+
+[[nodiscard]] Result<DeepseekV4ReferenceForwardResult> deepseek_v4_reference_decode(
+    const DeepseekV4ReferenceGraph& graph,
+    std::uint32_t token_id,
+    DeepseekV4ReferenceState& state);
 
 }  // namespace vastloom::inference

@@ -13,6 +13,10 @@ hardware, commands, measurements and limitations.
 
 ## Current report
 
+- [`M9_DEEPSEEK_BOUND_TRUNK_LOAD_VALIDATION.md`](M9_DEEPSEEK_BOUND_TRUNK_LOAD_VALIDATION.md) —
+  one exact artifact-bound F32 fixture range loaded through aggregate-budgeted RAM/staging,
+  rehashed in memory and retained through a scalar matvec, with allocation, cancellation,
+  corruption, truncation and lease-cleanup faults while the complete artifact stays non-executing.
 - [`M9_DEEPSEEK_RANGE_ARTIFACT_BINDING_VALIDATION.md`](M9_DEEPSEEK_RANGE_ARTIFACT_BINDING_VALIDATION.md) —
   closed-world native artifact verification, full local range rehashing and exact trunk binding to
   regenerated pinned GGUF catalog identities, validated with synthetic corruption and forgery

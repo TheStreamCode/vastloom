@@ -277,6 +277,12 @@ The 0731 GGUF reader adds a metadata-only safety boundary:
   byte count to match. It exposes only local offset-zero views, preserves
   `complete_checkpoint_verified=false` and `execution_supported=false`, and has no hash-bypass CLI
   option;
+- the bound-range loader accepts only an exact non-executing binding and matching `NVME` residency.
+  It has a caller-lowerable bound plus an absolute 1 GiB ceiling, reserves the complete RAM
+  destination and staging against the aggregate host limit before allocation, performs one exact
+  read and hashes the in-memory bytes again before `RAM_READY`. Early cancellation leaves `NVME`;
+  later read/hash/callback/cancellation failures publish `FAILED` only after transfer release and
+  free all reservations. A shared use lease prevents eviction while a consumer retains the bytes;
 - selected-expert/all range scopes fail before network while routing authority is caller-supplied.
   A future authoritative source must be named explicitly; a forged flag/source combination is
   rejected. Target-scoped locks clean only their own stale partial/incoming artifacts after a

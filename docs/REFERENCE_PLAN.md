@@ -109,8 +109,10 @@ The bounded partial-range importer has separately accepted the 21-range / 138,86
 scope in dry-run mode. It created no target and made no payload request. A real transfer requires
 explicit authorization, remains capped and publishes a non-executable derived artifact; the
 native closed-world reader and exact trunk binder now pass synthetic corruption and source-identity
-tests. The next gate is a governed synthetic trunk consumer; only after it passes should the user
-be asked to authorize the real transfer.
+tests. One complete four-byte F32 range also passes an aggregate-budgeted load, second in-memory
+hash, retained residency and scalar matvec. The next gate is to assemble every required bound
+tensor and execute the complete reduced graph from that artifact boundary; only after it passes
+should the user be asked to authorize the real transfer.
 
 Kimi K3 is not a reference-PC execution target. The project treats it as metadata/capacity-only
 because no exact profile has proved that its complete expert bundle fits one real tier on the

@@ -14,7 +14,7 @@ or matching tensor dimensions is never enough to enable execution automatically.
 | OLMoE-1B-7B-0924-Instruct | Pinned shards, top-k routes, expert streaming and I/O telemetry | Validated CPU expert streaming |
 | `deepseek-ai/DeepSeek-V4-Flash` preview at `60d8d707...` | Header catalog, tokenizer, reduced main+MTP prefill and five incremental cache steps | Reduced FP32 reference execution only |
 | `deepseek-ai/DeepSeek-V4-Flash-0731` at `7872f01b...` | Public metadata/config reviewed on 2026-08-10 | Not imported, inspected or executed by Vastloom yet |
-| `unsloth/DeepSeek-V4-Flash-0731-GGUF` at `fbbb5b93...` | Pinned atomic importer, verified metadata binding, 43 bounded layer-trunk plans, exact layer-0 trunk+top-6 range planning, bounded immutable partial-artifact import with a real trunk dry-run, native closed-world range verification and exact trunk binding, all trunk storage types covered by scalar references, one router-first governed reduced Q8_0/IQ1_S/IQ3_XXS layer, plus canonical synchronous/asynchronous cache-to-kernel parity on one real expert | Reduced synthetic mixed-format layer and one separate extracted expert execute; the checkpoint-shaped range path remains non-executing, its expert IDs are not yet authoritative and no official range payload was downloaded; bound local ranges are not connected to the governed trunk consumer, and complete shards, official layer/token and generation remain unvalidated |
+| `unsloth/DeepSeek-V4-Flash-0731-GGUF` at `fbbb5b93...` | Pinned atomic importer, verified metadata binding, 43 bounded layer-trunk plans, exact layer-0 trunk+top-6 range planning, bounded immutable partial-artifact import with a real trunk dry-run, native closed-world range verification/exact trunk binding plus one governed synthetic bound-range scalar load, all trunk storage types covered by scalar references, one router-first governed reduced Q8_0/IQ1_S/IQ3_XXS layer, and canonical synchronous/asynchronous cache-to-kernel parity on one real expert | Reduced synthetic mixed-format layer, one separate extracted expert and one synthetic artifact-bound F32 range execute; the checkpoint-shaped path remains non-executing, its expert IDs are not yet authoritative and no official range payload was downloaded; a complete artifact tensor set, complete shards, official layer/token and generation remain unvalidated |
 | `unsloth/Laguna-S-2.1` at `1a646907...` | Public config, custom-code and shard metadata reviewed on 2026-08-10 | Adapter and execution not implemented |
 | Kimi K3-class profiles | Public-roadmap capacity/traffic study only | Not a reference-PC execution target unless one exact complete expert passes the single-tier gate |
 
@@ -82,8 +82,10 @@ model-store disk reserve. Its real-metadata test validated only a no-network dry
 138,867,160-byte layer-0 trunk. Expert/all scopes remain blocked by the unverified route. A native
 closed-world verifier now rehashes every local range and the DeepSeek binder matches exact local
 trunk views to the independently verified catalog, regenerated plan and pinned complete-object
-identities. This passed synthetic corruption/forgery tests only; no official range was downloaded
-and no bound range reaches a tensor consumer, so the profile's execution status is unchanged.
+identities. One complete synthetic F32 range now additionally passes an aggregate-budgeted
+RAM/staging read, a second in-memory SHA-256, retained residency and scalar matvec. No official
+range was downloaded, the complete bound tensor set does not reach the graph, and the profile's
+execution status is unchanged.
 
 The layer catalog uses F32, Q8_0, Q5_K, Q6_K, I32 and BF16. Bounded scalar handling now covers all
 1,193 tensors and all 6,390,088,008 encoded layer-trunk bytes: floating matrix formats have exact

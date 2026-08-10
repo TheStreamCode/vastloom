@@ -258,8 +258,12 @@ unbounded allocation and clean recovery from injected CUDA failures.
 - [x] Bind `vastloom.range-artifact.v1` back to exact catalog tensors in a closed-world native
   reader, rehash all local ranges and expose exact local trunk tile views. Synthetic malformed,
   corruption and forged-binding cases pass without an official payload download.
-- [ ] Feed those bound local tile views through the governed trunk loader and reduced scalar
-  consumer, including short-read, cancellation and reservation cleanup.
+- [x] Feed one complete bound F32 fixture range through an aggregate-budgeted trunk load and
+  transactional scalar matvec. Post-read hash verification, short-read, corruption, callback,
+  cancellation, reservation and retained-lease cleanup cases pass across tested toolchains.
+- [ ] Assemble every required bound range into a retained typed tensor set and execute the complete
+  reduced graph from the artifact boundary, rejecting missing, duplicate, split or wrong-type
+  inputs transactionally.
 - [ ] Execute that probe by acquiring the bounded official trunk ranges, decoding the real
   `tid2eid` route and loading only its six selected complete expert bundles.
 - [ ] Pinned host buffers.

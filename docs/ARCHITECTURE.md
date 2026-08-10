@@ -401,8 +401,9 @@ This prevents a small derived artifact from masquerading as the complete shard.
 Crash recovery is target-scoped under the same exclusive import lock. Process-unique partial
 responses are discarded instead of resumed across servers, stale unpublished trees are removed,
 and already complete cached ranges are rehashed before reuse. A native artifact reader/catalog
-binder now closes the next identity boundary, but a successfully bound package still cannot reach
-inference.
+binder closes the identity boundary. One selected complete bound range can now reach the shared
+governed RAM loader and a scalar storage consumer, but the package still cannot drive a layer or
+model.
 
 ```text
 vastloom.range-artifact.v1 directory
@@ -411,7 +412,9 @@ vastloom.range-artifact.v1 directory
   -> reproduce trunk plan from hash-verified pinned GGUF metadata
   -> exact model/revision/layer/label/source span/full-object identity match
   -> offset-zero immutable local tile views
-  -> execution unsupported (governed tensor consumer not connected)
+  -> governed exact single-range load + second in-memory SHA-256
+  -> retained RAM use lease + scalar storage consumer
+  -> execution unsupported (complete typed tensor set and graph not connected)
 ```
 
 The generic verifier accepts at most 4,096 ranges, 1 GiB per range and 16 GiB total; callers may
@@ -422,6 +425,15 @@ range hashes, hash-verified pinned metadata and a plan reproducible from that ca
 only trunk scope while routing authority remains false. The manifest's raw plan SHA-256 is retained
 as provenance; exact regenerated range identities, rather than a shell-dependent JSON newline or
 encoding, are the native binding authority.
+
+The generic bound-range loader verifies the selected identity and source bounds again, requires a
+matching `NVME` residency object, and caps any one load at 1 GiB even if a caller requests more.
+`begin_read` reserves the complete destination plus equally bounded staging against the aggregate
+host-memory ceiling before the byte vector exists. After the exact read, SHA-256 is computed over
+the destination bytes before `RAM_READY` publication. The returned immutable buffer owns a
+`ResidencyUse`, so eviction remains illegal until the last consumer releases it. The current
+fixture consumes one complete four-byte F32 normalization range in a transactional `1 x 1` matvec;
+it does not assemble the other ranges into a DeepSeek graph.
 
 The scalar storage layer now recognizes every GGML type present in those 1,193 layer tensors.
 Q8_0, Q5_K and Q6_K follow the exact pinned ggml block layouts; BF16 and F32 are decoded from

@@ -33,7 +33,9 @@ authority and none of the planned payload was fetched. A separate explicit-autho
 importer now validates the plan, exact HTTP spans and per-range hashes, then publishes only a
 read-only non-executable derived artifact. The real 138,867,160-byte trunk passed dry-run only;
 selected-expert import remains blocked. A native closed-world verifier and exact pinned-catalog
-trunk binder pass synthetic faults, but bound ranges do not yet reach a tensor consumer. All 43
+trunk binder pass synthetic faults. One complete four-byte F32 fixture range now moves through
+an aggregate-budgeted RAM/staging transaction, is rehashed after read, retains a use lease and
+reaches the scalar matvec consumer; the full bound tensor set and official payload do not. All 43
 layers now expose deterministic
 non-routed trunk plans (1,193 tensors/tiles at a 64 MiB ceiling), and a synthetic governed tile
 transaction validates payload reads and cleanup. Scalar Q8_0/Q5_K/Q6_K/BF16/F32 references plus

@@ -73,8 +73,13 @@ model conversion.
 > request exact revision-pinned HTTP spans, hash each result and atomically publish a read-only
 > partial artifact under `models/optimized`. The real 138,867,160-byte layer-0 trunk passed only a
 > no-network dry-run; selected-expert imports remain blocked until routing authority is verified.
-> The complete 82.54 GB payload has not been downloaded or executed; storage-format coverage is not a
-> complete DeepSeek layer/token path, physical-NVMe performance, generation or CUDA implementation.
+> The native verifier now treats that artifact as a closed file set, rehashes every range and binds
+> it back to the exact regenerated catalog. A synthetic complete four-byte F32 trunk range then
+> passes an aggregate-budgeted RAM/staging transaction, a second post-read SHA-256 check, retained
+> residency and a scalar matvec. This proves one range-to-consumer boundary, not a complete tensor
+> set or layer. The complete 82.54 GB payload has not been downloaded or executed; storage-format
+> coverage is not a complete DeepSeek layer/token path, physical-NVMe performance, generation or
+> CUDA implementation.
 
 ## Why Vastloom exists
 
@@ -156,6 +161,8 @@ The bounded immutable range importer and its real-metadata no-network gate are d
 [`M9 range artifact import report`](docs/reports/M9_DEEPSEEK_RANGE_ARTIFACT_IMPORT_VALIDATION.md).
 The closed-world native verifier and exact pinned-catalog trunk binding are documented in the
 [`M9 range artifact binding report`](docs/reports/M9_DEEPSEEK_RANGE_ARTIFACT_BINDING_VALIDATION.md).
+The first governed bound-range-to-scalar transaction is documented in the
+[`M9 bound trunk-load report`](docs/reports/M9_DEEPSEEK_BOUND_TRUNK_LOAD_VALIDATION.md).
 The pinned importer and immutable full-source admission boundary are documented in the
 [`M7 checkpoint-binding report`](docs/reports/M7_DEEPSEEK_GGUF_CHECKPOINT_BINDING_VALIDATION.md).
 Current and candidate model support is kept explicit in the
@@ -362,6 +369,12 @@ portability target, not a validated platform claim.
   path, size and SHA-256 identity. The result exposes offset-zero local tile views but still reports
   `complete_checkpoint_verified=false` and `execution_supported=false`; no official payload was
   acquired or executed for this gate.
+- **Governed bound-range load:** one complete F32 range from the synthetic binding now reserves its
+  full RAM destination and staging together, performs an exact bounded read, hashes the in-memory
+  bytes again, publishes `RAM_READY` and remains protected by a retained use lease while the scalar
+  matvec consumes it. Allocation refusal, early/late cancellation, callback failure, same-size
+  corruption, truncation and eviction cleanup fail safely. The absolute per-load ceiling is 1 GiB
+  and callers can lower it. No complete artifact tensor set or official payload reaches the graph.
 
 ### Runtime foundation
 

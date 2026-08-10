@@ -14,7 +14,7 @@ or matching tensor dimensions is never enough to enable execution automatically.
 | OLMoE-1B-7B-0924-Instruct | Pinned shards, top-k routes, expert streaming and I/O telemetry | Validated CPU expert streaming |
 | `deepseek-ai/DeepSeek-V4-Flash` preview at `60d8d707...` | Header catalog, tokenizer, reduced main+MTP prefill and five incremental cache steps | Reduced FP32 reference execution only |
 | `deepseek-ai/DeepSeek-V4-Flash-0731` at `7872f01b...` | Public metadata/config reviewed on 2026-08-10 | Not imported, inspected or executed by Vastloom yet |
-| `unsloth/DeepSeek-V4-Flash-0731-GGUF` at `fbbb5b93...` | Pinned atomic importer, verified metadata binding, 43 bounded layer-trunk plans, all trunk storage types covered by scalar references, one router-first governed file-backed reduced Q8_0 layer, plus exact gate/up IQ1_S and down IQ3_XXS parity on one real expert | Reduced fixture loads only selected bundles through a bounded RAM cache; real full payload not imported; no official layer/token generation path |
+| `unsloth/DeepSeek-V4-Flash-0731-GGUF` at `fbbb5b93...` | Pinned atomic importer, verified metadata binding, 43 bounded layer-trunk plans, all trunk storage types covered by scalar references, one router-first governed file-backed reduced Q8_0 layer, plus canonical cache-to-kernel IQ1_S/IQ3_XXS parity on one real expert | One extracted selected expert executes through the bounded RAM cache; complete shards, official mixed-format layer/token and generation remain unvalidated |
 | `unsloth/Laguna-S-2.1` at `1a646907...` | Public config, custom-code and shard metadata reviewed on 2026-08-10 | Adapter and execution not implemented |
 | Kimi K3-class profiles | Public-roadmap capacity/traffic study only | Not a reference-PC execution target unless one exact complete expert passes the single-tier gate |
 
@@ -79,9 +79,12 @@ Three bounded ranges from the second shard have now been tested separately: the 
 gate and up IQ1_S matrices plus the 3,211,264-byte IQ3_XXS down matrix form the complete
 layer-0/expert-0 bundle. A fixed one-worker, one-entry loader pre-reserves and packs all 6,488,064
 bytes in RAM, then the scalar CPU reference executes SwiGLU and matches pinned ggml for all 4,096
-outputs bit for bit. The ranges are independently SHA-256 pinned extracted test artifacts, not a
-substitute for importing and verifying the complete source shard. No complete official-payload
-layer, routed token or generation path has executed.
+outputs bit for bit. The executable catalog now derives W1/W2/W3 from the canonical GGUF names and
+feeds the retained descriptors through the production router-first cache/consumer bridge. The
+first resolution is one exact miss, the second is a zero-read hit, and in-flight leases prevent
+eviction. The ranges are independently SHA-256 pinned extracted test artifacts, not a substitute
+for importing and verifying the complete source shard. No complete official-payload layer, routed
+token or generation path has executed.
 
 ### Laguna S 2.1
 
@@ -125,7 +128,9 @@ and encoded byte in those layer plans. A reduced architecture consumer now compo
 packed bytes from governed file-backed trunk tiles and complete expert bundles without copying
 payloads into the graph. The reduced graph now routes first, deduplicates the selected IDs and
 loads only those complete bundles through a bounded synchronous RAM LRU with access telemetry.
-Official full-shard import, the mixed-format 0731 layer/token scheduler, asynchronous overlap,
+The real extracted 0731 expert uses the same cache boundary after strict canonical catalog
+binding, but is not composed with official trunk payload. Official full-shard import, the
+mixed-format 0731 layer/token scheduler, asynchronous overlap,
 optimized kernels and the Laguna adapter remain open.
 
 The shared runtime may then place a tensor or expert bundle in one of these explicit states:
@@ -192,9 +197,11 @@ order without an explicit quality-changing mode.
 
 The shared synchronous oracle and bounded asynchronous pool implement range reads, compaction,
 per-tensor slices and `RAM_READY` publication. In addition to synthetic fault coverage, a
-one-worker/one-entry configuration feeds one real DeepSeek 0731 expert to the scalar kernel. The
-reduced Q8_0 graph separately connects router output to a synchronous two-entry RAM LRU and its
-packed expert compute. The general pool supports one to four workers, a queue of at most 64
+one-worker/one-entry configuration feeds one real DeepSeek 0731 expert through canonical catalog
+binding, the synchronous RAM cache and the scalar mixed-format kernel. A first miss and second hit
+validate exact logical-byte accounting and lease-protected residency. The reduced Q8_0 graph
+separately connects router output to a synchronous two-entry RAM LRU and its packed expert compute.
+The general pool supports one to four workers, a queue of at most 64
 requests, pre-enqueue reservations and safe queued-work cancellation. Neither test overlaps real
 official-payload I/O with compute; direct I/O remains in the OLMoE-specific measurement path.
 

@@ -119,8 +119,10 @@ for all 43 real layers. A reduced layer now consumes file-backed Q8_0/I32 bytes 
 retains Governor-owned trunk/expert buffers and blocks eviction. Its router-first test now loads
 only the two unique complete bundles selected by each one-token route through a two-entry RAM
 cache. Requests above the bound, insufficient reservations and eviction of an in-flight bundle are
-rejected. This does not make the absent official 0731 payload executable and does not validate a
-production asynchronous or VRAM path.
+rejected. One extracted real 0731 expert now also traverses strict catalog binding, the same
+cache boundary and the mixed-format scalar consumer; the complete 6,488,064-byte bundle remains
+indivisible and lease-protected. This does not make the absent complete official 0731 payload
+executable and does not validate a production asynchronous or VRAM path.
 
 ## State machine
 
@@ -246,9 +248,11 @@ The 0731 GGUF reader adds a metadata-only safety boundary:
   malformed later blocks and budget refusal leave that public output unchanged;
 - one complete real expert test can consume only three separately size/SHA-256-pinned extracted
   ranges under an 8 MiB RAM limit, 4 MiB staging limit, 10 MiB aggregate host-memory limit, one
-  worker and one queue entry;
+  worker and one queue entry. Canonical W1/W2/W3 identity is revalidated before the bundle may
+  enter the router-first cache or mixed-format kernel;
 - a one-byte RAM shortfall is rejected before worker I/O/allocation, the live use lease blocks
-  eviction, and RAM/staging/scratch reservations must all return to zero after release;
+  eviction, a malformed W2 format leaves output unpublished, the second resolution performs zero
+  logical reads, and RAM/staging/scratch reservations must all return to zero after release;
 - this opt-in test is not a generic GGUF/catalog execution backend, so metadata snapshots and
   unverified full shards still cannot reach the token path.
 

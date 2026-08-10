@@ -33,7 +33,10 @@ dequantized oracle. A file-backed repetition loads 12 complete trunk tiles and f
 expert bundles, then retains all 5,364 payload bytes through 16 Governor-backed immutable buffers
 without copying them into the graph. The reduced MoE graph now routes first and resolves only the
 deduplicated selected complete bundles through a bounded synchronous two-entry RAM LRU with exact
-hit/miss/eviction/logical-byte telemetry. A complete 0731 quantized layer/token path, asynchronous
+hit/miss/eviction/logical-byte telemetry. Canonical 0731 GGUF identities now bind one complete
+6,488,064-byte extracted IQ1_S/IQ3_XXS expert into the same one-entry cache/consumer boundary;
+first-miss/second-hit telemetry, pinned ggml output and lease cleanup pass across tested compilers.
+A complete 0731 quantized layer/token path, asynchronous
 compute/I/O overlap, generation and CUDA remain unvalidated.
 Windows and Linux CPU paths are tested; macOS/Metal remain unvalidated. Laguna S 2.1 remains a
 reviewed compatibility target, not a validated execution path.

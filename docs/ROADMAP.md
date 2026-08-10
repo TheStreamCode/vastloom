@@ -189,6 +189,8 @@ The ownership-preserving file-backed repetition is recorded in the
 [M9 governed-layer report](reports/M9_DEEPSEEK_GOVERNED_LAYER_VALIDATION.md).
 The router-first bounded cache and exact access telemetry are recorded in the
 [M9 selected-expert streaming report](reports/M9_DEEPSEEK_SELECTED_EXPERT_STREAMING_VALIDATION.md).
+The canonical 0731 catalog-to-cache mixed-format expert bridge is recorded in the
+[M9 real selected-expert report](reports/M9_DEEPSEEK_REAL_SELECTED_EXPERT_VALIDATION.md).
 The first real packed-matrix parity gate is recorded in the
 [M7 IQ1_S kernel report](reports/M7_DEEPSEEK_IQ1S_KERNEL_VALIDATION.md).
 The completed one-expert gate/up/SwiGLU/down path is recorded in the
@@ -227,6 +229,8 @@ unbounded allocation and clean recovery from injected CUDA failures.
   layer test from bounded file-backed ranges without unaccounted payload copies.
 - [x] Split execution at the router boundary and load only selected complete expert bundles;
   trace load/hit/eviction and exact logical bytes across multiple tokens.
+- [x] Derive strict W1/W2/W3 bindings from canonical 0731 GGUF identities and feed one complete
+  real IQ1_S/IQ3_XXS expert through the bounded selected-expert cache and scalar consumer.
 - [ ] Connect those futures to expert compute and measure real compute/I/O overlap.
 - [ ] Pinned host buffers.
 - [ ] Direct/overlapped NVMe reads where supported.

@@ -380,9 +380,11 @@ result still shares that buffer. The graph executes only the returned packed W1/
 and emits per-expert resident bytes, logical bytes read and hit state. An oversized selected set is
 rejected before the provider runs.
 
-This closes router-first acquisition for the deterministic Q8_0 layer, not for the official 0731
-checkpoint. The official mixed-format bundle mapping, asynchronous reads, compute/I/O overlap,
-VRAM placement and production prefill chunking remain separate gates.
+This closes router-first acquisition for the deterministic Q8_0 layer. A second adapter now maps
+canonical official 0731 GGUF expert identities to strict W1/W2/W3 descriptors and sends one
+extracted real IQ1_S/IQ3_XXS bundle through the same cache/consumer boundary. It does not compose
+that expert with official trunk payload. Asynchronous reads, compute/I/O overlap, VRAM placement
+and production prefill chunking remain separate gates.
 
 ```text
 pinned importer manifest + exact object identities
@@ -409,17 +411,21 @@ fixed 256-float scratch and performs scalar FP64-accumulated matvecs. The trunk 
 the same bounded/transactional rules for Q8_0, Q5_K, Q6_K, BF16 and F32, while I32 remains a
 typed lookup-table decoder.
 One exact DeepSeek 0731 layer-0/expert-0 gate/up/down bundle is loaded through the shared bounded
-worker and `RAM_READY` lease, executes FP32 SwiGLU, and matches pinned ggml bit for bit across all
-4,096 final outputs. The test uses three hash-pinned extracted ranges rather than an unverified
-full shard, so this is not registered as a generic GGUF model execution backend.
+worker and `RAM_READY` lease, then resolved through a one-entry router-first RAM cache. Canonical
+GGUF names determine W1/W2/W3 instead of test-defined slice positions. The mixed-format bridge
+executes FP32 SwiGLU and matches pinned ggml bit for bit across all 4,096 final outputs; a second
+resolution is a zero-read cache hit. The test uses three hash-pinned extracted ranges rather than
+an unverified full shard, so this is not registered as a generic GGUF model execution backend.
 
 ```text
 verified gate/up/down ranges (6,488,064 bytes)
+  -> executable logical catalog -> canonical W1/W2/W3 binding
   -> Governor reserves packed RAM + largest staging range
   -> fixed worker performs three bounded read-only reads
-  -> RAM_READY + use lease
+  -> RAM_READY + cache-retained use lease
   -> IQ1_S gate/up -> SiLU multiply -> IQ3_XXS down
   -> transactional FP32 output
+  -> second resolution: cache hit + zero logical bytes
   -> lease release -> RAM eviction -> zero reservations
 ```
 

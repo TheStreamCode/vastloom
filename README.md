@@ -42,8 +42,10 @@ model conversion.
 > reader now also maps the pinned 82.54 GB `UD-IQ1_S` 0731 profile from three headers into 11,008
 > logical expert bundles without downloading its complete payload. One complete 6.49 MB real
 > layer-0/expert-0 bundle now passes bit-for-bit gate/up IQ1_S, SwiGLU and down IQ3_XXS parity
-> against pinned ggml after a governed one-worker load into RAM. The exact three-object GGUF
-> distribution now has a bounded immutable importer and a fail-closed source-binding command:
+> against pinned ggml after canonical GGUF binding and a governed one-entry router-first RAM cache;
+> its first resolution reads exactly 6,488,064 logical bytes and its second is a zero-read hit.
+> The exact three-object GGUF distribution now has a bounded immutable importer and a fail-closed
+> source-binding command:
 > only a fully hashed payload that passes the single-tier expert gate can expose executable source
 > ranges. Bounded scalar Q8_0, Q5_K, Q6_K, BF16 and F32 reference kernels plus an I32 router-table
 > decoder now cover the storage types of all 1,193 per-layer trunk tensors in the real metadata.
@@ -57,7 +59,7 @@ model conversion.
 > IDs and resolve only those complete file-backed bundles through a two-entry governed RAM LRU.
 > Three one-token steps prove a 2-miss load, a 2-hit reuse and a 2-eviction replacement while
 > preserving packed-oracle logits, routes, attention indices and transactional state.
-> The real 82.54 GB payload has not been downloaded or executed; storage-format coverage is not a
+> The complete 82.54 GB payload has not been downloaded or executed; storage-format coverage is not a
 > complete DeepSeek layer/token path, generation or CUDA implementation.
 
 ## Why Vastloom exists
@@ -127,6 +129,8 @@ Its file-backed, Governor-owned execution is documented in the
 [`M9 governed-layer report`](docs/reports/M9_DEEPSEEK_GOVERNED_LAYER_VALIDATION.md).
 Its router-first bounded selected-expert execution is documented in the
 [`M9 selected-expert streaming report`](docs/reports/M9_DEEPSEEK_SELECTED_EXPERT_STREAMING_VALIDATION.md).
+The canonical real-expert catalog/cache/kernel bridge is documented in the
+[`M9 real selected-expert report`](docs/reports/M9_DEEPSEEK_REAL_SELECTED_EXPERT_VALIDATION.md).
 The pinned importer and immutable full-source admission boundary are documented in the
 [`M7 checkpoint-binding report`](docs/reports/M7_DEEPSEEK_GGUF_CHECKPOINT_BINDING_VALIDATION.md).
 Current and candidate model support is kept explicit in the
@@ -275,7 +279,9 @@ portability target, not a validated platform claim.
   fixture tensors stay FP32. The packed layer now binds file-backed trunk/expert loader buffers
   without payload copies into the graph. Its new router-first provider loads only deduplicated
   selected complete bundles through a bounded synchronous RAM cache and emits exact access
-  telemetry. A verified official-payload layer/token consumer, target-verified speculative
+  telemetry. Canonical 0731 GGUF identities can now feed one real IQ1_S/IQ3_XXS selected expert
+  through that same cache/consumer boundary with exact miss/hit accounting and retained leases.
+  A verified complete official-payload layer/token consumer, target-verified speculative
   generation, asynchronous overlap and CUDA remain future gates.
 - **Official 0731 GGUF catalog:** the separate Unsloth revision
   `fbbb5b93fb787c21338159b0af3318bb3f4d9768` now has a bounded GGUF v3 header reader and
@@ -285,9 +291,12 @@ portability target, not a validated platform claim.
   a top-6 no-cache decode would request 1,770,651,648 logical expert bytes per token before
   caching/prefetch gains. This is not measured physical SSD traffic or a speed claim.
 - **First complete real quantized expert:** exact gate and up IQ1_S slices plus the IQ3_XXS down
-  slice total 6,488,064 bytes. A one-worker/one-entry governed loader reserves and packs all three,
-  then a bounded scalar CPU path executes SwiGLU and matches pinned ggml for all 4,096 final
-  outputs bit for bit. This is one official-payload expert, not a complete official-payload layer,
+  slice total 6,488,064 bytes. Canonical layer/expert tensor names are converted from the shared
+  catalog into strict W1/W2/W3 descriptors. A one-worker loader and the production one-entry
+  router-first cache reserve and retain the complete indivisible bundle; the bounded scalar CPU
+  path executes SwiGLU and matches pinned ggml for all 4,096 final outputs bit for bit. The first
+  cache resolution reports one miss and 6,488,064 logical bytes, while the second reports a hit
+  and zero bytes. This is one extracted official expert, not a complete official-payload layer,
   routed token or model path.
 - **GGUF safety boundary:** `deepseek-gguf-inspect` reads metadata only. Header prefixes cannot
   become executable sources. The real-expert test uses three separately hash-pinned extracted
@@ -321,8 +330,9 @@ portability target, not a validated platform claim.
 - **Packed expert baseline:** canonical source ranges can be loaded into one reserved RAM buffer
   with exact per-tensor slices through either the synchronous oracle or a fixed-worker,
   fixed-capacity asynchronous pool. The full gate/up/down path is now exercised on one real
-  DeepSeek 0731 expert. The reduced DeepSeek layer now consumes selected file-backed fixture
-  bundles through a bounded cache; the official 0731 payload is not connected to that loop.
+  DeepSeek 0731 expert, including canonical catalog binding and the bounded cache/consumer bridge.
+  The reduced DeepSeek layer consumes selected file-backed fixture bundles through the same cache
+  abstraction; complete verified 0731 shards and an official mixed-format layer are not connected.
 - **Governed trunk tile:** one non-routed source tile is identity-checked against the catalog,
   destination and staging are reserved before allocation, metadata-only catalogs are refused and
   an RAII lease protects the resulting buffer through use/eviction.
@@ -725,8 +735,9 @@ It currently has:
   verified source-binding boundary; no full-checkpoint DeepSeek, MiniMax or Kimi execution adapter;
 - no CUDA, ROCm, Vulkan or Metal inference backend;
 - scalar IQ1_S/IQ3_XXS expert and Q8_0/Q5_K/Q6_K/BF16/F32 trunk reference kernels, plus bounded
-  I32 router-table decoding and one deterministic Q8_0 reduced-layer composition, but no
-  official-payload complete quantized layer/token, SIMD/fused production kernel or CUDA path;
+  I32 router-table decoding, one deterministic Q8_0 reduced-layer composition and one real
+  selected-expert cache/kernel bridge, but no official-payload complete quantized layer/token,
+  SIMD/fused production kernel or CUDA path;
 - complete metadata-derived trunk plans and storage-type coverage plus a governed
   tile/expert-to-DeepSeek fixture consumer and reduced router-first bounded expert cache, but no
   official trunk payload read, asynchronous production layer scheduler or full-model loop;
@@ -757,10 +768,11 @@ merely SSD throughput. It is:
 
 The next technical sequence remains incremental:
 
-1. bind the exact mixed-format 0731 tensor identities to the now-validated router-first layer
-   scheduler and prove bounded layer/expert lifetimes using synthetic payloads of safe size;
-2. connect the bounded asynchronous loader and measure useful expert-read/compute overlap without
+1. connect the bounded asynchronous loader to the now-validated canonical mixed-format
+   selected-expert bridge and measure useful expert-read/compute overlap without
    changing authoritative reduction order;
+2. compose one complete mixed-format layer/token probe from bounded trunk tiles plus routed real
+   experts and require exact logits/routes before scaling beyond pinned slices;
 3. only after explicit approval and a fresh capacity check, import and fully hash the real pinned
    shards and run the same bounded layer probe on official source ranges;
 4. connect a target-verified MTP decoding loop, then add CUDA dense, attention, router and packed

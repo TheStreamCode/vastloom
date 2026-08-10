@@ -77,6 +77,12 @@
   IQ3_XXS down expert path. Three pinned real ranges totaling 6,488,064 bytes now pass through a
   one-worker governed packed-RAM load and match the ggml oracle bit for bit across all 4,096 final
   outputs; complete official-payload layer/token execution and model generation remain open.
+- Bound canonical 0731 GGUF expert identities directly from the executable logical catalog into
+  strict W1/W2/W3 cache descriptors. The same 6,488,064-byte real IQ1_S/IQ3_XXS expert now passes
+  through the production router-first one-entry RAM cache: the first resolution is one exact miss,
+  the second is a zero-read hit, retained leases block premature eviction, malformed mixed-format
+  descriptors publish no output and every Governor reservation returns to zero. This connects one
+  real selected expert to the cache/kernel boundary, not a complete DeepSeek layer or generation.
 - Documented the tested platform boundary explicitly: Windows/MSVC and Linux GCC/Clang CPU paths
   are validated, while macOS and Metal remain unvalidated targets.
 - Added a public reference-PC admission gate: a model must fit one complete expert plus the

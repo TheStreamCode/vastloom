@@ -74,6 +74,7 @@ add_library(vastloom_core STATIC
     src/inference/gpt2_tokenizer.cpp
     src/inference/ggml_quantization.cpp
     src/inference/deepseek_v4_gguf.cpp
+    src/inference/deepseek_v4_probe.cpp
     src/inference/deepseek_v4_model.cpp
     src/inference/deepseek_v4_graph.cpp
     src/inference/deepseek_v4_expert_provider.cpp
@@ -327,6 +328,20 @@ if(BUILD_TESTING AND VASTLOOM_BUILD_TESTS)
                 RUN_SERIAL TRUE
                 PASS_REGULAR_EXPRESSION
                     "\"imported_manifest_verified\":true.*\"planned_layers\":43"
+            )
+            add_test(
+                NAME vastloom_deepseek_v4_gguf_probe_plan
+                COMMAND $<TARGET_FILE:vastloom> deepseek-gguf-probe-plan
+                    ${VASTLOOM_DEEPSEEK_V4_GGUF_CHECKPOINT}
+                    --layer 0
+                    --experts 0,1,2,3,4,5
+                    --json
+            )
+            set_tests_properties(vastloom_deepseek_v4_gguf_probe_plan PROPERTIES
+                TIMEOUT 3600
+                RUN_SERIAL TRUE
+                PASS_REGULAR_EXPRESSION
+                    "\"plan_only\":true.*\"routing_authority_verified\":false.*\"trunk_bytes\":138867160.*\"selected_expert_bytes\":38928384.*\"total_payload_bytes\":177795544.*\"total_range_count\":39.*\"unique_source_objects\":1"
             )
         endif()
     else()

@@ -2,6 +2,8 @@
 
 #include <cstdint>
 #include <filesystem>
+#include <optional>
+#include <span>
 #include <string>
 #include <string_view>
 #include <vector>
@@ -9,6 +11,7 @@
 #include "vastloom/core/bytes.hpp"
 #include "vastloom/core/status.hpp"
 #include "vastloom/model/gguf.hpp"
+#include "vastloom/model/layer_streaming.hpp"
 #include "vastloom/model/tensor_catalog.hpp"
 
 namespace vastloom::inference {
@@ -108,6 +111,58 @@ struct DeepseekV4GgufCheckpointInspectOptions {
     ByteCount safe_vram_cap_bytes{0U};
 };
 
+struct DeepseekV4ProbeTrunkRange {
+    std::string tensor_name;
+    model::TensorRole role{model::TensorRole::other};
+    ByteCount tensor_offset{0U};
+    model::TensorSourceRange source;
+    bool final_tile{false};
+    std::optional<std::uint32_t> ggml_type;
+};
+
+struct DeepseekV4ProbeTensorSlice {
+    std::string tensor_name;
+    std::vector<std::uint64_t> shape;
+    ByteCount packed_offset{0U};
+    ByteCount bytes{0U};
+    model::TensorSourceRange source;
+    std::optional<std::uint32_t> ggml_type;
+};
+
+struct DeepseekV4ProbeExpert {
+    std::uint32_t expert{0U};
+    ByteCount bytes{0U};
+    std::vector<model::TensorSourceRange> read_ranges;
+    std::vector<DeepseekV4ProbeTensorSlice> tensors;
+};
+
+// Exact, non-executing range plan for one checkpoint-shaped layer/token probe. The caller must
+// provide the top-k result after the trunk/router phase; this function validates the IDs and
+// ranges but cannot prove routing authority. Metadata-only catalogs may be planned but never loaded.
+struct DeepseekV4LayerProbePlan {
+    std::string model_id;
+    std::string revision;
+    bool metadata_only{true};
+    bool imported_file_hashes_verified{false};
+    bool full_payload_present{false};
+    bool executable_source_binding_verified{false};
+    std::uint32_t layer{0U};
+    std::uint32_t expected_top_k{0U};
+    ByteCount tile_limit_bytes{0U};
+    ByteCount trunk_bytes{0U};
+    ByteCount selected_expert_bytes{0U};
+    ByteCount total_payload_bytes{0U};
+    ByteCount maximum_read_range_bytes{0U};
+    ByteCount minimum_expert_tier_bytes{0U};
+    std::size_t trunk_range_count{0U};
+    std::size_t selected_expert_range_count{0U};
+    std::size_t total_range_count{0U};
+    std::size_t unique_source_objects{0U};
+    std::vector<std::uint32_t> selected_experts;
+    std::vector<DeepseekV4ProbeTrunkRange> trunk_ranges;
+    std::vector<DeepseekV4ProbeExpert> experts;
+};
+
 [[nodiscard]] Result<DeepseekV4GgufCatalogReport> build_deepseek_v4_gguf_catalog(
     const model::GgufSplitCatalog& split,
     const DeepseekV4GgufCatalogOptions& options);
@@ -124,7 +179,16 @@ pinned_deepseek_v4_flash_0731_iq1s_checkpoint();
     const DeepseekV4GgufCheckpointSpec& spec,
     const DeepseekV4GgufCheckpointInspectOptions& options);
 
+[[nodiscard]] Result<DeepseekV4LayerProbePlan> build_deepseek_v4_layer_probe_plan(
+    const DeepseekV4GgufCatalogReport& report,
+    std::uint32_t layer,
+    std::span<const std::uint32_t> selected_experts,
+    ByteCount tile_limit_bytes = model::kDefaultLayerStreamingTileBytes,
+    std::size_t max_ranges = 4'096U);
+
 [[nodiscard]] std::string to_json(const DeepseekV4GgufCatalogReport& report);
 [[nodiscard]] std::string to_text(const DeepseekV4GgufCatalogReport& report);
+[[nodiscard]] std::string to_json(const DeepseekV4LayerProbePlan& plan);
+[[nodiscard]] std::string to_text(const DeepseekV4LayerProbePlan& plan);
 
 }  // namespace vastloom::inference

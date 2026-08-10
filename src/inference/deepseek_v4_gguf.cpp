@@ -843,7 +843,12 @@ Result<DeepseekV4GgufCatalogReport> inspect_deepseek_v4_gguf_checkpoint(
         options.safe_vram_cap_bytes = inspect_options.safe_vram_cap_bytes;
         options.metadata_only = imported.value().metadata_only ||
                                 !imported.value().full_hash_verified;
-        if (!options.metadata_only) options.source_shards = selected_paths;
+        // Logical source ranges always name the immutable full checkpoint objects. Metadata-only
+        // header snapshots supply offsets and shapes, but must never become payload identities.
+        options.source_shards.reserve(spec.shards.size());
+        for (const auto& identity : spec.shards) {
+            options.source_shards.push_back(imported.value().root / identity.full_relative_path);
+        }
         auto report = build_deepseek_v4_gguf_catalog(split.value(), options);
         if (!report) return report.error();
         report.value().imported_manifest_verified = true;

@@ -259,6 +259,9 @@ void print_help() {
         << "  deepseek-gguf-checkpoint MODEL_DIRECTORY [--context N] [--batch-size N]"
            " [--no-verify] [--json]\n"
         << "      Verify and bind the pinned 0731 UD-IQ1_S import under single-tier admission.\n\n"
+        << "  deepseek-gguf-probe-plan MODEL_DIRECTORY --layer N --experts CSV"
+           " [--tile-size SIZE] [--context N] [--batch-size N] [--no-verify] [--json]\n"
+        << "      Plan exact trunk and caller-supplied selected-expert ranges; never fetch or execute them.\n\n"
         << "  moe-logits MODEL_DIRECTORY --text TEXT [--chat] [--top N]\n"
         << "       [--cache no-cache|lru|lfu|static-hot] [--cache-bytes SIZE]\n"
         << "       [--io sync|async] [--io-cache buffered|bypass] [--expert-read whole|staged]\n"
@@ -576,6 +579,30 @@ Result<std::vector<ByteCount>> parse_declared_sizes(std::string_view value,
     return sizes;
 }
 
+Result<std::vector<std::uint32_t>> parse_expert_ids(std::string_view value) {
+    const auto items = vastloom::util::split(value, ',', true);
+    if (items.empty() || items.size() > 64U) {
+        return vastloom::make_error(vastloom::ErrorCode::invalid_argument,
+                                    "DeepSeek probe expert list is empty or exceeds 64 IDs");
+    }
+    std::vector<std::uint32_t> experts;
+    experts.reserve(items.size());
+    for (const auto& item : items) {
+        const auto trimmed = vastloom::util::trim(item);
+        std::uint32_t expert = 0U;
+        const auto converted = std::from_chars(
+            trimmed.data(), trimmed.data() + trimmed.size(), expert);
+        if (trimmed.empty() || converted.ec != std::errc{} ||
+            converted.ptr != trimmed.data() + trimmed.size()) {
+            return vastloom::make_error(vastloom::ErrorCode::invalid_argument,
+                                        "DeepSeek probe expert IDs must be unsigned integers",
+                                        item);
+        }
+        experts.push_back(expert);
+    }
+    return experts;
+}
+
 int command_deepseek_gguf_inspect(const std::vector<std::string>& args) {
     std::size_t positional_count = 0U;
     while (positional_count < args.size() && !vastloom::util::starts_with(args[positional_count], "--")) {
@@ -689,6 +716,78 @@ int command_deepseek_gguf_checkpoint(const std::vector<std::string>& args) {
     if (!report) return print_error(report.error(), json);
     std::cout << (json ? vastloom::inference::to_json(report.value())
                       : vastloom::inference::to_text(report.value())) << '\n';
+    return 0;
+}
+
+int command_deepseek_gguf_probe_plan(const std::vector<std::string>& args) {
+    const bool json = has_flag(args, "--json");
+    auto valid = validate_options(
+        args,
+        1U,
+        {"--layer", "--experts", "--tile-size", "--context", "--batch-size"},
+        {"--no-verify", "--json"});
+    if (!valid) return print_error(valid.error(), json);
+    if (args.empty() || vastloom::util::starts_with(args.front(), "--")) {
+        return print_error(
+            vastloom::make_error(
+                vastloom::ErrorCode::invalid_argument,
+                "deepseek-gguf-probe-plan requires one imported checkpoint directory"),
+            json);
+    }
+    const auto layer_option = option_value(args, "--layer");
+    const auto expert_option = option_value(args, "--experts");
+    if (!layer_option.has_value() || !expert_option.has_value()) {
+        return print_error(
+            vastloom::make_error(vastloom::ErrorCode::invalid_argument,
+                                 "deepseek-gguf-probe-plan requires --layer and caller-supplied --experts IDs"),
+            json);
+    }
+    auto layer = optional_size(args, "--layer", 0U);
+    auto experts = parse_expert_ids(*expert_option);
+    auto tile_size = optional_bytes(
+        args, "--tile-size", vastloom::model::kDefaultLayerStreamingTileBytes);
+    auto context = optional_size(args, "--context", 4'096U);
+    auto batch_size = optional_size(args, "--batch-size", 1U);
+    if (!layer) return print_error(layer.error(), json);
+    if (!experts) return print_error(experts.error(), json);
+    if (!tile_size) return print_error(tile_size.error(), json);
+    if (!context) return print_error(context.error(), json);
+    if (!batch_size) return print_error(batch_size.error(), json);
+    if (layer.value() > std::numeric_limits<std::uint32_t>::max() ||
+        tile_size.value() == 0U || tile_size.value() > 1U * vastloom::GiB ||
+        context.value() == 0U || context.value() > 1'048'576U ||
+        batch_size.value() == 0U || batch_size.value() > 8U) {
+        return print_error(
+            vastloom::make_error(vastloom::ErrorCode::invalid_argument,
+                                 "DeepSeek probe layer, tile, context or batch bound is invalid"),
+            json);
+    }
+
+    const auto checkpoint_root = cli_path(args.front());
+    auto hardware = vastloom::hardware::HardwareProbe::collect(checkpoint_root);
+    if (!hardware) return print_error(hardware.error(), json);
+    auto policy = vastloom::safety::make_safe_runtime_policy(hardware.value());
+    if (!policy) return print_error(policy.error(), json);
+
+    vastloom::inference::DeepseekV4GgufCheckpointInspectOptions options;
+    options.verify_hashes = !has_flag(args, "--no-verify");
+    options.context_tokens = static_cast<std::uint32_t>(context.value());
+    options.batch_size = static_cast<std::uint32_t>(batch_size.value());
+    options.safe_ram_cap_bytes = policy.value().resources.host_memory_hard_limit;
+    options.safe_vram_cap_bytes = policy.value().resources.vram_hard_limit;
+    auto report = vastloom::inference::inspect_deepseek_v4_gguf_checkpoint(
+        checkpoint_root,
+        vastloom::inference::pinned_deepseek_v4_flash_0731_iq1s_checkpoint(),
+        options);
+    if (!report) return print_error(report.error(), json);
+    auto plan = vastloom::inference::build_deepseek_v4_layer_probe_plan(
+        report.value(),
+        static_cast<std::uint32_t>(layer.value()),
+        experts.value(),
+        tile_size.value());
+    if (!plan) return print_error(plan.error(), json);
+    std::cout << (json ? vastloom::inference::to_json(plan.value())
+                      : vastloom::inference::to_text(plan.value())) << '\n';
     return 0;
 }
 
@@ -1364,6 +1463,7 @@ int dispatch_cli(const std::vector<std::string>& arguments) {
         if (command == "deepseek-inspect") return command_deepseek_inspect(args);
         if (command == "deepseek-gguf-inspect") return command_deepseek_gguf_inspect(args);
         if (command == "deepseek-gguf-checkpoint") return command_deepseek_gguf_checkpoint(args);
+        if (command == "deepseek-gguf-probe-plan") return command_deepseek_gguf_probe_plan(args);
         if (command == "moe-logits") return command_moe_logits(args);
         if (command == "heartbeat-write") return command_heartbeat_write(args);
         if (command == "version" || command == "--version") {

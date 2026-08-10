@@ -518,6 +518,53 @@ void test_gguf(const std::filesystem::path& root) {
             if (mapped) {
                 CHECK(mapped.value().catalog.experts.front().read_ranges.size() == 3U &&
                       mapped.value().catalog.experts.front().tensor_slices.size() == 3U);
+                const std::array<std::uint32_t, 1U> selected{1U};
+                auto probe = vastloom::inference::build_deepseek_v4_layer_probe_plan(
+                    mapped.value(), 0U, selected, 4U, 8U);
+                CHECK(probe && !probe.value().metadata_only &&
+                      probe.value().layer == 0U && probe.value().expected_top_k == 1U &&
+                      probe.value().selected_experts == std::vector<std::uint32_t>{1U} &&
+                      probe.value().trunk_bytes == 4U &&
+                      probe.value().selected_expert_bytes == 102U &&
+                      probe.value().total_payload_bytes == 106U &&
+                      probe.value().trunk_range_count == 1U &&
+                      probe.value().selected_expert_range_count == 3U &&
+                      probe.value().total_range_count == 4U &&
+                      probe.value().unique_source_objects == 2U &&
+                      probe.value().maximum_read_range_bytes == 34U &&
+                      probe.value().minimum_expert_tier_bytes == 102U &&
+                      probe.value().experts.size() == 1U &&
+                      probe.value().experts.front().tensors.size() == 3U);
+                if (probe) {
+                    const auto json = vastloom::inference::to_json(probe.value());
+                    CHECK(json.find("\"plan_only\":true") != std::string::npos &&
+                          json.find("\"execution_supported\":false") != std::string::npos &&
+                          json.find("\"routing_authority_verified\":false") !=
+                              std::string::npos &&
+                          json.find("\"total_payload_bytes\":106") != std::string::npos &&
+                          json.find("model.gguf") != std::string::npos &&
+                          vastloom::inference::to_text(probe.value()).find(
+                              "planner cannot prove it") != std::string::npos);
+                }
+                const std::array<std::uint32_t, 1U> out_of_range{2U};
+                const std::array<std::uint32_t, 2U> wrong_count{0U, 1U};
+                const std::array<std::uint32_t, 2U> duplicate{1U, 1U};
+                CHECK(!vastloom::inference::build_deepseek_v4_layer_probe_plan(
+                    mapped.value(), 0U, out_of_range, 4U, 8U));
+                CHECK(!vastloom::inference::build_deepseek_v4_layer_probe_plan(
+                    mapped.value(), 0U, wrong_count, 4U, 8U));
+                CHECK(!vastloom::inference::build_deepseek_v4_layer_probe_plan(
+                    mapped.value(), 0U, selected, 4U, 3U));
+                CHECK(!vastloom::inference::build_deepseek_v4_layer_probe_plan(
+                    mapped.value(), 1U, selected, 4U, 8U));
+                auto duplicate_report = mapped.value();
+                duplicate_report.top_k = 2U;
+                CHECK(!vastloom::inference::build_deepseek_v4_layer_probe_plan(
+                    duplicate_report, 0U, duplicate, 4U, 8U));
+                auto missing_expert = mapped.value();
+                missing_expert.catalog.experts.pop_back();
+                CHECK(!vastloom::inference::build_deepseek_v4_layer_probe_plan(
+                    missing_expert, 0U, selected, 4U, 8U));
             }
             options.safe_ram_cap_bytes = 67'110'360U;
             options.safe_vram_cap_bytes = 60U;
@@ -702,6 +749,18 @@ void test_gguf(const std::filesystem::path& root) {
                   !metadata.value().full_payload_present &&
                   !metadata.value().executable_source_binding_verified &&
                   metadata.value().catalog.metadata_only);
+            if (metadata) {
+                const std::array<std::uint32_t, 1U> selected{0U};
+                auto probe = vastloom::inference::build_deepseek_v4_layer_probe_plan(
+                    metadata.value(), 0U, selected, 4U, 8U);
+                CHECK(probe && probe.value().imported_file_hashes_verified &&
+                      !probe.value().full_payload_present &&
+                      !probe.value().executable_source_binding_verified &&
+                      probe.value().trunk_ranges.front().source.shard ==
+                          metadata_import / "part-2.gguf" &&
+                      probe.value().experts.front().read_ranges.front().shard ==
+                          metadata_import / "part-1.gguf");
+            }
 
             auto mismatched_spec = checkpoint_spec;
             mismatched_spec.shards.front().full_sha256 = std::string(64U, '0');
@@ -3792,10 +3851,9 @@ void test_deepseek_v4_reference_graph(const std::filesystem::path& root) {
             async_options.asynchronous_workers = 1U;
             async_options.asynchronous_queue_capacity = 2U;
             std::atomic<bool> enable_overlap_barrier{false};
+            std::atomic<bool> second_service_waiting{false};
+            std::atomic<bool> release_second_service{false};
             std::atomic<std::size_t> async_cancellation_checks{0U};
-            std::weak_ptr<
-                vastloom::inference::DeepseekV4BoundedExpertCache>
-                overlap_cache;
             const std::size_t cancellation_checks_before_second =
                 expert_bindings.front().bundle.read_ranges.size() + 2U;
             async_options.load.cancelled = [&] {
@@ -3805,17 +3863,16 @@ void test_deepseek_v4_reference_graph(const std::filesystem::path& root) {
                     1U;
                 if (enable_overlap_barrier.load(std::memory_order_acquire) &&
                     check == cancellation_checks_before_second) {
+                    second_service_waiting.store(true, std::memory_order_release);
                     const auto deadline = std::chrono::steady_clock::now() +
                                           std::chrono::seconds(2);
-                    while (std::chrono::steady_clock::now() < deadline) {
-                        const auto cache = overlap_cache.lock();
-                        if (cache != nullptr && cache->snapshot().misses >= 1U) {
-                            std::this_thread::sleep_for(
-                                std::chrono::milliseconds(20));
-                            break;
-                        }
+                    while (!release_second_service.load(
+                               std::memory_order_acquire) &&
+                           std::chrono::steady_clock::now() < deadline) {
                         std::this_thread::yield();
                     }
+                    std::this_thread::sleep_for(
+                        std::chrono::milliseconds(50));
                 }
                 return false;
             };
@@ -3827,7 +3884,6 @@ void test_deepseek_v4_reference_graph(const std::filesystem::path& root) {
                 vastloom::inference::DeepseekV4BoundedExpertCache> async_cache;
             if (async_cache_result) {
                 async_cache = async_cache_result.take_value();
-                overlap_cache = async_cache;
                 auto async_provider = async_cache->provider_binding();
                 CHECK(async_provider.begin);
                 const std::array<std::uint32_t, 2U> async_ids{2U, 3U};
@@ -3851,9 +3907,69 @@ void test_deepseek_v4_reference_graph(const std::filesystem::path& root) {
                           packed_catalog.always_active_bytes &&
                       governor.snapshot().reserved[2] == 0U);
                 async_cancellation_checks.store(0U, std::memory_order_release);
+                second_service_waiting.store(false, std::memory_order_release);
+                release_second_service.store(false, std::memory_order_release);
                 enable_overlap_barrier.store(true, std::memory_order_release);
+                class CoordinatedBatch final
+                    : public vastloom::inference::DeepseekV4ExpertBatch {
+                public:
+                    CoordinatedBatch(
+                        std::unique_ptr<
+                            vastloom::inference::DeepseekV4ExpertBatch> inner,
+                        std::atomic<bool>& second_waiting,
+                        std::atomic<bool>& release_second)
+                        : inner_(std::move(inner)),
+                          second_waiting_(second_waiting),
+                          release_second_(release_second) {}
+
+                    [[nodiscard]] vastloom::Result<
+                        vastloom::inference::DeepseekV4ResolvedExpert>
+                    acquire(std::uint32_t expert_id) override {
+                        auto acquired = inner_->acquire(expert_id);
+                        if (!acquired || first_acquired_) return acquired;
+                        first_acquired_ = true;
+                        const auto deadline = std::chrono::steady_clock::now() +
+                                              std::chrono::seconds(2);
+                        while (!second_waiting_.load(std::memory_order_acquire) &&
+                               std::chrono::steady_clock::now() < deadline) {
+                            std::this_thread::yield();
+                        }
+                        if (!second_waiting_.load(std::memory_order_acquire)) {
+                            release_second_.store(true, std::memory_order_release);
+                            return vastloom::make_error(
+                                vastloom::ErrorCode::internal_error,
+                                "Controlled overlap service did not start");
+                        }
+                        release_second_.store(true, std::memory_order_release);
+                        return acquired;
+                    }
+
+                private:
+                    std::unique_ptr<
+                        vastloom::inference::DeepseekV4ExpertBatch> inner_;
+                    std::atomic<bool>& second_waiting_;
+                    std::atomic<bool>& release_second_;
+                    bool first_acquired_{false};
+                };
+                auto coordinated_provider = async_cache->provider_binding();
+                auto begin = coordinated_provider.begin;
+                coordinated_provider.begin =
+                    [begin = std::move(begin), &second_service_waiting,
+                     &release_second_service](
+                        std::string_view block_prefix,
+                        std::span<const std::uint32_t> expert_ids)
+                        -> vastloom::Result<std::unique_ptr<
+                            vastloom::inference::DeepseekV4ExpertBatch>> {
+                    auto inner = begin(block_prefix, expert_ids);
+                    if (!inner) return inner.error();
+                    return std::unique_ptr<
+                        vastloom::inference::DeepseekV4ExpertBatch>(
+                        std::make_unique<CoordinatedBatch>(
+                            inner.take_value(), second_service_waiting,
+                            release_second_service));
+                };
                 dynamic_graph.expert_providers.emplace(
-                    "layers.0.ffn", async_cache->provider_binding());
+                    "layers.0.ffn", std::move(coordinated_provider));
             }
 
             vastloom::inference::DeepseekV4ReferenceState async_oracle_state;
@@ -3863,6 +3979,7 @@ void test_deepseek_v4_reference_graph(const std::filesystem::path& root) {
             auto asynchronous = vastloom::inference::deepseek_v4_reference_prefill(
                 dynamic_graph, dynamic_prompt, &async_state);
             enable_overlap_barrier.store(false, std::memory_order_release);
+            release_second_service.store(true, std::memory_order_release);
             CHECK(async_oracle && asynchronous);
             if (async_oracle && asynchronous) {
                 compare_packed_forward(asynchronous.value(), async_oracle.value());

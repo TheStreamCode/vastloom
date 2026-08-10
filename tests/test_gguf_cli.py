@@ -181,6 +181,38 @@ def main() -> int:
         require(unimported.returncode != 0,
                 "raw GGUF path bypassed the immutable import contract", unimported)
 
+        missing_probe_layer = run(
+            args.vastloom,
+            "deepseek-gguf-probe-plan",
+            str(model),
+            "--experts",
+            "0,1,2,3,4,5",
+        )
+        require(missing_probe_layer.returncode != 0 and "requires --layer" in missing_probe_layer.stderr,
+                "probe planner accepted an implicit layer", missing_probe_layer)
+
+        missing_probe_experts = run(
+            args.vastloom,
+            "deepseek-gguf-probe-plan",
+            str(model),
+            "--layer",
+            "0",
+        )
+        require(missing_probe_experts.returncode != 0 and "requires --layer" in missing_probe_experts.stderr,
+                "probe planner accepted a missing selected-expert set", missing_probe_experts)
+
+        malformed_probe_experts = run(
+            args.vastloom,
+            "deepseek-gguf-probe-plan",
+            str(model),
+            "--layer",
+            "0",
+            "--experts",
+            "0,,2",
+        )
+        require(malformed_probe_experts.returncode != 0 and "unsigned integers" in malformed_probe_experts.stderr,
+                "probe planner accepted a malformed selected-expert set", malformed_probe_experts)
+
     print("DeepSeek GGUF CLI tests passed")
     return 0
 

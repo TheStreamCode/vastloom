@@ -46,6 +46,8 @@ struct DeepseekV4ExpertCacheOptions {
     std::string block_prefix;
     std::size_t max_cached_experts{2U};
     std::size_t max_experts_per_request{2U};
+    unsigned asynchronous_workers{0U};
+    std::size_t asynchronous_queue_capacity{0U};
     model::ExpertLoadOptions load;
 };
 
@@ -57,7 +59,10 @@ struct DeepseekV4ExpertCacheSnapshot {
     std::size_t hits{0U};
     std::size_t misses{0U};
     std::size_t evictions{0U};
+    std::size_t abandoned_loads{0U};
     ByteCount logical_bytes_read{0U};
+    ByteCount wasted_prefetch_bytes{0U};
+    bool telemetry_overflow{false};
 };
 
 // Converts one executable DeepSeek GGUF layer from the universal catalog into strict W1/W2/W3
@@ -81,9 +86,9 @@ deepseek_v4_make_gguf_expert_bindings(
     std::span<float> output,
     const QuantizedKernelLimits& limits = {});
 
-// Synchronous correctness baseline for router-first expert acquisition. The cache owns complete,
-// indivisible RAM bundles and never splits one across tiers. Its callback is bounded by both the
-// request and cache limits; asynchronous prefetch/overlap belongs to a later scheduler.
+// Router-first complete-bundle RAM cache. Synchronous mode is the correctness baseline; bounded
+// asynchronous mode submits all selected misses and lets the graph acquire each expert at its
+// compute boundary. Neither mode splits an expert across tiers.
 class DeepseekV4BoundedExpertCache final
     : public std::enable_shared_from_this<DeepseekV4BoundedExpertCache> {
 public:
@@ -101,6 +106,8 @@ public:
     [[nodiscard]] Result<void> clear();
 
 private:
+    class AsyncBatch;
+
     struct CacheEntry {
         DeepseekV4ResolvedExpert expert;
         model::ResidencyObject residency;
@@ -115,6 +122,9 @@ private:
     [[nodiscard]] Result<std::vector<DeepseekV4ResolvedExpert>> resolve(
         std::string_view block_prefix,
         std::span<const std::uint32_t> unique_expert_ids);
+    [[nodiscard]] Result<std::unique_ptr<DeepseekV4ExpertBatch>> begin_resolve(
+        std::string_view block_prefix,
+        std::span<const std::uint32_t> unique_expert_ids);
     [[nodiscard]] Result<void> evict_one(std::span<const std::uint32_t> protected_ids);
 
     std::map<std::uint32_t, DeepseekV4ExpertBundleBinding> bindings_;
@@ -122,8 +132,10 @@ private:
     DeepseekV4ExpertCacheOptions options_;
     mutable std::mutex mutex_;
     std::map<std::uint32_t, CacheEntry> cache_;
+    std::unique_ptr<model::BoundedExpertLoadPool> load_pool_;
     DeepseekV4ExpertCacheSnapshot telemetry_;
     std::size_t tick_{0U};
+    bool async_batch_active_{false};
 };
 
 }  // namespace vastloom::inference

@@ -6,12 +6,14 @@
 
 #include <algorithm>
 #include <array>
+#include <chrono>
 #include <cmath>
 #include <exception>
 #include <limits>
 #include <new>
 #include <numbers>
 #include <numeric>
+#include <optional>
 #include <span>
 #include <string>
 #include <utility>
@@ -1297,88 +1299,177 @@ Result<MoeResult> moe_forward(const DeepseekV4ReferenceGraph& graph,
     }
 
     std::vector<DeepseekV4ResolvedExpert> resolved_experts;
-    std::vector<DeepseekV4LayerTrace::ExpertAccess> expert_accesses;
+    std::unique_ptr<DeepseekV4ExpertBatch> pending_batch;
+    std::vector<std::pair<std::uint32_t, DeepseekV4LayerTrace::ExpertAccess>>
+        recorded_accesses;
+    std::vector<std::pair<std::chrono::steady_clock::time_point,
+                          std::chrono::steady_clock::time_point>>
+        compute_windows;
     const auto provider = graph.expert_providers.find(base);
     if (provider != graph.expert_providers.end()) {
-        if (!provider->second.resolve ||
+        if ((!provider->second.resolve && !provider->second.begin) ||
             provider->second.max_experts_per_request == 0U ||
             requested_experts.size() > provider->second.max_experts_per_request) {
             return make_error(ErrorCode::resource_exhausted,
                               "Selected-expert request exceeds its configured bound",
                               base);
         }
-        auto provided = [&]() -> Result<std::vector<DeepseekV4ResolvedExpert>> {
-            try {
-                return provider->second.resolve(base, requested_experts);
-            } catch (const std::bad_alloc&) {
-                return make_error(ErrorCode::resource_exhausted,
-                                  "Selected-expert provider exhausted memory",
-                                  base);
-            } catch (const std::exception& exception) {
-                return make_error(ErrorCode::internal_error,
-                                  "Selected-expert provider failed",
-                                  exception.what());
-            } catch (...) {
-                return make_error(ErrorCode::internal_error,
-                                  "Selected-expert provider failed",
-                                  base);
-            }
-        }();
-        if (!provided) return provided.error();
-        resolved_experts = provided.take_value();
-        if (resolved_experts.size() != requested_experts.size()) {
-            return make_error(ErrorCode::integrity_error,
-                              "Selected-expert provider returned the wrong bundle count",
-                              base);
-        }
         try {
-            expert_accesses.reserve(requested_experts.size());
-            for (const auto expert_id : requested_experts) {
-                const auto found = std::find_if(
-                    resolved_experts.begin(), resolved_experts.end(),
-                    [expert_id](const DeepseekV4ResolvedExpert& expert) {
-                        return expert.expert_id == expert_id;
-                    });
-                if (found == resolved_experts.end() || found->resident_bytes == 0U ||
-                    found->logical_bytes_read > found->resident_bytes ||
-                    (found->cache_hit && found->logical_bytes_read != 0U)) {
+            recorded_accesses.reserve(requested_experts.size());
+            compute_windows.reserve(requested_experts.size());
+            if (provider->second.begin) {
+                auto begun = provider->second.begin(base, requested_experts);
+                if (!begun) return begun.error();
+                pending_batch = begun.take_value();
+                if (pending_batch == nullptr) {
                     return make_error(ErrorCode::integrity_error,
-                                      "Selected-expert provider returned malformed telemetry",
-                                      base + ".experts." + std::to_string(expert_id));
+                                      "Selected-expert provider returned an empty batch",
+                                      base);
                 }
-                if (std::count_if(
-                        resolved_experts.begin(), resolved_experts.end(),
-                        [expert_id](const DeepseekV4ResolvedExpert& expert) {
-                            return expert.expert_id == expert_id;
-                        }) != 1) {
-                    return make_error(ErrorCode::integrity_error,
-                                      "Selected-expert provider returned duplicate identities",
-                                      base + ".experts." + std::to_string(expert_id));
+            } else {
+                auto provided = provider->second.resolve(base, requested_experts);
+                if (!provided) return provided.error();
+                resolved_experts = provided.take_value();
+                if (resolved_experts.size() != requested_experts.size()) {
+                    return make_error(
+                        ErrorCode::integrity_error,
+                        "Selected-expert provider returned the wrong bundle count",
+                        base);
                 }
-                expert_accesses.push_back(DeepseekV4LayerTrace::ExpertAccess{
-                    found->expert_id, found->resident_bytes,
-                    found->logical_bytes_read, found->cache_hit});
+                for (const auto expert_id : requested_experts) {
+                    if (std::count_if(
+                            resolved_experts.begin(), resolved_experts.end(),
+                            [expert_id](const DeepseekV4ResolvedExpert& expert) {
+                                return expert.expert_id == expert_id;
+                            }) != 1) {
+                        return make_error(
+                            ErrorCode::integrity_error,
+                            "Selected-expert provider returned duplicate identities",
+                            base + ".experts." + std::to_string(expert_id));
+                    }
+                }
             }
         } catch (const std::bad_alloc&) {
             return make_error(ErrorCode::resource_exhausted,
-                              "Unable to retain selected-expert telemetry",
+                              "Selected-expert provider exhausted memory",
+                              base);
+        } catch (const std::exception& exception) {
+            return make_error(ErrorCode::internal_error,
+                              "Selected-expert provider failed",
+                              exception.what());
+        } catch (...) {
+            return make_error(ErrorCode::internal_error,
+                              "Selected-expert provider failed",
                               base);
         }
     }
+
+    const auto validate_resolved = [&](const DeepseekV4ResolvedExpert& expert,
+                                       std::uint32_t expected_id) -> Result<void> {
+        if (expert.expert_id != expected_id || expert.resident_bytes == 0U ||
+            expert.logical_bytes_read > expert.resident_bytes ||
+            (expert.cache_hit && expert.logical_bytes_read != 0U) ||
+            !std::isfinite(expert.load_queue_ms) || expert.load_queue_ms < 0.0 ||
+            !std::isfinite(expert.load_service_ms) || expert.load_service_ms < 0.0 ||
+            !std::isfinite(expert.load_total_ms) || expert.load_total_ms < 0.0 ||
+            expert.load_total_ms + 0.01 < expert.load_queue_ms ||
+            expert.load_total_ms + 0.01 < expert.load_service_ms ||
+            (expert.asynchronous_load &&
+             (expert.load_request_sequence == 0U ||
+              expert.load_service_started_at ==
+                  std::chrono::steady_clock::time_point{} ||
+              expert.load_completed_at ==
+                  std::chrono::steady_clock::time_point{} ||
+              expert.load_completed_at < expert.load_service_started_at))) {
+            return make_error(ErrorCode::integrity_error,
+                              "Selected-expert provider returned malformed telemetry",
+                              base + ".experts." + std::to_string(expected_id));
+        }
+        return {};
+    };
+
     auto output_count = bounded_product({token_count, config.width}, base + " output");
     if (!output_count) return output_count.error();
     std::vector<float> output(output_count.value(), 0.0F);
     for (std::size_t expert = 0U; expert < config.expert_count; ++expert) {
+        const bool selected =
+            std::find(requested_experts.begin(), requested_experts.end(), expert) !=
+            requested_experts.end();
+        if (provider != graph.expert_providers.end() && !selected) continue;
+
+        std::optional<DeepseekV4ResolvedExpert> acquired_expert;
         const DeepseekV4ResolvedExpert* resolved = nullptr;
         if (provider != graph.expert_providers.end()) {
-            const auto found = std::find_if(
-                resolved_experts.begin(), resolved_experts.end(),
-                [expert](const DeepseekV4ResolvedExpert& value) {
-                    return value.expert_id == expert;
-                });
-            if (found == resolved_experts.end()) continue;
-            resolved = &*found;
+            const auto wait_started = std::chrono::steady_clock::now();
+            if (pending_batch != nullptr) {
+                auto acquired = [&]() -> Result<DeepseekV4ResolvedExpert> {
+                    try {
+                        return pending_batch->acquire(
+                            static_cast<std::uint32_t>(expert));
+                    } catch (const std::bad_alloc&) {
+                        return make_error(ErrorCode::resource_exhausted,
+                                          "Selected-expert acquisition exhausted memory",
+                                          std::to_string(expert));
+                    } catch (const std::exception& exception) {
+                        return make_error(ErrorCode::internal_error,
+                                          "Selected-expert acquisition failed",
+                                          exception.what());
+                    } catch (...) {
+                        return make_error(ErrorCode::internal_error,
+                                          "Selected-expert acquisition failed",
+                                          std::to_string(expert));
+                    }
+                }();
+                if (!acquired) return acquired.error();
+                acquired_expert = acquired.take_value();
+                resolved = &*acquired_expert;
+            } else {
+                const auto found = std::find_if(
+                    resolved_experts.begin(), resolved_experts.end(),
+                    [expert](const DeepseekV4ResolvedExpert& value) {
+                        return value.expert_id == expert;
+                    });
+                if (found == resolved_experts.end()) {
+                    return make_error(ErrorCode::integrity_error,
+                                      "Selected-expert provider omitted an identity",
+                                      std::to_string(expert));
+                }
+                resolved = &*found;
+            }
+            const auto wait_completed = std::chrono::steady_clock::now();
+            auto valid = validate_resolved(
+                *resolved, static_cast<std::uint32_t>(expert));
+            if (!valid) return valid.error();
+
+            DeepseekV4LayerTrace::ExpertAccess access{
+                resolved->expert_id, resolved->resident_bytes,
+                resolved->logical_bytes_read, resolved->cache_hit};
+            access.asynchronous_load = resolved->asynchronous_load;
+            access.load_request_sequence = resolved->load_request_sequence;
+            access.load_queue_ms = resolved->load_queue_ms;
+            access.load_service_ms = resolved->load_service_ms;
+            access.load_total_ms = resolved->load_total_ms;
+            access.acquire_wait_ms = std::chrono::duration<double, std::milli>(
+                                         wait_completed - wait_started)
+                                         .count();
+            if (resolved->asynchronous_load) {
+                for (const auto& window : compute_windows) {
+                    const auto overlap_start = std::max(
+                        resolved->load_service_started_at, window.first);
+                    const auto overlap_end = std::min(
+                        resolved->load_completed_at, window.second);
+                    if (overlap_end > overlap_start) {
+                        access.io_compute_overlap_ms +=
+                            std::chrono::duration<double, std::milli>(
+                                overlap_end - overlap_start)
+                                .count();
+                    }
+                }
+            }
+            recorded_accesses.emplace_back(
+                static_cast<std::uint32_t>(expert), std::move(access));
         }
+        const auto compute_started = std::chrono::steady_clock::now();
         for (std::size_t token = 0U; token < token_count; ++token) {
             for (std::size_t slot = 0U; slot < config.experts_per_token; ++slot) {
                 if (route.value().indices[token * config.experts_per_token + slot] != expert) {
@@ -1398,6 +1489,38 @@ Result<MoeResult> moe_forward(const DeepseekV4ReferenceGraph& graph,
                 }
             }
         }
+        const auto compute_completed = std::chrono::steady_clock::now();
+        if (provider != graph.expert_providers.end()) {
+            recorded_accesses.back().second.compute_ms =
+                std::chrono::duration<double, std::milli>(
+                    compute_completed - compute_started)
+                    .count();
+            compute_windows.emplace_back(compute_started, compute_completed);
+        }
+    }
+
+    std::vector<DeepseekV4LayerTrace::ExpertAccess> expert_accesses;
+    try {
+        if (provider != graph.expert_providers.end()) {
+            expert_accesses.reserve(requested_experts.size());
+            for (const auto expert_id : requested_experts) {
+                const auto access = std::find_if(
+                    recorded_accesses.begin(), recorded_accesses.end(),
+                    [expert_id](const auto& candidate) {
+                        return candidate.first == expert_id;
+                    });
+                if (access == recorded_accesses.end()) {
+                    return make_error(ErrorCode::integrity_error,
+                                      "Selected-expert telemetry omitted an identity",
+                                      std::to_string(expert_id));
+                }
+                expert_accesses.push_back(access->second);
+            }
+        }
+    } catch (const std::bad_alloc&) {
+        return make_error(ErrorCode::resource_exhausted,
+                          "Unable to retain selected-expert telemetry",
+                          base);
     }
     auto shared = execute_expert(graph, base + ".shared_experts", input, {}, token_count);
     if (!shared) return shared.error();

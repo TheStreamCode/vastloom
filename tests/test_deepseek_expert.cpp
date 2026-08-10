@@ -361,6 +361,80 @@ int main(int argc, char** argv) {
         }
     }
 
+    // The same canonical real bundle must also cross the bounded future boundary. This is a
+    // one-expert acquisition gate, not an overlap benchmark; multi-expert overlap is covered by
+    // the deterministic graph fixture.
+    {
+        vastloom::safety::ResourceGovernor async_governor(make_limits(8U * vastloom::MiB));
+        vastloom::inference::DeepseekV4ExpertCacheOptions async_options;
+        async_options.block_prefix = "blk.0.ffn";
+        async_options.max_cached_experts = 1U;
+        async_options.max_experts_per_request = 1U;
+        async_options.asynchronous_workers = 1U;
+        async_options.asynchronous_queue_capacity = 1U;
+        async_options.load = make_pool_options().load;
+        auto cache_result =
+            vastloom::inference::DeepseekV4BoundedExpertCache::create(
+                bindings.value(), async_governor, async_options);
+        if (!cache_result) return fail(cache_result.error().message);
+        auto cache = cache_result.take_value();
+        auto provider = cache->provider_binding();
+        const std::array<std::uint32_t, 1U> selected{0U};
+        {
+            auto batch = provider.begin("blk.0.ffn", selected);
+            if (!batch || batch.value() == nullptr) {
+                return fail(batch ? "real asynchronous batch is empty"
+                                  : batch.error().message);
+            }
+            auto acquired = batch.value()->acquire(0U);
+            if (!acquired || !acquired.value().asynchronous_load ||
+                acquired.value().cache_hit ||
+                acquired.value().logical_bytes_read != kBundleBytes ||
+                acquired.value().load_request_sequence == 0U ||
+                acquired.value().load_service_ms < 0.0 ||
+                acquired.value().load_total_ms <
+                    acquired.value().load_service_ms) {
+                return fail(acquired ? "real asynchronous telemetry is inconsistent"
+                                     : acquired.error().message);
+            }
+
+            constexpr vastloom::ByteCount kComputeBytes =
+                (3U * kHiddenSize + 2U * kExpertWidth) * sizeof(float);
+            auto compute_reservation = async_governor.try_reserve(
+                vastloom::safety::ResourceKind::scratch, kComputeBytes,
+                "deepseek-v4 asynchronous expert input, output and scratch");
+            if (!compute_reservation) return fail(compute_reservation.error().message);
+            std::vector<float> input(kHiddenSize);
+            std::vector<float> gate_scratch(kExpertWidth);
+            std::vector<float> up_scratch(kExpertWidth);
+            std::vector<float> down_scratch(kHiddenSize);
+            std::vector<float> output(kHiddenSize);
+            for (std::size_t column = 0U; column < input.size(); ++column) {
+                const int centered = static_cast<int>(column % 29U) - 14;
+                input[column] = static_cast<float>(centered) * 0.03125F +
+                                static_cast<float>(column % 3U) * 0.0078125F;
+            }
+            auto executed =
+                vastloom::inference::deepseek_v4_execute_resolved_iq1_s_iq3_xxs_f32(
+                    acquired.value(), input,
+                    {gate_scratch, up_scratch, down_scratch}, output);
+            if (!executed || output_fingerprint(output) != kExpectedOutputFnv64) {
+                return fail(executed ? "asynchronous real expert differs from ggml"
+                                     : executed.error().message);
+            }
+            if (cache->clear()) {
+                return fail("active asynchronous real expert was evicted");
+            }
+        }
+        auto cleared = cache->clear();
+        const auto final = async_governor.snapshot();
+        if (!cleared || final.reserved[0] != 0U || final.reserved[2] != 0U ||
+            final.reserved[3] != 0U) {
+            return fail(cleared ? "asynchronous real expert leaked a reservation"
+                                : cleared.error().message);
+        }
+    }
+
     std::cout << "DeepSeek V4 Flash 0731 full real expert: PASS"
               << " bytes=" << kBundleBytes
               << " ranges=3 load_ms=" << load_ms

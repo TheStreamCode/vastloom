@@ -3355,6 +3355,20 @@ void test_deepseek_v4_reference_graph(const std::filesystem::path& root) {
                 invalid_options.max_experts_per_request = 3U;
                 CHECK(!vastloom::inference::DeepseekV4BoundedExpertCache::create(
                     expert_bindings, governor, invalid_options));
+                auto invalid_async_queue = cache_options;
+                invalid_async_queue.asynchronous_workers = 1U;
+                invalid_async_queue.asynchronous_queue_capacity = 1U;
+                CHECK(!vastloom::inference::DeepseekV4BoundedExpertCache::create(
+                    expert_bindings, governor, invalid_async_queue));
+                auto invalid_async_workers = cache_options;
+                invalid_async_workers.asynchronous_workers = 5U;
+                invalid_async_workers.asynchronous_queue_capacity = 2U;
+                CHECK(!vastloom::inference::DeepseekV4BoundedExpertCache::create(
+                    expert_bindings, governor, invalid_async_workers));
+                auto ignored_async_queue = cache_options;
+                ignored_async_queue.asynchronous_queue_capacity = 2U;
+                CHECK(!vastloom::inference::DeepseekV4BoundedExpertCache::create(
+                    expert_bindings, governor, ignored_async_queue));
                 auto duplicate_bindings = expert_bindings;
                 duplicate_bindings.push_back(expert_bindings.front());
                 CHECK(!vastloom::inference::DeepseekV4BoundedExpertCache::create(
@@ -3410,6 +3424,25 @@ void test_deepseek_v4_reference_graph(const std::filesystem::path& root) {
                     CHECK(!refused_provider.resolve(
                         "layers.0.ffn", one_expert));
                     CHECK(refused_cache.value()->snapshot().cached_experts == 0U &&
+                          cache_refused_governor.snapshot().reserved[0] == 0U &&
+                          cache_refused_governor.snapshot().reserved[2] == 0U);
+                }
+                auto refused_async_options = cache_options;
+                refused_async_options.asynchronous_workers = 1U;
+                refused_async_options.asynchronous_queue_capacity = 2U;
+                auto refused_async_cache =
+                    vastloom::inference::DeepseekV4BoundedExpertCache::create(
+                        expert_bindings, cache_refused_governor,
+                        refused_async_options);
+                CHECK(refused_async_cache);
+                if (refused_async_cache) {
+                    auto refused_async_provider =
+                        refused_async_cache.value()->provider_binding();
+                    const std::array<std::uint32_t, 1U> one_expert{0U};
+                    CHECK(!refused_async_provider.begin(
+                        "layers.0.ffn", one_expert));
+                    CHECK(refused_async_cache.value()->snapshot().cached_experts ==
+                              0U &&
                           cache_refused_governor.snapshot().reserved[0] == 0U &&
                           cache_refused_governor.snapshot().reserved[2] == 0U);
                 }
@@ -3533,6 +3566,48 @@ void test_deepseek_v4_reference_graph(const std::filesystem::path& root) {
                 CHECK(!vastloom::inference::deepseek_v4_reference_prefill(
                     throwing, dynamic_prompt));
             }
+            {
+                class ThrowingBatch final
+                    : public vastloom::inference::DeepseekV4ExpertBatch {
+                public:
+                    [[nodiscard]] vastloom::Result<
+                        vastloom::inference::DeepseekV4ResolvedExpert>
+                    acquire(std::uint32_t) override {
+                        throw 7;
+                    }
+                };
+                auto throwing_batch = dynamic_graph;
+                auto& binding =
+                    throwing_batch.expert_providers["layers.0.ffn"];
+                binding.resolve = {};
+                binding.begin = [](
+                                    std::string_view,
+                                    std::span<const std::uint32_t>)
+                    -> vastloom::Result<std::unique_ptr<
+                        vastloom::inference::DeepseekV4ExpertBatch>> {
+                    return std::unique_ptr<
+                        vastloom::inference::DeepseekV4ExpertBatch>(
+                        std::make_unique<ThrowingBatch>());
+                };
+                CHECK(!vastloom::inference::deepseek_v4_reference_prefill(
+                    throwing_batch, dynamic_prompt));
+            }
+            {
+                auto empty_batch = dynamic_graph;
+                auto& binding =
+                    empty_batch.expert_providers["layers.0.ffn"];
+                binding.resolve = {};
+                binding.begin = [](
+                                    std::string_view,
+                                    std::span<const std::uint32_t>)
+                    -> vastloom::Result<std::unique_ptr<
+                        vastloom::inference::DeepseekV4ExpertBatch>> {
+                    return std::unique_ptr<
+                        vastloom::inference::DeepseekV4ExpertBatch>{};
+                };
+                CHECK(!vastloom::inference::deepseek_v4_reference_prefill(
+                    empty_batch, dynamic_prompt));
+            }
 
             const vastloom::ByteCount dynamic_cache_bytes =
                 miss_cache_snapshot.resident_bytes;
@@ -3565,10 +3640,178 @@ void test_deepseek_v4_reference_graph(const std::filesystem::path& root) {
             }
 
             dynamic_graph.expert_providers.clear();
-            dynamic_graph.packed_matrices.clear();
-            dynamic_graph.packed_integer_tensors.clear();
             CHECK(expert_cache != nullptr && expert_cache->clear());
             expert_cache.reset();
+
+            // The asynchronous provider submits the complete selected miss set, but the graph
+            // acquires one expert only when its authoritative numeric compute turn begins. An
+            // abandoned batch drains its futures and releases reservations without publishing
+            // partial cache entries.
+            auto async_options = cache_options;
+            async_options.asynchronous_workers = 1U;
+            async_options.asynchronous_queue_capacity = 2U;
+            std::atomic<bool> enable_overlap_barrier{false};
+            std::atomic<std::size_t> async_cancellation_checks{0U};
+            std::weak_ptr<
+                vastloom::inference::DeepseekV4BoundedExpertCache>
+                overlap_cache;
+            const std::size_t cancellation_checks_before_second =
+                expert_bindings.front().bundle.read_ranges.size() + 2U;
+            async_options.load.cancelled = [&] {
+                const auto check =
+                    async_cancellation_checks.fetch_add(
+                        1U, std::memory_order_acq_rel) +
+                    1U;
+                if (enable_overlap_barrier.load(std::memory_order_acquire) &&
+                    check == cancellation_checks_before_second) {
+                    const auto deadline = std::chrono::steady_clock::now() +
+                                          std::chrono::seconds(2);
+                    while (std::chrono::steady_clock::now() < deadline) {
+                        const auto cache = overlap_cache.lock();
+                        if (cache != nullptr && cache->snapshot().misses >= 1U) {
+                            std::this_thread::sleep_for(
+                                std::chrono::milliseconds(20));
+                            break;
+                        }
+                        std::this_thread::yield();
+                    }
+                }
+                return false;
+            };
+            auto async_cache_result =
+                vastloom::inference::DeepseekV4BoundedExpertCache::create(
+                    expert_bindings, governor, async_options);
+            CHECK(async_cache_result);
+            std::shared_ptr<
+                vastloom::inference::DeepseekV4BoundedExpertCache> async_cache;
+            if (async_cache_result) {
+                async_cache = async_cache_result.take_value();
+                overlap_cache = async_cache;
+                auto async_provider = async_cache->provider_binding();
+                CHECK(async_provider.begin);
+                const std::array<std::uint32_t, 2U> async_ids{2U, 3U};
+                {
+                    auto abandoned = async_provider.begin(
+                        "layers.0.ffn", async_ids);
+                    CHECK(abandoned && abandoned.value() != nullptr &&
+                          !async_provider.begin("layers.0.ffn", async_ids) &&
+                          !async_provider.resolve("layers.0.ffn", async_ids) &&
+                          !async_cache->clear());
+                }
+                CHECK(async_cache->snapshot().cached_experts == 0U &&
+                      async_cache->snapshot().resident_bytes == 0U &&
+                      async_cache->snapshot().abandoned_loads == 2U &&
+                      async_cache->snapshot().logical_bytes_read ==
+                          2U * expert_bindings.front().bundle.bytes &&
+                      async_cache->snapshot().wasted_prefetch_bytes ==
+                          2U * expert_bindings.front().bundle.bytes &&
+                      !async_cache->snapshot().telemetry_overflow &&
+                      governor.snapshot().reserved[0] ==
+                          packed_catalog.always_active_bytes &&
+                      governor.snapshot().reserved[2] == 0U);
+                async_cancellation_checks.store(0U, std::memory_order_release);
+                enable_overlap_barrier.store(true, std::memory_order_release);
+                dynamic_graph.expert_providers.emplace(
+                    "layers.0.ffn", async_cache->provider_binding());
+            }
+
+            vastloom::inference::DeepseekV4ReferenceState async_oracle_state;
+            vastloom::inference::DeepseekV4ReferenceState async_state;
+            auto async_oracle = vastloom::inference::deepseek_v4_reference_prefill(
+                quantized_oracle, dynamic_prompt, &async_oracle_state);
+            auto asynchronous = vastloom::inference::deepseek_v4_reference_prefill(
+                dynamic_graph, dynamic_prompt, &async_state);
+            enable_overlap_barrier.store(false, std::memory_order_release);
+            CHECK(async_oracle && asynchronous);
+            if (async_oracle && asynchronous) {
+                compare_packed_forward(asynchronous.value(), async_oracle.value());
+                CHECK(asynchronous.value().layers[0].expert_accesses.size() == 2U);
+                bool saw_io_compute_overlap = false;
+                std::size_t previous_request_sequence = 0U;
+                for (const auto& access :
+                     asynchronous.value().layers[0].expert_accesses) {
+                    CHECK(!access.cache_hit && access.asynchronous_load &&
+                          access.load_request_sequence >
+                              previous_request_sequence &&
+                          access.logical_bytes_read == access.resident_bytes &&
+                          access.load_queue_ms >= 0.0 &&
+                          access.load_service_ms >= 0.0 &&
+                          access.load_total_ms >= access.load_queue_ms &&
+                          access.load_total_ms >= access.load_service_ms &&
+                          access.acquire_wait_ms >= 0.0 &&
+                          access.compute_ms >= 0.0 &&
+                          access.io_compute_overlap_ms >= 0.0);
+                    saw_io_compute_overlap = saw_io_compute_overlap ||
+                                             access.io_compute_overlap_ms > 0.0;
+                    previous_request_sequence = access.load_request_sequence;
+                }
+                CHECK(saw_io_compute_overlap);
+            }
+            const auto async_miss_snapshot =
+                async_cache != nullptr
+                    ? async_cache->snapshot()
+                    : vastloom::inference::DeepseekV4ExpertCacheSnapshot{};
+            CHECK(async_miss_snapshot.cached_experts == 2U &&
+                  async_miss_snapshot.misses == 2U &&
+                  async_miss_snapshot.hits == 0U &&
+                  async_miss_snapshot.logical_bytes_read ==
+                      4U * expert_bindings.front().bundle.bytes &&
+                  async_miss_snapshot.wasted_prefetch_bytes ==
+                      2U * expert_bindings.front().bundle.bytes &&
+                  async_miss_snapshot.abandoned_loads == 2U &&
+                  !async_miss_snapshot.telemetry_overflow);
+
+            auto async_oracle_hit =
+                vastloom::inference::deepseek_v4_reference_decode(
+                    quantized_oracle, 10U, async_oracle_state);
+            auto asynchronous_hit =
+                vastloom::inference::deepseek_v4_reference_decode(
+                    dynamic_graph, 10U, async_state);
+            CHECK(async_oracle_hit && asynchronous_hit);
+            if (async_oracle_hit && asynchronous_hit) {
+                compare_packed_forward(asynchronous_hit.value(),
+                                       async_oracle_hit.value());
+                for (const auto& access :
+                     asynchronous_hit.value().layers[0].expert_accesses) {
+                    CHECK(access.cache_hit && !access.asynchronous_load &&
+                          access.load_request_sequence == 0U &&
+                          access.logical_bytes_read == 0U);
+                }
+            }
+            CHECK(async_cache != nullptr &&
+                  async_cache->snapshot().hits == 2U);
+
+            dynamic_graph.expert_providers.clear();
+            CHECK(async_cache != nullptr && async_cache->clear());
+            async_cache.reset();
+
+            auto cancelled_async_options = async_options;
+            cancelled_async_options.load.cancelled = [] { return true; };
+            auto cancelled_async_cache =
+                vastloom::inference::DeepseekV4BoundedExpertCache::create(
+                    expert_bindings, governor, cancelled_async_options);
+            CHECK(cancelled_async_cache);
+            if (cancelled_async_cache) {
+                auto cancelled_provider =
+                    cancelled_async_cache.value()->provider_binding();
+                const std::array<std::uint32_t, 1U> cancelled_id{0U};
+                {
+                    auto cancelled_batch = cancelled_provider.begin(
+                        "layers.0.ffn", cancelled_id);
+                    CHECK(cancelled_batch &&
+                          !cancelled_batch.value()->acquire(0U));
+                }
+                CHECK(cancelled_async_cache.value()->snapshot().cached_experts ==
+                          0U &&
+                      cancelled_async_cache.value()->snapshot().misses == 0U &&
+                      cancelled_async_cache.value()->clear() &&
+                      governor.snapshot().reserved[0] ==
+                          packed_catalog.always_active_bytes &&
+                      governor.snapshot().reserved[2] == 0U);
+            }
+
+            dynamic_graph.packed_matrices.clear();
+            dynamic_graph.packed_integer_tensors.clear();
             for (std::size_t index = 0U; index < trunk_residency_count; ++index) {
                 auto snapshot = resident_objects[index].snapshot();
                 CHECK(snapshot && snapshot.value().active_uses == 0U &&

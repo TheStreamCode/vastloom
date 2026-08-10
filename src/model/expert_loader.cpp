@@ -144,13 +144,17 @@ Result<LoadedExpert> load_prepared_expert_bundle(const ExpertBundle& bundle,
             if (!lease) return lease.error();
 
             ExpertLoadTelemetry telemetry;
+            const auto completed = std::chrono::steady_clock::now();
             telemetry.logical_bytes = bundle.bytes;
             telemetry.range_count = bundle.read_ranges.size();
             telemetry.elapsed_ms = std::chrono::duration<double, std::milli>(
-                                       std::chrono::steady_clock::now() - started)
+                                       completed - started)
                                        .count();
             telemetry.service_ms = telemetry.elapsed_ms;
             telemetry.total_ms = telemetry.elapsed_ms;
+            telemetry.submitted_at = started;
+            telemetry.service_started_at = started;
+            telemetry.completed_at = completed;
             if (process_before.has_value()) {
                 auto after = io::sample_process_io();
                 if (after) {
@@ -411,6 +415,9 @@ void BoundedExpertLoadPool::worker_loop() {
             telemetry.queue_ms = std::chrono::duration<double, std::milli>(service_started - task->submitted).count();
             telemetry.service_ms = std::chrono::duration<double, std::milli>(completed - service_started).count();
             telemetry.total_ms = std::chrono::duration<double, std::milli>(completed - task->submitted).count();
+            telemetry.submitted_at = task->submitted;
+            telemetry.service_started_at = service_started;
+            telemetry.completed_at = completed;
         }
         try {
             task->promise.set_value(std::move(loaded));

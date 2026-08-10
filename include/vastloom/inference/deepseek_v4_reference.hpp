@@ -1,5 +1,6 @@
 #pragma once
 
+#include <chrono>
 #include <cstddef>
 #include <cstdint>
 #include <functional>
@@ -127,11 +128,34 @@ struct DeepseekV4ResolvedExpert {
     std::uint64_t resident_bytes{0U};
     std::uint64_t logical_bytes_read{0U};
     bool cache_hit{false};
+    bool asynchronous_load{false};
+    std::size_t load_request_sequence{0U};
+    double load_queue_ms{0.0};
+    double load_service_ms{0.0};
+    double load_total_ms{0.0};
+    std::chrono::steady_clock::time_point load_service_started_at;
+    std::chrono::steady_clock::time_point load_completed_at;
+};
+
+class DeepseekV4ExpertBatch {
+public:
+    DeepseekV4ExpertBatch() = default;
+    DeepseekV4ExpertBatch(const DeepseekV4ExpertBatch&) = delete;
+    DeepseekV4ExpertBatch& operator=(const DeepseekV4ExpertBatch&) = delete;
+    virtual ~DeepseekV4ExpertBatch() = default;
+
+    [[nodiscard]] virtual Result<DeepseekV4ResolvedExpert> acquire(
+        std::uint32_t expert_id) = 0;
 };
 
 using DeepseekV4ExpertProvider = std::function<Result<std::vector<DeepseekV4ResolvedExpert>>(
     std::string_view block_prefix,
     std::span<const std::uint32_t> unique_expert_ids)>;
+
+using DeepseekV4ExpertBatchProvider =
+    std::function<Result<std::unique_ptr<DeepseekV4ExpertBatch>>(
+        std::string_view block_prefix,
+        std::span<const std::uint32_t> unique_expert_ids)>;
 
 struct DeepseekV4ExpertProviderBinding {
     DeepseekV4ExpertProviderBinding() = default;
@@ -141,6 +165,7 @@ struct DeepseekV4ExpertProviderBinding {
 
     std::size_t max_experts_per_request{0U};
     DeepseekV4ExpertProvider resolve;
+    DeepseekV4ExpertBatchProvider begin;
 };
 
 // Bind exact complete tensors from bounded file loaders without copying their payload. The
@@ -202,6 +227,14 @@ struct DeepseekV4LayerTrace {
         std::uint64_t resident_bytes{0U};
         std::uint64_t logical_bytes_read{0U};
         bool cache_hit{false};
+        bool asynchronous_load{false};
+        std::size_t load_request_sequence{0U};
+        double load_queue_ms{0.0};
+        double load_service_ms{0.0};
+        double load_total_ms{0.0};
+        double acquire_wait_ms{0.0};
+        double compute_ms{0.0};
+        double io_compute_overlap_ms{0.0};
     };
 
     std::size_t layer{0};

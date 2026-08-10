@@ -1,8 +1,12 @@
 #include "vastloom/inference/deepseek_v4_expert_provider.hpp"
 
 #include <algorithm>
+#include <exception>
+#include <future>
 #include <limits>
 #include <new>
+#include <optional>
+#include <stdexcept>
 #include <utility>
 
 #include "vastloom/inference/ggml_quantization.hpp"
@@ -50,6 +54,49 @@ Result<void> validate_binding(const DeepseekV4ExpertBundleBinding& binding,
         }
     }
     return {};
+}
+
+Result<DeepseekV4ResolvedExpert> bind_loaded_expert(
+    const DeepseekV4ExpertBundleBinding& binding,
+    const model::LoadedExpert& loaded,
+    bool asynchronous_load) {
+    DeepseekV4ResolvedExpert expert;
+    expert.expert_id = binding.expert_id;
+    expert.resident_bytes = binding.bundle.bytes;
+    const auto& telemetry = loaded.telemetry();
+    expert.logical_bytes_read = telemetry.logical_bytes;
+    expert.asynchronous_load = asynchronous_load;
+    expert.load_request_sequence = telemetry.request_sequence;
+    expert.load_queue_ms = telemetry.queue_ms;
+    expert.load_service_ms = telemetry.service_ms;
+    expert.load_total_ms = telemetry.total_ms;
+    expert.load_service_started_at = telemetry.service_started_at;
+    expert.load_completed_at = telemetry.completed_at;
+    for (const auto& matrix : binding.matrices) {
+        auto packed = deepseek_v4_bind_packed_matrix(
+            loaded, matrix.catalog_tensor_index, matrix.ggml_type,
+            matrix.rows, matrix.logical_columns, matrix.storage_columns);
+        if (!packed) return packed.error();
+        switch (matrix.weight) {
+            case DeepseekV4ExpertWeight::w1:
+                expert.w1 = packed.take_value();
+                break;
+            case DeepseekV4ExpertWeight::w2:
+                expert.w2 = packed.take_value();
+                break;
+            case DeepseekV4ExpertWeight::w3:
+                expert.w3 = packed.take_value();
+                break;
+        }
+    }
+    if (expert.w1.resident == nullptr ||
+        expert.w1.resident != expert.w2.resident ||
+        expert.w1.resident != expert.w3.resident) {
+        return make_error(ErrorCode::integrity_error,
+                          "DeepSeek expert matrices do not share one indivisible bundle",
+                          std::to_string(binding.expert_id));
+    }
+    return expert;
 }
 
 }  // namespace
@@ -227,6 +274,12 @@ DeepseekV4BoundedExpertCache::create(
         options.max_cached_experts == 0U ||
         options.max_experts_per_request == 0U ||
         options.max_experts_per_request > options.max_cached_experts ||
+        options.asynchronous_workers > 4U ||
+        (options.asynchronous_workers == 0U &&
+         options.asynchronous_queue_capacity != 0U) ||
+        (options.asynchronous_workers != 0U &&
+         (options.asynchronous_queue_capacity < options.max_experts_per_request ||
+          options.asynchronous_queue_capacity > 64U)) ||
         options.load.max_expert_bytes == 0U ||
         options.load.max_range_bytes == 0U || options.load.max_ranges == 0U) {
         return make_error(ErrorCode::invalid_argument,
@@ -251,6 +304,13 @@ DeepseekV4BoundedExpertCache::create(
     } catch (const std::bad_alloc&) {
         return make_error(ErrorCode::resource_exhausted,
                           "Unable to allocate the bounded DeepSeek expert cache");
+    } catch (const std::exception& exception) {
+        return make_error(ErrorCode::resource_exhausted,
+                          "Unable to start the bounded DeepSeek expert cache",
+                          exception.what());
+    } catch (...) {
+        return make_error(ErrorCode::resource_exhausted,
+                          "Unable to start the bounded DeepSeek expert cache");
     }
 }
 
@@ -258,7 +318,16 @@ DeepseekV4BoundedExpertCache::DeepseekV4BoundedExpertCache(
     std::map<std::uint32_t, DeepseekV4ExpertBundleBinding> bindings,
     safety::ResourceGovernor& governor,
     DeepseekV4ExpertCacheOptions options)
-    : bindings_(std::move(bindings)), governor_(governor), options_(std::move(options)) {}
+    : bindings_(std::move(bindings)), governor_(governor), options_(std::move(options)) {
+    if (options_.asynchronous_workers != 0U) {
+        model::ExpertLoadPoolOptions pool_options;
+        pool_options.workers = options_.asynchronous_workers;
+        pool_options.max_queued_requests = options_.asynchronous_queue_capacity;
+        pool_options.load = options_.load;
+        load_pool_ = std::make_unique<model::BoundedExpertLoadPool>(
+            std::move(pool_options), governor_);
+    }
+}
 
 DeepseekV4BoundedExpertCache::~DeepseekV4BoundedExpertCache() {
     static_cast<void>(clear());
@@ -266,13 +335,21 @@ DeepseekV4BoundedExpertCache::~DeepseekV4BoundedExpertCache() {
 
 DeepseekV4ExpertProviderBinding DeepseekV4BoundedExpertCache::provider_binding() {
     auto self = shared_from_this();
-    return DeepseekV4ExpertProviderBinding{
+    DeepseekV4ExpertProviderBinding binding{
         options_.max_experts_per_request,
-        [self = std::move(self)](
+        [self](
             std::string_view block_prefix,
             std::span<const std::uint32_t> unique_expert_ids) {
             return self->resolve(block_prefix, unique_expert_ids);
         }};
+    if (load_pool_ != nullptr) {
+        binding.begin = [self = std::move(self)](
+                            std::string_view block_prefix,
+                            std::span<const std::uint32_t> unique_expert_ids) {
+            return self->begin_resolve(block_prefix, unique_expert_ids);
+        };
+    }
+    return binding;
 }
 
 DeepseekV4ExpertCacheSnapshot DeepseekV4BoundedExpertCache::snapshot() const {
@@ -280,6 +357,347 @@ DeepseekV4ExpertCacheSnapshot DeepseekV4BoundedExpertCache::snapshot() const {
     auto snapshot = telemetry_;
     snapshot.cached_experts = cache_.size();
     return snapshot;
+}
+
+class DeepseekV4BoundedExpertCache::AsyncBatch final
+    : public DeepseekV4ExpertBatch {
+public:
+    AsyncBatch(std::shared_ptr<DeepseekV4BoundedExpertCache> cache,
+               std::string block_prefix,
+               std::span<const std::uint32_t> expert_ids)
+        : cache_(std::move(cache)),
+          block_prefix_(std::move(block_prefix)),
+          requested_ids_(expert_ids.begin(), expert_ids.end()) {}
+
+    ~AsyncBatch() override { cleanup(); }
+
+    [[nodiscard]] Result<void> prepare() {
+        if (cache_ == nullptr || cache_->load_pool_ == nullptr) {
+            return make_error(ErrorCode::internal_error,
+                              "DeepSeek asynchronous expert pool is unavailable",
+                              block_prefix_);
+        }
+        {
+            std::scoped_lock lock(cache_->mutex_);
+            if (cache_->async_batch_active_) {
+                return make_error(ErrorCode::resource_exhausted,
+                                  "DeepSeek expert cache already has an active asynchronous batch",
+                                  block_prefix_);
+            }
+            if (block_prefix_ != cache_->options_.block_prefix ||
+                requested_ids_.empty()) {
+                return make_error(ErrorCode::invalid_argument,
+                                  "DeepSeek selected-expert request does not match its cache binding",
+                                  block_prefix_);
+            }
+            if (requested_ids_.size() >
+                cache_->options_.max_experts_per_request) {
+                return make_error(ErrorCode::resource_exhausted,
+                                  "DeepSeek selected-expert request exceeds its cache binding",
+                                  block_prefix_);
+            }
+            for (std::size_t index = 0U; index < requested_ids_.size(); ++index) {
+                if (!cache_->bindings_.contains(requested_ids_[index]) ||
+                    std::find(requested_ids_.begin(),
+                              requested_ids_.begin() +
+                                  static_cast<std::ptrdiff_t>(index),
+                              requested_ids_[index]) !=
+                        requested_ids_.begin() +
+                            static_cast<std::ptrdiff_t>(index)) {
+                    return make_error(
+                        ErrorCode::invalid_argument,
+                        "DeepSeek selected-expert request contains an unknown or duplicate identity",
+                        std::to_string(requested_ids_[index]));
+                }
+            }
+            if (cache_->telemetry_.requests ==
+                    std::numeric_limits<std::size_t>::max() ||
+                cache_->telemetry_.telemetry_overflow ||
+                requested_ids_.size() >
+                    std::numeric_limits<std::size_t>::max() -
+                        cache_->telemetry_.requested_experts) {
+                return make_error(ErrorCode::resource_exhausted,
+                                  "DeepSeek expert cache request telemetry overflow",
+                                  block_prefix_);
+            }
+
+            cache_->async_batch_active_ = true;
+            active_ = true;
+            entries_.reserve(requested_ids_.size());
+            std::size_t misses = 0U;
+            for (const auto expert_id : requested_ids_) {
+                if (cache_->tick_ == std::numeric_limits<std::size_t>::max()) {
+                    return make_error(ErrorCode::resource_exhausted,
+                                      "DeepSeek expert cache LRU clock overflow",
+                                      block_prefix_);
+                }
+                ++cache_->tick_;
+                Entry entry;
+                entry.expert_id = expert_id;
+                entry.last_use = cache_->tick_;
+                const auto cached = cache_->cache_.find(expert_id);
+                if (cached != cache_->cache_.end()) {
+                    if (cache_->telemetry_.hits ==
+                        std::numeric_limits<std::size_t>::max()) {
+                        return make_error(ErrorCode::resource_exhausted,
+                                          "DeepSeek expert cache hit telemetry overflow",
+                                          block_prefix_);
+                    }
+                    cached->second.last_use = entry.last_use;
+                    entry.ready = cached->second.expert;
+                    entry.ready->cache_hit = true;
+                    entry.ready->logical_bytes_read = 0U;
+                    entry.ready->asynchronous_load = false;
+                    entry.ready->load_request_sequence = 0U;
+                    entry.ready->load_queue_ms = 0.0;
+                    entry.ready->load_service_ms = 0.0;
+                    entry.ready->load_total_ms = 0.0;
+                    entry.ready->load_service_started_at = {};
+                    entry.ready->load_completed_at = {};
+                    ++cache_->telemetry_.hits;
+                } else {
+                    ++misses;
+                }
+                entries_.push_back(std::move(entry));
+            }
+            if (cache_->cache_.size() >
+                cache_->options_.max_cached_experts) {
+                return make_error(ErrorCode::integrity_error,
+                                  "DeepSeek expert cache exceeds its configured capacity",
+                                  block_prefix_);
+            }
+            while (misses > cache_->options_.max_cached_experts -
+                                cache_->cache_.size()) {
+                auto evicted = cache_->evict_one(requested_ids_);
+                if (!evicted) return evicted.error();
+            }
+            ++cache_->telemetry_.requests;
+            cache_->telemetry_.requested_experts += requested_ids_.size();
+        }
+
+        for (auto& entry : entries_) {
+            if (entry.ready.has_value()) continue;
+            const auto& binding = cache_->bindings_.at(entry.expert_id);
+            auto residency = model::ResidencyObject::create(
+                block_prefix_ + ".experts." +
+                    std::to_string(entry.expert_id),
+                binding.bundle.bytes);
+            if (!residency) return residency.error();
+            entry.residency = residency.take_value();
+        }
+
+        std::vector<Entry*> pending;
+        pending.reserve(entries_.size());
+        for (auto& entry : entries_) {
+            if (!entry.ready.has_value()) pending.push_back(&entry);
+        }
+        std::sort(pending.begin(), pending.end(), [](const Entry* left,
+                                                     const Entry* right) {
+            return left->expert_id < right->expert_id;
+        });
+        for (auto* entry : pending) {
+            const auto& binding = cache_->bindings_.at(entry->expert_id);
+            auto submitted = cache_->load_pool_->submit(
+                binding.bundle, *entry->residency,
+                block_prefix_ + ".experts." +
+                    std::to_string(entry->expert_id));
+            if (!submitted) return submitted.error();
+            entry->future = submitted.take_value();
+        }
+        return {};
+    }
+
+    [[nodiscard]] Result<DeepseekV4ResolvedExpert> acquire(
+        std::uint32_t expert_id) override {
+        std::scoped_lock batch_lock(mutex_);
+        auto entry = std::find_if(entries_.begin(), entries_.end(),
+                                  [expert_id](const Entry& candidate) {
+                                      return candidate.expert_id == expert_id;
+                                  });
+        if (!active_ || entry == entries_.end() || entry->acquired) {
+            return make_error(ErrorCode::invalid_argument,
+                              "DeepSeek asynchronous expert acquisition is invalid",
+                              std::to_string(expert_id));
+        }
+        entry->acquired = true;
+        if (entry->ready.has_value()) return *entry->ready;
+        if (!entry->future.has_value() || !entry->future->valid() ||
+            !entry->residency.has_value()) {
+            return make_error(ErrorCode::internal_error,
+                              "DeepSeek asynchronous expert future is unavailable",
+                              std::to_string(expert_id));
+        }
+
+        try {
+            auto loaded = entry->future->get();
+            entry->future.reset();
+            if (!loaded) return loaded.error();
+            entry->completed_logical_bytes = loaded.value().telemetry().logical_bytes;
+            const auto& binding = cache_->bindings_.at(expert_id);
+            auto bound = bind_loaded_expert(binding, loaded.value(), true);
+            if (!bound) return bound.error();
+            auto expert = bound.take_value();
+
+            std::scoped_lock lock(cache_->mutex_);
+            if (!cache_->async_batch_active_) {
+                return make_error(ErrorCode::internal_error,
+                                  "DeepSeek asynchronous expert batch lost cache ownership",
+                                  std::to_string(expert_id));
+            }
+            auto logical_total = checked_add(
+                cache_->telemetry_.logical_bytes_read,
+                expert.logical_bytes_read);
+            if (!logical_total) return logical_total.error();
+            auto resident_total = checked_add(
+                cache_->telemetry_.resident_bytes,
+                binding.bundle.bytes);
+            if (!resident_total) return resident_total.error();
+            if (cache_->telemetry_.misses ==
+                std::numeric_limits<std::size_t>::max()) {
+                return make_error(ErrorCode::resource_exhausted,
+                                  "DeepSeek expert cache miss telemetry overflow",
+                                  block_prefix_);
+            }
+            auto inserted = cache_->cache_.emplace(
+                expert_id,
+                CacheEntry{expert, *entry->residency, entry->last_use});
+            if (!inserted.second) {
+                return make_error(ErrorCode::integrity_error,
+                                  "DeepSeek asynchronous expert duplicated a cache entry",
+                                  std::to_string(expert_id));
+            }
+            entry->installed = true;
+            ++cache_->telemetry_.misses;
+            cache_->telemetry_.logical_bytes_read = logical_total.value();
+            cache_->telemetry_.resident_bytes = resident_total.value();
+            return expert;
+        } catch (const std::bad_alloc&) {
+            return make_error(ErrorCode::resource_exhausted,
+                              "Unable to retain an asynchronous DeepSeek expert",
+                              std::to_string(expert_id));
+        } catch (const std::future_error& exception) {
+            entry->future.reset();
+            return make_error(ErrorCode::internal_error,
+                              "DeepSeek asynchronous expert future failed",
+                              exception.what());
+        } catch (const std::exception& exception) {
+            return make_error(ErrorCode::internal_error,
+                              "DeepSeek asynchronous expert acquisition failed",
+                              exception.what());
+        } catch (...) {
+            return make_error(ErrorCode::internal_error,
+                              "DeepSeek asynchronous expert acquisition failed",
+                              std::to_string(expert_id));
+        }
+    }
+
+private:
+    struct Entry {
+        std::uint32_t expert_id{0U};
+        std::size_t last_use{0U};
+        std::optional<DeepseekV4ResolvedExpert> ready;
+        std::optional<model::ResidencyObject> residency;
+        std::optional<std::future<Result<model::LoadedExpert>>> future;
+        ByteCount completed_logical_bytes{0U};
+        bool acquired{false};
+        bool installed{false};
+    };
+
+    void cleanup() noexcept {
+        if (!active_) return;
+        ByteCount abandoned_bytes = 0U;
+        std::size_t abandoned_loads = 0U;
+        bool telemetry_overflow = false;
+        for (auto& entry : entries_) {
+            if (entry.future.has_value() && entry.future->valid()) {
+                try {
+                    {
+                        auto ignored = entry.future->get();
+                        if (ignored) {
+                            entry.completed_logical_bytes =
+                                ignored.value().telemetry().logical_bytes;
+                        }
+                    }
+                } catch (...) {
+                    // The pool contains worker failures; cleanup still releases residency below.
+                }
+                entry.future.reset();
+            }
+            if (entry.residency.has_value() && !entry.installed) {
+                try {
+                    auto snapshot = entry.residency->snapshot();
+                    if (snapshot &&
+                        snapshot.value().state == model::ResidencyState::ram_ready) {
+                        static_cast<void>(entry.residency->evict_ram());
+                    }
+                } catch (...) {
+                    // Residency control releases any remaining reservations on destruction.
+                }
+            }
+            if (!entry.installed && entry.completed_logical_bytes != 0U) {
+                auto total = checked_add(abandoned_bytes,
+                                         entry.completed_logical_bytes);
+                if (!total || abandoned_loads ==
+                                  std::numeric_limits<std::size_t>::max()) {
+                    telemetry_overflow = true;
+                } else {
+                    abandoned_bytes = total.value();
+                    ++abandoned_loads;
+                }
+            }
+        }
+        entries_.clear();
+        {
+            std::scoped_lock lock(cache_->mutex_);
+            auto logical_total = checked_add(
+                cache_->telemetry_.logical_bytes_read, abandoned_bytes);
+            auto wasted_total = checked_add(
+                cache_->telemetry_.wasted_prefetch_bytes, abandoned_bytes);
+            if (telemetry_overflow || !logical_total || !wasted_total ||
+                abandoned_loads > std::numeric_limits<std::size_t>::max() -
+                                      cache_->telemetry_.abandoned_loads) {
+                cache_->telemetry_.telemetry_overflow = true;
+            } else {
+                cache_->telemetry_.logical_bytes_read = logical_total.value();
+                cache_->telemetry_.wasted_prefetch_bytes = wasted_total.value();
+                cache_->telemetry_.abandoned_loads += abandoned_loads;
+            }
+            cache_->async_batch_active_ = false;
+        }
+        active_ = false;
+    }
+
+    std::shared_ptr<DeepseekV4BoundedExpertCache> cache_;
+    std::string block_prefix_;
+    std::vector<std::uint32_t> requested_ids_;
+    std::vector<Entry> entries_;
+    std::mutex mutex_;
+    bool active_{false};
+};
+
+Result<std::unique_ptr<DeepseekV4ExpertBatch>>
+DeepseekV4BoundedExpertCache::begin_resolve(
+    std::string_view block_prefix,
+    std::span<const std::uint32_t> unique_expert_ids) {
+    try {
+        auto batch = std::make_unique<AsyncBatch>(
+            shared_from_this(), std::string(block_prefix), unique_expert_ids);
+        auto prepared = batch->prepare();
+        if (!prepared) return prepared.error();
+        return std::unique_ptr<DeepseekV4ExpertBatch>(std::move(batch));
+    } catch (const std::bad_alloc&) {
+        return make_error(ErrorCode::resource_exhausted,
+                          "Unable to allocate a DeepSeek asynchronous expert batch",
+                          std::string(block_prefix));
+    } catch (const std::exception& exception) {
+        return make_error(ErrorCode::internal_error,
+                          "Unable to create a DeepSeek asynchronous expert batch",
+                          exception.what());
+    } catch (...) {
+        return make_error(ErrorCode::internal_error,
+                          "Unable to create a DeepSeek asynchronous expert batch",
+                          std::string(block_prefix));
+    }
 }
 
 Result<void> DeepseekV4BoundedExpertCache::evict_one(
@@ -335,6 +753,16 @@ Result<std::vector<DeepseekV4ResolvedExpert>> DeepseekV4BoundedExpertCache::reso
     std::string_view block_prefix,
     std::span<const std::uint32_t> unique_expert_ids) {
     std::scoped_lock lock(mutex_);
+    if (async_batch_active_) {
+        return make_error(ErrorCode::resource_exhausted,
+                          "DeepSeek expert cache has an active asynchronous batch",
+                          std::string(block_prefix));
+    }
+    if (telemetry_.telemetry_overflow) {
+        return make_error(ErrorCode::resource_exhausted,
+                          "DeepSeek expert cache telemetry overflowed",
+                          std::string(block_prefix));
+    }
     if (block_prefix != options_.block_prefix || unique_expert_ids.empty()) {
         return make_error(ErrorCode::invalid_argument,
                           "DeepSeek selected-expert request does not match its cache binding",
@@ -383,6 +811,13 @@ Result<std::vector<DeepseekV4ResolvedExpert>> DeepseekV4BoundedExpertCache::reso
                 auto expert = cached->second.expert;
                 expert.cache_hit = true;
                 expert.logical_bytes_read = 0U;
+                expert.asynchronous_load = false;
+                expert.load_request_sequence = 0U;
+                expert.load_queue_ms = 0.0;
+                expert.load_service_ms = 0.0;
+                expert.load_total_ms = 0.0;
+                expert.load_service_started_at = {};
+                expert.load_completed_at = {};
                 if (telemetry_.hits == std::numeric_limits<std::size_t>::max()) {
                     return make_error(ErrorCode::resource_exhausted,
                                       "DeepSeek expert cache hit telemetry overflow",
@@ -406,34 +841,9 @@ Result<std::vector<DeepseekV4ResolvedExpert>> DeepseekV4BoundedExpertCache::reso
                 binding.bundle, residency.value(), governor_, options_.load);
             if (!loaded) return loaded.error();
 
-            DeepseekV4ResolvedExpert expert;
-            expert.expert_id = expert_id;
-            expert.resident_bytes = binding.bundle.bytes;
-            expert.logical_bytes_read = loaded.value().telemetry().logical_bytes;
-            for (const auto& matrix : binding.matrices) {
-                auto packed = deepseek_v4_bind_packed_matrix(
-                    loaded.value(), matrix.catalog_tensor_index, matrix.ggml_type,
-                    matrix.rows, matrix.logical_columns, matrix.storage_columns);
-                if (!packed) return packed.error();
-                switch (matrix.weight) {
-                    case DeepseekV4ExpertWeight::w1:
-                        expert.w1 = packed.take_value();
-                        break;
-                    case DeepseekV4ExpertWeight::w2:
-                        expert.w2 = packed.take_value();
-                        break;
-                    case DeepseekV4ExpertWeight::w3:
-                        expert.w3 = packed.take_value();
-                        break;
-                }
-            }
-            if (expert.w1.resident == nullptr ||
-                expert.w1.resident != expert.w2.resident ||
-                expert.w1.resident != expert.w3.resident) {
-                return make_error(ErrorCode::integrity_error,
-                                  "DeepSeek expert matrices do not share one indivisible bundle",
-                                  std::to_string(expert_id));
-            }
+            auto bound = bind_loaded_expert(binding, loaded.value(), false);
+            if (!bound) return bound.error();
+            auto expert = bound.take_value();
             const ByteCount logical_bytes = expert.logical_bytes_read;
             auto logical_total =
                 checked_add(telemetry_.logical_bytes_read, logical_bytes);
@@ -464,6 +874,11 @@ Result<std::vector<DeepseekV4ResolvedExpert>> DeepseekV4BoundedExpertCache::reso
 
 Result<void> DeepseekV4BoundedExpertCache::clear() {
     std::scoped_lock lock(mutex_);
+    if (async_batch_active_) {
+        return make_error(ErrorCode::resource_exhausted,
+                          "DeepSeek expert cache cannot clear an active asynchronous batch",
+                          options_.block_prefix);
+    }
     while (!cache_.empty()) {
         std::array<std::uint32_t, 0U> none{};
         auto evicted = evict_one(none);

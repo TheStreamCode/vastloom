@@ -1,5 +1,6 @@
 #pragma once
 
+#include <chrono>
 #include <cstddef>
 #include <condition_variable>
 #include <deque>
@@ -40,6 +41,9 @@ struct ExpertLoadTelemetry {
     double service_ms{0.0};
     double total_ms{0.0};
     double elapsed_ms{0.0};
+    std::chrono::steady_clock::time_point submitted_at;
+    std::chrono::steady_clock::time_point service_started_at;
+    std::chrono::steady_clock::time_point completed_at;
     std::optional<io::ProcessIoDelta> process_io;
     std::optional<io::DeviceIoDelta> device_io;
 };

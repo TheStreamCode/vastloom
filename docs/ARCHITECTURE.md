@@ -294,6 +294,27 @@ consumer can recover exact tensors after range compaction. These are validated a
 issued DeepSeek I/O requests; the header-only inspection still has no payload and reports
 execution as unsupported.
 
+The official 0731 GGUF path reaches the same catalog through a different physical layout:
+
+```text
+bounded GGUF v3 split headers
+      │ exact GGML type · block size · aligned relative offset
+      ▼
+129 packed `blk.N.ffn_{down,gate,up}_exps.weight` tensors
+      │ final dimension = 256 experts
+      ▼
+33,024 non-overlapping projection slices
+      │ group by `(layer, expert)`
+      ▼
+11,008 three-slice expert bundles + 1,199 always-active tensors
+```
+
+The reviewed `UD-IQ1_S` headers contain 1,328 physical tensors and become 34,223 logical
+descriptors. Header-prefix objects are always metadata-only unless a caller supplies separate
+immutable full-shard paths; the CLI never makes that promotion. Exact encoded byte accounting is
+available to planning, while dequantization, expert compute and payload verification remain
+outside this slice.
+
 ## TinyTransformer adapter boundary
 
 The alpha.2 adapter defines:
@@ -418,13 +439,13 @@ router decisions or accepted output tokens.
 - `hardware/`: non-invasive machine probe.
 - `planner/`: conservative capacity and placement plan.
 - `safety/`: reservations, state machine and heartbeat.
-- `model/`: manifest/Safetensors parsing, imported-checkpoint verification, immutable model
+- `model/`: manifest/Safetensors/GGUF parsing, imported-checkpoint verification, immutable model
   storage, the universal logical tensor/expert catalog and governed residency state.
 - `io/`: bounded asynchronous reads plus platform-labeled process-I/O counters.
 - `research/`: native-telemetry-driven no-cache/LRU/LFU/static-hot simulation and exact
   unique-expert reuse distance.
-- `inference/`: TinyTransformer, pinned SmolLM2 generation and pinned OLMoE routed
-  CPU reference/streaming adapters.
+- `inference/`: TinyTransformer, pinned SmolLM2 generation, pinned OLMoE routed CPU
+  reference/streaming and non-executing DeepSeek Safetensors/GGUF adapters.
 - `cli/`: interactive and one-shot model client commands.
 
 The data plane now has device-level I/O plus a repeatable operating-system cache-bypass

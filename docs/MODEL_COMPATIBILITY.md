@@ -14,7 +14,7 @@ or matching tensor dimensions is never enough to enable execution automatically.
 | OLMoE-1B-7B-0924-Instruct | Pinned shards, top-k routes, expert streaming and I/O telemetry | Validated CPU expert streaming |
 | `deepseek-ai/DeepSeek-V4-Flash` preview at `60d8d707...` | Header catalog, tokenizer, reduced main+MTP prefill and five incremental cache steps | Reduced FP32 reference execution only |
 | `deepseek-ai/DeepSeek-V4-Flash-0731` at `7872f01b...` | Public metadata/config reviewed on 2026-08-10 | Not imported, inspected or executed by Vastloom yet |
-| `unsloth/DeepSeek-V4-Flash-0731-GGUF` at `fbbb5b93...` | GGUF profile/file metadata reviewed on 2026-08-10 | GGUF reader and execution not implemented |
+| `unsloth/DeepSeek-V4-Flash-0731-GGUF` at `fbbb5b93...` | Bounded GGUF v3/split headers and `UD-IQ1_S` packed-expert catalog validated | Metadata-only catalog; quantized execution not implemented |
 | `unsloth/Laguna-S-2.1` at `1a646907...` | Public config, custom-code and shard metadata reviewed on 2026-08-10 | Adapter and execution not implemented |
 
 Historical DeepSeek reports remain tied to the preview revision they actually tested. The newer
@@ -37,6 +37,14 @@ profiles range from 82,539,237,792 bytes (`UD-IQ1_S`) to 161,869,615,520 bytes
 (`UD-Q8_K_XL`), plus separate approximately 10–11 GB DSpark files. Supporting it requires a
 bounded GGUF metadata/tensor reader and quantization-specific parity tests; no profile may be
 selected through silent quality degradation.
+
+The first half of that boundary is now implemented for `UD-IQ1_S`. Native inspection of the
+three split headers validates 1,328 physical tensors and slices the 129 packed expert matrices
+into 11,008 logical layer/expert bundles. The catalog accounts for 75,547,803,648 routed-expert
+bytes and 6,986,088,796 always-active bytes. A top-6 no-cache schedule would request
+1,770,651,648 logical expert bytes/token. This is header-derived planning data: the two large
+payload shards were not downloaded, no full artifact hash was verified and no tensor was
+dequantized or executed.
 
 ### Laguna S 2.1
 
@@ -67,10 +75,11 @@ model revision
   + immutable source shard and bounded byte range
 ```
 
-The shared catalog and Safetensors-backed binding are now implemented for the pinned DeepSeek
+The shared catalog and Safetensors-backed binding are implemented for the pinned DeepSeek
 preview. Its 69,187 tensors produce 11,264 logical expert bundles and 22,528 coalesced immutable
-source ranges. Format/architecture adapters for the official 0731 release, GGUF and Laguna still
-need to populate and validate the same contract before they can use it.
+source ranges. The separate GGUF binding now populates the same contract for the official 0731
+`UD-IQ1_S` headers by slicing each packed tensor along its expert axis. Executable full-shard
+binding, quantized kernels and the Laguna adapter remain open.
 
 The shared runtime may then place a tensor or expert bundle in one of these explicit states:
 
@@ -133,7 +142,8 @@ OLMoE-specific path.
 ## Format policy
 
 - Safetensors is the authoritative path for official revisions and exact tensor identities.
-- GGUF is a first-class future import format, not a shortcut around architecture validation.
+- GGUF is a first-class bounded metadata/catalog format, not a shortcut around architecture
+  validation; executable payload import remains gated on exact hashes and quantized parity.
 - Derived layouts are written as temporary artifacts, verified and atomically published.
 - Original Safetensors/GGUF files remain immutable.
 - Quantization profiles are named, reported and parity-tested; there is no implicit precision

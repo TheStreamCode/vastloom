@@ -15,9 +15,11 @@ cache steps. Verified headers populate a universal tensor/expert catalog, and a 
 governed state machine validates legal NVMe/RAM/VRAM reservation transitions. Synchronous and
 bounded asynchronous fixture paths now load canonical ranges into governed packed RAM buffers
 with exact tensor slices and exclusive transfer leases. Full-checkpoint payload binding,
-compute-coupled shared streaming, speculative generation and CUDA do not exist yet.
-The newer official 0731 release, its Unsloth GGUF conversions and Laguna S 2.1 are reviewed
-compatibility targets, not validated execution paths.
+compute-coupled shared streaming, speculative generation and CUDA do not exist yet. The newer
+official 0731 Unsloth `UD-IQ1_S` GGUF profile now has a bounded v3/split-header reader and a
+metadata-only packed-expert catalog: 1,328 physical tensors map to 11,008 logical expert bundles.
+No large payload, quantized kernel or 0731 token path is validated. Laguna S 2.1 remains a reviewed
+compatibility target, not a validated execution path.
 
 Do not restart or generically redesign the project. Inspect the relevant implementation,
 documentation, tests and git state before changing code. Preserve working components and do not

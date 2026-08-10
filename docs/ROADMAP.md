@@ -93,8 +93,8 @@ warm buffered forward time by 46.0% in three paired WSL runs. Three Windows
 `direct-unbuffered-v1` runs then returned identical reference output and exactly
 1,610,743,808 whole-device bytes for 1,610,612,736 logical expert bytes per run. M5 is
 closed. The exact official DeepSeek checkpoint contract, reduced float main graph and one
-checkpoint-shaped MTP block are now validated; the packed checkpoint loader, incremental state
-and speculative verification loop remain M7 work.
+checkpoint-shaped MTP block and reduced incremental state are now validated; executable packed
+payload kernels and the speculative verification loop remain M7 work.
 
 ## M6 — Exact DeepSeek inspector and architecture-faithful fixture — complete
 
@@ -130,7 +130,9 @@ is tracked as a separate, not-yet-validated target in the
 
 - [x] Bind the pinned preview Safetensors header catalog to universal tensor/expert roles and
   exact coalesced source ranges.
-- [ ] Bind full payload/GGUF catalogs and packed FP4/FP8 weights to executable kernels.
+- [x] Parse the official 0731 `UD-IQ1_S` GGUF split headers and bind packed expert subranges to
+  the universal catalog without reading payloads.
+- [ ] Bind verified full GGUF payloads and packed IQ/FP4/FP8 weights to executable kernels.
 - [x] Bounded operator primitives for normalization, base RoPE, selected-latent attention,
   learned/hash routing, routed SwiGLU and Hyper-Connections.
 - [x] Reduced float main graph with YaRN, overlapping compression, learned indexer,
@@ -153,6 +155,8 @@ The cache-state slice is recorded in the
 [M7 incremental validation report](reports/M7_DEEPSEEK_INCREMENTAL_VALIDATION.md).
 The model-independent tensor/expert binding is recorded in the
 [M7 logical catalog report](reports/M7_LOGICAL_TENSOR_CATALOG_VALIDATION.md).
+The separate official 0731 GGUF header binding is recorded in the
+[M7 0731 GGUF catalog report](reports/M7_DEEPSEEK_0731_GGUF_CATALOG_VALIDATION.md).
 
 ## M8 — CUDA path for the RTX 4070 Super
 
@@ -228,8 +232,8 @@ and the server binds to loopback unless remote access is explicitly configured.
 
 ## M14 — Model and backend expansion
 
-- [ ] Pin and implement the official DeepSeek V4 Flash 0731/DSpark profile.
-- [ ] Add bounded GGUF metadata/tensor import with explicit quantization identity.
+- [ ] Complete and execute the official DeepSeek V4 Flash 0731/DSpark profile.
+- [x] Add bounded GGUF v3 metadata/tensor import with explicit GGML quantization identity.
 - [ ] Laguna S 2.1 architecture adapter and expert-streaming parity.
 - [ ] MiniMax-class MoE adapter.
 - [ ] Kimi K3 capacity and traffic benchmark.

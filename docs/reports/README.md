@@ -13,6 +13,9 @@ hardware, commands, measurements and limitations.
 
 ## Current report
 
+- [`M7_DEEPSEEK_0731_GGUF_CATALOG_VALIDATION.md`](M7_DEEPSEEK_0731_GGUF_CATALOG_VALIDATION.md) —
+  bounded native GGUF v3/split-header parsing, real `UD-IQ1_S` packed-expert mapping and the
+  explicit metadata-only/non-execution boundary.
 - [`M6_DEEPSEEK_METADATA_INSPECTION_VALIDATION.md`](M6_DEEPSEEK_METADATA_INSPECTION_VALIDATION.md) —
   exact official DeepSeek V4 Flash revision, bounded header-only import, native
   69,187-tensor inspection and the remaining non-execution boundary.
@@ -40,6 +43,8 @@ hardware, commands, measurements and limitations.
 - [`M9_PACKED_EXPERT_LOAD_VALIDATION.md`](M9_PACKED_EXPERT_LOAD_VALIDATION.md) — governed
   multi-range reads into one packed RAM buffer, exact per-tensor slices, ready-state publication
   and failure cleanup.
+- [`M9_ASYNC_EXPERT_LOAD_VALIDATION.md`](M9_ASYNC_EXPERT_LOAD_VALIDATION.md) — fixed workers,
+  bounded queues, pre-enqueue reservations, exclusive transfers and shutdown cancellation.
 
 M6 is complete for its reduced float correctness gate, and the first M7 MTP component gate is
 complete together with the reduced incremental-state gate. Full-checkpoint DeepSeek execution,

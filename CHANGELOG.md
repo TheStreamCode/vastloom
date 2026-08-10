@@ -29,6 +29,15 @@
   its Unsloth GGUF profiles and Laguna S 2.1 as separate compatibility targets. None inherits
   the preview checkpoint's execution claims; the universal tensor/expert residency contract
   and per-adapter acceptance ladder are now explicit.
+- Added a bounded native GGUF v3 reader with strict metadata/tensor/alignment/offset limits,
+  exact GGML encoded-byte accounting, split-header catalogs and header-prefix mode. The CLI can
+  inspect one file or build a metadata-only multi-shard DeepSeek catalog without reading payloads.
+- Bound the pinned 82,539,237,792-byte 0731 `UD-IQ1_S` profile's 1,328 physical tensors to
+  34,223 logical descriptors and 11,008 packed expert bundles from bounded headers. The derived
+  1,770,651,648 no-cache expert bytes/token is a planning value, not measured SSD traffic;
+  quantized execution remains unsupported.
+- Fixed CLI path construction so Windows wide-character arguments remain Unicode-native through
+  `std::filesystem`; an accented GGUF filename is now covered end to end.
 - Added the shared logical tensor catalog and bound all 69,187 pinned DeepSeek preview tensors
   to role, shape, dtype and immutable source ranges. Its 67,584 routed tensors form 11,264
   main/MTP expert bundles whose six tensors coalesce into exactly two ranges per expert; no

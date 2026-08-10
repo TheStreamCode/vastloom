@@ -154,8 +154,27 @@ The pinned DeepSeek V4 Flash preview inspection path is intentionally non-execut
 The opt-in authorizes only an immutable download. It does not imply that the runtime can
 execute the checkpoint, and it does not relax the 300 GiB default free-space reserve.
 The newer official 0731 release, Unsloth GGUF variants and Laguna S 2.1 have separate
-identities and no import authorization or execution support. A user-supplied URL never bypasses
-revision pinning, license review, exact size/hash catalogs or the large-download interlock.
+identities and no executable import authorization. A user-supplied URL never bypasses revision
+pinning, license review, exact size/hash catalogs or the large-download interlock.
+
+The 0731 GGUF reader adds a metadata-only safety boundary:
+
+- one header is capped at 256 MiB, with explicit entry, tensor, string, array, dimension,
+  nesting and alignment ceilings;
+- split prefixes require the declared complete shard size, and every tensor offset/encoded span
+  is checked against that immutable declared boundary;
+- symlinks, malformed values, duplicate keys/tensors, invalid block shapes, offset collisions,
+  nonzero padding, truncation and inconsistent split numbering fail closed;
+- `deepseek-gguf-inspect` never reads tensor payloads and always publishes a `metadata_only`
+  catalog;
+- a header-prefix path cannot be used as an executable tensor source. A library caller must
+  explicitly supply separate full-shard paths, after which normal immutable import and checksum
+  gates are still required before execution;
+- no GGML quantized kernel is registered, so the current catalog cannot reach the token path.
+
+The local validation used one complete 5.26 MB metadata shard and two 16 MiB HTTP-range prefixes;
+it did not download the 82.54 GB profile. Header-derived logical bytes/token are planning data,
+not physical device telemetry and never relax Resource Governor limits.
 
 ## Real OLMoE streaming bounds
 
@@ -264,6 +283,8 @@ integration remains required before long-running large-model inference.
   out-of-bounds read cleanup, cancellation and zero residual reservations.
 - exclusive transfer leases, deterministic asynchronous queue saturation, reservation rollback,
   queued-request shutdown cancellation and ThreadSanitizer coverage.
+- bounded GGUF v3 header/split parsing, packed-expert slicing, exact quantized byte spans,
+  Unicode Windows paths, malformed-header rejection and non-executable snapshot enforcement.
 
 ## Safety tests still required for production adapters
 

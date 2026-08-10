@@ -39,8 +39,10 @@ model conversion.
 > 11,264 main/MTP expert bundles collapse from six tensors to exactly two contiguous source
 > ranges each. A governed fixed-worker pool can now reserve, queue and asynchronously load those
 > generic multi-range bundles into packed RAM buffers, but it has only been exercised on a tiny
-> fixture because the header-only DeepSeek import contains no payload. Full-checkpoint DeepSeek
-> loading, generation and CUDA remain unimplemented.
+> fixture because the header-only preview import contains no payload. A bounded native GGUF v3
+> reader now also maps the pinned 82.54 GB `UD-IQ1_S` 0731 profile from three headers into 11,008
+> logical expert bundles without downloading its complete payload. Full-checkpoint DeepSeek loading,
+> quantized execution, generation and CUDA remain unimplemented.
 
 ## Why Vastloom exists
 
@@ -90,6 +92,8 @@ The first governed multi-range-to-packed-buffer transaction is documented in the
 [`M9 packed expert load report`](docs/reports/M9_PACKED_EXPERT_LOAD_VALIDATION.md).
 The bounded shared worker/queue transaction is documented in the
 [`M9 asynchronous expert-load report`](docs/reports/M9_ASYNC_EXPERT_LOAD_VALIDATION.md).
+The official 0731 GGUF header and packed-expert binding is documented in the
+[`M7 0731 GGUF catalog report`](docs/reports/M7_DEEPSEEK_0731_GGUF_CATALOG_VALIDATION.md).
 Current and candidate model support is kept explicit in the
 [`model compatibility matrix`](docs/MODEL_COMPATIBILITY.md).
 
@@ -223,6 +227,15 @@ allocation plan is derived from detected capacity and conservative headroom.
   `execution_supported=false`. The expanded reduced graph uses only 4,750 deterministic FP32
   values; packed checkpoint tensors, target-verified speculative generation and CUDA remain
   future gates.
+- **Official 0731 GGUF catalog:** the separate Unsloth revision
+  `fbbb5b93fb787c21338159b0af3318bb3f4d9768` now has a bounded GGUF v3 header reader and
+  DeepSeek-specific packed-expert mapper. The reviewed `UD-IQ1_S` split exposes 1,328 physical
+  tensors, 34,223 logical tensors and 11,008 layer/expert bundles.
+- **Header-derived traffic floor:** the encoded routed experts total 75,547,803,648 bytes;
+  a top-6 no-cache decode would request 1,770,651,648 logical expert bytes per token before
+  caching/prefetch gains. This is not measured physical SSD traffic or a speed claim.
+- **GGUF safety boundary:** `deepseek-gguf-inspect` reads metadata only. Header prefixes cannot
+  become executable sources, and no quantized kernel or 0731 generation path is connected yet.
 
 ### Runtime foundation
 
@@ -438,6 +451,21 @@ The inspector allocates metadata structures only and never treats the snapshot a
 runnable checkpoint. Do not add `--allow-large-download` merely to try the command: the
 complete checkpoint still has no Vastloom inference path.
 
+The newer 0731 GGUF path can likewise catalog user-supplied complete files or bounded header
+prefixes. For three prefixes, their original complete sizes must be supplied in split order:
+
+```powershell
+vastloom deepseek-gguf-inspect .\part-00001.gguf .\part-00002.gguf .\part-00003.gguf `
+  --declared-sizes 5257664,49093726624,33440253504 `
+  --revision fbbb5b93fb787c21338159b0af3318bb3f4d9768 `
+  --json
+```
+
+This command emits a `metadata_only` logical catalog. It does not download shards, verify a remote
+revision, read tensor payloads or authorize inference. Use only exact sizes from an independently
+verified artifact manifest; a user-entered revision is reported as a label, not cryptographic
+proof.
+
 ## TinyChat CLI options
 
 ```text
@@ -495,7 +523,7 @@ vastloom chat MODEL_OR_MANIFEST
 vastloom model-info MODEL_OR_MANIFEST
 vastloom self-test MODEL_OR_MANIFEST
 vastloom doctor
-vastloom inspect MANIFEST_OR_SAFETENSORS
+vastloom inspect MANIFEST_OR_MODEL_HEADERS [--declared-size SIZE] [--tensor-limit N]
 vastloom verify MANIFEST [--full]
 vastloom plan MANIFEST
 vastloom trace-sim TRACE.csv
@@ -507,6 +535,7 @@ vastloom tokenize MODEL_DIRECTORY --text TEXT [--chat] [--json]
 vastloom real-logits MODEL_DIRECTORY --text TEXT [--chat] [--top N] [--json]
 vastloom moe-inspect MODEL_DIRECTORY [--no-verify] [--json]
 vastloom deepseek-inspect MODEL_DIRECTORY [--no-verify] [--json]
+vastloom deepseek-gguf-inspect SHARD... [--declared-sizes CSV] [--revision ID] [--json]
 vastloom moe-logits MODEL_DIRECTORY --text TEXT [--chat] [--top N]
     [--cache no-cache|lru|lfu|static-hot] [--cache-bytes SIZE]
     [--io sync|async] [--io-cache buffered|bypass] [--expert-read whole|staged]
@@ -582,8 +611,9 @@ Alpha.4 proves one real dense path and one real CPU MoE streaming path with an
 opt-in bounded asynchronous reader, not the final Vastloom research thesis.
 It currently has:
 
-- two executable pinned Hugging Face adapters plus a DeepSeek metadata/tokenizer and reduced
-  FP32 prefill oracle; no full-checkpoint DeepSeek, MiniMax, Kimi or GGUF execution adapter;
+- two executable pinned Hugging Face adapters plus a DeepSeek metadata/tokenizer, reduced
+  FP32 prefill oracle and official 0731 GGUF metadata catalog; no full-checkpoint DeepSeek,
+  MiniMax, Kimi or GGUF execution adapter;
 - no CUDA, ROCm, Vulkan or Metal inference backend;
 - no production quantized kernels;
 - no VRAM expert tier or pinned host buffers; direct/unbuffered I/O is currently an
@@ -610,8 +640,8 @@ research metric is not merely SSD throughput. It is:
 
 The next technical sequence remains incremental:
 
-1. bind the official 0731 GGUF metadata and quantized payloads to the verified logical expert
-   bundles, then connect packed FP4/FP8 kernels and a target-verified MTP decoding loop;
+1. bind one official 0731 IQ1_S expert slice to reference quantized CPU kernels, then connect
+   verified full payloads and a target-verified MTP decoding loop;
 2. CUDA dense, attention, router and packed expert kernels;
 3. explicit VRAM/RAM/NVMe placement with pinned buffers and direct/overlapped I/O;
 4. adaptive placement, predictive routing and speculative expert deduplication;

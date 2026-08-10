@@ -105,6 +105,8 @@ The first complete real quantized expert and governed-load gate is documented in
 [`M7 real-expert report`](docs/reports/M7_DEEPSEEK_REAL_EXPERT_VALIDATION.md).
 The derived resident/streamed trunk capacity gate is documented in the
 [`M7 working-set report`](docs/reports/M7_DEEPSEEK_WORKING_SET_VALIDATION.md).
+The first model-independent per-layer trunk plan and governed tile transaction are documented in
+the [`M9 layer-trunk streaming report`](docs/reports/M9_LAYER_TRUNK_STREAMING_VALIDATION.md).
 The pinned importer and immutable full-source admission boundary are documented in the
 [`M7 checkpoint-binding report`](docs/reports/M7_DEEPSEEK_GGUF_CHECKPOINT_BINDING_VALIDATION.md).
 Current and candidate model support is kept explicit in the
@@ -269,6 +271,10 @@ portability target, not a validated platform claim.
   must pass full-file SHA-256 and the live single-tier expert admission gate before it can expose
   executable source ranges; even then, `execution_supported=false` until a layer/token consumer
   exists.
+- **Bounded layer-trunk plan:** every non-routed `blk.N.*` tensor now keeps its exact layer
+  identity. The real 0731 metadata yields 43/43 deterministic plans, 1,193 tensors/tiles and a
+  35,651,584-byte largest tile under a 64 MiB cap. A governed fixture proves one immutable tile
+  read and fault cleanup; no official payload tile or complete layer was executed.
 
 ### Runtime foundation
 
@@ -288,6 +294,9 @@ portability target, not a validated platform claim.
   with exact per-tensor slices through either the synchronous oracle or a fixed-worker,
   fixed-capacity asynchronous pool. The full gate/up/down path is now exercised on one real
   DeepSeek 0731 expert; no DeepSeek layer or token loop consumes these buffers yet.
+- **Governed trunk tile:** one non-routed source tile is identity-checked against the catalog,
+  destination and staging are reserved before allocation, metadata-only catalogs are refused and
+  an RAII lease protects the resulting buffer through use/eviction.
 - **Safety state machine:** `NORMAL → PRESSURE → CRITICAL → EMERGENCY`, with immediate
   escalation and hysteretic recovery.
 - **Bounded asynchronous I/O:** fixed worker, queue and request limits; every buffer
@@ -667,8 +676,9 @@ The official 0731 `UD-IQ1_S` GGUF catalog now also derives two batch-1, 4,096-to
 profiles from exact metadata. The streamed-trunk floor is 124,905,496 bytes including one complete
 8,781,824-byte expert; the resident-trunk floor is 7,110,994,292 bytes. This makes the intended
 low-memory contract explicit: trunk weights may remain immutable on SSD and move through bounded
-tiles, but one expert is never split across RAM and VRAM. This is capacity accounting only; the
-DeepSeek trunk-streaming token path is not implemented.
+tiles, but one expert is never split across RAM and VRAM. The 43 layer plans use 1,193 tiles with
+a 35,651,584-byte maximum; only a synthetic tile payload has been loaded. The DeepSeek
+trunk-streaming token path is not implemented.
 
 ## Current limitations
 
@@ -682,6 +692,8 @@ It currently has:
 - no CUDA, ROCm, Vulkan or Metal inference backend;
 - one scalar IQ1_S/IQ3_XXS reference path validated on a complete real expert, but no complete
   quantized layer/token, SIMD/fused production kernel or CUDA quantized path;
+- complete metadata-derived trunk plans and a fixture-only tile loader, but no official trunk
+  payload read and no Q8_0/Q5_K/Q6_K/BF16/F32 trunk-kernel set;
 - no VRAM expert tier or pinned host buffers; direct/unbuffered I/O is currently an
   opt-in OLMoE measurement protocol, not the production path for every adapter;
 - OLMoE currently exposes final-logit probes and route telemetry, not decoding/chat;
@@ -709,8 +721,9 @@ merely SSD throughput. It is:
 
 The next technical sequence remains incremental:
 
-1. import and fully hash the real pinned shards, consume bounded trunk tiles plus routed experts
-   in one complete quantized layer/token probe, then connect a target-verified MTP decoding loop;
+1. import and fully hash the real pinned shards, add the missing trunk quantization kernels,
+   consume the existing bounded plans plus routed experts in one complete quantized layer/token
+   probe, then connect a target-verified MTP decoding loop;
 2. CUDA dense, attention, router and packed expert kernels;
 3. explicit VRAM/RAM/NVMe placement with pinned buffers and direct/overlapped I/O;
 4. adaptive placement, predictive routing and speculative expert deduplication;

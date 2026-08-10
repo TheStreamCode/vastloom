@@ -14,8 +14,9 @@ or matching tensor dimensions is never enough to enable execution automatically.
 | OLMoE-1B-7B-0924-Instruct | Pinned shards, top-k routes, expert streaming and I/O telemetry | Validated CPU expert streaming |
 | `deepseek-ai/DeepSeek-V4-Flash` preview at `60d8d707...` | Header catalog, tokenizer, reduced main+MTP prefill and five incremental cache steps | Reduced FP32 reference execution only |
 | `deepseek-ai/DeepSeek-V4-Flash-0731` at `7872f01b...` | Public metadata/config reviewed on 2026-08-10 | Not imported, inspected or executed by Vastloom yet |
-| `unsloth/DeepSeek-V4-Flash-0731-GGUF` at `fbbb5b93...` | Pinned atomic importer, verified metadata binding, derived resident/streamed working sets, plus exact gate/up IQ1_S and down IQ3_XXS parity on one real expert | One governed scalar CPU expert only; real full payload not imported; no layer/token generation |
+| `unsloth/DeepSeek-V4-Flash-0731-GGUF` at `fbbb5b93...` | Pinned atomic importer, verified metadata binding, 43 bounded layer-trunk plans, plus exact gate/up IQ1_S and down IQ3_XXS parity on one real expert | One governed scalar CPU expert and fixture-only trunk tile; real full payload not imported; no layer/token generation |
 | `unsloth/Laguna-S-2.1` at `1a646907...` | Public config, custom-code and shard metadata reviewed on 2026-08-10 | Adapter and execution not implemented |
+| Kimi K3-class profiles | Public-roadmap capacity/traffic study only | Not a reference-PC execution target unless one exact complete expert passes the single-tier gate |
 
 Historical DeepSeek reports remain tied to the preview revision they actually tested. The newer
 0731 release is a separate compatibility target, not a silent rename of that evidence.
@@ -60,7 +61,10 @@ a separate array bound, cross-checks the 43-layer/256-expert/top-6 scalar metada
 batch-1, 4,096-token memory components. Runtime state is 116,123,672 bytes; the largest expert is
 8,781,824 bytes. A streamed-trunk CPU floor is therefore 124,905,496 bytes, while keeping all
 6,986,088,796 always-active encoded bytes resident raises the CPU floor to 7,110,994,292 bytes.
-Both are metadata-only capacity profiles, not executable DeepSeek plans.
+All 43 layers also produce bounded non-routed plans: 1,193 tensors become 1,193 tiles under a
+64 MiB ceiling, with 138,867,160–161,707,992 bytes of trunk per layer and a 35,651,584-byte
+largest tile. These are metadata-derived plans; the official tile sources remain unavailable and
+no executable DeepSeek layer exists.
 
 Three bounded ranges from the second shard have now been tested separately: the 1,638,400-byte
 gate and up IQ1_S matrices plus the 3,211,264-byte IQ3_XXS down matrix form the complete
@@ -105,8 +109,11 @@ source ranges. The separate GGUF binding now populates the same contract for the
 `UD-IQ1_S` headers by slicing each packed tensor along its expert axis. Its pinned checkpoint gate
 can couple fully hashed immutable shards to those ranges after capacity admission. Scalar IQ1_S
 and IQ3_XXS oracles execute one complete real extracted bundle through the shared governed loader.
-The official full-shard import, a layer/token consumer, optimized kernels and the Laguna adapter
-remain open.
+All non-routed `blk.N.*` tensors now retain their layer identity and feed a shared bounded tile
+planner/loader. The real 0731 metadata produces 43 complete layer plans, 1,193 tensors/tiles and a
+35,651,584-byte maximum tile under the 64 MiB ceiling. Only a synthetic tile payload has been
+loaded; the official full-shard import, a layer/token consumer, optimized kernels and the Laguna
+adapter remain open.
 
 The shared runtime may then place a tensor or expert bundle in one of these explicit states:
 
@@ -177,6 +184,11 @@ The general pool supports one to four workers, a queue of at most 64 requests, p
 reservations and safe queued-work cancellation. This test reads before compute and therefore does
 not demonstrate useful overlap. Cache lookup and direct I/O remain in the existing OLMoE-specific
 path.
+
+The separate non-routed tile primitive currently performs one synchronous buffered range at a
+time under the same Governor/residency rules. It proves bounded trunk payload movement and fault
+cleanup, not compute coupling or SSD speed. A production loop may double-buffer only after both
+buffers, queue slots and the target kernel have been budgeted and parity-tested.
 
 ## Format policy
 

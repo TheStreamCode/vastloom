@@ -52,6 +52,14 @@ tensor slices; destroys scratch before releasing staging; and keeps its use leas
 packed bytes are destroyed. Short reads, bounds failures and cancellation publish `FAILED` only
 after temporary buffers have been released.
 
+The non-routed layer-tile loader follows the same publication rule. A plan may be derived from
+metadata, but payload loading is rejected until the catalog has executable sources. Before a
+single tile is allocated, the loader checks its exact tensor-relative offset against the catalog,
+requires a matching `NVME` residency object, caps it at 64 MiB by default and reserves both its
+RAM destination and staging charge. Cancellation is checked before admission and after I/O;
+short reads or late cancellation release the transfer and both reservations before publishing
+`FAILED`. A successful buffer keeps a use lease until its bytes are destroyed.
+
 The shared asynchronous expert pool keeps one to four fixed workers and one to 64 queued
 requests. Each request reserves its complete destination and bounded staging before enqueue. A
 second capacity check rolls those reservations back if another submitter filled the queue or
@@ -106,8 +114,9 @@ profile is a capacity result, not authorization to execute unverified weights.
 
 The DeepSeek GGUF inspector additionally derives both trunk profiles from exact scalar metadata,
 the retained bounded compression schedule and encoded tensor ranges. It never adds RAM and VRAM
-together to make an oversized expert appear admissible. The streamed-trunk result is currently a
-planning result only; no DeepSeek trunk-streaming token path exists yet.
+together to make an oversized expert appear admissible. It now also verifies deterministic plans
+for all 43 real layers, but only the synthetic tile transaction has consumed payload bytes. No
+official DeepSeek trunk-streaming token path exists yet.
 
 ## State machine
 

@@ -22,7 +22,9 @@ A bounded scalar IQ1_S dequantization/matvec oracle matches pinned ggml output o
 layer-0/expert-0 gate slice. Scalar IQ3_XXS parity and one complete real gate/up/SwiGLU/down
 expert now also match pinned ggml bit for bit after a governed asynchronous RAM load. Its exact
 three-object importer and full-hash/single-tier source-binding gate are implemented, but the real
-82.54 GB payload has not been imported or executed. A complete 0731 quantized layer/token path,
+82.54 GB payload has not been imported or executed. All 43 layers now expose deterministic
+non-routed trunk plans (1,193 tensors/tiles at a 64 MiB ceiling), and a synthetic governed tile
+transaction validates payload reads and cleanup. No official trunk tile was read. A complete 0731 quantized layer/token path,
 generation and CUDA remain unvalidated. Windows and Linux CPU paths are tested; macOS/Metal remain
 unvalidated. Laguna S 2.1 remains a reviewed compatibility target, not a validated execution path.
 

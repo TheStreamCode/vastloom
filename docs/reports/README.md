@@ -13,6 +13,9 @@ hardware, commands, measurements and limitations.
 
 ## Current report
 
+- [`M9_LAYER_TRUNK_STREAMING_VALIDATION.md`](M9_LAYER_TRUNK_STREAMING_VALIDATION.md) — exact
+  `blk.N.*` identities, deterministic 64 MiB per-layer trunk plans, a governed single-tile loader,
+  fault cleanup and real 43-layer 0731 metadata-plan results without downloading weight payloads.
 - [`M7_DEEPSEEK_GGUF_CHECKPOINT_BINDING_VALIDATION.md`](M7_DEEPSEEK_GGUF_CHECKPOINT_BINDING_VALIDATION.md) —
   exact 0731 `UD-IQ1_S` object identities, bounded atomic metadata/full importer, immutable
   checkpoint binding, full-hash and single-tier admission gates, plus real 5.34 MB metadata

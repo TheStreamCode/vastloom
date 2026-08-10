@@ -41,6 +41,11 @@
   immutable manifest, every complete-file SHA-256 and live single-tier expert admission.
   `--no-verify` remains metadata-only, the official 82.54 GB payload was not downloaded, and the
   CLI still reports `execution_supported=false` until a layer/token consumer exists.
+- Preserved exact `blk.N.*` identity for all non-routed GGUF tensors and added deterministic
+  per-layer trunk plans with a 64 MiB ceiling. The real 0731 metadata maps all 43 layers into
+  1,193 tensor tiles; a new governed fixture loader covers immutable identity, Unicode paths,
+  budget refusal, cancellation, short reads, leases and zero-reservation cleanup. No official
+  weight payload or complete DeepSeek layer was executed.
 - Added a bounded scalar IQ1_S dequantization/matvec reference kernel derived from pinned ggml
   equations and licensed codebook data. Synthetic vectors and one exact 1,638,400-byte real
   DeepSeek 0731 expert-gate slice match the upstream oracle bit for bit across all 2,048 rows.

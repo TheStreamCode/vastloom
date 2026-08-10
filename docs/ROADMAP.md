@@ -141,6 +141,9 @@ Safetensors payload and complete layer/token remain unvalidated.
 - [x] Pin the three exact 0731 `UD-IQ1_S` object sizes/SHA-256 values, import bounded headers or
   complete immutable shards atomically, and expose full source ranges only after complete hash
   verification plus live single-tier admission. The real 82.54 GB payload remains undownloaded.
+- [x] Preserve layer identity for every `blk.N.*` trunk tensor, produce deterministic per-layer
+  plans with a 64 MiB tile ceiling and validate a governed single-tile payload transaction on a
+  fault-injected fixture. No official weight payload was read.
 - [x] Match pinned ggml IQ1_S dequantization/matvec output on one exact real 0731 expert-gate
   slice with bounded scalar CPU code.
 - [x] Match pinned ggml IQ3_XXS output and execute one complete real 0731 gate/up/down expert
@@ -173,6 +176,8 @@ The separate official 0731 GGUF header binding is recorded in the
 [M7 0731 GGUF catalog report](reports/M7_DEEPSEEK_0731_GGUF_CATALOG_VALIDATION.md).
 The immutable import/source gate is recorded in the
 [M7 checkpoint-binding report](reports/M7_DEEPSEEK_GGUF_CHECKPOINT_BINDING_VALIDATION.md).
+The bounded per-layer trunk plan and tile transaction are recorded in the
+[M9 layer-trunk streaming report](reports/M9_LAYER_TRUNK_STREAMING_VALIDATION.md).
 The first real packed-matrix parity gate is recorded in the
 [M7 IQ1_S kernel report](reports/M7_DEEPSEEK_IQ1S_KERNEL_VALIDATION.md).
 The completed one-expert gate/up/SwiGLU/down path is recorded in the
@@ -201,6 +206,8 @@ unbounded allocation and clean recovery from injected CUDA failures.
 - [x] Couple a synchronous packed buffer and validated multi-range completion to `RAM_READY`.
 - [x] Add bounded asynchronous multi-range transactions with exclusive transfer leases.
 - [x] Feed one complete real DeepSeek 0731 expert from governed packed RAM into a scalar kernel.
+- [x] Build deterministic non-routed per-layer trunk tile plans and complete a governed,
+  cancellation-aware single-tile RAM load with fault cleanup.
 - [ ] Connect those futures to expert compute and measure real compute/I/O overlap.
 - [ ] Pinned host buffers.
 - [ ] Direct/overlapped NVMe reads where supported.

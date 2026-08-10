@@ -326,6 +326,27 @@ hash verification and live single-tier expert admission. Skipping hashes forces 
 catalog back to metadata-only. Exact encoded byte accounting is available to planning, but the
 real full payload has not been imported and layer/token execution remains outside this slice.
 
+Every non-routed `blk.N.*` descriptor now retains its checked layer identity. The shared layer
+planner walks catalog order, excludes routed-expert bundles and splits each immutable tensor range
+at a 64 MiB ceiling. On the real 0731 metadata this produces complete plans for 43/43 layers:
+1,193 tensors and 1,193 tiles, with 138,867,160–161,707,992 encoded bytes per layer and a largest
+individual tile of 35,651,584 bytes. The aggregate layer is never allocated as one buffer.
+
+```text
+logical layer N
+  -> ordered non-routed tensors
+  -> bounded source tile(s) per tensor
+  -> reserve RAM destination + staging
+  -> read immutable range
+  -> RAM_READY + use lease
+  -> compute consumer (not connected for official 0731 payload)
+```
+
+The synchronous shared tile loader validates this transaction on a synthetic payload, including
+Unicode paths, cancellation, short reads and reservation cleanup. Metadata-only catalogs can plan
+but are forbidden to load. The official 82.54 GB payload is absent, so these real layer numbers
+remain metadata-derived placement evidence rather than an execution claim.
+
 ```text
 pinned importer manifest + exact object identities
   -> bounded GGUF header/split validation
@@ -406,6 +427,11 @@ ranges to physical packed RAM buffers, destroy scratch before ready-state public
 use lease alive until the buffer is destroyed. The asynchronous result exposes queue, service and
 total timing so a future execution loop can overlap expert N+1 with compute on expert N. Actual
 compute coupling, shared direct I/O and CUDA copy events are not connected yet.
+
+The layer-tile loader uses the same residency contract for one non-routed source range. It checks
+the planned identity against the immutable catalog, reserves both destination and staging before
+allocation, publishes only after a complete read and retains a use lease until the byte buffer is
+destroyed. It is currently synchronous/buffered and has no official DeepSeek kernel consumer.
 
 For TinyChat only L1 is active:
 

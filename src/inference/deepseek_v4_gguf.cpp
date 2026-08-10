@@ -13,6 +13,7 @@
 
 #include "vastloom/model/imported_checkpoint.hpp"
 #include "vastloom/model/layer_streaming.hpp"
+#include "vastloom/inference/ggml_quantization.hpp"
 #include "vastloom/util/json.hpp"
 #include "vastloom/util/sha256.hpp"
 #include "vastloom/util/string.hpp"
@@ -545,6 +546,28 @@ Result<DeepseekV4GgufCatalogReport> build_deepseek_v4_gguf_catalog(
         std::size_t layer_trunk_planned_layers = 0U;
         std::size_t layer_trunk_tensor_count = 0U;
         std::size_t layer_trunk_tile_count = 0U;
+        std::size_t covered_storage_tensor_count = 0U;
+        ByteCount covered_storage_bytes = 0U;
+        std::size_t unsupported_storage_tensor_count = 0U;
+        ByteCount unsupported_storage_bytes = 0U;
+        for (const auto& tensor : logical.tensors) {
+            if (tensor.role == model::TensorRole::routed_expert || !tensor.layer.has_value()) {
+                continue;
+            }
+            const bool covered = tensor.ggml_type.has_value() &&
+                                 supports_reference_storage_ggml_type(*tensor.ggml_type);
+            auto& count = covered ? covered_storage_tensor_count
+                                  : unsupported_storage_tensor_count;
+            auto& bytes = covered ? covered_storage_bytes : unsupported_storage_bytes;
+            if (count == std::numeric_limits<std::size_t>::max() ||
+                tensor.source.bytes > std::numeric_limits<ByteCount>::max() - bytes) {
+                return make_error(ErrorCode::invalid_format,
+                                  "DeepSeek GGUF storage-kernel coverage totals overflow",
+                                  tensor.name);
+            }
+            ++count;
+            bytes += tensor.source.bytes;
+        }
         for (std::uint32_t layer = 0U; layer < options.layers; ++layer) {
             auto plan = model::build_layer_streaming_plan(logical, layer);
             if (!plan) {
@@ -626,6 +649,14 @@ Result<DeepseekV4GgufCatalogReport> build_deepseek_v4_gguf_catalog(
         report.layer_trunk_planned_layers = layer_trunk_planned_layers;
         report.layer_trunk_tensor_count = layer_trunk_tensor_count;
         report.layer_trunk_tile_count = layer_trunk_tile_count;
+        report.reference_storage_type_covered_tensor_count = covered_storage_tensor_count;
+        report.reference_storage_type_covered_bytes = covered_storage_bytes;
+        report.reference_storage_type_unsupported_tensor_count = unsupported_storage_tensor_count;
+        report.reference_storage_type_unsupported_bytes = unsupported_storage_bytes;
+        report.reference_storage_types_complete =
+            layer_trunk_tensor_count != 0U &&
+            covered_storage_tensor_count == layer_trunk_tensor_count &&
+            unsupported_storage_tensor_count == 0U;
         report.context_tokens = options.context_tokens;
         report.maximum_context_tokens = working_set.value().maximum_context_tokens;
         report.batch_size = options.batch_size;
@@ -875,7 +906,17 @@ std::string to_json(const DeepseekV4GgufCatalogReport& report) {
            << ",\"minimum_layer_trunk_bytes\":" << report.minimum_layer_trunk_bytes
            << ",\"maximum_layer_trunk_bytes\":" << report.maximum_layer_trunk_bytes
            << ",\"maximum_tensor_bytes\":" << report.maximum_layer_trunk_tensor_bytes
-           << ",\"maximum_tile_bytes\":" << report.maximum_layer_trunk_tile_bytes << '}'
+           << ",\"maximum_tile_bytes\":" << report.maximum_layer_trunk_tile_bytes
+           << ",\"reference_storage_type_covered_tensor_count\":"
+           << report.reference_storage_type_covered_tensor_count
+           << ",\"reference_storage_type_covered_bytes\":"
+           << report.reference_storage_type_covered_bytes
+           << ",\"reference_storage_type_unsupported_tensor_count\":"
+           << report.reference_storage_type_unsupported_tensor_count
+           << ",\"reference_storage_type_unsupported_bytes\":"
+           << report.reference_storage_type_unsupported_bytes
+           << ",\"reference_storage_types_complete\":"
+           << (report.reference_storage_types_complete ? "true" : "false") << '}'
            << ",\"working_set\":{\"context_tokens\":" << report.context_tokens
            << ",\"maximum_context_tokens\":" << report.maximum_context_tokens
            << ",\"batch_size\":" << report.batch_size
@@ -944,6 +985,11 @@ std::string to_text(const DeepseekV4GgufCatalogReport& report) {
            << "Bounded tile maximum:" << ' '
            << format_bytes(report.maximum_layer_trunk_tile_bytes) << " / "
            << format_bytes(report.layer_streaming_tile_limit_bytes) << '\n'
+           << "Storage type kernels:" << ' '
+           << report.reference_storage_type_covered_tensor_count << " covered / "
+           << report.reference_storage_type_unsupported_tensor_count << " unsupported"
+           << (report.reference_storage_types_complete ? " (complete)" : " (incomplete)")
+           << '\n'
            << "Context assumption:  " << report.context_tokens << " / "
            << report.maximum_context_tokens << " tokens, batch " << report.batch_size << '\n'
            << "Persistent KV:       " << format_bytes(report.persistent_kv_bytes) << '\n'

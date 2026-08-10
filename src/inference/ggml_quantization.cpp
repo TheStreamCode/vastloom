@@ -8,6 +8,7 @@
 #include <functional>
 #include <limits>
 #include <string_view>
+#include <utility>
 
 namespace vastloom::inference {
 namespace {
@@ -209,6 +210,316 @@ Result<void> decode_iq3_xxs_block(
     return {};
 }
 
+float bf16_to_float(std::uint16_t value) noexcept {
+    return std::bit_cast<float>(static_cast<std::uint32_t>(value) << 16U);
+}
+
+float read_f32_le(const std::byte* bytes) noexcept {
+    return std::bit_cast<float>(read_u32_le(bytes));
+}
+
+Result<void> decode_q8_0_block(
+    const std::byte* encoded,
+    std::span<float, kQ8_0BlockElements> output) {
+    const float scale = fp16_to_float(read_u16_le(encoded));
+    if (!std::isfinite(scale)) {
+        return make_error(ErrorCode::invalid_format,
+                          "Q8_0 block scale is not finite");
+    }
+    for (std::size_t index = 0U; index < output.size(); ++index) {
+        const auto raw = std::to_integer<std::uint8_t>(encoded[2U + index]);
+        const auto quantized = std::bit_cast<std::int8_t>(raw);
+        output[index] = scale * static_cast<float>(quantized);
+    }
+    return {};
+}
+
+void q5_k_scale_min(std::size_t index,
+                    const std::byte* encoded,
+                    std::uint8_t& scale,
+                    std::uint8_t& minimum) noexcept {
+    const auto at = [encoded](std::size_t offset) {
+        return std::to_integer<std::uint8_t>(encoded[offset]);
+    };
+    if (index < 4U) {
+        scale = static_cast<std::uint8_t>(at(index) & 63U);
+        minimum = static_cast<std::uint8_t>(at(index + 4U) & 63U);
+        return;
+    }
+    scale = static_cast<std::uint8_t>(
+        (static_cast<std::uint32_t>(at(index + 4U)) & 15U) |
+        ((static_cast<std::uint32_t>(at(index - 4U)) >> 6U) << 4U));
+    minimum = static_cast<std::uint8_t>(
+        (static_cast<std::uint32_t>(at(index + 4U)) >> 4U) |
+        ((static_cast<std::uint32_t>(at(index)) >> 6U) << 4U));
+}
+
+Result<void> decode_q5_k_block(
+    const std::byte* encoded,
+    std::span<float, kQ5KBlockElements> output) {
+    const float scale = fp16_to_float(read_u16_le(encoded));
+    const float minimum = fp16_to_float(read_u16_le(encoded + 2U));
+    if (!std::isfinite(scale) || !std::isfinite(minimum)) {
+        return make_error(ErrorCode::invalid_format,
+                          "Q5_K block scale or minimum is not finite");
+    }
+
+    const std::byte* scales = encoded + 4U;
+    const std::byte* high = encoded + 16U;
+    const std::byte* low = encoded + 48U;
+    std::size_t scale_index = 0U;
+    std::uint8_t first_high_mask = 1U;
+    std::uint8_t second_high_mask = 2U;
+    for (std::size_t group = 0U; group < 4U; ++group) {
+        std::uint8_t first_scale = 0U;
+        std::uint8_t first_minimum = 0U;
+        std::uint8_t second_scale = 0U;
+        std::uint8_t second_minimum = 0U;
+        q5_k_scale_min(scale_index, scales, first_scale, first_minimum);
+        q5_k_scale_min(scale_index + 1U, scales, second_scale, second_minimum);
+        const float d1 = scale * static_cast<float>(first_scale);
+        const float m1 = minimum * static_cast<float>(first_minimum);
+        const float d2 = scale * static_cast<float>(second_scale);
+        const float m2 = minimum * static_cast<float>(second_minimum);
+        for (std::size_t lane = 0U; lane < 32U; ++lane) {
+            const auto low_byte = std::to_integer<std::uint8_t>(low[lane]);
+            const auto high_byte = std::to_integer<std::uint8_t>(high[lane]);
+            const std::uint8_t first = static_cast<std::uint8_t>(
+                (low_byte & 15U) + ((high_byte & first_high_mask) != 0U ? 16U : 0U));
+            const std::uint8_t second = static_cast<std::uint8_t>(
+                (low_byte >> 4U) + ((high_byte & second_high_mask) != 0U ? 16U : 0U));
+            const std::size_t base = group * 64U;
+            output[base + lane] = d1 * static_cast<float>(first) - m1;
+            output[base + 32U + lane] = d2 * static_cast<float>(second) - m2;
+        }
+        low += 32U;
+        scale_index += 2U;
+        first_high_mask = static_cast<std::uint8_t>(first_high_mask << 2U);
+        second_high_mask = static_cast<std::uint8_t>(second_high_mask << 2U);
+    }
+    return {};
+}
+
+Result<void> decode_q6_k_block(
+    const std::byte* encoded,
+    std::span<float, kQ6KBlockElements> output) {
+    const float scale = fp16_to_float(read_u16_le(encoded + 208U));
+    if (!std::isfinite(scale)) {
+        return make_error(ErrorCode::invalid_format,
+                          "Q6_K block scale is not finite");
+    }
+
+    const std::byte* low = encoded;
+    const std::byte* high = encoded + 128U;
+    const std::byte* scales = encoded + 192U;
+    for (std::size_t half = 0U; half < 2U; ++half) {
+        for (std::size_t lane = 0U; lane < 32U; ++lane) {
+            const std::size_t scale_index = lane / 16U;
+            const auto low_first = std::to_integer<std::uint8_t>(low[lane]);
+            const auto low_second = std::to_integer<std::uint8_t>(low[lane + 32U]);
+            const auto high_byte = std::to_integer<std::uint8_t>(high[lane]);
+            const auto q1 = static_cast<std::int32_t>(
+                (low_first & 15U) | (((high_byte >> 0U) & 3U) << 4U)) - 32;
+            const auto q2 = static_cast<std::int32_t>(
+                (low_second & 15U) | (((high_byte >> 2U) & 3U) << 4U)) - 32;
+            const auto q3 = static_cast<std::int32_t>(
+                (low_first >> 4U) | (((high_byte >> 4U) & 3U) << 4U)) - 32;
+            const auto q4 = static_cast<std::int32_t>(
+                (low_second >> 4U) | (((high_byte >> 6U) & 3U) << 4U)) - 32;
+            const auto signed_scale = [scales](std::size_t index) {
+                return std::bit_cast<std::int8_t>(
+                    std::to_integer<std::uint8_t>(scales[index]));
+            };
+            const std::size_t base = half * 128U;
+            output[base + lane] = scale * static_cast<float>(signed_scale(scale_index)) *
+                                  static_cast<float>(q1);
+            output[base + 32U + lane] =
+                scale * static_cast<float>(signed_scale(scale_index + 2U)) *
+                static_cast<float>(q2);
+            output[base + 64U + lane] =
+                scale * static_cast<float>(signed_scale(scale_index + 4U)) *
+                static_cast<float>(q3);
+            output[base + 96U + lane] =
+                scale * static_cast<float>(signed_scale(scale_index + 6U)) *
+                static_cast<float>(q4);
+        }
+        low += 64U;
+        high += 32U;
+        scales += 8U;
+    }
+    return {};
+}
+
+Result<void> validate_input(std::span<const float> input) {
+    for (const float value : input) {
+        if (!std::isfinite(value)) {
+            return make_error(ErrorCode::invalid_argument,
+                              "Reference matvec input contains a non-finite value");
+        }
+    }
+    return {};
+}
+
+template <std::size_t BlockElements, std::size_t BlockBytes, typename Validator,
+          typename Decoder>
+Result<void> dequantize_blocked(std::span<const std::byte> encoded,
+                                std::span<float> output,
+                                const QuantizedKernelLimits& limits,
+                                Validator&& validator,
+                                Decoder&& decoder) {
+    if (output.empty() || output.size() % BlockElements != 0U ||
+        output.size() > limits.max_elements) {
+        return make_error(ErrorCode::invalid_argument,
+                          "Blocked output size is empty, unaligned or outside its limit");
+    }
+    auto required = checked_encoded_bytes(output.size(), BlockElements, BlockBytes);
+    if (!required) return required.error();
+    if (encoded.size() != required.value()) {
+        return make_error(ErrorCode::invalid_format,
+                          "Blocked encoded bytes do not match the output element count");
+    }
+    auto validated = std::invoke(std::forward<Validator>(validator), encoded);
+    if (!validated) return validated.error();
+    for (std::size_t block = 0U; block < output.size() / BlockElements; ++block) {
+        auto status = std::invoke(
+            std::forward<Decoder>(decoder), encoded.data() + block * BlockBytes,
+            std::span<float, BlockElements>(output.data() + block * BlockElements,
+                                            BlockElements));
+        if (!status) return status.error();
+    }
+    return {};
+}
+
+template <std::size_t BlockElements, std::size_t BlockBytes, typename Validator,
+          typename Decoder>
+Result<void> matvec_blocked(std::span<const std::byte> encoded_matrix,
+                            std::size_t rows,
+                            std::size_t columns,
+                            std::span<const float> input,
+                            std::span<float> output,
+                            const QuantizedKernelLimits& limits,
+                            Validator&& validator,
+                            Decoder&& decoder) {
+    auto elements = checked_matrix_elements(rows, columns, BlockElements, limits);
+    if (!elements) return elements.error();
+    auto required = checked_encoded_bytes(elements.value(), BlockElements, BlockBytes);
+    if (!required) return required.error();
+    if (encoded_matrix.size() != required.value() || input.size() != columns ||
+        output.size() != rows) {
+        return make_error(ErrorCode::invalid_argument,
+                          "Blocked matrix, input or output span has the wrong size");
+    }
+    auto input_status = validate_input(input);
+    if (!input_status) return input_status.error();
+    auto validated = std::invoke(std::forward<Validator>(validator), encoded_matrix);
+    if (!validated) return validated.error();
+
+    const std::size_t blocks_per_row = columns / BlockElements;
+    std::array<float, BlockElements> decoded{};
+    for (std::size_t row = 0U; row < rows; ++row) {
+        double sum = 0.0;
+        for (std::size_t block = 0U; block < blocks_per_row; ++block) {
+            const std::size_t encoded_block = row * blocks_per_row + block;
+            auto status = std::invoke(
+                std::forward<Decoder>(decoder),
+                encoded_matrix.data() + encoded_block * BlockBytes,
+                std::span<float, BlockElements>(decoded));
+            if (!status) return status.error();
+            const std::size_t input_base = block * BlockElements;
+            for (std::size_t column = 0U; column < BlockElements; ++column) {
+                sum += static_cast<double>(decoded[column]) *
+                       static_cast<double>(input[input_base + column]);
+            }
+        }
+        const float value = static_cast<float>(sum);
+        if (!std::isfinite(value)) {
+            return make_error(ErrorCode::invalid_format,
+                              "Blocked matvec produced a non-finite result");
+        }
+        output[row] = value;
+    }
+    return {};
+}
+
+template <std::size_t ElementBytes, typename Decoder>
+Result<void> validate_dense_values(std::span<const std::byte> encoded, Decoder&& decoder) {
+    if (encoded.size() % ElementBytes != 0U) {
+        return make_error(ErrorCode::invalid_format,
+                          "Dense encoded bytes are not element-aligned");
+    }
+    for (std::size_t offset = 0U; offset < encoded.size(); offset += ElementBytes) {
+        if (!std::isfinite(std::invoke(std::forward<Decoder>(decoder),
+                                       encoded.data() + offset))) {
+            return make_error(ErrorCode::invalid_format,
+                              "Dense tensor contains a non-finite value");
+        }
+    }
+    return {};
+}
+
+template <std::size_t ElementBytes, typename Decoder>
+Result<void> dequantize_dense(std::span<const std::byte> encoded,
+                              std::span<float> output,
+                              const QuantizedKernelLimits& limits,
+                              Decoder&& decoder) {
+    if (output.empty() || output.size() > limits.max_elements) {
+        return make_error(ErrorCode::invalid_argument,
+                          "Dense output size is empty or outside its limit");
+    }
+    auto required = checked_encoded_bytes(output.size(), 1U, ElementBytes);
+    if (!required) return required.error();
+    if (encoded.size() != required.value()) {
+        return make_error(ErrorCode::invalid_format,
+                          "Dense encoded bytes do not match the output element count");
+    }
+    auto validated = validate_dense_values<ElementBytes>(encoded, decoder);
+    if (!validated) return validated.error();
+    for (std::size_t index = 0U; index < output.size(); ++index) {
+        output[index] = std::invoke(std::forward<Decoder>(decoder),
+                                    encoded.data() + index * ElementBytes);
+    }
+    return {};
+}
+
+template <std::size_t ElementBytes, typename Decoder>
+Result<void> matvec_dense(std::span<const std::byte> encoded_matrix,
+                          std::size_t rows,
+                          std::size_t columns,
+                          std::span<const float> input,
+                          std::span<float> output,
+                          const QuantizedKernelLimits& limits,
+                          Decoder&& decoder) {
+    auto elements = checked_matrix_elements(rows, columns, 1U, limits);
+    if (!elements) return elements.error();
+    auto required = checked_encoded_bytes(elements.value(), 1U, ElementBytes);
+    if (!required) return required.error();
+    if (encoded_matrix.size() != required.value() || input.size() != columns ||
+        output.size() != rows) {
+        return make_error(ErrorCode::invalid_argument,
+                          "Dense matrix, input or output span has the wrong size");
+    }
+    auto input_status = validate_input(input);
+    if (!input_status) return input_status.error();
+    auto validated = validate_dense_values<ElementBytes>(encoded_matrix, decoder);
+    if (!validated) return validated.error();
+    for (std::size_t row = 0U; row < rows; ++row) {
+        double sum = 0.0;
+        for (std::size_t column = 0U; column < columns; ++column) {
+            const float weight = std::invoke(
+                std::forward<Decoder>(decoder),
+                encoded_matrix.data() + (row * columns + column) * ElementBytes);
+            sum += static_cast<double>(weight) * static_cast<double>(input[column]);
+        }
+        const float value = static_cast<float>(sum);
+        if (!std::isfinite(value)) {
+            return make_error(ErrorCode::invalid_format,
+                              "Dense matvec produced a non-finite result");
+        }
+        output[row] = value;
+    }
+    return {};
+}
+
 bool overlaps(std::span<const float> first, std::span<const float> second) noexcept {
     if (first.empty() || second.empty()) return false;
     const std::less<const float*> less;
@@ -217,6 +528,123 @@ bool overlaps(std::span<const float> first, std::span<const float> second) noexc
 }
 
 }  // namespace
+
+bool supports_reference_matvec_ggml_type(std::uint32_t ggml_type) noexcept {
+    switch (ggml_type) {
+        case kGgmlTypeF32:
+        case kGgmlTypeQ8_0:
+        case kGgmlTypeQ5K:
+        case kGgmlTypeQ6K:
+        case kGgmlTypeIq3Xxs:
+        case kGgmlTypeIq1S:
+        case kGgmlTypeBf16: return true;
+        default: return false;
+    }
+}
+
+bool supports_reference_storage_ggml_type(std::uint32_t ggml_type) noexcept {
+    return supports_reference_matvec_ggml_type(ggml_type) || ggml_type == kGgmlTypeI32;
+}
+
+Result<void> dequantize_q8_0(std::span<const std::byte> encoded,
+                             std::span<float> output,
+                             const QuantizedKernelLimits& limits) {
+    const auto validator = [](std::span<const std::byte> bytes) {
+        return validate_block_scales(bytes, kQ8_0BlockBytes);
+    };
+    return dequantize_blocked<kQ8_0BlockElements, kQ8_0BlockBytes>(
+        encoded, output, limits, validator, decode_q8_0_block);
+}
+
+Result<void> matvec_q8_0_f32(std::span<const std::byte> encoded_matrix,
+                             std::size_t rows,
+                             std::size_t columns,
+                             std::span<const float> input,
+                             std::span<float> output,
+                             const QuantizedKernelLimits& limits) {
+    const auto validator = [](std::span<const std::byte> bytes) {
+        return validate_block_scales(bytes, kQ8_0BlockBytes);
+    };
+    return matvec_blocked<kQ8_0BlockElements, kQ8_0BlockBytes>(
+        encoded_matrix, rows, columns, input, output, limits, validator,
+        decode_q8_0_block);
+}
+
+Result<void> dequantize_q5_k(std::span<const std::byte> encoded,
+                             std::span<float> output,
+                             const QuantizedKernelLimits& limits) {
+    const auto validator = [](std::span<const std::byte> bytes) -> Result<void> {
+        for (std::size_t offset = 0U; offset < bytes.size(); offset += kQ5KBlockBytes) {
+            const float scale = fp16_to_float(read_u16_le(bytes.data() + offset));
+            const float minimum = fp16_to_float(read_u16_le(bytes.data() + offset + 2U));
+            if (!std::isfinite(scale) || !std::isfinite(minimum)) {
+                return make_error(ErrorCode::invalid_format,
+                                  "Q5_K block scale or minimum is not finite");
+            }
+        }
+        return {};
+    };
+    return dequantize_blocked<kQ5KBlockElements, kQ5KBlockBytes>(
+        encoded, output, limits, validator, decode_q5_k_block);
+}
+
+Result<void> matvec_q5_k_f32(std::span<const std::byte> encoded_matrix,
+                             std::size_t rows,
+                             std::size_t columns,
+                             std::span<const float> input,
+                             std::span<float> output,
+                             const QuantizedKernelLimits& limits) {
+    const auto validator = [](std::span<const std::byte> bytes) -> Result<void> {
+        for (std::size_t offset = 0U; offset < bytes.size(); offset += kQ5KBlockBytes) {
+            const float scale = fp16_to_float(read_u16_le(bytes.data() + offset));
+            const float minimum = fp16_to_float(read_u16_le(bytes.data() + offset + 2U));
+            if (!std::isfinite(scale) || !std::isfinite(minimum)) {
+                return make_error(ErrorCode::invalid_format,
+                                  "Q5_K block scale or minimum is not finite");
+            }
+        }
+        return {};
+    };
+    return matvec_blocked<kQ5KBlockElements, kQ5KBlockBytes>(
+        encoded_matrix, rows, columns, input, output, limits, validator,
+        decode_q5_k_block);
+}
+
+Result<void> dequantize_q6_k(std::span<const std::byte> encoded,
+                             std::span<float> output,
+                             const QuantizedKernelLimits& limits) {
+    const auto validator = [](std::span<const std::byte> bytes) -> Result<void> {
+        for (std::size_t offset = 0U; offset < bytes.size(); offset += kQ6KBlockBytes) {
+            if (!std::isfinite(fp16_to_float(read_u16_le(bytes.data() + offset + 208U)))) {
+                return make_error(ErrorCode::invalid_format,
+                                  "Q6_K block scale is not finite");
+            }
+        }
+        return {};
+    };
+    return dequantize_blocked<kQ6KBlockElements, kQ6KBlockBytes>(
+        encoded, output, limits, validator, decode_q6_k_block);
+}
+
+Result<void> matvec_q6_k_f32(std::span<const std::byte> encoded_matrix,
+                             std::size_t rows,
+                             std::size_t columns,
+                             std::span<const float> input,
+                             std::span<float> output,
+                             const QuantizedKernelLimits& limits) {
+    const auto validator = [](std::span<const std::byte> bytes) -> Result<void> {
+        for (std::size_t offset = 0U; offset < bytes.size(); offset += kQ6KBlockBytes) {
+            if (!std::isfinite(fp16_to_float(read_u16_le(bytes.data() + offset + 208U)))) {
+                return make_error(ErrorCode::invalid_format,
+                                  "Q6_K block scale is not finite");
+            }
+        }
+        return {};
+    };
+    return matvec_blocked<kQ6KBlockElements, kQ6KBlockBytes>(
+        encoded_matrix, rows, columns, input, output, limits, validator,
+        decode_q6_k_block);
+}
 
 Result<void> dequantize_iq1_s(std::span<const std::byte> encoded,
                               std::span<float> output,
@@ -371,6 +799,128 @@ Result<void> matvec_iq3_xxs_f32(std::span<const std::byte> encoded_matrix,
         }
         output[row] = value;
     }
+    return {};
+}
+
+Result<void> dequantize_bf16(std::span<const std::byte> encoded,
+                             std::span<float> output,
+                             const QuantizedKernelLimits& limits) {
+    const auto decoder = [](const std::byte* bytes) {
+        return bf16_to_float(read_u16_le(bytes));
+    };
+    return dequantize_dense<kBf16ElementBytes>(encoded, output, limits, decoder);
+}
+
+Result<void> matvec_bf16_f32(std::span<const std::byte> encoded_matrix,
+                             std::size_t rows,
+                             std::size_t columns,
+                             std::span<const float> input,
+                             std::span<float> output,
+                             const QuantizedKernelLimits& limits) {
+    const auto decoder = [](const std::byte* bytes) {
+        return bf16_to_float(read_u16_le(bytes));
+    };
+    return matvec_dense<kBf16ElementBytes>(
+        encoded_matrix, rows, columns, input, output, limits, decoder);
+}
+
+Result<void> dequantize_f32_le(std::span<const std::byte> encoded,
+                               std::span<float> output,
+                               const QuantizedKernelLimits& limits) {
+    return dequantize_dense<kF32ElementBytes>(encoded, output, limits, read_f32_le);
+}
+
+Result<void> matvec_f32_le_f32(std::span<const std::byte> encoded_matrix,
+                               std::size_t rows,
+                               std::size_t columns,
+                               std::span<const float> input,
+                               std::span<float> output,
+                               const QuantizedKernelLimits& limits) {
+    return matvec_dense<kF32ElementBytes>(
+        encoded_matrix, rows, columns, input, output, limits, read_f32_le);
+}
+
+Result<void> decode_i32_le(std::span<const std::byte> encoded,
+                           std::span<std::int32_t> output,
+                           const QuantizedKernelLimits& limits) {
+    if (output.empty() || output.size() > limits.max_elements) {
+        return make_error(ErrorCode::invalid_argument,
+                          "I32 output size is empty or outside its limit");
+    }
+    auto required = checked_encoded_bytes(output.size(), 1U, kI32ElementBytes);
+    if (!required) return required.error();
+    if (encoded.size() != required.value()) {
+        return make_error(ErrorCode::invalid_format,
+                          "I32 encoded bytes do not match the output element count");
+    }
+    for (std::size_t index = 0U; index < output.size(); ++index) {
+        output[index] = std::bit_cast<std::int32_t>(
+            read_u32_le(encoded.data() + index * kI32ElementBytes));
+    }
+    return {};
+}
+
+Result<void> matvec_ggml_f32_transactional(
+    std::uint32_t ggml_type,
+    std::span<const std::byte> encoded_matrix,
+    std::size_t rows,
+    std::size_t columns,
+    std::span<const float> input,
+    std::span<float> scratch,
+    std::span<float> output,
+    const QuantizedKernelLimits& limits) {
+    if (!supports_reference_matvec_ggml_type(ggml_type)) {
+        return make_error(ErrorCode::unsupported,
+                          "GGML storage type has no reference matvec kernel");
+    }
+    if (rows == 0U || scratch.size() != rows || output.size() != rows) {
+        return make_error(ErrorCode::invalid_argument,
+                          "Transactional matvec scratch or output has the wrong size");
+    }
+    const std::span<const float> scratch_view = scratch;
+    const std::span<const float> output_view = output;
+    if (overlaps(input, scratch_view) || overlaps(input, output_view) ||
+        overlaps(scratch_view, output_view)) {
+        return make_error(ErrorCode::invalid_argument,
+                          "Transactional matvec buffers overlap");
+    }
+
+    Result<void> status;
+    switch (ggml_type) {
+        case kGgmlTypeF32:
+            status = matvec_f32_le_f32(
+                encoded_matrix, rows, columns, input, scratch, limits);
+            break;
+        case kGgmlTypeQ8_0:
+            status = matvec_q8_0_f32(
+                encoded_matrix, rows, columns, input, scratch, limits);
+            break;
+        case kGgmlTypeQ5K:
+            status = matvec_q5_k_f32(
+                encoded_matrix, rows, columns, input, scratch, limits);
+            break;
+        case kGgmlTypeQ6K:
+            status = matvec_q6_k_f32(
+                encoded_matrix, rows, columns, input, scratch, limits);
+            break;
+        case kGgmlTypeIq3Xxs:
+            status = matvec_iq3_xxs_f32(
+                encoded_matrix, rows, columns, input, scratch, limits);
+            break;
+        case kGgmlTypeIq1S:
+            status = matvec_iq1_s_f32(
+                encoded_matrix, rows, columns, input, scratch, limits);
+            break;
+        case kGgmlTypeBf16:
+            status = matvec_bf16_f32(
+                encoded_matrix, rows, columns, input, scratch, limits);
+            break;
+        default:
+            return make_error(ErrorCode::unsupported,
+                              "GGML storage type has no reference matvec kernel");
+    }
+    if (!status) return status.error();
+    std::copy(scratch.begin(), scratch.end(), output.begin());
     return {};
 }
 

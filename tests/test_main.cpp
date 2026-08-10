@@ -496,6 +496,11 @@ void test_gguf(const std::filesystem::path& root) {
                   mapped.value().maximum_layer_trunk_bytes == 4U &&
                   mapped.value().maximum_layer_trunk_tensor_bytes == 4U &&
                   mapped.value().maximum_layer_trunk_tile_bytes == 4U &&
+                  mapped.value().reference_storage_type_covered_tensor_count == 1U &&
+                  mapped.value().reference_storage_type_covered_bytes == 4U &&
+                  mapped.value().reference_storage_type_unsupported_tensor_count == 0U &&
+                  mapped.value().reference_storage_type_unsupported_bytes == 0U &&
+                  mapped.value().reference_storage_types_complete &&
                   mapped.value().minimum_expert_bundle_bytes == 102U &&
                   mapped.value().maximum_expert_bundle_bytes == 102U &&
                   mapped.value().no_cache_expert_bytes_per_token == 102U &&
@@ -722,6 +727,274 @@ void test_gguf(const std::filesystem::path& root) {
                 full_import, checkpoint_spec, options));
         }
     }
+}
+
+void test_trunk_storage_reference_kernels() {
+    const auto write_u16_le = [](std::span<std::byte> bytes,
+                                 std::size_t offset,
+                                 std::uint16_t value) {
+        bytes[offset] = static_cast<std::byte>(value & 0xffU);
+        bytes[offset + 1U] = static_cast<std::byte>(value >> 8U);
+    };
+    const auto write_u32_le = [](std::span<std::byte> bytes,
+                                 std::size_t offset,
+                                 std::uint32_t value) {
+        for (unsigned index = 0U; index < 4U; ++index) {
+            bytes[offset + index] = static_cast<std::byte>(
+                (value >> (index * 8U)) & 0xffU);
+        }
+    };
+    const auto fingerprint = [](std::span<const float> values) {
+        std::uint64_t hash = UINT64_C(14695981039346656037);
+        for (const float value : values) {
+            const std::uint32_t bits = std::bit_cast<std::uint32_t>(value);
+            for (unsigned shift = 0U; shift < 32U; shift += 8U) {
+                hash ^= static_cast<std::uint8_t>((bits >> shift) & 0xffU);
+                hash *= UINT64_C(1099511628211);
+            }
+        }
+        return hash;
+    };
+    const auto make_input = [](std::size_t columns) {
+        std::vector<float> input(columns);
+        for (std::size_t column = 0U; column < columns; ++column) {
+            const int centered = static_cast<int>(column % 29U) - 14;
+            input[column] = static_cast<float>(centered) * 0.03125F +
+                            static_cast<float>(column % 3U) * 0.0078125F;
+        }
+        return input;
+    };
+    constexpr std::array<std::uint16_t, 6U> scales{
+        0x3c00U, 0xb800U, 0x3555U, 0x4000U, 0x0400U, 0x0001U};
+    constexpr std::array<std::uint16_t, 6U> minimum_scales{
+        0x3800U, 0xbc00U, 0x3000U, 0x3c00U, 0x0001U, 0x0400U};
+
+    std::vector<std::byte> q8(scales.size() * vastloom::inference::kQ8_0BlockBytes);
+    for (std::size_t block = 0U; block < scales.size(); ++block) {
+        const std::size_t base = block * vastloom::inference::kQ8_0BlockBytes;
+        write_u16_le(q8, base, scales[block]);
+        for (std::size_t index = 0U;
+             index < vastloom::inference::kQ8_0BlockElements; ++index) {
+            q8[base + 2U + index] = static_cast<std::byte>(
+                (block * 37U + index * 53U + 11U) & 0xffU);
+        }
+    }
+    std::vector<float> q8_decoded(
+        scales.size() * vastloom::inference::kQ8_0BlockElements);
+    CHECK(vastloom::inference::dequantize_q8_0(q8, q8_decoded));
+    CHECK(fingerprint(q8_decoded) == UINT64_C(0x25edd1a40129ee99));
+    CHECK(q8_decoded[0] == 11.0F && q8_decoded[7] == 126.0F &&
+          q8_decoded[8] == -77.0F && q8_decoded[31] == 118.0F &&
+          q8_decoded[32] == -24.0F && q8_decoded[63] == 50.5F &&
+          q8_decoded[127] == -54.0F);
+    auto q8_input = make_input(64U);
+    std::array<float, 3U> q8_output{};
+    CHECK(vastloom::inference::matvec_q8_0_f32(
+        q8, 3U, 64U, q8_input, q8_output));
+    CHECK(q8_output[0] == -168.55859375F);
+    CHECK(q8_output[1] == -2.8284435272216797F);
+    CHECK(q8_output[2] == 0.0058367089368402958F);
+
+    std::vector<std::byte> q5(scales.size() * vastloom::inference::kQ5KBlockBytes);
+    for (std::size_t block = 0U; block < scales.size(); ++block) {
+        const std::size_t base = block * vastloom::inference::kQ5KBlockBytes;
+        write_u16_le(q5, base, scales[block]);
+        write_u16_le(q5, base + 2U, minimum_scales[block]);
+        for (std::size_t index = 0U; index < 12U; ++index) {
+            q5[base + 4U + index] = static_cast<std::byte>(
+                (block * 29U + index * 47U + 7U) & 0xffU);
+        }
+        for (std::size_t index = 0U; index < 32U; ++index) {
+            q5[base + 16U + index] = static_cast<std::byte>(
+                (block * 41U + index * 31U + 13U) & 0xffU);
+        }
+        for (std::size_t index = 0U; index < 128U; ++index) {
+            q5[base + 48U + index] = static_cast<std::byte>(
+                (block * 37U + index * 53U + 11U) & 0xffU);
+        }
+    }
+    std::vector<float> q5_decoded(
+        scales.size() * vastloom::inference::kQ5KBlockElements);
+    CHECK(vastloom::inference::dequantize_q5_k(q5, q5_decoded));
+    CHECK(fingerprint(q5_decoded) == UINT64_C(0x3ec4a59589931118));
+    CHECK(q5_decoded[0] == 187.5F && q5_decoded[7] == 96.5F &&
+          q5_decoded[8] == 131.5F && q5_decoded[31] == 40.5F &&
+          q5_decoded[32] == -25.0F && q5_decoded[63] == 1217.0F &&
+          q5_decoded[127] == 332.0F && q5_decoded[255] == 916.0F &&
+          q5_decoded[256] == 32.0F && q5_decoded[511] == -453.5F);
+    auto q5_input = make_input(512U);
+    std::array<float, 3U> q5_output{};
+    CHECK(vastloom::inference::matvec_q5_k_f32(
+        q5, 3U, 512U, q5_input, q5_output));
+    CHECK(q5_output[0] == 668.2421875F);
+    CHECK(q5_output[1] == 1631.9100341796875F);
+    CHECK(q5_output[2] == -0.046117834746837616F);
+
+    std::vector<std::byte> q6(scales.size() * vastloom::inference::kQ6KBlockBytes);
+    for (std::size_t block = 0U; block < scales.size(); ++block) {
+        const std::size_t base = block * vastloom::inference::kQ6KBlockBytes;
+        for (std::size_t index = 0U; index < 128U; ++index) {
+            q6[base + index] = static_cast<std::byte>(
+                (block * 37U + index * 53U + 11U) & 0xffU);
+        }
+        for (std::size_t index = 0U; index < 64U; ++index) {
+            q6[base + 128U + index] = static_cast<std::byte>(
+                (block * 41U + index * 31U + 13U) & 0xffU);
+        }
+        for (std::size_t index = 0U; index < 16U; ++index) {
+            q6[base + 192U + index] = static_cast<std::byte>(
+                (block * 59U + index * 43U + 17U) & 0xffU);
+        }
+        write_u16_le(q6, base + 208U, scales[block]);
+    }
+    std::vector<float> q6_decoded(
+        scales.size() * vastloom::inference::kQ6KBlockElements);
+    CHECK(vastloom::inference::dequantize_q6_k(q6, q6_decoded));
+    CHECK(fingerprint(q6_decoded) == UINT64_C(0xcd39c3f1219afbc9));
+    CHECK(q6_decoded[0] == -85.0F && q6_decoded[7] == 238.0F &&
+          q6_decoded[8] == -221.0F && q6_decoded[31] == 360.0F &&
+          q6_decoded[32] == 2781.0F && q6_decoded[63] == -2420.0F &&
+          q6_decoded[127] == 1054.0F && q6_decoded[255] == -530.0F &&
+          q6_decoded[511] == 540.5F);
+    auto q6_input = make_input(512U);
+    std::array<float, 3U> q6_output{};
+    CHECK(vastloom::inference::matvec_q6_k_f32(
+        q6, 3U, 512U, q6_input, q6_output));
+    CHECK(q6_output[0] == -4684.79296875F);
+    CHECK(q6_output[1] == 7494.287109375F);
+    CHECK(q6_output[2] == 0.5950310230255127F);
+
+    constexpr std::array<float, 8U> dense_values{
+        1.0F, -2.0F, 0.5F, 4.0F, -1.0F, 3.0F, -0.25F, 2.0F};
+    constexpr std::array<std::uint16_t, 8U> bf16_values{
+        0x3f80U, 0xc000U, 0x3f00U, 0x4080U, 0xbf80U, 0x4040U, 0xbe80U, 0x4000U};
+    std::vector<std::byte> bf16(bf16_values.size() * vastloom::inference::kBf16ElementBytes);
+    std::vector<std::byte> f32(dense_values.size() * vastloom::inference::kF32ElementBytes);
+    for (std::size_t index = 0U; index < dense_values.size(); ++index) {
+        write_u16_le(bf16, index * 2U, bf16_values[index]);
+        write_u32_le(f32, index * 4U, std::bit_cast<std::uint32_t>(dense_values[index]));
+    }
+    std::array<float, 8U> dense_decoded{};
+    CHECK(vastloom::inference::dequantize_bf16(bf16, dense_decoded));
+    CHECK(std::equal(dense_decoded.begin(), dense_decoded.end(), dense_values.begin()));
+    std::fill(dense_decoded.begin(), dense_decoded.end(), 0.0F);
+    CHECK(vastloom::inference::dequantize_f32_le(f32, dense_decoded));
+    CHECK(std::equal(dense_decoded.begin(), dense_decoded.end(), dense_values.begin()));
+    constexpr std::array<float, 4U> dense_input{0.25F, -0.5F, 2.0F, 1.0F};
+    std::array<float, 2U> dense_output{};
+    CHECK(vastloom::inference::matvec_bf16_f32(
+        bf16, 2U, 4U, dense_input, dense_output));
+    CHECK(dense_output[0] == 6.25F && dense_output[1] == -0.25F);
+    CHECK(vastloom::inference::matvec_f32_le_f32(
+        f32, 2U, 4U, dense_input, dense_output));
+    CHECK(dense_output[0] == 6.25F && dense_output[1] == -0.25F);
+
+    constexpr std::array<std::int32_t, 5U> i32_values{
+        0, 1, -1, std::numeric_limits<std::int32_t>::min(),
+        std::numeric_limits<std::int32_t>::max()};
+    std::vector<std::byte> i32(i32_values.size() * vastloom::inference::kI32ElementBytes);
+    for (std::size_t index = 0U; index < i32_values.size(); ++index) {
+        write_u32_le(i32, index * vastloom::inference::kI32ElementBytes,
+                     std::bit_cast<std::uint32_t>(i32_values[index]));
+    }
+    std::array<std::int32_t, 5U> i32_decoded{};
+    CHECK(vastloom::inference::decode_i32_le(i32, i32_decoded));
+    CHECK(i32_decoded == i32_values);
+    auto truncated_i32 = i32;
+    truncated_i32.pop_back();
+    CHECK(!vastloom::inference::decode_i32_le(truncated_i32, i32_decoded));
+
+    for (const std::uint32_t type : {
+             vastloom::inference::kGgmlTypeF32,
+             vastloom::inference::kGgmlTypeQ8_0,
+             vastloom::inference::kGgmlTypeQ5K,
+             vastloom::inference::kGgmlTypeQ6K,
+             vastloom::inference::kGgmlTypeIq3Xxs,
+             vastloom::inference::kGgmlTypeIq1S,
+             vastloom::inference::kGgmlTypeBf16}) {
+        CHECK(vastloom::inference::supports_reference_matvec_ggml_type(type));
+        CHECK(vastloom::inference::supports_reference_storage_ggml_type(type));
+    }
+    CHECK(!vastloom::inference::supports_reference_matvec_ggml_type(1024U));
+    CHECK(!vastloom::inference::supports_reference_matvec_ggml_type(
+        vastloom::inference::kGgmlTypeI32));
+    CHECK(vastloom::inference::supports_reference_storage_ggml_type(
+        vastloom::inference::kGgmlTypeI32));
+    CHECK(!vastloom::inference::supports_reference_storage_ggml_type(1024U));
+
+    std::array<float, 3U> scratch{};
+    std::array<float, 3U> published{17.0F, 17.0F, 17.0F};
+    CHECK(vastloom::inference::matvec_ggml_f32_transactional(
+        vastloom::inference::kGgmlTypeQ8_0, q8, 3U, 64U, q8_input,
+        scratch, published));
+    CHECK(published == q8_output);
+    CHECK(vastloom::inference::matvec_ggml_f32_transactional(
+        vastloom::inference::kGgmlTypeQ5K, q5, 3U, 512U, q5_input,
+        scratch, published));
+    CHECK(published == q5_output);
+    CHECK(vastloom::inference::matvec_ggml_f32_transactional(
+        vastloom::inference::kGgmlTypeQ6K, q6, 3U, 512U, q6_input,
+        scratch, published));
+    CHECK(published == q6_output);
+    std::array<float, 2U> dense_scratch{};
+    std::array<float, 2U> dense_published{17.0F, 17.0F};
+    CHECK(vastloom::inference::matvec_ggml_f32_transactional(
+        vastloom::inference::kGgmlTypeBf16, bf16, 2U, 4U, dense_input,
+        dense_scratch, dense_published));
+    CHECK(dense_published[0] == 6.25F && dense_published[1] == -0.25F);
+    CHECK(vastloom::inference::matvec_ggml_f32_transactional(
+        vastloom::inference::kGgmlTypeF32, f32, 2U, 4U, dense_input,
+        dense_scratch, dense_published));
+    CHECK(dense_published[0] == 6.25F && dense_published[1] == -0.25F);
+    std::fill(published.begin(), published.end(), 17.0F);
+    auto invalid_q8 = q8;
+    write_u16_le(invalid_q8, 4U * vastloom::inference::kQ8_0BlockBytes, 0x7c00U);
+    CHECK(!vastloom::inference::matvec_ggml_f32_transactional(
+        vastloom::inference::kGgmlTypeQ8_0, invalid_q8, 3U, 64U, q8_input,
+        scratch, published));
+    CHECK(std::all_of(published.begin(), published.end(),
+                      [](float value) { return value == 17.0F; }));
+    CHECK(!vastloom::inference::matvec_ggml_f32_transactional(
+        1024U, q8, 3U, 64U, q8_input, scratch, published));
+    CHECK(!vastloom::inference::matvec_ggml_f32_transactional(
+        vastloom::inference::kGgmlTypeQ8_0, q8, 3U, 64U, q8_input,
+        published, published));
+
+    auto truncated = q5;
+    truncated.pop_back();
+    CHECK(!vastloom::inference::dequantize_q5_k(truncated, q5_decoded));
+    auto unchanged = q5_decoded;
+    auto invalid_q5 = q5;
+    write_u16_le(invalid_q5, 5U * vastloom::inference::kQ5KBlockBytes + 2U, 0x7c00U);
+    CHECK(!vastloom::inference::dequantize_q5_k(invalid_q5, q5_decoded));
+    CHECK(q5_decoded == unchanged);
+    auto invalid_q6 = q6;
+    write_u16_le(invalid_q6, 5U * vastloom::inference::kQ6KBlockBytes + 208U, 0x7c00U);
+    unchanged = q6_decoded;
+    CHECK(!vastloom::inference::dequantize_q6_k(invalid_q6, q6_decoded));
+    CHECK(q6_decoded == unchanged);
+    vastloom::inference::QuantizedKernelLimits small_limits;
+    small_limits.max_elements = 255U;
+    CHECK(!vastloom::inference::dequantize_q5_k(q5, q5_decoded, small_limits));
+    small_limits.max_elements = 4U;
+    CHECK(!vastloom::inference::decode_i32_le(i32, i32_decoded, small_limits));
+    CHECK(!vastloom::inference::matvec_q8_0_f32(
+        q8, 3U, 63U, q8_input, q8_output));
+    q8_input[0] = std::numeric_limits<float>::quiet_NaN();
+    CHECK(!vastloom::inference::matvec_q8_0_f32(
+        q8, 3U, 64U, q8_input, q8_output));
+
+    auto invalid_bf16 = bf16;
+    write_u16_le(invalid_bf16, 6U, 0x7f80U);
+    std::fill(dense_decoded.begin(), dense_decoded.end(), 17.0F);
+    CHECK(!vastloom::inference::dequantize_bf16(invalid_bf16, dense_decoded));
+    CHECK(std::all_of(dense_decoded.begin(), dense_decoded.end(),
+                      [](float value) { return value == 17.0F; }));
+    auto invalid_f32 = f32;
+    write_u32_le(invalid_f32, 24U, 0x7f800000U);
+    CHECK(!vastloom::inference::dequantize_f32_le(invalid_f32, dense_decoded));
+    CHECK(std::all_of(dense_decoded.begin(), dense_decoded.end(),
+                      [](float value) { return value == 17.0F; }));
 }
 
 void test_iq1_s_reference_kernel() {
@@ -3104,6 +3377,7 @@ int main() {
     test_bounded_json();
     test_safetensors(root);
     test_gguf(root);
+    test_trunk_storage_reference_kernels();
     test_iq1_s_reference_kernel();
     test_iq3_xxs_reference_kernel();
     test_quantized_routed_expert_contract();

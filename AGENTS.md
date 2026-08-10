@@ -12,8 +12,10 @@ metadata/header inspector plus native tokenizer/basic chat framing and bounded e
 reference operators. A deterministic two-layer DeepSeek float prefill plus one checkpoint-shaped
 MTP block now match the pinned preview graph for prefill and five incremental raw/compressed
 cache steps. Verified headers populate a universal tensor/expert catalog, and a buffer-free
-governed state machine validates legal NVMe/RAM/VRAM reservation transitions. Full-checkpoint
-payload binding, physical multitier buffers, speculative generation and CUDA do not exist yet.
+governed state machine validates legal NVMe/RAM/VRAM reservation transitions. A synchronous
+fixture path now loads canonical ranges into a governed packed RAM buffer with exact tensor
+slices. Full-checkpoint payload binding, asynchronous shared streaming, speculative generation
+and CUDA do not exist yet.
 The newer official 0731 release, its Unsloth GGUF conversions and Laguna S 2.1 are reviewed
 compatibility targets, not validated execution paths.
 

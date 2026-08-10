@@ -37,6 +37,9 @@ hardware, commands, measurements and limitations.
 - [`M9_RESIDENCY_STATE_VALIDATION.md`](M9_RESIDENCY_STATE_VALIDATION.md) — legal
   NVMe/RAM/VRAM transitions, atomic Governor reservation ownership, RAII use leases,
   concurrent admission and fail-closed cleanup.
+- [`M9_PACKED_EXPERT_LOAD_VALIDATION.md`](M9_PACKED_EXPERT_LOAD_VALIDATION.md) — governed
+  multi-range reads into one packed RAM buffer, exact per-tensor slices, ready-state publication
+  and failure cleanup.
 
 M6 is complete for its reduced float correctness gate, and the first M7 MTP component gate is
 complete together with the reduced incremental-state gate. Full-checkpoint DeepSeek execution,

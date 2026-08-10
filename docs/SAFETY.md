@@ -37,6 +37,12 @@ VRAM while the RAM source remains valid. A failed second reservation rolls back 
 state. Pins and counted RAII use leases reject eviction, and failure cleanup refuses to release a
 buffer still in active use. Residency handles and leases must never outlive their governor.
 
+The shared packed-expert loader allocates only after those reservations. It caps expert bytes,
+individual range bytes and range count; rejects non-canonical ranges and incomplete/overlapping
+tensor slices; destroys scratch before releasing staging; and keeps its use lease alive until the
+packed bytes are destroyed. Short reads, bounds failures and cancellation publish `FAILED` only
+after temporary buffers have been released.
+
 ## Headroom
 
 The planner creates separate reserves for:
@@ -246,6 +252,8 @@ integration remains required before long-running large-model inference.
   results for synthetic and real repeated-route traces.
 - legal NVMe/RAM/VRAM residency transitions, atomic multi-resource rollback, pressure refusal,
   concurrent read admission, pin/use-lease eviction guards and final reservation release.
+- Unicode buffered multi-range expert loading, exact packed tensor slices, pre-allocation limits,
+  out-of-bounds read cleanup, cancellation and zero residual reservations.
 
 ## Safety tests still required for production adapters
 

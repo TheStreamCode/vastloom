@@ -83,6 +83,8 @@ The model-independent role/range binding is documented in the
 [`M7 logical tensor catalog report`](docs/reports/M7_LOGICAL_TENSOR_CATALOG_VALIDATION.md).
 The reservation-backed NVMe/RAM/VRAM control plane is documented in the
 [`M9 residency-state report`](docs/reports/M9_RESIDENCY_STATE_VALIDATION.md).
+The first governed multi-range-to-packed-buffer transaction is documented in the
+[`M9 packed expert load report`](docs/reports/M9_PACKED_EXPERT_LOAD_VALIDATION.md).
 Current and candidate model support is kept explicit in the
 [`model compatibility matrix`](docs/MODEL_COMPATIBILITY.md).
 
@@ -228,6 +230,9 @@ allocation plan is derived from detected capacity and conservative headroom.
 - **Governed residency:** logical objects move only through legal
   `NVME → READING → RAM_READY → COPYING_TO_VRAM → VRAM_READY` states. RAM, staging and
   VRAM destinations are reserved before work begins; pins and RAII use leases block eviction.
+- **Packed expert baseline:** canonical source ranges can be loaded into one reserved RAM buffer
+  with exact per-tensor slices. This path is synchronous and fixture-validated; it is not yet the
+  asynchronous DeepSeek token path.
 - **Safety state machine:** `NORMAL → PRESSURE → CRITICAL → EMERGENCY`, with immediate
   escalation and hysteretic recovery.
 - **Bounded asynchronous I/O:** fixed worker, queue and request limits; every buffer

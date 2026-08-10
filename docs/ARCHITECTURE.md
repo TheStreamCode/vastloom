@@ -289,8 +289,10 @@ bounded source ranges for the future residency scheduler
 
 For the pinned DeepSeek preview, 67,584 routed tensors become 11,264 main/MTP expert
 bundles. Each bundle is 13,369,344 bytes and its six tensors coalesce into exactly two source
-ranges, for 22,528 ranges total. These are validated addresses, not issued I/O requests; the
-header-only inspection still has no payload and reports execution as unsupported.
+ranges, for 22,528 ranges total. Each bundle now also carries six checked packed slices so a
+consumer can recover exact tensors after range compaction. These are validated addresses, not
+issued DeepSeek I/O requests; the header-only inspection still has no payload and reports
+execution as unsupported.
 
 ## TinyTransformer adapter boundary
 
@@ -327,8 +329,10 @@ or numerical reduction order.
 The shared residency control object now enforces those transitions and owns move-only Governor
 reservations. It reserves the complete RAM destination plus bounded read staging before exposing
 `READING`, retains RAM while reserving VRAM, and blocks eviction while pinned or protected by an
-RAII use lease. This is control-plane validation only: buffer ownership, I/O completion and CUDA
-copy events are not connected yet.
+RAII use lease. A synchronous reference transaction now connects canonical ranges to a physical
+packed RAM buffer, destroys scratch before ready-state publication and keeps a lease alive until
+the buffer is destroyed. Asynchronous scheduling, direct I/O and CUDA copy events are not
+connected yet.
 
 For TinyChat only L1 is active:
 

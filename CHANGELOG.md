@@ -37,6 +37,10 @@
   destinations are reserved before transition publication; failed compound reservations roll
   back, while pins and RAII use leases prevent unsafe eviction. The state-only slice allocates no
   tensor buffer and makes no new inference claim.
+- Added the first governed packed-expert load transaction: canonical source ranges are read into a
+  reserved compact RAM buffer, every expert tensor receives an exact packed slice and an RAII use
+  lease prevents eviction until the bytes are destroyed. The synchronous fixture baseline is not
+  a DeepSeek or physical-NVMe performance claim.
 - Added an explicit `--allow-large-download` gate for checkpoint imports containing at
   least 20 GiB of weight payload. DeepSeek execution remains unsupported and is reported
   as such by the CLI.

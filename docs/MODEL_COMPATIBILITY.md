@@ -122,6 +122,11 @@ prefetch bytes, queue/read/copy/compute timestamps, PCIe bytes, GPU idle time an
 Ready-order execution may change scheduling, but never the router choice or numerical reduction
 order without an explicit quality-changing mode.
 
+The first synchronous reference transaction now implements the bounded range-read, compaction,
+per-tensor-slice and `RAM_READY` publication portion on a synthetic immutable fixture. It is a
+correctness baseline; cache lookup, async prefetch, direct I/O and kernel execution remain in the
+existing OLMoE-specific path until the shared loader gains those features.
+
 ## Format policy
 
 - Safetensors is the authoritative path for official revisions and exact tensor identities.

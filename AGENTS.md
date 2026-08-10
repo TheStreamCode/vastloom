@@ -19,9 +19,11 @@ compute-coupled shared streaming, speculative generation and CUDA do not exist y
 official 0731 Unsloth `UD-IQ1_S` GGUF profile now has a bounded v3/split-header reader and a
 metadata-only packed-expert catalog: 1,328 physical tensors map to 11,008 logical expert bundles.
 A bounded scalar IQ1_S dequantization/matvec oracle matches pinned ggml output on one exact real
-layer-0/expert-0 gate slice. The IQ3_XXS down projection, complete expert execution, full payload
-binding and 0731 token path remain unvalidated. Laguna S 2.1 remains a reviewed compatibility
-target, not a validated execution path.
+layer-0/expert-0 gate slice. Scalar IQ3_XXS parity and one complete real gate/up/SwiGLU/down
+expert now also match pinned ggml bit for bit after a governed asynchronous RAM load. Direct
+verified full-shard binding, a complete 0731 layer/token path, generation and CUDA remain
+unvalidated. Windows and Linux CPU paths are tested; macOS/Metal remain unvalidated. Laguna S 2.1
+remains a reviewed compatibility target, not a validated execution path.
 
 Do not restart or generically redesign the project. Inspect the relevant implementation,
 documentation, tests and git state before changing code. Preserve working components and do not

@@ -38,8 +38,13 @@
   complete quantized execution remains unsupported.
 - Added a bounded scalar IQ1_S dequantization/matvec reference kernel derived from pinned ggml
   equations and licensed codebook data. Synthetic vectors and one exact 1,638,400-byte real
-  DeepSeek 0731 expert-gate slice match the upstream oracle bit for bit across all 2,048 rows;
-  IQ3_XXS, complete expert execution and model generation remain open.
+  DeepSeek 0731 expert-gate slice match the upstream oracle bit for bit across all 2,048 rows.
+- Added exact scalar IQ3_XXS decode/matvec plus a transactional IQ1_S gate/up, FP32 SwiGLU and
+  IQ3_XXS down expert path. Three pinned real ranges totaling 6,488,064 bytes now pass through a
+  one-worker governed packed-RAM load and match the ggml oracle bit for bit across all 4,096 final
+  outputs; complete layer/token execution and model generation remain open.
+- Documented the tested platform boundary explicitly: Windows/MSVC and Linux GCC/Clang CPU paths
+  are validated, while macOS and Metal remain unvalidated targets.
 - Replaced repeated GGUF metadata `seekg` calls with verified sequential discards. The same real
   5.26 MB header on Windows-mounted WSL storage improved from 37.42 s to 0.11 s while preserving
   strict bounded/truncation behavior.

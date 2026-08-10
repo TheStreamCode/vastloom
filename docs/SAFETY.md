@@ -170,16 +170,21 @@ The 0731 GGUF reader adds a metadata-only safety boundary:
 - a header-prefix path cannot be used as an executable tensor source. A library caller must
   explicitly supply separate full-shard paths, after which normal immutable import and checksum
   gates are still required before execution;
-- the scalar IQ1_S oracle accepts caller-supplied bounded spans only, prevalidates dimensions,
-  encoded size, all block scales and finite inputs, and has a 64-million-element default ceiling;
-- the oracle is not registered as a GGUF/catalog execution backend, so metadata snapshots and
+- the scalar IQ1_S/IQ3_XXS oracle accepts caller-supplied bounded spans only, prevalidates
+  dimensions, encoded size, all block scales, finite inputs and non-overlapping scratch, and has a
+  64-million-element default ceiling;
+- one complete real expert test can consume only three separately size/SHA-256-pinned extracted
+  ranges under an 8 MiB RAM limit, 4 MiB staging limit, one worker and one queue entry;
+- a one-byte RAM shortfall is rejected before worker I/O/allocation, the live use lease blocks
+  eviction, and RAM/staging/scratch reservations must all return to zero after release;
+- this opt-in test is not a generic GGUF/catalog execution backend, so metadata snapshots and
   unverified full shards still cannot reach the token path.
 
 The local validation used one complete 5.26 MB metadata shard and two 16 MiB HTTP-range prefixes;
-it did not download the 82.54 GB profile. A separate exact 1.64 MB HTTP range was used for the
-real IQ1_S parity test and remains outside the immutable model store. Header-derived logical
-bytes/token are planning data, not physical device telemetry and never relax Resource Governor
-limits.
+it did not download the 82.54 GB profile. Three separate exact ranges totaling 6,488,064 bytes
+were used for the real expert test and remain outside the immutable model store. Every range is
+rehash-verified before loading. Header-derived logical bytes/token are planning data, not physical
+device telemetry and never relax Resource Governor limits.
 
 ## Real OLMoE streaming bounds
 

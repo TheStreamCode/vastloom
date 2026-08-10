@@ -13,6 +13,10 @@ hardware, commands, measurements and limitations.
 
 ## Current report
 
+- [`M7_DEEPSEEK_REAL_EXPERT_VALIDATION.md`](M7_DEEPSEEK_REAL_EXPERT_VALIDATION.md) —
+  one complete real DeepSeek 0731 gate/up IQ1_S plus down IQ3_XXS expert, bit-identical ggml
+  parity, governed asynchronous RAM loading, fail-closed budget/lease cleanup and explicitly
+  warm-buffered process-I/O measurements.
 - [`M7_DEEPSEEK_IQ1S_KERNEL_VALIDATION.md`](M7_DEEPSEEK_IQ1S_KERNEL_VALIDATION.md) —
   exact IQ1_S dequantization/matvec parity on one real 1.64 MB DeepSeek 0731 expert-gate slice,
   including the explicit incomplete-expert/non-inference boundary.
@@ -49,10 +53,10 @@ hardware, commands, measurements and limitations.
 - [`M9_ASYNC_EXPERT_LOAD_VALIDATION.md`](M9_ASYNC_EXPERT_LOAD_VALIDATION.md) — fixed workers,
   bounded queues, pre-enqueue reservations, exclusive transfers and shutdown cancellation.
 
-M6 is complete for its reduced float correctness gate, and the first M7 MTP component gate is
-complete together with the reduced incremental-state gate. Full-checkpoint DeepSeek execution,
-packed kernels, speculative verification and CUDA remain M7/M8 work. The preceding completed
-storage milestone is M5:
+M6 is complete for its reduced float correctness gate. M7 now includes MTP, reduced incremental
+state and one complete real quantized expert, while full-shard/layer/token DeepSeek execution,
+optimized packed kernels, speculative verification and CUDA remain M7/M8 work. The preceding
+completed storage milestone is M5:
 
 - [`M5_DEVICE_IO_CACHE_BYPASS_VALIDATION.md`](M5_DEVICE_IO_CACHE_BYPASS_VALIDATION.md) —
   device-level Windows/Linux counters, bounded direct/unbuffered reads, repeatable

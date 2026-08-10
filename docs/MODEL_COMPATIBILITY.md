@@ -14,7 +14,7 @@ or matching tensor dimensions is never enough to enable execution automatically.
 | OLMoE-1B-7B-0924-Instruct | Pinned shards, top-k routes, expert streaming and I/O telemetry | Validated CPU expert streaming |
 | `deepseek-ai/DeepSeek-V4-Flash` preview at `60d8d707...` | Header catalog, tokenizer, reduced main+MTP prefill and five incremental cache steps | Reduced FP32 reference execution only |
 | `deepseek-ai/DeepSeek-V4-Flash-0731` at `7872f01b...` | Public metadata/config reviewed on 2026-08-10 | Not imported, inspected or executed by Vastloom yet |
-| `unsloth/DeepSeek-V4-Flash-0731-GGUF` at `fbbb5b93...` | Bounded GGUF v3/split headers and `UD-IQ1_S` packed-expert catalog validated | Metadata-only catalog; quantized execution not implemented |
+| `unsloth/DeepSeek-V4-Flash-0731-GGUF` at `fbbb5b93...` | Bounded headers/catalog plus exact gate/up IQ1_S and down IQ3_XXS parity on one real expert | One governed scalar CPU expert only; no layer/token generation |
 | `unsloth/Laguna-S-2.1` at `1a646907...` | Public config, custom-code and shard metadata reviewed on 2026-08-10 | Adapter and execution not implemented |
 
 Historical DeepSeek reports remain tied to the preview revision they actually tested. The newer
@@ -45,10 +45,13 @@ bytes and 6,986,088,796 always-active bytes. A top-6 no-cache schedule would req
 1,770,651,648 logical expert bytes/token. This is header-derived planning data: the two large
 payload shards were not downloaded and no full artifact hash was verified.
 
-One bounded 1,638,400-byte range from the second shard has now been tested separately: the
-layer-0/expert-0 gate matrix matches pinned ggml IQ1_S dequantization/matvec output bit for bit.
-That proves one real projection only. The matching up projection is not loader-bound, the down
-projection uses unsupported IQ3_XXS, and no complete expert, layer or token has executed.
+Three bounded ranges from the second shard have now been tested separately: the 1,638,400-byte
+gate and up IQ1_S matrices plus the 3,211,264-byte IQ3_XXS down matrix form the complete
+layer-0/expert-0 bundle. A fixed one-worker, one-entry loader pre-reserves and packs all 6,488,064
+bytes in RAM, then the scalar CPU reference executes SwiGLU and matches pinned ggml for all 4,096
+outputs bit for bit. The ranges are independently SHA-256 pinned extracted test artifacts, not a
+substitute for importing and verifying the complete source shard. No complete layer, routed token
+or generation path has executed.
 
 ### Laguna S 2.1
 
@@ -82,9 +85,9 @@ model revision
 The shared catalog and Safetensors-backed binding are implemented for the pinned DeepSeek
 preview. Its 69,187 tensors produce 11,264 logical expert bundles and 22,528 coalesced immutable
 source ranges. The separate GGUF binding now populates the same contract for the official 0731
-`UD-IQ1_S` headers by slicing each packed tensor along its expert axis. A scalar IQ1_S oracle now
-exists outside that binding; executable full-shard coupling, remaining quantization kernels and
-the Laguna adapter remain open.
+`UD-IQ1_S` headers by slicing each packed tensor along its expert axis. Scalar IQ1_S and IQ3_XXS
+oracles now execute one complete real bundle through the shared governed loader. Direct immutable
+full-shard coupling, layer/token execution, optimized kernels and the Laguna adapter remain open.
 
 The shared runtime may then place a tensor or expert bundle in one of these explicit states:
 
@@ -98,7 +101,8 @@ The shared control object now implements the displayed states, a terminal/retrya
 state, a pin flag, counted RAII use leases and an exclusive transfer lease. RAM, VRAM and staging
 transitions are budgeted by the Resource Governor. The shared synchronous loader and bounded
 worker pool now publish a physical packed RAM buffer only after every canonical range completes.
-VRAM copies and quantized kernel consumption through that loader are not connected yet.
+One real DeepSeek gate/up/down bundle now reaches the quantized CPU consumer while protected by a
+use lease. VRAM copies and a model-wide quantized consumer remain unconnected.
 
 ## Residency policy
 
@@ -137,12 +141,13 @@ prefetch bytes, queue/read/copy/compute timestamps, PCIe bytes, GPU idle time an
 Ready-order execution may change scheduling, but never the router choice or numerical reduction
 order without an explicit quality-changing mode.
 
-The shared synchronous oracle and bounded asynchronous pool now implement range reads,
-compaction, per-tensor slices and `RAM_READY` publication on a synthetic immutable fixture. The
-pool supports one to four workers, a queue of at most 64 requests, pre-enqueue reservations and
-safe queued-work cancellation. It makes next-expert overlap possible but does not yet connect a
-kernel consumer or measure useful overlap. Cache lookup and direct I/O remain in the existing
-OLMoE-specific path.
+The shared synchronous oracle and bounded asynchronous pool implement range reads, compaction,
+per-tensor slices and `RAM_READY` publication. In addition to synthetic fault coverage, a
+one-worker/one-entry configuration now feeds one real DeepSeek 0731 expert to the scalar kernel.
+The general pool supports one to four workers, a queue of at most 64 requests, pre-enqueue
+reservations and safe queued-work cancellation. This test reads before compute and therefore does
+not demonstrate useful overlap. Cache lookup and direct I/O remain in the existing OLMoE-specific
+path.
 
 ## Format policy
 

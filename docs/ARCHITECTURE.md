@@ -312,15 +312,26 @@ bounded GGUF v3 split headers
 The reviewed `UD-IQ1_S` headers contain 1,328 physical tensors and become 34,223 logical
 descriptors. Header-prefix objects are always metadata-only unless a caller supplies separate
 immutable full-shard paths; the CLI never makes that promotion. Exact encoded byte accounting is
-available to planning, while complete expert compute and payload verification remain outside
-this slice.
+available to planning, while complete full-shard verification and layer/token execution remain
+outside this slice.
 
 The first quantized compute oracle is deliberately narrower than the catalog. It accepts complete
-GGML IQ1_S blocks, validates every FP16 scale and all dimensions before output publication,
-decodes into a fixed 256-float scratch buffer and performs a scalar FP64-accumulated matvec into
-caller-owned FP32 output. One exact 2,048 × 4,096 DeepSeek 0731 gate projection matches pinned
-ggml bit for bit. It is not registered as a generic GGUF execution backend: the expert's IQ3_XXS
-down projection, governed loader coupling and routed SwiGLU still have separate gates.
+GGML IQ1_S and IQ3_XXS blocks, validates every FP16 scale and all dimensions before final output
+publication, decodes through fixed 256-float scratch and performs scalar FP64-accumulated matvecs.
+One exact DeepSeek 0731 layer-0/expert-0 gate/up/down bundle is loaded through the shared bounded
+worker and `RAM_READY` lease, executes FP32 SwiGLU, and matches pinned ggml bit for bit across all
+4,096 final outputs. The test uses three hash-pinned extracted ranges rather than an unverified
+full shard, so this is not registered as a generic GGUF model execution backend.
+
+```text
+verified gate/up/down ranges (6,488,064 bytes)
+  -> Governor reserves packed RAM + largest staging range
+  -> fixed worker performs three bounded read-only reads
+  -> RAM_READY + use lease
+  -> IQ1_S gate/up -> SiLU multiply -> IQ3_XXS down
+  -> transactional FP32 output
+  -> lease release -> RAM eviction -> zero reservations
+```
 
 ## TinyTransformer adapter boundary
 

@@ -27,6 +27,7 @@
 #include "vastloom/model/imported_checkpoint.hpp"
 #include "vastloom/model/model_store.hpp"
 #include "vastloom/model/safetensors.hpp"
+#include "vastloom/model/tensor_catalog.hpp"
 #include "vastloom/model/verifier.hpp"
 #include "vastloom/planner/execution_planner.hpp"
 #include "vastloom/research/trace_simulator.hpp"
@@ -180,6 +181,62 @@ void test_safetensors(const std::filesystem::path& root) {
         output.write("123456789", 9);
     }
     CHECK(!vastloom::model::SafetensorsFile::open(checkpoint / "invalid.safetensors"));
+}
+
+void test_logical_tensor_catalog() {
+    using vastloom::model::LogicalTensorDescriptor;
+    using vastloom::model::TensorDType;
+    using vastloom::model::TensorRole;
+    using vastloom::model::TensorSourceRange;
+
+    vastloom::model::LogicalTensorCatalog catalog;
+    catalog.model_id = "test/moe";
+    catalog.revision = "revision";
+    catalog.tensors = {
+        LogicalTensorDescriptor{"embed", TensorDType::f32, {2U}, TensorRole::embedding,
+                                std::nullopt, std::nullopt, false, TensorSourceRange{"shard-a", 0U, 8U}},
+        LogicalTensorDescriptor{"expert.weight", TensorDType::f32, {1U}, TensorRole::routed_expert,
+                                2U, 7U, false, TensorSourceRange{"shard-a", 8U, 4U}},
+        LogicalTensorDescriptor{"expert.scale", TensorDType::f32, {1U}, TensorRole::routed_expert,
+                                2U, 7U, false, TensorSourceRange{"shard-a", 12U, 4U}},
+        LogicalTensorDescriptor{"expert.bias", TensorDType::f16, {1U}, TensorRole::routed_expert,
+                                2U, 7U, false, TensorSourceRange{"shard-b", 0U, 2U}},
+    };
+    auto finalized = vastloom::model::finalize_logical_tensor_catalog(catalog);
+    CHECK(finalized);
+    CHECK(catalog.tensor_bytes == 18U && catalog.always_active_bytes == 8U &&
+          catalog.routed_expert_bytes == 10U);
+    CHECK(catalog.experts.size() == 1U && catalog.expert_read_range_count == 2U);
+    if (catalog.experts.size() == 1U) {
+        CHECK(catalog.experts[0].layer == 2U && catalog.experts[0].expert == 7U &&
+              !catalog.experts[0].speculative && catalog.experts[0].bytes == 10U);
+        CHECK(catalog.experts[0].tensor_indices.size() == 3U && catalog.experts[0].read_ranges.size() == 2U);
+        if (catalog.experts[0].read_ranges.size() == 2U) {
+            CHECK(catalog.experts[0].read_ranges[0].shard == "shard-a" &&
+                  catalog.experts[0].read_ranges[0].offset == 8U &&
+                  catalog.experts[0].read_ranges[0].bytes == 8U);
+        }
+    }
+    CHECK(vastloom::model::to_string(TensorRole::routed_expert) == "routed_expert");
+
+    auto duplicate = catalog;
+    duplicate.tensors.push_back(LogicalTensorDescriptor{
+        "embed", TensorDType::f32, {1U}, TensorRole::other,
+        std::nullopt, std::nullopt, false, TensorSourceRange{"shard-a", 20U, 4U}});
+    CHECK(!vastloom::model::finalize_logical_tensor_catalog(duplicate));
+
+    auto missing_identity = catalog;
+    missing_identity.tensors[1].expert.reset();
+    CHECK(!vastloom::model::finalize_logical_tensor_catalog(missing_identity));
+
+    auto overlapping = catalog;
+    overlapping.tensors[3].source = TensorSourceRange{"shard-a", 10U, 2U};
+    CHECK(!vastloom::model::finalize_logical_tensor_catalog(overlapping));
+
+    auto overflowing = catalog;
+    overflowing.tensors[0].source.offset = std::numeric_limits<vastloom::ByteCount>::max();
+    CHECK(!vastloom::model::finalize_logical_tensor_catalog(overflowing));
+    CHECK(!vastloom::model::finalize_logical_tensor_catalog(catalog, 2U, 1U));
 }
 
 void test_imported_checkpoint_and_llama_config(const std::filesystem::path& root) {
@@ -1600,6 +1657,7 @@ int main() {
     test_json_escape();
     test_bounded_json();
     test_safetensors(root);
+    test_logical_tensor_catalog();
     test_imported_checkpoint_and_llama_config(root);
     test_olmoe_config(root);
     test_deepseek_v4_config(root);

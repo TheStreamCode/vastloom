@@ -42,11 +42,14 @@ def main() -> int:
     require(payload["metadata_only"] is True, "DeepSeek metadata import was marked complete", inspected)
     require(payload["hashes_verified"] is True, "DeepSeek metadata hashes were not verified", inspected)
     require(payload["header_catalog_complete"] is True, "DeepSeek header catalog is incomplete", inspected)
+    require(payload["logical_catalog_valid"] is True, "DeepSeek logical tensor catalog is invalid", inspected)
     require(payload["execution_supported"] is False, "DeepSeek execution was claimed prematurely", inspected)
     require(payload["shard_count"] == 46 and payload["tensor_count"] == 69_187, "DeepSeek tensor identity changed", inspected)
     require(payload["tensor_payload_bytes"] == 159_609_485_896, "DeepSeek payload bytes changed", inspected)
     require(payload["routed_expert_bytes"] == 150_592_290_816, "DeepSeek expert bytes changed", inspected)
     require(payload["always_active_bytes"] == 9_017_195_080, "DeepSeek trunk bytes changed", inspected)
+    require(payload["expert_bundle_count"] == 11_264, "DeepSeek expert bundle count changed", inspected)
+    require(payload["expert_read_range_count"] == 22_528, "DeepSeek expert read-range layout changed", inspected)
     require(payload["bytes_per_expert"] == 13_369_344, "DeepSeek per-expert bytes changed", inspected)
     require(
         payload["active_expert_bytes_per_layer"] == 80_216_064,

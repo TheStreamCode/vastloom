@@ -2,6 +2,7 @@
 
 #include <algorithm>
 #include <array>
+#include <charconv>
 #include <cmath>
 #include <limits>
 #include <map>
@@ -27,6 +28,7 @@ constexpr ByteCount kAlwaysActiveBytes = 9'017'195'080ULL;
 constexpr ByteCount kBytesPerExpert = 13'369'344ULL;
 constexpr std::size_t kTensorCount = 69'187U;
 constexpr std::size_t kRoutedExpertTensorCount = 67'584U;
+constexpr std::size_t kExpertBundleCount = 11'264U;
 constexpr std::size_t kShardCount = 46U;
 
 struct ExpectedFile {
@@ -287,6 +289,94 @@ bool routed_expert_tensor(std::string_view name) {
            name.find(".ffn.experts.") != std::string_view::npos;
 }
 
+Result<std::uint32_t> parse_identifier(std::string_view text,
+                                       std::size_t begin,
+                                       std::size_t end,
+                                       std::string_view tensor_name) {
+    if (begin >= end || end > text.size()) {
+        return make_error(ErrorCode::invalid_format,
+                          "DeepSeek tensor has an invalid numeric identity",
+                          std::string(tensor_name));
+    }
+    std::uint32_t value = 0U;
+    const auto parsed = std::from_chars(text.data() + begin, text.data() + end, value);
+    if (parsed.ec != std::errc{} || parsed.ptr != text.data() + end) {
+        return make_error(ErrorCode::invalid_format,
+                          "DeepSeek tensor has an invalid numeric identity",
+                          std::string(tensor_name));
+    }
+    return value;
+}
+
+struct TensorIdentity {
+    model::TensorRole role{model::TensorRole::other};
+    std::optional<std::uint32_t> layer;
+    std::optional<std::uint32_t> expert;
+    bool speculative{false};
+};
+
+Result<TensorIdentity> classify_tensor(std::string_view name, const DeepseekV4Config& config) {
+    TensorIdentity identity;
+    if (name.starts_with("layers.")) {
+        constexpr std::size_t begin = std::string_view("layers.").size();
+        const auto end = name.find('.', begin);
+        if (end == std::string_view::npos) {
+            return make_error(ErrorCode::invalid_format, "DeepSeek layer tensor name is malformed", std::string(name));
+        }
+        auto layer = parse_identifier(name, begin, end, name);
+        if (!layer || layer.value() >= config.num_hidden_layers) {
+            return make_error(ErrorCode::invalid_format, "DeepSeek layer tensor identity is out of range", std::string(name));
+        }
+        identity.layer = layer.value();
+    } else if (name.starts_with("mtp.")) {
+        constexpr std::size_t begin = std::string_view("mtp.").size();
+        const auto end = name.find('.', begin);
+        if (end == std::string_view::npos) {
+            return make_error(ErrorCode::invalid_format, "DeepSeek MTP tensor name is malformed", std::string(name));
+        }
+        auto mtp_layer = parse_identifier(name, begin, end, name);
+        if (!mtp_layer || mtp_layer.value() >= config.num_nextn_predict_layers ||
+            mtp_layer.value() > std::numeric_limits<std::uint32_t>::max() - config.num_hidden_layers) {
+            return make_error(ErrorCode::invalid_format, "DeepSeek MTP tensor identity is out of range", std::string(name));
+        }
+        identity.layer = config.num_hidden_layers + mtp_layer.value();
+        identity.speculative = true;
+    }
+
+    constexpr std::string_view expert_marker = ".ffn.experts.";
+    const auto expert_marker_at = name.find(expert_marker);
+    if (expert_marker_at != std::string_view::npos) {
+        const auto begin = expert_marker_at + expert_marker.size();
+        const auto end = name.find('.', begin);
+        if (!identity.layer.has_value() || end == std::string_view::npos) {
+            return make_error(ErrorCode::invalid_format, "DeepSeek routed expert tensor name is malformed", std::string(name));
+        }
+        auto expert = parse_identifier(name, begin, end, name);
+        if (!expert || expert.value() >= config.num_routed_experts) {
+            return make_error(ErrorCode::invalid_format, "DeepSeek routed expert identity is out of range", std::string(name));
+        }
+        identity.expert = expert.value();
+        identity.role = model::TensorRole::routed_expert;
+    } else if (name.find(".ffn.shared_experts.") != std::string_view::npos) {
+        identity.role = model::TensorRole::shared_expert;
+    } else if (name.find(".ffn.gate.") != std::string_view::npos) {
+        identity.role = model::TensorRole::router;
+    } else if (name == "embed.weight") {
+        identity.role = model::TensorRole::embedding;
+    } else if (name == "head.weight") {
+        identity.role = model::TensorRole::output_head;
+    } else if (name.find(".attn.") != std::string_view::npos) {
+        identity.role = model::TensorRole::attention;
+    } else if (name.starts_with("hc_") || name.find(".hc_") != std::string_view::npos) {
+        identity.role = model::TensorRole::hyper_connection;
+    } else if (name.find("norm.") != std::string_view::npos) {
+        identity.role = model::TensorRole::normalization;
+    } else if (identity.speculative) {
+        identity.role = model::TensorRole::speculative;
+    }
+    return identity;
+}
+
 std::string expert_identity(std::string_view name) {
     const auto marker = name.find(".ffn.experts.");
     if (marker == std::string_view::npos) return {};
@@ -301,15 +391,21 @@ struct CatalogSummary {
     ByteCount total_tensor_bytes{0};
     ByteCount routed_expert_bytes{0};
     std::size_t routed_expert_tensors{0};
+    model::LogicalTensorCatalog logical_catalog;
 };
 
 Result<CatalogSummary> validate_headers(const std::filesystem::path& root,
                                         bool metadata_only,
-                                        const ExpectedTensorMap& expected) {
+                                        const ExpectedTensorMap& expected,
+                                        const DeepseekV4Config& config) {
     std::map<model::TensorDType, DeepseekDTypeSummary> dtypes;
     std::set<std::string, std::less<>> seen;
     std::map<std::string, ByteCount, std::less<>> expert_bytes;
     CatalogSummary summary;
+    summary.logical_catalog.model_id = std::string(kModelId);
+    summary.logical_catalog.revision = std::string(kRevision);
+    summary.logical_catalog.metadata_only = metadata_only;
+    summary.logical_catalog.tensors.reserve(expected.size());
     for (const auto& shard : kShards) {
         const auto path = metadata_only
                               ? root / "headers" / (std::string(shard.name) + ".header")
@@ -343,6 +439,18 @@ Result<CatalogSummary> validate_headers(const std::filesystem::path& root,
                 summary.routed_expert_bytes += tensor.byte_count;
                 expert_bytes[expert_identity(tensor.name)] += tensor.byte_count;
             }
+            auto identity = classify_tensor(tensor.name, config);
+            if (!identity) return identity.error();
+            summary.logical_catalog.tensors.push_back(model::LogicalTensorDescriptor{
+                tensor.name,
+                tensor.dtype,
+                tensor.shape,
+                identity.value().role,
+                identity.value().layer,
+                identity.value().expert,
+                identity.value().speculative,
+                model::TensorSourceRange{root / std::string(shard.name), tensor.absolute_offset, tensor.byte_count},
+            });
         }
     }
     if (seen.size() != expected.size() || summary.total_tensor_bytes != kTensorPayloadBytes ||
@@ -353,6 +461,23 @@ Result<CatalogSummary> validate_headers(const std::filesystem::path& root,
     for (const auto& [name, bytes] : expert_bytes) {
         if (name.empty() || bytes != kBytesPerExpert) {
             return make_error(ErrorCode::integrity_error, "DeepSeek routed expert byte layout differs from the pinned revision", name);
+        }
+    }
+    auto logical = model::finalize_logical_tensor_catalog(summary.logical_catalog, kTensorCount, kExpertBundleCount);
+    if (!logical) return logical.error();
+    if (summary.logical_catalog.tensor_bytes != kTensorPayloadBytes ||
+        summary.logical_catalog.routed_expert_bytes != kRoutedExpertBytes ||
+        summary.logical_catalog.always_active_bytes != kAlwaysActiveBytes ||
+        summary.logical_catalog.experts.size() != kExpertBundleCount) {
+        return make_error(ErrorCode::integrity_error,
+                          "DeepSeek logical tensor catalog differs from the pinned revision",
+                          root.string());
+    }
+    for (const auto& expert : summary.logical_catalog.experts) {
+        if (expert.bytes != kBytesPerExpert || expert.tensor_indices.size() != 6U || expert.read_ranges.empty()) {
+            return make_error(ErrorCode::integrity_error,
+                              "DeepSeek logical expert bundle differs from the pinned revision",
+                              root.string());
         }
     }
     constexpr std::array<std::pair<model::TensorDType, std::pair<std::size_t, ByteCount>>, 6> expected_dtypes{{
@@ -483,7 +608,7 @@ Result<DeepseekV4Inspection> inspect_deepseek_v4_checkpoint(const std::filesyste
     if (!config) return config.error();
     auto index = load_and_validate_index(imported.value().root / "model.safetensors.index.json", config.value());
     if (!index) return index.error();
-    auto headers = validate_headers(imported.value().root, imported.value().metadata_only, index.value());
+    auto headers = validate_headers(imported.value().root, imported.value().metadata_only, index.value(), config.value());
     if (!headers) return headers.error();
 
     DeepseekV4Inspection result;
@@ -494,6 +619,7 @@ Result<DeepseekV4Inspection> inspect_deepseek_v4_checkpoint(const std::filesyste
     result.metadata_only = imported.value().metadata_only;
     result.hashes_verified = imported.value().full_hash_verified;
     result.header_catalog_complete = true;
+    result.logical_catalog_valid = true;
     result.execution_supported = false;
     result.shard_count = kShardCount;
     result.tensor_count = kTensorCount;
@@ -509,6 +635,7 @@ Result<DeepseekV4Inspection> inspect_deepseek_v4_checkpoint(const std::filesyste
     result.no_cache_expert_bytes_per_token = result.active_expert_bytes_per_layer * config.value().num_hidden_layers;
     result.safe_ram_cap_bytes = safe_ram_cap_bytes;
     result.dtypes = std::move(headers.value().dtypes);
+    result.logical_catalog = std::move(headers.value().logical_catalog);
     return result;
 }
 
@@ -520,6 +647,7 @@ std::string to_json(const DeepseekV4Inspection& inspection) {
            << (inspection.metadata_only ? "true" : "false")
            << ",\"hashes_verified\":" << (inspection.hashes_verified ? "true" : "false")
            << ",\"header_catalog_complete\":" << (inspection.header_catalog_complete ? "true" : "false")
+           << ",\"logical_catalog_valid\":" << (inspection.logical_catalog_valid ? "true" : "false")
            << ",\"execution_supported\":" << (inspection.execution_supported ? "true" : "false")
            << ",\"layers\":" << inspection.config.num_hidden_layers
            << ",\"hidden_size\":" << inspection.config.hidden_size
@@ -534,6 +662,8 @@ std::string to_json(const DeepseekV4Inspection& inspection) {
            << ",\"shard_count\":" << inspection.shard_count
            << ",\"tensor_count\":" << inspection.tensor_count
            << ",\"routed_expert_tensor_count\":" << inspection.routed_expert_tensor_count
+           << ",\"expert_bundle_count\":" << inspection.logical_catalog.experts.size()
+           << ",\"expert_read_range_count\":" << inspection.logical_catalog.expert_read_range_count
            << ",\"imported_file_bytes\":" << inspection.imported_file_bytes
            << ",\"checkpoint_file_bytes\":" << inspection.checkpoint_file_bytes
            << ",\"header_snapshot_bytes\":" << inspection.header_snapshot_bytes
@@ -564,6 +694,8 @@ std::string to_text(const DeepseekV4Inspection& inspection) {
            << "Safetensors: " << inspection.shard_count << " shards, " << inspection.tensor_count << " tensors, "
            << format_bytes(inspection.tensor_payload_bytes) << " payload\n"
            << "Header snapshots: " << format_bytes(inspection.header_snapshot_bytes) << '\n'
+           << "Logical expert bundles: " << inspection.logical_catalog.experts.size() << " in "
+           << inspection.logical_catalog.expert_read_range_count << " bounded source ranges\n"
            << "Always-active tensors: " << format_bytes(inspection.always_active_bytes) << '\n'
            << "Routed experts: " << format_bytes(inspection.routed_expert_bytes) << '\n'
            << "One routed expert: " << format_bytes(inspection.bytes_per_expert) << '\n'

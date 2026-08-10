@@ -8,6 +8,7 @@
 
 #include "vastloom/core/bytes.hpp"
 #include "vastloom/core/status.hpp"
+#include "vastloom/model/tensor_catalog.hpp"
 
 namespace vastloom::inference {
 
@@ -52,6 +53,7 @@ struct DeepseekV4Inspection {
     bool metadata_only{false};
     bool hashes_verified{false};
     bool header_catalog_complete{false};
+    bool logical_catalog_valid{false};
     bool execution_supported{false};
     std::size_t shard_count{0};
     std::size_t tensor_count{0};
@@ -67,6 +69,7 @@ struct DeepseekV4Inspection {
     ByteCount no_cache_expert_bytes_per_token{0};
     ByteCount safe_ram_cap_bytes{0};
     std::vector<DeepseekDTypeSummary> dtypes;
+    model::LogicalTensorCatalog logical_catalog;
 };
 
 [[nodiscard]] Result<DeepseekV4Config> load_deepseek_v4_config(

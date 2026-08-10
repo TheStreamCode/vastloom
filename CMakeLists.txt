@@ -76,6 +76,7 @@ add_library(vastloom_core STATIC
     src/model/manifest.cpp
     src/model/model_store.cpp
     src/model/safetensors.cpp
+    src/model/tensor_catalog.cpp
     src/model/verifier.cpp
     src/planner/execution_planner.cpp
     src/research/trace_simulator.cpp

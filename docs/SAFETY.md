@@ -170,11 +170,16 @@ The 0731 GGUF reader adds a metadata-only safety boundary:
 - a header-prefix path cannot be used as an executable tensor source. A library caller must
   explicitly supply separate full-shard paths, after which normal immutable import and checksum
   gates are still required before execution;
-- no GGML quantized kernel is registered, so the current catalog cannot reach the token path.
+- the scalar IQ1_S oracle accepts caller-supplied bounded spans only, prevalidates dimensions,
+  encoded size, all block scales and finite inputs, and has a 64-million-element default ceiling;
+- the oracle is not registered as a GGUF/catalog execution backend, so metadata snapshots and
+  unverified full shards still cannot reach the token path.
 
 The local validation used one complete 5.26 MB metadata shard and two 16 MiB HTTP-range prefixes;
-it did not download the 82.54 GB profile. Header-derived logical bytes/token are planning data,
-not physical device telemetry and never relax Resource Governor limits.
+it did not download the 82.54 GB profile. A separate exact 1.64 MB HTTP range was used for the
+real IQ1_S parity test and remains outside the immutable model store. Header-derived logical
+bytes/token are planning data, not physical device telemetry and never relax Resource Governor
+limits.
 
 ## Real OLMoE streaming bounds
 

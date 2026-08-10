@@ -35,7 +35,17 @@
 - Bound the pinned 82,539,237,792-byte 0731 `UD-IQ1_S` profile's 1,328 physical tensors to
   34,223 logical descriptors and 11,008 packed expert bundles from bounded headers. The derived
   1,770,651,648 no-cache expert bytes/token is a planning value, not measured SSD traffic;
-  quantized execution remains unsupported.
+  complete quantized execution remains unsupported.
+- Added a bounded scalar IQ1_S dequantization/matvec reference kernel derived from pinned ggml
+  equations and licensed codebook data. Synthetic vectors and one exact 1,638,400-byte real
+  DeepSeek 0731 expert-gate slice match the upstream oracle bit for bit across all 2,048 rows;
+  IQ3_XXS, complete expert execution and model generation remain open.
+- Replaced repeated GGUF metadata `seekg` calls with verified sequential discards. The same real
+  5.26 MB header on Windows-mounted WSL storage improved from 37.42 s to 0.11 s while preserving
+  strict bounded/truncation behavior.
+- Made capacity-sensitive tests deterministic without weakening production disk reserves, added
+  the private-repository permission required by CodeQL and gated GitHub Dependency Review until
+  the repository is public or GitHub Advanced Security is available.
 - Fixed CLI path construction so Windows wide-character arguments remain Unicode-native through
   `std::filesystem`; an accented GGUF filename is now covered end to end.
 - Added the shared logical tensor catalog and bound all 69,187 pinned DeepSeek preview tensors

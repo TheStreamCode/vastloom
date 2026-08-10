@@ -132,6 +132,8 @@ is tracked as a separate, not-yet-validated target in the
   exact coalesced source ranges.
 - [x] Parse the official 0731 `UD-IQ1_S` GGUF split headers and bind packed expert subranges to
   the universal catalog without reading payloads.
+- [x] Match pinned ggml IQ1_S dequantization/matvec output on one exact real 0731 expert-gate
+  slice with bounded scalar CPU code.
 - [ ] Bind verified full GGUF payloads and packed IQ/FP4/FP8 weights to executable kernels.
 - [x] Bounded operator primitives for normalization, base RoPE, selected-latent attention,
   learned/hash routing, routed SwiGLU and Hyper-Connections.
@@ -157,13 +159,16 @@ The model-independent tensor/expert binding is recorded in the
 [M7 logical catalog report](reports/M7_LOGICAL_TENSOR_CATALOG_VALIDATION.md).
 The separate official 0731 GGUF header binding is recorded in the
 [M7 0731 GGUF catalog report](reports/M7_DEEPSEEK_0731_GGUF_CATALOG_VALIDATION.md).
+The first real packed-matrix parity gate is recorded in the
+[M7 IQ1_S kernel report](reports/M7_DEEPSEEK_IQ1S_KERNEL_VALIDATION.md); it does not yet execute
+the IQ3_XXS down projection or a complete expert.
 
 ## M8 — CUDA path for the RTX 4070 Super
 
 - [ ] Native CUDA device capability probe.
 - [ ] Bounded CUDA allocator integrated with Resource Governor.
 - [ ] Dense and attention/state kernels.
-- [ ] Packed expert kernels for the selected quantization.
+- [ ] Optimized packed expert kernels for the selected quantization (scalar IQ1_S oracle exists).
 - [ ] Async copy streams, cancellation and error recovery.
 - [ ] CPU fallback for unsupported operators.
 

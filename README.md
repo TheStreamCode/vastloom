@@ -41,8 +41,10 @@ model conversion.
 > generic multi-range bundles into packed RAM buffers, but it has only been exercised on a tiny
 > fixture because the header-only preview import contains no payload. A bounded native GGUF v3
 > reader now also maps the pinned 82.54 GB `UD-IQ1_S` 0731 profile from three headers into 11,008
-> logical expert bundles without downloading its complete payload. Full-checkpoint DeepSeek loading,
-> quantized execution, generation and CUDA remain unimplemented.
+> logical expert bundles without downloading its complete payload. One exact 1.64 MB real
+> expert-gate slice now passes bit-for-bit IQ1_S CPU dequantization/matvec parity against pinned
+> ggml. The IQ3_XXS down projection, complete expert execution, full-checkpoint DeepSeek loading,
+> generation and CUDA remain unimplemented.
 
 ## Why Vastloom exists
 
@@ -94,6 +96,8 @@ The bounded shared worker/queue transaction is documented in the
 [`M9 asynchronous expert-load report`](docs/reports/M9_ASYNC_EXPERT_LOAD_VALIDATION.md).
 The official 0731 GGUF header and packed-expert binding is documented in the
 [`M7 0731 GGUF catalog report`](docs/reports/M7_DEEPSEEK_0731_GGUF_CATALOG_VALIDATION.md).
+The first real quantized matrix parity gate is documented in the
+[`M7 IQ1_S kernel report`](docs/reports/M7_DEEPSEEK_IQ1S_KERNEL_VALIDATION.md).
 Current and candidate model support is kept explicit in the
 [`model compatibility matrix`](docs/MODEL_COMPATIBILITY.md).
 
@@ -234,8 +238,12 @@ allocation plan is derived from detected capacity and conservative headroom.
 - **Header-derived traffic floor:** the encoded routed experts total 75,547,803,648 bytes;
   a top-6 no-cache decode would request 1,770,651,648 logical expert bytes per token before
   caching/prefetch gains. This is not measured physical SSD traffic or a speed claim.
+- **First real quantized matrix:** a bounded scalar IQ1_S CPU path matches pinned ggml for all
+  2,048 outputs of the exact 1,638,400-byte layer-0/expert-0 gate slice. This is one projection,
+  not a complete expert or model execution path.
 - **GGUF safety boundary:** `deepseek-gguf-inspect` reads metadata only. Header prefixes cannot
-  become executable sources, and no quantized kernel or 0731 generation path is connected yet.
+  become executable sources, and the IQ1_S oracle is not connected to the catalog, expert loader
+  or 0731 generation path yet.
 
 ### Runtime foundation
 
@@ -615,7 +623,8 @@ It currently has:
   FP32 prefill oracle and official 0731 GGUF metadata catalog; no full-checkpoint DeepSeek,
   MiniMax, Kimi or GGUF execution adapter;
 - no CUDA, ROCm, Vulkan or Metal inference backend;
-- no production quantized kernels;
+- one scalar IQ1_S reference kernel validated on a real gate matrix, but no IQ3_XXS down
+  projection, complete quantized expert, SIMD/fused production kernel or CUDA quantized path;
 - no VRAM expert tier or pinned host buffers; direct/unbuffered I/O is currently an
   opt-in OLMoE measurement protocol, not the production path for every adapter;
 - OLMoE currently exposes final-logit probes and route telemetry, not decoding/chat;
@@ -640,8 +649,8 @@ research metric is not merely SSD throughput. It is:
 
 The next technical sequence remains incremental:
 
-1. bind one official 0731 IQ1_S expert slice to reference quantized CPU kernels, then connect
-   verified full payloads and a target-verified MTP decoding loop;
+1. add IQ3_XXS parity, execute one complete official 0731 expert bundle through the governed
+   loader, then connect verified full payloads and a target-verified MTP decoding loop;
 2. CUDA dense, attention, router and packed expert kernels;
 3. explicit VRAM/RAM/NVMe placement with pinned buffers and direct/overlapped I/O;
 4. adaptive placement, predictive routing and speculative expert deduplication;

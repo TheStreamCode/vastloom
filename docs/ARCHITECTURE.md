@@ -312,8 +312,15 @@ bounded GGUF v3 split headers
 The reviewed `UD-IQ1_S` headers contain 1,328 physical tensors and become 34,223 logical
 descriptors. Header-prefix objects are always metadata-only unless a caller supplies separate
 immutable full-shard paths; the CLI never makes that promotion. Exact encoded byte accounting is
-available to planning, while dequantization, expert compute and payload verification remain
-outside this slice.
+available to planning, while complete expert compute and payload verification remain outside
+this slice.
+
+The first quantized compute oracle is deliberately narrower than the catalog. It accepts complete
+GGML IQ1_S blocks, validates every FP16 scale and all dimensions before output publication,
+decodes into a fixed 256-float scratch buffer and performs a scalar FP64-accumulated matvec into
+caller-owned FP32 output. One exact 2,048 × 4,096 DeepSeek 0731 gate projection matches pinned
+ggml bit for bit. It is not registered as a generic GGUF execution backend: the expert's IQ3_XXS
+down projection, governed loader coupling and routed SwiGLU still have separate gates.
 
 ## TinyTransformer adapter boundary
 

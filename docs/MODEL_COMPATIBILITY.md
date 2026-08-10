@@ -43,8 +43,12 @@ three split headers validates 1,328 physical tensors and slices the 129 packed e
 into 11,008 logical layer/expert bundles. The catalog accounts for 75,547,803,648 routed-expert
 bytes and 6,986,088,796 always-active bytes. A top-6 no-cache schedule would request
 1,770,651,648 logical expert bytes/token. This is header-derived planning data: the two large
-payload shards were not downloaded, no full artifact hash was verified and no tensor was
-dequantized or executed.
+payload shards were not downloaded and no full artifact hash was verified.
+
+One bounded 1,638,400-byte range from the second shard has now been tested separately: the
+layer-0/expert-0 gate matrix matches pinned ggml IQ1_S dequantization/matvec output bit for bit.
+That proves one real projection only. The matching up projection is not loader-bound, the down
+projection uses unsupported IQ3_XXS, and no complete expert, layer or token has executed.
 
 ### Laguna S 2.1
 
@@ -78,8 +82,9 @@ model revision
 The shared catalog and Safetensors-backed binding are implemented for the pinned DeepSeek
 preview. Its 69,187 tensors produce 11,264 logical expert bundles and 22,528 coalesced immutable
 source ranges. The separate GGUF binding now populates the same contract for the official 0731
-`UD-IQ1_S` headers by slicing each packed tensor along its expert axis. Executable full-shard
-binding, quantized kernels and the Laguna adapter remain open.
+`UD-IQ1_S` headers by slicing each packed tensor along its expert axis. A scalar IQ1_S oracle now
+exists outside that binding; executable full-shard coupling, remaining quantization kernels and
+the Laguna adapter remain open.
 
 The shared runtime may then place a tensor or expert bundle in one of these explicit states:
 
@@ -93,7 +98,7 @@ The shared control object now implements the displayed states, a terminal/retrya
 state, a pin flag, counted RAII use leases and an exclusive transfer lease. RAM, VRAM and staging
 transitions are budgeted by the Resource Governor. The shared synchronous loader and bounded
 worker pool now publish a physical packed RAM buffer only after every canonical range completes.
-VRAM copies and quantized kernel consumption are not connected yet.
+VRAM copies and quantized kernel consumption through that loader are not connected yet.
 
 ## Residency policy
 

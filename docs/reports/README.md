@@ -13,6 +13,9 @@ hardware, commands, measurements and limitations.
 
 ## Current report
 
+- [`M7_DEEPSEEK_IQ1S_KERNEL_VALIDATION.md`](M7_DEEPSEEK_IQ1S_KERNEL_VALIDATION.md) —
+  exact IQ1_S dequantization/matvec parity on one real 1.64 MB DeepSeek 0731 expert-gate slice,
+  including the explicit incomplete-expert/non-inference boundary.
 - [`M7_DEEPSEEK_0731_GGUF_CATALOG_VALIDATION.md`](M7_DEEPSEEK_0731_GGUF_CATALOG_VALIDATION.md) —
   bounded native GGUF v3/split-header parsing, real `UD-IQ1_S` packed-expert mapping and the
   explicit metadata-only/non-execution boundary.

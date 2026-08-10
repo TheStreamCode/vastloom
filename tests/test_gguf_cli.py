@@ -120,6 +120,8 @@ def main() -> int:
         require(catalogued.returncode == 0, "DeepSeek GGUF catalog failed", catalogued)
         catalog = json.loads(catalogued.stdout)
         require(catalog["metadata_only"] is True, "catalog was not metadata-only", catalogued)
+        require(catalog["execution_supported"] is False,
+                "GGUF inspection made an execution claim", catalogued)
         require(catalog["physical_tensors"] == 130, "catalog tensor count mismatch", catalogued)
         require(catalog["logical_tensors"] == 33_025, "logical tensor count mismatch", catalogued)
         require(catalog["logical_experts"] == 11_008, "logical expert count mismatch", catalogued)
@@ -169,6 +171,15 @@ def main() -> int:
         )
         require(rejected.returncode != 0 and "differs from shard count" in rejected.stderr,
                 "mismatched declared sizes were accepted", rejected)
+
+        unimported = run(
+            args.vastloom,
+            "deepseek-gguf-checkpoint",
+            str(model),
+            "--json",
+        )
+        require(unimported.returncode != 0,
+                "raw GGUF path bypassed the immutable import contract", unimported)
 
     print("DeepSeek GGUF CLI tests passed")
     return 0

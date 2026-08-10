@@ -64,6 +64,7 @@ class ModelSpec:
     model_id: str
     revision: str
     files: tuple[FileSpec, ...]
+    artifact_name: str | None = None
 
 
 SMOLLM2 = ModelSpec(
@@ -267,7 +268,60 @@ DEEPSEEK_V4_FLASH = ModelSpec(
 )
 
 
-MODELS = {item.alias: item for item in (SMOLLM2, OLMOE, DEEPSEEK_V4_FLASH)}
+DEEPSEEK_V4_FLASH_0731_GGUF_IQ1S = ModelSpec(
+    alias="deepseek-v4-flash-0731-gguf-iq1s",
+    model_id="unsloth/DeepSeek-V4-Flash-0731-GGUF",
+    revision="fbbb5b93fb787c21338159b0af3318bb3f4d9768",
+    files=(
+        # Split 1 contains only GGUF metadata and is small enough to import in full for both
+        # modes. Splits 2 and 3 are immutable payload objects in a full import and bounded,
+        # independently hashed header prefixes in metadata-only mode.
+        FileSpec(
+            "UD-IQ1_S/DeepSeek-V4-Flash-0731-UD-IQ1_S-00001-of-00003.gguf",
+            5_257_664,
+            "2fa152e25a14500e42e6d98f20d200eec1e945f34dc1cfb981b651b9c86b97be",
+        ),
+        FileSpec(
+            "UD-IQ1_S/DeepSeek-V4-Flash-0731-UD-IQ1_S-00002-of-00003.gguf",
+            49_093_726_624,
+            "e9fc77544cd48aa0c31fbf32fdf5432f2b560b92a9aeffd9f690d99867cf0e5f",
+            True,
+        ),
+        FileSpec(
+            "UD-IQ1_S/DeepSeek-V4-Flash-0731-UD-IQ1_S-00003-of-00003.gguf",
+            33_440_253_504,
+            "fd99d5cd0503d668b6febc2eedcc9db68e264cfb79dd355efc88c15eabe4248d",
+            True,
+        ),
+        FileSpec(
+            "headers/UD-IQ1_S/DeepSeek-V4-Flash-0731-UD-IQ1_S-00002-of-00003.gguf.header",
+            52_320,
+            "7128e5c180640517eb10a2ba2eb22a5153f80b3d8316ec70122246a5a2f3db47",
+            source_name="UD-IQ1_S/DeepSeek-V4-Flash-0731-UD-IQ1_S-00002-of-00003.gguf",
+            metadata_only_only=True,
+            range_prefix=True,
+            source_size=49_093_726_624,
+        ),
+        FileSpec(
+            "headers/UD-IQ1_S/DeepSeek-V4-Flash-0731-UD-IQ1_S-00003-of-00003.gguf.header",
+            33_600,
+            "48c9b417ec3c389e834bb299a3273376e8dabbc2855116d12cadb92977091717",
+            source_name="UD-IQ1_S/DeepSeek-V4-Flash-0731-UD-IQ1_S-00003-of-00003.gguf",
+            metadata_only_only=True,
+            range_prefix=True,
+            source_size=33_440_253_504,
+        ),
+    ),
+    # Keep nested cache/staging paths below legacy Windows MAX_PATH without weakening the
+    # model/revision identity recorded in the immutable manifest.
+    artifact_name="deepseek-v4-flash-0731-iq1s-fbbb5b93",
+)
+
+
+MODELS = {
+    item.alias: item
+    for item in (SMOLLM2, OLMOE, DEEPSEEK_V4_FLASH, DEEPSEEK_V4_FLASH_0731_GGUF_IQ1S)
+}
 
 
 def validate_store(store: Path) -> Path:
@@ -322,9 +376,12 @@ def import_lock(path: Path):
 
 
 def target_name(spec: ModelSpec, metadata_only: bool) -> str:
-    model = spec.model_id.replace("/", "-")
+    model = spec.artifact_name or spec.model_id.replace("/", "-")
+    if not model or Path(model).name != model or model in (".", ".."):
+        raise RuntimeError("unsafe importer artifact name")
     suffix = "--metadata" if metadata_only else ""
-    return f"{model}--{spec.revision}{suffix}"
+    revision = "" if spec.artifact_name else f"--{spec.revision}"
+    return f"{model}{revision}{suffix}"
 
 
 def selected_files(spec: ModelSpec, metadata_only: bool) -> tuple[FileSpec, ...]:

@@ -92,6 +92,52 @@ def main() -> int:
             ),
             "DeepSeek header snapshot identity is incomplete",
         )
+        gguf_metadata = MODULE.selected_files(MODULE.DEEPSEEK_V4_FLASH_0731_GGUF_IQ1S, True)
+        gguf_full = MODULE.selected_files(MODULE.DEEPSEEK_V4_FLASH_0731_GGUF_IQ1S, False)
+        require(len(gguf_metadata) == 3, "DeepSeek 0731 GGUF metadata set is incomplete")
+        require(len(gguf_full) == 3, "DeepSeek 0731 GGUF full set is incomplete")
+        require(
+            sum(item.size for item in gguf_metadata) == 5_343_584,
+            "DeepSeek 0731 bounded GGUF metadata byte count changed",
+        )
+        require(
+            sum(item.size for item in gguf_full) == 82_539_237_792,
+            "DeepSeek 0731 GGUF split byte count changed",
+        )
+        require(
+            sum(item.size for item in gguf_full if item.weight) == 82_533_980_128,
+            "DeepSeek 0731 GGUF payload authorization byte count changed",
+        )
+        require(
+            all(item.sha256 for item in MODULE.DEEPSEEK_V4_FLASH_0731_GGUF_IQ1S.files),
+            "DeepSeek 0731 GGUF objects and headers must have pinned SHA-256 values",
+        )
+        require(
+            {item.name for item in gguf_metadata if item.range_prefix}
+            == {
+                "headers/UD-IQ1_S/DeepSeek-V4-Flash-0731-UD-IQ1_S-00002-of-00003.gguf.header",
+                "headers/UD-IQ1_S/DeepSeek-V4-Flash-0731-UD-IQ1_S-00003-of-00003.gguf.header",
+            },
+            "DeepSeek 0731 GGUF metadata import did not select the exact bounded headers",
+        )
+        require(
+            MODULE.target_name(MODULE.DEEPSEEK_V4_FLASH_0731_GGUF_IQ1S, True)
+            == "deepseek-v4-flash-0731-iq1s-fbbb5b93--metadata",
+            "DeepSeek 0731 Windows-safe artifact name changed",
+        )
+        try:
+            MODULE.import_model(
+                root,
+                MODULE.DEEPSEEK_V4_FLASH_0731_GGUF_IQ1S,
+                metadata_only=False,
+                reserve_bytes=20 * MODULE.GIB,
+                timeout=1.0,
+                dry_run=True,
+            )
+        except RuntimeError as error:
+            require("--allow-large-download" in str(error), "GGUF large-import refusal is not actionable")
+        else:
+            raise AssertionError("DeepSeek 0731 full GGUF import lacked explicit authorization")
         try:
             MODULE.import_model(
                 root,

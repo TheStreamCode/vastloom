@@ -256,6 +256,9 @@ void print_help() {
         << "  deepseek-gguf-inspect SHARD... [--declared-sizes CSV] [--revision ID]"
            " [--context N] [--batch-size N] [--json]\n"
         << "      Build a metadata-only catalog and derived resident/streamed working-set plan.\n\n"
+        << "  deepseek-gguf-checkpoint MODEL_DIRECTORY [--context N] [--batch-size N]"
+           " [--no-verify] [--json]\n"
+        << "      Verify and bind the pinned 0731 UD-IQ1_S import under single-tier admission.\n\n"
         << "  moe-logits MODEL_DIRECTORY --text TEXT [--chat] [--top N]\n"
         << "       [--cache no-cache|lru|lfu|static-hot] [--cache-bytes SIZE]\n"
         << "       [--io sync|async] [--io-cache buffered|bypass] [--expert-read whole|staged]\n"
@@ -637,6 +640,52 @@ int command_deepseek_gguf_inspect(const std::vector<std::string>& args) {
     }
     options.metadata_only = true;
     auto report = vastloom::inference::build_deepseek_v4_gguf_catalog(split.value(), options);
+    if (!report) return print_error(report.error(), json);
+    std::cout << (json ? vastloom::inference::to_json(report.value())
+                      : vastloom::inference::to_text(report.value())) << '\n';
+    return 0;
+}
+
+int command_deepseek_gguf_checkpoint(const std::vector<std::string>& args) {
+    const bool json = has_flag(args, "--json");
+    auto valid = validate_options(
+        args, 1U, {"--context", "--batch-size"}, {"--no-verify", "--json"});
+    if (!valid) return print_error(valid.error(), json);
+    if (args.empty() || vastloom::util::starts_with(args.front(), "--")) {
+        return print_error(
+            vastloom::make_error(
+                vastloom::ErrorCode::invalid_argument,
+                "deepseek-gguf-checkpoint requires one imported checkpoint directory"),
+            json);
+    }
+    auto context = optional_size(args, "--context", 4'096U);
+    auto batch_size = optional_size(args, "--batch-size", 1U);
+    if (!context) return print_error(context.error(), json);
+    if (!batch_size) return print_error(batch_size.error(), json);
+    if (context.value() == 0U || context.value() > 1'048'576U ||
+        batch_size.value() == 0U || batch_size.value() > 8U) {
+        return print_error(
+            vastloom::make_error(vastloom::ErrorCode::invalid_argument,
+                                 "DeepSeek context or batch size is outside safe bounds"),
+            json);
+    }
+
+    const auto checkpoint_root = cli_path(args.front());
+    auto hardware = vastloom::hardware::HardwareProbe::collect(checkpoint_root);
+    if (!hardware) return print_error(hardware.error(), json);
+    auto policy = vastloom::safety::make_safe_runtime_policy(hardware.value());
+    if (!policy) return print_error(policy.error(), json);
+
+    vastloom::inference::DeepseekV4GgufCheckpointInspectOptions options;
+    options.verify_hashes = !has_flag(args, "--no-verify");
+    options.context_tokens = static_cast<std::uint32_t>(context.value());
+    options.batch_size = static_cast<std::uint32_t>(batch_size.value());
+    options.safe_ram_cap_bytes = policy.value().resources.host_memory_hard_limit;
+    options.safe_vram_cap_bytes = policy.value().resources.vram_hard_limit;
+    auto report = vastloom::inference::inspect_deepseek_v4_gguf_checkpoint(
+        checkpoint_root,
+        vastloom::inference::pinned_deepseek_v4_flash_0731_iq1s_checkpoint(),
+        options);
     if (!report) return print_error(report.error(), json);
     std::cout << (json ? vastloom::inference::to_json(report.value())
                       : vastloom::inference::to_text(report.value())) << '\n';
@@ -1314,6 +1363,7 @@ int dispatch_cli(const std::vector<std::string>& arguments) {
         if (command == "moe-inspect") return command_moe_inspect(args);
         if (command == "deepseek-inspect") return command_deepseek_inspect(args);
         if (command == "deepseek-gguf-inspect") return command_deepseek_gguf_inspect(args);
+        if (command == "deepseek-gguf-checkpoint") return command_deepseek_gguf_checkpoint(args);
         if (command == "moe-logits") return command_moe_logits(args);
         if (command == "heartbeat-write") return command_heartbeat_write(args);
         if (command == "version" || command == "--version") {

@@ -216,6 +216,19 @@ void test_safetensors(const std::filesystem::path& root) {
 void test_gguf(const std::filesystem::path& root) {
     const auto directory = root / std::filesystem::path(std::u8string(u8"gguf-àccènt"));
     std::filesystem::create_directories(directory);
+    const auto& pinned = vastloom::inference::pinned_deepseek_v4_flash_0731_iq1s_checkpoint();
+    CHECK(pinned.model_id == "unsloth/DeepSeek-V4-Flash-0731-GGUF" &&
+          pinned.revision == "fbbb5b93fb787c21338159b0af3318bb3f4d9768" &&
+          pinned.shards.size() == 3U && pinned.layers == 43U &&
+          pinned.experts_per_layer == 256U && pinned.top_k == 6U);
+    if (pinned.shards.size() == 3U) {
+        CHECK(pinned.shards[0].full_bytes + pinned.shards[1].full_bytes +
+                  pinned.shards[2].full_bytes ==
+              82'539'237'792U);
+        CHECK(pinned.shards[0].metadata_bytes + pinned.shards[1].metadata_bytes +
+                  pinned.shards[2].metadata_bytes ==
+              5'343'584U);
+    }
     std::vector<unsigned char> header;
     append_u32_le(header, 0x46554747U);
     append_u32_le(header, 3U);
@@ -533,6 +546,139 @@ void test_gguf(const std::filesystem::path& root) {
             options.context_tokens = 128U;
             CHECK(!vastloom::inference::build_deepseek_v4_gguf_catalog(
                 oversized_catalog.value(), options));
+        }
+    }
+
+    if (continuation_file) {
+        const auto full_import = directory / "checkpoint-full";
+        const auto metadata_import = directory / "checkpoint-metadata";
+        std::filesystem::create_directories(full_import);
+        std::filesystem::create_directories(metadata_import / "headers");
+        const auto full_part_1 = full_import / "part-1.gguf";
+        const auto full_part_2 = full_import / "part-2.gguf";
+        const auto header_part_1 = metadata_import / "headers" / "part-1.gguf.header";
+        const auto header_part_2 = metadata_import / "headers" / "part-2.gguf.header";
+        write_bytes(full_part_1, full);
+        write_bytes(full_part_2, continuation);
+        write_bytes(header_part_1, header);
+        const auto continuation_header_bytes = static_cast<std::size_t>(
+            continuation_file.value().data_offset());
+        std::vector<unsigned char> continuation_header(
+            continuation.begin(),
+            continuation.begin() + static_cast<std::ptrdiff_t>(continuation_header_bytes));
+        write_bytes(header_part_2, continuation_header);
+
+        const auto full_hash_1 = vastloom::util::sha256_file(full_part_1);
+        const auto full_hash_2 = vastloom::util::sha256_file(full_part_2);
+        const auto header_hash_1 = vastloom::util::sha256_file(header_part_1);
+        const auto header_hash_2 = vastloom::util::sha256_file(header_part_2);
+        CHECK(full_hash_1 && full_hash_2 && header_hash_1 && header_hash_2);
+        if (full_hash_1 && full_hash_2 && header_hash_1 && header_hash_2) {
+            const vastloom::inference::DeepseekV4GgufCheckpointSpec checkpoint_spec{
+                "test/deepseek4-gguf-checkpoint",
+                "fixture-revision",
+                {
+                    {"part-1.gguf", full.size(), full_hash_1.value(),
+                     "headers/part-1.gguf.header", header.size(), header_hash_1.value()},
+                    {"part-2.gguf", continuation.size(), full_hash_2.value(),
+                     "headers/part-2.gguf.header", continuation_header.size(),
+                     header_hash_2.value()},
+                },
+                1U,
+                2U,
+                1U,
+            };
+            {
+                std::ofstream manifest(full_import / "vastloom-import.json");
+                manifest << "{\"format\":\"vastloom.hf-import.v1\","
+                            "\"model_id\":\"test/deepseek4-gguf-checkpoint\","
+                            "\"revision\":\"fixture-revision\",\"metadata_only\":false,"
+                            "\"files\":[{\"name\":\"part-1.gguf\",\"size\":"
+                         << full.size() << ",\"sha256\":\"" << full_hash_1.value()
+                         << "\"},{\"name\":\"part-2.gguf\",\"size\":"
+                         << continuation.size() << ",\"sha256\":\"" << full_hash_2.value()
+                         << "\"}]}";
+            }
+            {
+                std::ofstream manifest(metadata_import / "vastloom-import.json");
+                manifest << "{\"format\":\"vastloom.hf-import.v1\","
+                            "\"model_id\":\"test/deepseek4-gguf-checkpoint\","
+                            "\"revision\":\"fixture-revision\",\"metadata_only\":true,"
+                            "\"files\":[{\"name\":\"headers/part-1.gguf.header\",\"size\":"
+                         << header.size() << ",\"sha256\":\"" << header_hash_1.value()
+                         << "\"},{\"name\":\"headers/part-2.gguf.header\",\"size\":"
+                         << continuation_header.size() << ",\"sha256\":\""
+                         << header_hash_2.value() << "\"}]}";
+            }
+
+            vastloom::inference::DeepseekV4GgufCheckpointInspectOptions options;
+            options.context_tokens = 128U;
+            options.safe_ram_cap_bytes = 80U * vastloom::MiB;
+            options.safe_vram_cap_bytes = 102U;
+            auto bound = vastloom::inference::inspect_deepseek_v4_gguf_checkpoint(
+                full_import, checkpoint_spec, options);
+            CHECK(bound && bound.value().imported_manifest_verified &&
+                  bound.value().imported_file_hashes_verified &&
+                  bound.value().full_payload_present &&
+                  bound.value().executable_source_binding_verified &&
+                  !bound.value().catalog.metadata_only &&
+                  bound.value().expert_fits_vram_tier);
+            if (bound) {
+                CHECK(bound.value().catalog.experts.front().read_ranges.front().shard.parent_path() ==
+                      full_import);
+            }
+
+            options.verify_hashes = false;
+            auto quick = vastloom::inference::inspect_deepseek_v4_gguf_checkpoint(
+                full_import, checkpoint_spec, options);
+            CHECK(quick && quick.value().full_payload_present &&
+                  !quick.value().imported_file_hashes_verified &&
+                  !quick.value().executable_source_binding_verified &&
+                  quick.value().catalog.metadata_only);
+
+            options.verify_hashes = true;
+            options.safe_ram_cap_bytes = 67'110'360U;
+            options.safe_vram_cap_bytes = 60U;
+            auto rejected = vastloom::inference::inspect_deepseek_v4_gguf_checkpoint(
+                full_import, checkpoint_spec, options);
+            CHECK(!rejected && rejected.error().code == vastloom::ErrorCode::resource_exhausted);
+
+            options.safe_ram_cap_bytes = 80U * vastloom::MiB;
+            options.safe_vram_cap_bytes = 102U;
+            auto metadata = vastloom::inference::inspect_deepseek_v4_gguf_checkpoint(
+                metadata_import, checkpoint_spec, options);
+            CHECK(metadata && metadata.value().imported_manifest_verified &&
+                  metadata.value().imported_file_hashes_verified &&
+                  !metadata.value().full_payload_present &&
+                  !metadata.value().executable_source_binding_verified &&
+                  metadata.value().catalog.metadata_only);
+
+            auto mismatched_spec = checkpoint_spec;
+            mismatched_spec.shards.front().full_sha256 = std::string(64U, '0');
+            CHECK(!vastloom::inference::inspect_deepseek_v4_gguf_checkpoint(
+                full_import, mismatched_spec, options));
+
+            const auto missing_import = directory / "checkpoint-missing-shard";
+            std::filesystem::create_directories(missing_import);
+            {
+                std::ofstream manifest(missing_import / "vastloom-import.json");
+                manifest << "{\"format\":\"vastloom.hf-import.v1\","
+                            "\"model_id\":\"test/deepseek4-gguf-checkpoint\","
+                            "\"revision\":\"fixture-revision\",\"metadata_only\":false,"
+                            "\"files\":[{\"name\":\"part-1.gguf\",\"size\":"
+                         << full.size() << ",\"sha256\":\"" << full_hash_1.value()
+                         << "\"},{\"name\":\"part-2.gguf\",\"size\":"
+                         << continuation.size() << ",\"sha256\":\"" << full_hash_2.value()
+                         << "\"}]}";
+            }
+            CHECK(!vastloom::inference::inspect_deepseek_v4_gguf_checkpoint(
+                missing_import, checkpoint_spec, options));
+
+            auto corrupted = full;
+            corrupted.back() ^= 1U;
+            write_bytes(full_part_1, corrupted);
+            CHECK(!vastloom::inference::inspect_deepseek_v4_gguf_checkpoint(
+                full_import, checkpoint_spec, options));
         }
     }
 }

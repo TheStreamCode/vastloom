@@ -5,12 +5,15 @@
 #include <charconv>
 #include <initializer_list>
 #include <limits>
+#include <map>
 #include <new>
 #include <optional>
 #include <sstream>
 #include <string_view>
 
+#include "vastloom/model/imported_checkpoint.hpp"
 #include "vastloom/util/json.hpp"
+#include "vastloom/util/sha256.hpp"
 #include "vastloom/util/string.hpp"
 
 namespace vastloom::inference {
@@ -614,12 +617,182 @@ Result<DeepseekV4GgufCatalogReport> build_deepseek_v4_gguf_catalog(
     }
 }
 
+const DeepseekV4GgufCheckpointSpec& pinned_deepseek_v4_flash_0731_iq1s_checkpoint() {
+    static const DeepseekV4GgufCheckpointSpec spec{
+        "unsloth/DeepSeek-V4-Flash-0731-GGUF",
+        "fbbb5b93fb787c21338159b0af3318bb3f4d9768",
+        {
+            {
+                "UD-IQ1_S/DeepSeek-V4-Flash-0731-UD-IQ1_S-00001-of-00003.gguf",
+                5'257'664U,
+                "2fa152e25a14500e42e6d98f20d200eec1e945f34dc1cfb981b651b9c86b97be",
+                "UD-IQ1_S/DeepSeek-V4-Flash-0731-UD-IQ1_S-00001-of-00003.gguf",
+                5'257'664U,
+                "2fa152e25a14500e42e6d98f20d200eec1e945f34dc1cfb981b651b9c86b97be",
+            },
+            {
+                "UD-IQ1_S/DeepSeek-V4-Flash-0731-UD-IQ1_S-00002-of-00003.gguf",
+                49'093'726'624U,
+                "e9fc77544cd48aa0c31fbf32fdf5432f2b560b92a9aeffd9f690d99867cf0e5f",
+                "headers/UD-IQ1_S/DeepSeek-V4-Flash-0731-UD-IQ1_S-00002-of-00003.gguf.header",
+                52'320U,
+                "7128e5c180640517eb10a2ba2eb22a5153f80b3d8316ec70122246a5a2f3db47",
+            },
+            {
+                "UD-IQ1_S/DeepSeek-V4-Flash-0731-UD-IQ1_S-00003-of-00003.gguf",
+                33'440'253'504U,
+                "fd99d5cd0503d668b6febc2eedcc9db68e264cfb79dd355efc88c15eabe4248d",
+                "headers/UD-IQ1_S/DeepSeek-V4-Flash-0731-UD-IQ1_S-00003-of-00003.gguf.header",
+                33'600U,
+                "48c9b417ec3c389e834bb299a3273376e8dabbc2855116d12cadb92977091717",
+            },
+        },
+        43U,
+        256U,
+        6U,
+    };
+    return spec;
+}
+
+Result<DeepseekV4GgufCatalogReport> inspect_deepseek_v4_gguf_checkpoint(
+    const std::filesystem::path& checkpoint_root,
+    const DeepseekV4GgufCheckpointSpec& spec,
+    const DeepseekV4GgufCheckpointInspectOptions& inspect_options) {
+    try {
+        if (spec.model_id.empty() || spec.revision.empty() || spec.shards.empty() ||
+            spec.shards.size() > 1'024U || spec.layers == 0U ||
+            spec.experts_per_layer == 0U || spec.top_k == 0U ||
+            spec.top_k > spec.experts_per_layer || inspect_options.context_tokens == 0U ||
+            inspect_options.batch_size == 0U || inspect_options.batch_size > 8U ||
+            inspect_options.safe_ram_cap_bytes == 0U) {
+            return make_error(ErrorCode::invalid_argument,
+                              "DeepSeek GGUF checkpoint inspection options are invalid",
+                              checkpoint_root.string());
+        }
+
+        auto imported = model::verify_imported_checkpoint(
+            checkpoint_root, inspect_options.verify_hashes);
+        if (!imported) return imported.error();
+        if (imported.value().model_id != spec.model_id ||
+            imported.value().revision != spec.revision ||
+            imported.value().files.size() != spec.shards.size()) {
+            return make_error(ErrorCode::integrity_error,
+                              "Imported DeepSeek GGUF identity or shard count does not match the pinned profile",
+                              checkpoint_root.string());
+        }
+
+        std::map<std::string, const model::ImportedFile*, std::less<>> imported_by_name;
+        for (const auto& file : imported.value().files) {
+            const auto name = file.relative_path.generic_string();
+            if (!imported_by_name.emplace(name, &file).second) {
+                return make_error(ErrorCode::integrity_error,
+                                  "Imported DeepSeek GGUF contains a duplicate object identity",
+                                  name);
+            }
+        }
+
+        std::vector<std::filesystem::path> selected_paths;
+        selected_paths.reserve(spec.shards.size());
+        for (const auto& shard : spec.shards) {
+            const auto& relative = imported.value().metadata_only
+                                       ? shard.metadata_relative_path
+                                       : shard.full_relative_path;
+            const ByteCount expected_bytes = imported.value().metadata_only
+                                                 ? shard.metadata_bytes
+                                                 : shard.full_bytes;
+            const auto& expected_sha = imported.value().metadata_only
+                                           ? shard.metadata_sha256
+                                           : shard.full_sha256;
+            if (relative.empty() || expected_bytes == 0U ||
+                !util::is_sha256_hex(expected_sha)) {
+                return make_error(ErrorCode::invalid_argument,
+                                  "DeepSeek GGUF checkpoint profile contains an invalid object identity",
+                                  relative.string());
+            }
+            const auto found = imported_by_name.find(relative.generic_string());
+            if (found == imported_by_name.end() || found->second->bytes != expected_bytes ||
+                found->second->sha256 != expected_sha) {
+                return make_error(ErrorCode::integrity_error,
+                                  "Imported DeepSeek GGUF object does not match the pinned path, size and SHA-256",
+                                  relative.generic_string());
+            }
+            selected_paths.push_back(imported.value().root / relative);
+        }
+
+        model::GgufReaderLimits reader_limits;
+        reader_limits.max_header_bytes = 16U * MiB;
+        reader_limits.retained_integral_array_keys = {
+            "deepseek4.attention.compress_ratios"};
+        std::vector<model::GgufFile> shards;
+        shards.reserve(spec.shards.size());
+        for (std::size_t index = 0U; index < spec.shards.size(); ++index) {
+            const auto& identity = spec.shards[index];
+            Result<model::GgufFile> opened = imported.value().metadata_only &&
+                                                   identity.metadata_bytes < identity.full_bytes
+                                               ? model::GgufFile::open_header_prefix(
+                                                     selected_paths[index],
+                                                     identity.full_bytes,
+                                                     reader_limits)
+                                               : model::GgufFile::open(
+                                                     selected_paths[index], reader_limits);
+            if (!opened) return opened.error();
+            shards.push_back(opened.take_value());
+        }
+        auto split = model::finalize_gguf_split_catalog(std::move(shards));
+        if (!split) return split.error();
+
+        DeepseekV4GgufCatalogOptions options;
+        options.model_id = spec.model_id;
+        options.revision = spec.revision;
+        options.layers = spec.layers;
+        options.experts_per_layer = spec.experts_per_layer;
+        options.top_k = spec.top_k;
+        options.context_tokens = inspect_options.context_tokens;
+        options.batch_size = inspect_options.batch_size;
+        options.safe_ram_cap_bytes = inspect_options.safe_ram_cap_bytes;
+        options.safe_vram_cap_bytes = inspect_options.safe_vram_cap_bytes;
+        options.metadata_only = imported.value().metadata_only ||
+                                !imported.value().full_hash_verified;
+        if (!options.metadata_only) options.source_shards = selected_paths;
+        auto report = build_deepseek_v4_gguf_catalog(split.value(), options);
+        if (!report) return report.error();
+        report.value().imported_manifest_verified = true;
+        report.value().imported_file_hashes_verified = imported.value().full_hash_verified;
+        report.value().full_payload_present = !imported.value().metadata_only;
+
+        if (!imported.value().metadata_only && imported.value().full_hash_verified &&
+            !report.value().capacity_plan_candidate) {
+            return make_error(
+                ErrorCode::resource_exhausted,
+                "DeepSeek GGUF execution refused: one complete expert bundle does not fit a single safe RAM or VRAM tier",
+                std::to_string(report.value().maximum_expert_bundle_bytes));
+        }
+        report.value().executable_source_binding_verified =
+            !imported.value().metadata_only && imported.value().full_hash_verified &&
+            report.value().capacity_plan_candidate;
+        return report;
+    } catch (const std::bad_alloc&) {
+        return make_error(ErrorCode::resource_exhausted,
+                          "Unable to allocate the bounded DeepSeek GGUF checkpoint binding",
+                          checkpoint_root.string());
+    }
+}
+
 std::string to_json(const DeepseekV4GgufCatalogReport& report) {
     std::ostringstream output;
     output << "{\"ok\":true,\"format\":\"GGUFv3\",\"architecture\":\"deepseek4\""
            << ",\"model_id\":\"" << util::json_escape(report.catalog.model_id)
            << "\",\"revision\":\"" << util::json_escape(report.catalog.revision)
            << "\",\"metadata_only\":" << (report.catalog.metadata_only ? "true" : "false")
+           << ",\"execution_supported\":false"
+           << ",\"checkpoint\":{\"imported_manifest_verified\":"
+           << (report.imported_manifest_verified ? "true" : "false")
+           << ",\"imported_file_hashes_verified\":"
+           << (report.imported_file_hashes_verified ? "true" : "false")
+           << ",\"full_payload_present\":"
+           << (report.full_payload_present ? "true" : "false")
+           << ",\"executable_source_binding_verified\":"
+           << (report.executable_source_binding_verified ? "true" : "false") << '}'
            << ",\"split_shards\":" << report.split_shards
            << ",\"physical_tensors\":" << report.physical_tensors
            << ",\"logical_tensors\":" << report.catalog.tensors.size()
@@ -677,6 +850,13 @@ std::string to_text(const DeepseekV4GgufCatalogReport& report) {
            << "Revision label:      " << report.catalog.revision << '\n'
            << "Mode:                "
            << (report.catalog.metadata_only ? "metadata only" : "executable sources") << '\n'
+           << "Import manifest:     "
+           << (report.imported_manifest_verified ? "verified" : "not bound") << '\n'
+           << "Imported file hashes:" << ' '
+           << (report.imported_file_hashes_verified ? "verified" : "not verified") << '\n'
+           << "Executable binding:  "
+           << (report.executable_source_binding_verified ? "verified" : "unavailable") << '\n'
+           << "RAM + VRAM pooling:  forbidden for one expert bundle" << '\n'
            << "Split shards:        " << report.split_shards << '\n'
            << "Physical tensors:    " << report.physical_tensors << '\n'
            << "Logical tensors:     " << report.catalog.tensors.size() << '\n'

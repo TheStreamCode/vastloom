@@ -63,11 +63,53 @@ struct DeepseekV4GgufCatalogReport {
     ByteCount total_file_bytes{0U};
     ByteCount total_header_bytes{0U};
     ByteCount total_payload_bytes{0U};
+    bool imported_manifest_verified{false};
+    bool imported_file_hashes_verified{false};
+    bool full_payload_present{false};
+    bool executable_source_binding_verified{false};
+};
+
+struct DeepseekV4GgufShardIdentity {
+    std::filesystem::path full_relative_path;
+    ByteCount full_bytes{0U};
+    std::string full_sha256;
+    std::filesystem::path metadata_relative_path;
+    ByteCount metadata_bytes{0U};
+    std::string metadata_sha256;
+};
+
+struct DeepseekV4GgufCheckpointSpec {
+    std::string model_id;
+    std::string revision;
+    std::vector<DeepseekV4GgufShardIdentity> shards;
+    std::uint32_t layers{43U};
+    std::uint32_t experts_per_layer{256U};
+    std::uint32_t top_k{6U};
+};
+
+struct DeepseekV4GgufCheckpointInspectOptions {
+    bool verify_hashes{true};
+    std::uint32_t context_tokens{4'096U};
+    std::uint32_t batch_size{1U};
+    ByteCount safe_ram_cap_bytes{0U};
+    ByteCount safe_vram_cap_bytes{0U};
 };
 
 [[nodiscard]] Result<DeepseekV4GgufCatalogReport> build_deepseek_v4_gguf_catalog(
     const model::GgufSplitCatalog& split,
     const DeepseekV4GgufCatalogOptions& options);
+
+[[nodiscard]] const DeepseekV4GgufCheckpointSpec&
+pinned_deepseek_v4_flash_0731_iq1s_checkpoint();
+
+// Verifies an immutable importer manifest, exact object identities and (by default) every file
+// hash before exposing payload paths. A full verified checkpoint is rejected unless one complete
+// expert bundle fits in either the safe RAM tier or the safe VRAM tier. The two capacities are
+// intentionally never pooled.
+[[nodiscard]] Result<DeepseekV4GgufCatalogReport> inspect_deepseek_v4_gguf_checkpoint(
+    const std::filesystem::path& checkpoint_root,
+    const DeepseekV4GgufCheckpointSpec& spec,
+    const DeepseekV4GgufCheckpointInspectOptions& options);
 
 [[nodiscard]] std::string to_json(const DeepseekV4GgufCatalogReport& report);
 [[nodiscard]] std::string to_text(const DeepseekV4GgufCatalogReport& report);

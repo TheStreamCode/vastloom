@@ -43,6 +43,8 @@ set(VASTLOOM_DEEPSEEK_V4_MODEL "" CACHE PATH
     "Optional pinned DeepSeek V4 Flash metadata/header import for inspection tests")
 set(VASTLOOM_DEEPSEEK_V4_GGUF_HEADER "" CACHE FILEPATH
     "Optional pinned DeepSeek V4 Flash 0731 GGUF split-zero metadata shard")
+set(VASTLOOM_DEEPSEEK_V4_GGUF_CHECKPOINT "" CACHE PATH
+    "Optional pinned DeepSeek V4 Flash 0731 UD-IQ1_S imported checkpoint")
 set(VASTLOOM_DEEPSEEK_V4_IQ1S_SLICE "" CACHE FILEPATH
     "Optional pinned DeepSeek V4 Flash 0731 layer-0 expert-0 IQ1_S gate slice")
 set(VASTLOOM_DEEPSEEK_V4_IQ1S_UP_SLICE "" CACHE FILEPATH
@@ -309,6 +311,19 @@ if(BUILD_TESTING AND VASTLOOM_BUILD_TESTS)
                 TIMEOUT 30
                 RUN_SERIAL TRUE
                 PASS_REGULAR_EXPRESSION "\\\"architecture\\\":\\\"deepseek4\\\""
+            )
+        endif()
+        if(VASTLOOM_DEEPSEEK_V4_GGUF_CHECKPOINT)
+            add_test(
+                NAME vastloom_deepseek_v4_gguf_checkpoint
+                COMMAND $<TARGET_FILE:vastloom> deepseek-gguf-checkpoint
+                    ${VASTLOOM_DEEPSEEK_V4_GGUF_CHECKPOINT}
+                    --json
+            )
+            set_tests_properties(vastloom_deepseek_v4_gguf_checkpoint PROPERTIES
+                TIMEOUT 3600
+                RUN_SERIAL TRUE
+                PASS_REGULAR_EXPRESSION "\"imported_manifest_verified\":true"
             )
         endif()
     else()

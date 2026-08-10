@@ -363,8 +363,16 @@ main layer replaces all 23 float matrices with deterministic Q8_0 storage and it
 I32 bytes. The graph distinguishes logical columns from a block-aligned physical stride, pads
 activations with zeros, dispatches transactional matvecs, and feeds raw router projections into
 the unchanged sqrt-softplus/top-k equations. Full prefill and one incremental step match the
-independently dequantized oracle for main/MTP logits, routes and attention indices. The fixture
-owns its bytes in memory; loader-backed ownership is the remaining boundary before file payloads.
+independently dequantized oracle for main/MTP logits, routes and attention indices.
+
+The same graph now accepts immutable resident byte buffers created only by the bounded trunk and
+expert loaders. Each buffer owns its `ResidencyUse`; graph descriptors hold a shared reference plus
+an exact checked subrange. The reduced file-backed test loads 12 complete trunk tensors and four
+indivisible three-matrix expert bundles, then destroys every loader wrapper before inference. Its
+16 residency objects remain non-evictable until the graph releases its final reference. This
+eliminates payload copies at the loader/graph boundary. It does not yet schedule experts after
+routing: all four tiny fixture experts are resident together, which is not the production MoE
+policy.
 
 ```text
 pinned importer manifest + exact object identities

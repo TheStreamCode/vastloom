@@ -115,8 +115,10 @@ profile is a capacity result, not authorization to execute unverified weights.
 The DeepSeek GGUF inspector additionally derives both trunk profiles from exact scalar metadata,
 the retained bounded compression schedule and encoded tensor ranges. It never adds RAM and VRAM
 together to make an oversized expert appear admissible. It now also verifies deterministic plans
-for all 43 real layers. A reduced layer consumes fixture-owned Q8_0/I32 bytes, but no
-Governor-owned official DeepSeek trunk-streaming token path exists yet.
+for all 43 real layers. A reduced layer now consumes file-backed Q8_0/I32 bytes while its graph
+retains the 16 Governor-owned trunk/expert buffers and blocks eviction. It still preloads all four
+tiny fixture experts, and no dynamic or official DeepSeek trunk/expert streaming token path exists
+yet.
 
 ## State machine
 

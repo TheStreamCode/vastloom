@@ -28,8 +28,10 @@ transaction validates payload reads and cleanup. Scalar Q8_0/Q5_K/Q6_K/BF16/F32 
 typed I32 router decoding cover all 1,193 layer-trunk storage types in metadata, but no official
 trunk tile was read. A deterministic reduced layer now consumes 23 packed Q8_0 matrices and one
 I32 hash table through those storage kernels; prefill and incremental results match an independently
-dequantized oracle. Its bytes are still fixture-owned rather than retained through Governor-backed
-loader leases. A complete 0731 quantized layer/token path, generation and CUDA remain unvalidated.
+dequantized oracle. A file-backed repetition loads 12 complete trunk tiles and four indivisible
+expert bundles, then retains all 5,364 payload bytes through 16 Governor-backed immutable buffers
+without copying them into the graph. Dynamic selected-expert loading, a complete 0731 quantized
+layer/token path, generation and CUDA remain unvalidated.
 Windows and Linux CPU paths are tested; macOS/Metal remain unvalidated. Laguna S 2.1 remains a
 reviewed compatibility target, not a validated execution path.
 

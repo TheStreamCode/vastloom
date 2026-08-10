@@ -86,8 +86,9 @@ bytes. This proves metadata-level capacity accounting, not DeepSeek execution; f
 verification on the official local objects, official-payload trunk compute and a layer/token path
 remain absent. Scalar storage handling now covers every type in the 1,193 planned layer tensors,
 and a reduced first layer now composes Q8_0/I32 packed storage through the architecture graph.
-That fixture is memory-owned and does not yet bind official trunk tiles or Governor-backed loader
-leases, so it is not a 0731 execution result.
+A file-backed repetition retains the bounded trunk/expert loader buffers and their Governor leases
+directly through execution. It still preloads every tiny fixture expert and does not bind official
+0731 payload ranges, so it is not a 0731 execution result.
 The pinned importer/checkpoint gate can now bind complete shards only after full SHA-256 and this
 same live single-tier admission; its real validation used only the 5,343,584-byte metadata import.
 

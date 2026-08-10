@@ -58,6 +58,11 @@
   through transactional storage dispatch; prefill and incremental main/MTP logits, routes and
   attention indices match an independently dequantized oracle. File-backed governed ownership,
   official payload execution and generation remain open.
+- Added immutable resident byte buffers shared by the bounded trunk and expert loaders. A
+  file-backed reduced DeepSeek layer now binds 12 complete trunk tiles and four indivisible expert
+  bundles directly into the graph, retains exactly 5,364 governed payload bytes across prefill and
+  decode, blocks eviction while referenced, and returns all reservations to zero on release.
+  Dynamic selected-expert loading and official payload execution remain open.
 - Added a bounded scalar IQ1_S dequantization/matvec reference kernel derived from pinned ggml
   equations and licensed codebook data. Synthetic vectors and one exact 1,638,400-byte real
   DeepSeek 0731 expert-gate slice match the upstream oracle bit for bit across all 2,048 rows.

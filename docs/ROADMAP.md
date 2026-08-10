@@ -185,6 +185,8 @@ The complete scalar layer-trunk storage-type gate is recorded in the
 [M9 trunk storage-kernel report](reports/M9_DEEPSEEK_TRUNK_STORAGE_KERNEL_VALIDATION.md).
 The first reduced architecture-level packed Q8_0 layer is recorded in the
 [M9 packed-layer report](reports/M9_DEEPSEEK_PACKED_LAYER_VALIDATION.md).
+The ownership-preserving file-backed repetition is recorded in the
+[M9 governed-layer report](reports/M9_DEEPSEEK_GOVERNED_LAYER_VALIDATION.md).
 The first real packed-matrix parity gate is recorded in the
 [M7 IQ1_S kernel report](reports/M7_DEEPSEEK_IQ1S_KERNEL_VALIDATION.md).
 The completed one-expert gate/up/SwiGLU/down path is recorded in the
@@ -219,8 +221,10 @@ unbounded allocation and clean recovery from injected CUDA failures.
   tensors, including a separate non-matvec I32 router-table path.
 - [x] Bind packed tensor identities to one architecture-specific quantized DeepSeek layer
   fixture and match an independently dequantized oracle before reading official trunk payloads.
-- [ ] Retain those packed views through Governor-owned trunk/expert loader leases and repeat the
+- [x] Retain those packed views through Governor-owned trunk/expert loader leases and repeat the
   layer test from bounded file-backed ranges without unaccounted payload copies.
+- [ ] Split execution at the router boundary and load only selected complete expert bundles;
+  trace load/hit/eviction and exact logical bytes across multiple tokens.
 - [ ] Connect those futures to expert compute and measure real compute/I/O overlap.
 - [ ] Pinned host buffers.
 - [ ] Direct/overlapped NVMe reads where supported.

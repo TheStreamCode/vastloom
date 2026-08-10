@@ -14,7 +14,7 @@ or matching tensor dimensions is never enough to enable execution automatically.
 | OLMoE-1B-7B-0924-Instruct | Pinned shards, top-k routes, expert streaming and I/O telemetry | Validated CPU expert streaming |
 | `deepseek-ai/DeepSeek-V4-Flash` preview at `60d8d707...` | Header catalog, tokenizer, reduced main+MTP prefill and five incremental cache steps | Reduced FP32 reference execution only |
 | `deepseek-ai/DeepSeek-V4-Flash-0731` at `7872f01b...` | Public metadata/config reviewed on 2026-08-10 | Not imported, inspected or executed by Vastloom yet |
-| `unsloth/DeepSeek-V4-Flash-0731-GGUF` at `fbbb5b93...` | Pinned atomic importer, verified metadata binding, 43 bounded layer-trunk plans, all trunk storage types covered by scalar references, one reduced Q8_0 packed layer, plus exact gate/up IQ1_S and down IQ3_XXS parity on one real expert | One governed scalar CPU expert and memory-owned reduced packed-layer fixture; real full payload not imported; no layer/token generation |
+| `unsloth/DeepSeek-V4-Flash-0731-GGUF` at `fbbb5b93...` | Pinned atomic importer, verified metadata binding, 43 bounded layer-trunk plans, all trunk storage types covered by scalar references, one governed file-backed reduced Q8_0 layer, plus exact gate/up IQ1_S and down IQ3_XXS parity on one real expert | Reduced layer retains governed trunk/expert buffers; real full payload not imported; no dynamic selected-expert or layer/token generation path |
 | `unsloth/Laguna-S-2.1` at `1a646907...` | Public config, custom-code and shard metadata reviewed on 2026-08-10 | Adapter and execution not implemented |
 | Kimi K3-class profiles | Public-roadmap capacity/traffic study only | Not a reference-PC execution target unless one exact complete expert passes the single-tier gate |
 
@@ -122,9 +122,10 @@ All non-routed `blk.N.*` tensors now retain their layer identity and feed a shar
 planner/loader. The real 0731 metadata produces 43 complete layer plans, 1,193 tensors/tiles and a
 35,651,584-byte maximum tile under the 64 MiB ceiling. Scalar storage handling covers every type
 and encoded byte in those layer plans. A reduced architecture consumer now composes Q8_0/I32
-packed bytes, but those bytes are fixture-owned and only a synthetic tile payload has been loaded
-through residency. The official full-shard import, loader-owned 0731 layer/token consumer,
-optimized kernels and Laguna adapter remain open.
+packed bytes from governed file-backed trunk tiles and complete expert bundles without copying
+payloads into the graph. It preloads all four tiny fixture experts; dynamic selected-expert
+loading, official full-shard import, the 0731 layer/token scheduler, optimized kernels and the
+Laguna adapter remain open.
 
 The shared runtime may then place a tensor or expert bundle in one of these explicit states:
 

@@ -13,10 +13,15 @@ hardware, commands, measurements and limitations.
 
 ## Current report
 
+- [`M9_DEEPSEEK_GOVERNED_LAYER_VALIDATION.md`](M9_DEEPSEEK_GOVERNED_LAYER_VALIDATION.md) —
+  ownership-preserving resident buffers, 12 file-backed trunk tiles, four indivisible expert
+  bundles, exact 5,364-byte Governor accounting, eviction interlocks, failure rollback and full
+  reduced prefill/incremental parity without payload copies into the graph.
 - [`M9_DEEPSEEK_PACKED_LAYER_VALIDATION.md`](M9_DEEPSEEK_PACKED_LAYER_VALIDATION.md) —
   ggml-verified deterministic Q8_0 encoding, all 23 matrices of one reduced DeepSeek main layer,
   I32 hash routing, full prefill/incremental graph parity and transactional malformed-input tests;
-  the fixture is still memory-owned rather than bound to governed file-loader leases.
+  that milestone deliberately left the fixture memory-owned, a boundary closed by the newer
+  governed-layer report above.
 - [`M9_DEEPSEEK_TRUNK_STORAGE_KERNEL_VALIDATION.md`](M9_DEEPSEEK_TRUNK_STORAGE_KERNEL_VALIDATION.md) —
   pinned-ggml Q8_0/Q5_K/Q6_K parity, bounded BF16/F32 matvec and I32 router-table handling,
   transactional output, and real metadata coverage for all 1,193 layer-trunk tensors while

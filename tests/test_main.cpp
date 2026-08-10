@@ -7,6 +7,7 @@
 #include <fstream>
 #include <iostream>
 #include <limits>
+#include <optional>
 #include <string>
 #include <thread>
 #include <vector>
@@ -26,6 +27,7 @@
 #include "vastloom/model/manifest.hpp"
 #include "vastloom/model/imported_checkpoint.hpp"
 #include "vastloom/model/model_store.hpp"
+#include "vastloom/model/residency.hpp"
 #include "vastloom/model/safetensors.hpp"
 #include "vastloom/model/tensor_catalog.hpp"
 #include "vastloom/model/verifier.hpp"
@@ -218,6 +220,14 @@ void test_logical_tensor_catalog() {
         }
     }
     CHECK(vastloom::model::to_string(TensorRole::routed_expert) == "routed_expert");
+    auto residencies = vastloom::model::make_expert_residencies(catalog);
+    CHECK(residencies && residencies.value().size() == 1U);
+    if (residencies && residencies.value().size() == 1U) {
+        auto residency = residencies.value()[0].snapshot();
+        CHECK(residency && residency.value().state == vastloom::model::ResidencyState::nvme &&
+              residency.value().object_bytes == 10U);
+    }
+    CHECK(!vastloom::model::make_expert_residencies(catalog, 0U));
 
     auto duplicate = catalog;
     duplicate.tensors.push_back(LogicalTensorDescriptor{
@@ -237,6 +247,155 @@ void test_logical_tensor_catalog() {
     overflowing.tensors[0].source.offset = std::numeric_limits<vastloom::ByteCount>::max();
     CHECK(!vastloom::model::finalize_logical_tensor_catalog(overflowing));
     CHECK(!vastloom::model::finalize_logical_tensor_catalog(catalog, 2U, 1U));
+}
+
+void test_residency_state_machine() {
+    using vastloom::model::ResidencyState;
+    CHECK(!vastloom::model::ResidencyObject::create("", 8U));
+    CHECK(!vastloom::model::ResidencyObject::create("expert", 0U));
+
+    vastloom::safety::ResourceLimits limits;
+    limits.ram_hard_limit = 16U * vastloom::MiB;
+    limits.vram_hard_limit = 16U * vastloom::MiB;
+    limits.staging_hard_limit = 4U * vastloom::MiB;
+    limits.scratch_hard_limit = 4U * vastloom::MiB;
+    vastloom::safety::ResourceGovernor governor(limits);
+
+    auto created = vastloom::model::ResidencyObject::create("test/layer/2/expert/7", 8U * vastloom::MiB);
+    CHECK(created);
+    if (!created) return;
+    auto object = created.take_value();
+    auto initial = object.snapshot();
+    CHECK(initial && initial.value().state == ResidencyState::nvme && !initial.value().evictable);
+    CHECK(!object.acquire_use());
+    CHECK(!object.begin_read(governor, 0U));
+    CHECK(!object.begin_read(governor, 9U * vastloom::MiB));
+    CHECK(object.begin_read(governor, 4U * vastloom::MiB));
+    CHECK(!object.begin_read(governor, 4U * vastloom::MiB));
+    auto reading = object.snapshot();
+    CHECK(reading && reading.value().state == ResidencyState::reading &&
+          reading.value().ram_reserved_bytes == 8U * vastloom::MiB &&
+          reading.value().staging_reserved_bytes == 4U * vastloom::MiB);
+    CHECK(governor.snapshot().reserved[0] == 8U * vastloom::MiB &&
+          governor.snapshot().reserved[2] == 4U * vastloom::MiB);
+    CHECK(object.publish_ram_ready());
+    auto ram_ready = object.snapshot();
+    CHECK(ram_ready && ram_ready.value().state == ResidencyState::ram_ready &&
+          ram_ready.value().staging_reserved_bytes == 0U && ram_ready.value().evictable);
+
+    auto use = object.acquire_use();
+    CHECK(use);
+    CHECK(!object.evict_ram() && !object.begin_vram_copy(governor));
+    if (use) use.value().release();
+    CHECK(object.set_pinned(true));
+    CHECK(!object.evict_ram());
+    CHECK(object.set_pinned(false));
+
+    CHECK(object.begin_vram_copy(governor));
+    auto copying = object.snapshot();
+    CHECK(copying && copying.value().state == ResidencyState::copying_to_vram &&
+          copying.value().ram_reserved_bytes == 8U * vastloom::MiB &&
+          copying.value().vram_reserved_bytes == 8U * vastloom::MiB);
+    CHECK(object.publish_vram_ready(true));
+    CHECK(object.evict_ram());
+    auto vram_only = object.snapshot();
+    CHECK(vram_only && vram_only.value().state == ResidencyState::vram_ready &&
+          vram_only.value().ram_reserved_bytes == 0U &&
+          vram_only.value().vram_reserved_bytes == 8U * vastloom::MiB);
+    auto gpu_use = object.acquire_use();
+    CHECK(gpu_use && !object.evict_vram() && !object.fail("must not free an active expert"));
+    if (gpu_use) gpu_use.value().release();
+    CHECK(object.evict_vram());
+    CHECK(object.snapshot() && object.snapshot().value().state == ResidencyState::nvme);
+
+    CHECK(object.fail("injected I/O failure"));
+    auto failed = object.snapshot();
+    CHECK(failed && failed.value().state == ResidencyState::failed &&
+          failed.value().failure == "injected I/O failure" &&
+          failed.value().ram_reserved_bytes == 0U && failed.value().vram_reserved_bytes == 0U);
+    CHECK(!object.begin_read(governor, 4U * vastloom::MiB));
+    CHECK(object.retry());
+    CHECK(object.snapshot() && object.snapshot().value().state == ResidencyState::nvme);
+
+    vastloom::safety::ResourceLimits small_limits = limits;
+    small_limits.ram_hard_limit = 4U * vastloom::MiB;
+    vastloom::safety::ResourceGovernor small_governor(small_limits);
+    auto too_large = vastloom::model::ResidencyObject::create("too-large", 8U * vastloom::MiB);
+    CHECK(too_large && !too_large.value().begin_read(small_governor, 4U * vastloom::MiB));
+    CHECK(small_governor.snapshot().reserved[0] == 0U && small_governor.snapshot().reserved[2] == 0U);
+
+    vastloom::safety::ResourceLimits staging_limits = limits;
+    staging_limits.staging_hard_limit = 1U * vastloom::MiB;
+    vastloom::safety::ResourceGovernor staging_governor(staging_limits);
+    auto no_staging = vastloom::model::ResidencyObject::create("no-staging", 8U * vastloom::MiB);
+    CHECK(no_staging && !no_staging.value().begin_read(staging_governor, 2U * vastloom::MiB));
+    CHECK(staging_governor.snapshot().reserved[0] == 0U &&
+          staging_governor.snapshot().reserved[2] == 0U);
+    CHECK(no_staging && no_staging.value().snapshot() &&
+          no_staging.value().snapshot().value().state == ResidencyState::nvme);
+
+    vastloom::safety::ResourceLimits copy_limits = limits;
+    copy_limits.vram_hard_limit = 4U * vastloom::MiB;
+    vastloom::safety::ResourceGovernor copy_governor(copy_limits);
+    auto no_vram = vastloom::model::ResidencyObject::create("no-vram", 8U * vastloom::MiB);
+    CHECK(no_vram && no_vram.value().begin_read(copy_governor, 2U * vastloom::MiB) &&
+          no_vram.value().publish_ram_ready());
+    CHECK(no_vram && !no_vram.value().begin_vram_copy(copy_governor));
+    CHECK(no_vram && no_vram.value().snapshot() &&
+          no_vram.value().snapshot().value().state == ResidencyState::ram_ready &&
+          no_vram.value().snapshot().value().ram_reserved_bytes == 8U * vastloom::MiB &&
+          no_vram.value().snapshot().value().vram_reserved_bytes == 0U);
+    CHECK(no_vram && no_vram.value().evict_ram());
+    CHECK(copy_governor.snapshot().reserved[0] == 0U && copy_governor.snapshot().reserved[1] == 0U);
+
+    auto concurrent = vastloom::model::ResidencyObject::create("concurrent", 4U * vastloom::MiB);
+    CHECK(concurrent);
+    if (concurrent) {
+        auto first_handle = concurrent.value();
+        auto second_handle = concurrent.value();
+        std::array<int, 2> successes{};
+        std::thread first_reader([&] {
+            successes[0] = first_handle.begin_read(governor, 2U * vastloom::MiB) ? 1 : 0;
+        });
+        std::thread second_reader([&] {
+            successes[1] = second_handle.begin_read(governor, 2U * vastloom::MiB) ? 1 : 0;
+        });
+        first_reader.join();
+        second_reader.join();
+        CHECK(successes[0] + successes[1] == 1);
+        auto concurrent_snapshot = concurrent.value().snapshot();
+        CHECK(concurrent_snapshot && concurrent_snapshot.value().state == ResidencyState::reading &&
+              concurrent_snapshot.value().ram_reserved_bytes == 4U * vastloom::MiB &&
+              concurrent_snapshot.value().staging_reserved_bytes == 2U * vastloom::MiB);
+        CHECK(concurrent.value().fail("cancel concurrent read"));
+    }
+    CHECK(governor.snapshot().reserved[0] == 0U && governor.snapshot().reserved[2] == 0U);
+
+    vastloom::safety::ResourceGovernor pressure_governor(limits);
+    CHECK(pressure_governor.update_pressure(
+              {1U, 16U * vastloom::MiB, limits.minimum_storage_available * 4U}) ==
+          vastloom::safety::SafetyState::emergency);
+    auto pressure_object = vastloom::model::ResidencyObject::create("pressure", 2U * vastloom::MiB);
+    CHECK(pressure_object && !pressure_object.value().begin_read(pressure_governor, 1U * vastloom::MiB));
+    CHECK(pressure_object && pressure_object.value().snapshot() &&
+          pressure_object.value().snapshot().value().state == ResidencyState::nvme);
+
+    std::optional<vastloom::model::ResidencyUse> retained_use;
+    {
+        auto lifetime = vastloom::model::ResidencyObject::create("lease-lifetime", 2U * vastloom::MiB);
+        CHECK(lifetime && lifetime.value().begin_read(governor, 1U * vastloom::MiB) &&
+              lifetime.value().publish_ram_ready());
+        if (lifetime) {
+            auto acquired = lifetime.value().acquire_use();
+            CHECK(acquired);
+            if (acquired) retained_use.emplace(acquired.take_value());
+        }
+    }
+    CHECK(governor.snapshot().reserved[0] == 2U * vastloom::MiB);
+    retained_use.reset();
+    CHECK(governor.snapshot().reserved[0] == 0U && governor.snapshot().reserved[1] == 0U &&
+          governor.snapshot().reserved[2] == 0U);
+    CHECK(vastloom::model::to_string(ResidencyState::copying_to_vram) == "COPYING_TO_VRAM");
 }
 
 void test_imported_checkpoint_and_llama_config(const std::filesystem::path& root) {
@@ -1658,6 +1817,7 @@ int main() {
     test_bounded_json();
     test_safetensors(root);
     test_logical_tensor_catalog();
+    test_residency_state_machine();
     test_imported_checkpoint_and_llama_config(root);
     test_olmoe_config(root);
     test_deepseek_v4_config(root);

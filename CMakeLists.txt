@@ -75,6 +75,7 @@ add_library(vastloom_core STATIC
     src/model/imported_checkpoint.cpp
     src/model/manifest.cpp
     src/model/model_store.cpp
+    src/model/residency.cpp
     src/model/safetensors.cpp
     src/model/tensor_catalog.cpp
     src/model/verifier.cpp

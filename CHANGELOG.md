@@ -43,9 +43,9 @@
 - Replaced repeated GGUF metadata `seekg` calls with verified sequential discards. The same real
   5.26 MB header on Windows-mounted WSL storage improved from 37.42 s to 0.11 s while preserving
   strict bounded/truncation behavior.
-- Made capacity-sensitive tests deterministic without weakening production disk reserves, added
-  the private-repository permission required by CodeQL and gated GitHub Dependency Review until
-  the repository is public or GitHub Advanced Security is available.
+- Made capacity-sensitive tests deterministic without weakening production disk reserves and
+  gated CodeQL/Dependency Review until the repository is public or GitHub Advanced Security is
+  explicitly enabled through the `VASTLOOM_ENABLE_GHAS` repository variable.
 - Fixed CLI path construction so Windows wide-character arguments remain Unicode-native through
   `std::filesystem`; an accented GGUF filename is now covered end to end.
 - Added the shared logical tensor catalog and bound all 69,187 pinned DeepSeek preview tensors

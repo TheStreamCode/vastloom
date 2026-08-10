@@ -19,6 +19,9 @@ concurrency:
 
 jobs:
   analyze:
+    # Code scanning is available when the repository is public or GitHub Advanced
+    # Security has been enabled explicitly for the private repository.
+    if: github.event.repository.visibility == 'public' || vars.VASTLOOM_ENABLE_GHAS == 'true'
     name: Analyze ${{ matrix.language }}
     timeout-minutes: 45
     runs-on: ubuntu-latest

@@ -13,6 +13,9 @@ hardware, commands, measurements and limitations.
 
 ## Current report
 
+- [`M1_MODEL_ADMISSION_VALIDATION.md`](M1_MODEL_ADMISSION_VALIDATION.md) — native
+  minimum-working-set and complete-expert RAM/VRAM capacity gate, aggregate host-memory
+  governance, strict/legacy manifest behavior and reference-PC accept/reject evidence.
 - [`M7_DEEPSEEK_REAL_EXPERT_VALIDATION.md`](M7_DEEPSEEK_REAL_EXPERT_VALIDATION.md) —
   one complete real DeepSeek 0731 gate/up IQ1_S plus down IQ3_XXS expert, bit-identical ggml
   parity, governed asynchronous RAM loading, fail-closed budget/lease cleanup and explicitly

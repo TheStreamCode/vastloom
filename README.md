@@ -655,9 +655,11 @@ fixture is smaller than one megabyte and remains resident in CPU RAM.
 
 ## Research path
 
-The first production target is DeepSeek V4 Flash-class memory pressure, followed by a
-larger MiniMax-class MoE and eventually Kimi K3 as the extreme benchmark. The main
-research metric is not merely SSD throughput. It is:
+The first production target is DeepSeek V4 Flash-class memory pressure, followed only by MoE
+profiles whose minimum live working set fits the reference PC's safe RAM/VRAM budgets. Kimi K3 is
+a future metadata/capacity stress study, not an execution target for the 32 GiB RAM / 12 GiB VRAM
+reference machine unless an exact profile passes the public admission gate. The main research
+metric is not merely SSD throughput. It is:
 
 > **How few bytes must be fetched from NVMe for each accepted token?**
 
@@ -671,6 +673,8 @@ The next technical sequence remains incremental:
 5. OpenAI-compatible local server and coding-agent integration.
 
 Detailed acceptance gates are in [`docs/ROADMAP.md`](docs/ROADMAP.md).
+The reference-PC working-set rule is defined in
+[`docs/REFERENCE_PLAN.md`](docs/REFERENCE_PLAN.md#reference-pc-model-admission-gate).
 
 ## Prior art and research baselines
 

@@ -25,6 +25,12 @@ verified full-shard binding, a complete 0731 layer/token path, generation and CU
 unvalidated. Windows and Linux CPU paths are tested; macOS/Metal remain unvalidated. Laguna S 2.1
 remains a reviewed compatibility target, not a validated execution path.
 
+Reference-PC execution targets must pass the public minimum-working-set gate: one complete routed
+expert, the required always-active block, KV, scratch and staging must fit live post-reserve
+budgets derived from 32 GiB RAM and 12 GiB VRAM. Kimi K3 is capacity-study-only on that machine
+unless an exact profile passes this gate; do not download or claim execution for an ineligible
+profile merely because its complete weights fit on SSD.
+
 Do not restart or generically redesign the project. Inspect the relevant implementation,
 documentation, tests and git state before changing code. Preserve working components and do not
 replace real paths with placeholders.

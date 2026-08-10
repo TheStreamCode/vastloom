@@ -247,11 +247,15 @@ and the server binds to loopback unless remote access is explicitly configured.
 - [x] Add bounded GGUF v3 metadata/tensor import with explicit GGML quantization identity.
 - [ ] Laguna S 2.1 architecture adapter and expert-streaming parity.
 - [ ] MiniMax-class MoE adapter.
-- [ ] Kimi K3 capacity and traffic benchmark.
+- [ ] Kimi K3 metadata-only capacity and traffic study; do not download or execute it on the
+  reference PC unless an exact profile passes the minimum-working-set admission gate.
 - [ ] Vulkan and ROCm backends according to measured demand.
 - [ ] Multi-NVMe and optional LAN tier experiments.
 
-Kimi K3 remains an extreme research target, not the first product milestone.
+Kimi K3 remains an extreme capacity study, not a reference-PC inference target. Practical model
+validation is limited to MoE profiles whose complete minimum live working set—including one full
+expert, required active block, KV, scratch and staging—fits the dynamic safe budgets derived from
+32 GiB RAM and 12 GiB VRAM with host headroom preserved.
 
 ### Public macOS and Metal track
 

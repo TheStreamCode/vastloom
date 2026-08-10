@@ -45,6 +45,10 @@
   outputs; complete layer/token execution and model generation remain open.
 - Documented the tested platform boundary explicitly: Windows/MSVC and Linux GCC/Clang CPU paths
   are validated, while macOS and Metal remain unvalidated targets.
+- Added a public reference-PC admission gate: a model must fit one complete expert plus the
+  required active block, KV, scratch and staging inside live post-reserve RAM/VRAM budgets. Kimi K3
+  is now capacity-study-only on the 32 GiB RAM / 12 GiB VRAM machine unless an exact profile passes
+  that gate.
 - Replaced repeated GGUF metadata `seekg` calls with verified sequential discards. The same real
   5.26 MB header on Windows-mounted WSL storage improved from 37.42 s to 0.11 s while preserving
   strict bounded/truncation behavior.

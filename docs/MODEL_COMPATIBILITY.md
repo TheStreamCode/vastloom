@@ -117,6 +117,14 @@ The default safe plan is:
 - fail closed or enter an explicit low-memory profile if the minimum trunk/state working set
   cannot preserve operating-system headroom.
 
+Model admission is based on the minimum live working set, not total SSD capacity or marketing
+“active parameter” counts. At least one complete routed-expert bundle, the largest required
+always-active block, router/reduction state, requested KV, activation scratch and one bounded
+staging slot must fit the live Governor budgets after OS/driver reserves. If that irreducible set
+does not fit, the model/profile is unsupported on that host even when all weights fit on SSD.
+Vastloom does not split an indivisible expert through generic swap or promise that RAM plus VRAM
+can be added as one oversubscribed allocation.
+
 Streaming the always-active trunk from SSD on every layer/token is technically possible but is
 not the normal interactive plan: it multiplies unavoidable traffic. The runtime must reduce
 bytes per accepted token, not merely maximize sequential benchmark bandwidth.
@@ -162,9 +170,10 @@ path.
 ## Acceptance ladder for a new model
 
 1. Pin repository revision, license, config, tokenizer and every artifact identity.
-2. Parse headers/metadata without payload and produce a role-aware storage plan.
-3. Match tokenizer, chat template and completion parsing.
-4. Match reduced operator, route, logit and cache-state fixtures.
-5. Run selected full-model probes under hard RAM/VRAM/disk limits.
-6. Enable CPU and then GPU execution only after output parity.
-7. Publish measured bytes/token and overlap; never infer speed from SSD specifications.
+2. Reject the profile unless its minimum irreducible working set fits live host budgets.
+3. Parse headers/metadata without payload and produce a role-aware storage plan.
+4. Match tokenizer, chat template and completion parsing.
+5. Match reduced operator, route, logit and cache-state fixtures.
+6. Run selected full-model probes under hard RAM/VRAM/disk limits.
+7. Enable CPU and then GPU execution only after output parity.
+8. Publish measured bytes/token and overlap; never infer speed from SSD specifications.

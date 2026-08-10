@@ -64,6 +64,20 @@ The planner creates separate reserves for:
 The safety profile is conservative. Performance mode may use more resources but never
 removes hard reserves.
 
+## Minimum working-set admission
+
+SSD capacity alone never makes a model runnable. Before a large MoE may download or execute on a
+host, its adapter must prove that one complete routed expert plus the required always-active
+block, router/reduction state, requested KV, activation scratch and one bounded staging slot fit
+the live RAM/VRAM hard budgets after OS and driver reserves. Optional cache, additional resident
+experts and prefetch are excluded from this minimum and are reduced first.
+
+If the irreducible set does not fit, Vastloom rejects the model/profile. It does not combine RAM
+and VRAM into fictional capacity, delegate the expert to uncontrolled swap, reduce precision
+silently or proceed merely because the remaining weights fit on NVMe. On the reference PC this
+rule applies to the dynamic budgets derived from 32 GiB RAM and 12 GiB VRAM, not their nominal
+totals. Kimi K3 remains a metadata-only capacity study unless an exact profile passes this gate.
+
 ## State machine
 
 ```text

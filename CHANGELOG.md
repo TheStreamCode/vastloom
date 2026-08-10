@@ -46,6 +46,11 @@
   1,193 tensor tiles; a new governed fixture loader covers immutable identity, Unicode paths,
   budget refusal, cancellation, short reads, leases and zero-reservation cleanup. No official
   weight payload or complete DeepSeek layer was executed.
+- Added bounded scalar Q8_0, Q5_K, Q6_K, BF16 and F32 decode/matvec kernels plus a separate I32
+  router-table decoder. Synthetic raw blocks match the pinned ggml oracle, caller output is
+  transactional through bounded scratch, and the real 0731 metadata now reports native storage
+  handling for all 1,193 layer-trunk tensors / 6,390,088,008 encoded bytes. This is storage/math
+  coverage only: the 82.54 GB payload remains absent and `execution_supported=false`.
 - Added a bounded scalar IQ1_S dequantization/matvec reference kernel derived from pinned ggml
   equations and licensed codebook data. Synthetic vectors and one exact 1,638,400-byte real
   DeepSeek 0731 expert-gate slice match the upstream oracle bit for bit across all 2,048 rows.

@@ -45,8 +45,10 @@ model conversion.
 > against pinned ggml after a governed one-worker load into RAM. The exact three-object GGUF
 > distribution now has a bounded immutable importer and a fail-closed source-binding command:
 > only a fully hashed payload that passes the single-tier expert gate can expose executable source
-> ranges. The real 82.54 GB payload has not been downloaded or executed; a complete DeepSeek
-> layer/token path, generation and CUDA remain unimplemented.
+> ranges. Bounded scalar Q8_0, Q5_K, Q6_K, BF16 and F32 reference kernels plus an I32 router-table
+> decoder now cover the storage types of all 1,193 per-layer trunk tensors in the real metadata.
+> The real 82.54 GB payload has not been downloaded or executed; storage-format coverage is not a
+> complete DeepSeek layer/token path, generation or CUDA implementation.
 
 ## Why Vastloom exists
 
@@ -107,6 +109,8 @@ The derived resident/streamed trunk capacity gate is documented in the
 [`M7 working-set report`](docs/reports/M7_DEEPSEEK_WORKING_SET_VALIDATION.md).
 The first model-independent per-layer trunk plan and governed tile transaction are documented in
 the [`M9 layer-trunk streaming report`](docs/reports/M9_LAYER_TRUNK_STREAMING_VALIDATION.md).
+The complete layer-trunk storage-type kernel gate is documented in the
+[`M9 trunk storage-kernel report`](docs/reports/M9_DEEPSEEK_TRUNK_STORAGE_KERNEL_VALIDATION.md).
 The pinned importer and immutable full-source admission boundary are documented in the
 [`M7 checkpoint-binding report`](docs/reports/M7_DEEPSEEK_GGUF_CHECKPOINT_BINDING_VALIDATION.md).
 Current and candidate model support is kept explicit in the
@@ -274,7 +278,9 @@ portability target, not a validated platform claim.
 - **Bounded layer-trunk plan:** every non-routed `blk.N.*` tensor now keeps its exact layer
   identity. The real 0731 metadata yields 43/43 deterministic plans, 1,193 tensors/tiles and a
   35,651,584-byte largest tile under a 64 MiB cap. A governed fixture proves one immutable tile
-  read and fault cleanup; no official payload tile or complete layer was executed.
+  read and fault cleanup. Exact scalar storage handling now covers all 1,193 tensors /
+  6,390,088,008 encoded bytes through Q8_0, Q5_K, Q6_K, BF16, F32 and I32 paths. No official
+  payload tile or complete layer was executed.
 
 ### Runtime foundation
 
@@ -677,8 +683,9 @@ profiles from exact metadata. The streamed-trunk floor is 124,905,496 bytes incl
 8,781,824-byte expert; the resident-trunk floor is 7,110,994,292 bytes. This makes the intended
 low-memory contract explicit: trunk weights may remain immutable on SSD and move through bounded
 tiles, but one expert is never split across RAM and VRAM. The 43 layer plans use 1,193 tiles with
-a 35,651,584-byte maximum; only a synthetic tile payload has been loaded. The DeepSeek
-trunk-streaming token path is not implemented.
+a 35,651,584-byte maximum. Every layer-trunk storage type now has a bounded scalar decoder and
+the floating matrix types have transactional reference matvecs, but only a synthetic tile payload
+has been loaded. The DeepSeek trunk-streaming token path is not implemented.
 
 ## Current limitations
 
@@ -690,10 +697,11 @@ It currently has:
   FP32 prefill oracle, official 0731 GGUF metadata catalog and verified source-binding boundary;
   no full-checkpoint DeepSeek, MiniMax, Kimi or GGUF layer/token execution adapter;
 - no CUDA, ROCm, Vulkan or Metal inference backend;
-- one scalar IQ1_S/IQ3_XXS reference path validated on a complete real expert, but no complete
-  quantized layer/token, SIMD/fused production kernel or CUDA quantized path;
-- complete metadata-derived trunk plans and a fixture-only tile loader, but no official trunk
-  payload read and no Q8_0/Q5_K/Q6_K/BF16/F32 trunk-kernel set;
+- scalar IQ1_S/IQ3_XXS expert and Q8_0/Q5_K/Q6_K/BF16/F32 trunk reference kernels, plus bounded
+  I32 router-table decoding, but no architecture-specific complete quantized layer/token,
+  SIMD/fused production kernel or CUDA quantized path;
+- complete metadata-derived trunk plans and storage-type coverage with a fixture-only tile loader,
+  but no official trunk payload read or tile-to-DeepSeek-operator consumer;
 - no VRAM expert tier or pinned host buffers; direct/unbuffered I/O is currently an
   opt-in OLMoE measurement protocol, not the production path for every adapter;
 - OLMoE currently exposes final-logit probes and route telemetry, not decoding/chat;
@@ -721,13 +729,15 @@ merely SSD throughput. It is:
 
 The next technical sequence remains incremental:
 
-1. import and fully hash the real pinned shards, add the missing trunk quantization kernels,
-   consume the existing bounded plans plus routed experts in one complete quantized layer/token
-   probe, then connect a target-verified MTP decoding loop;
-2. CUDA dense, attention, router and packed expert kernels;
-3. explicit VRAM/RAM/NVMe placement with pinned buffers and direct/overlapped I/O;
-4. adaptive placement, predictive routing and speculative expert deduplication;
-5. OpenAI-compatible local server and coding-agent integration.
+1. bind the completed trunk storage kernels, reference operators, incremental state and governed
+   expert loader in one quantized one-layer fixture, then match the pinned reference graph;
+2. only after explicit approval and a fresh capacity check, import and fully hash the real pinned
+   shards and run the same bounded layer probe on official source ranges;
+3. connect a target-verified MTP decoding loop, then add CUDA dense, attention, router and packed
+   expert kernels;
+4. explicit VRAM/RAM/NVMe placement with pinned buffers and direct/overlapped I/O;
+5. adaptive placement, predictive routing and speculative expert deduplication;
+6. OpenAI-compatible local server and coding-agent integration.
 
 Detailed acceptance gates are in [`docs/ROADMAP.md`](docs/ROADMAP.md).
 The reference-PC working-set rule is defined in

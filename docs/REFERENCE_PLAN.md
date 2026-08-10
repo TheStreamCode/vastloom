@@ -83,7 +83,9 @@ The official 0731 `UD-IQ1_S` GGUF headers now produce a derived batch-1, 4,096-t
 runtime state is 116,123,672 bytes, the largest complete expert bundle is 8,781,824 bytes, the
 streamed-trunk CPU floor is 124,905,496 bytes, and the resident-trunk CPU floor is 7,110,994,292
 bytes. This proves metadata-level capacity accounting, not DeepSeek execution; full payload
-verification on the official local objects, trunk streaming and a layer/token path remain absent.
+verification on the official local objects, official-payload trunk compute and a layer/token path
+remain absent. Scalar storage handling now covers every type in the 1,193 planned layer tensors,
+but storage-format parity is not the architecture-specific consumer.
 The pinned importer/checkpoint gate can now bind complete shards only after full SHA-256 and this
 same live single-tier admission; its real validation used only the 5,343,584-byte metadata import.
 

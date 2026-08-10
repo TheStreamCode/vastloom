@@ -347,6 +347,18 @@ Unicode paths, cancellation, short reads and reservation cleanup. Metadata-only 
 but are forbidden to load. The official 82.54 GB payload is absent, so these real layer numbers
 remain metadata-derived placement evidence rather than an execution claim.
 
+The scalar storage layer now recognizes every GGML type present in those 1,193 layer tensors.
+Q8_0, Q5_K and Q6_K follow the exact pinned ggml block layouts; BF16 and F32 are decoded from
+explicit little-endian bytes; and the three `ffn_gate_tid2eid` I32 routing tables use a separate
+integer decoder instead of being forced through a floating matvec. The real metadata reports
+6,390,088,008 / 6,390,088,008 encoded bytes covered and zero unsupported layer tensors.
+
+Floating matrix formats share a transactional dispatcher: the caller reserves disjoint input,
+scratch and output spans, the complete operation writes scratch first, and public output is copied
+only after every encoded block and row succeeds. Quantized matrices are never expanded in full;
+one fixed block of at most 256 floats is decoded at a time. This is a storage/math boundary, not
+the architecture consumer that sequences norms, routing, attention, shared experts and state.
+
 ```text
 pinned importer manifest + exact object identities
   -> bounded GGUF header/split validation
@@ -366,9 +378,11 @@ activation/kernel scratch. Together with the largest 8,781,824-byte expert, this
 a 7,110,994,292-byte resident-trunk CPU floor. These are capacity profiles; neither executes a
 DeepSeek layer/token.
 
-The first quantized compute oracle is deliberately narrower than the catalog. It accepts complete
-GGML IQ1_S and IQ3_XXS blocks, validates every FP16 scale and all dimensions before final output
-publication, decodes through fixed 256-float scratch and performs scalar FP64-accumulated matvecs.
+The routed-expert quantized compute oracle accepts complete GGML IQ1_S and IQ3_XXS blocks,
+validates every FP16 scale and all dimensions before final output publication, decodes through
+fixed 256-float scratch and performs scalar FP64-accumulated matvecs. The trunk storage paths use
+the same bounded/transactional rules for Q8_0, Q5_K, Q6_K, BF16 and F32, while I32 remains a
+typed lookup-table decoder.
 One exact DeepSeek 0731 layer-0/expert-0 gate/up/down bundle is loaded through the shared bounded
 worker and `RAM_READY` lease, executes FP32 SwiGLU, and matches pinned ggml bit for bit across all
 4,096 final outputs. The test uses three hash-pinned extracted ranges rather than an unverified

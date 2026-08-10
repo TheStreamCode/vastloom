@@ -233,9 +233,13 @@ The 0731 GGUF reader adds a metadata-only safety boundary:
   expert bundle fits wholly in safe RAM or wholly in safe VRAM. `--no-verify` forces metadata-only
   behavior, and the command still reports `execution_supported=false` because no layer/token
   consumer exists;
-- the scalar IQ1_S/IQ3_XXS oracle accepts caller-supplied bounded spans only, prevalidates
-  dimensions, encoded size, all block scales, finite inputs and non-overlapping scratch, and has a
-  64-million-element default ceiling;
+- the scalar IQ1_S/IQ3_XXS expert and Q8_0/Q5_K/Q6_K/BF16/F32 trunk paths accept caller-supplied
+  bounded spans only, prevalidate dimensions, encoded size, all applicable block scales, finite
+  inputs and non-overlapping scratch, and have a 64-million-element default ceiling;
+- the three I32 layer router tables use a typed little-endian decoder and are explicitly rejected
+  by the floating matvec dispatcher; storage-type support is never mistaken for operator support;
+- the generic matvec dispatcher publishes caller output only after the complete operation succeeds;
+  malformed later blocks and budget refusal leave that public output unchanged;
 - one complete real expert test can consume only three separately size/SHA-256-pinned extracted
   ranges under an 8 MiB RAM limit, 4 MiB staging limit, 10 MiB aggregate host-memory limit, one
   worker and one queue entry;

@@ -14,7 +14,7 @@ or matching tensor dimensions is never enough to enable execution automatically.
 | OLMoE-1B-7B-0924-Instruct | Pinned shards, top-k routes, expert streaming and I/O telemetry | Validated CPU expert streaming |
 | `deepseek-ai/DeepSeek-V4-Flash` preview at `60d8d707...` | Header catalog, tokenizer, reduced main+MTP prefill and five incremental cache steps | Reduced FP32 reference execution only |
 | `deepseek-ai/DeepSeek-V4-Flash-0731` at `7872f01b...` | Public metadata/config reviewed on 2026-08-10 | Not imported, inspected or executed by Vastloom yet |
-| `unsloth/DeepSeek-V4-Flash-0731-GGUF` at `fbbb5b93...` | Pinned atomic importer, verified metadata binding, 43 bounded layer-trunk plans, plus exact gate/up IQ1_S and down IQ3_XXS parity on one real expert | One governed scalar CPU expert and fixture-only trunk tile; real full payload not imported; no layer/token generation |
+| `unsloth/DeepSeek-V4-Flash-0731-GGUF` at `fbbb5b93...` | Pinned atomic importer, verified metadata binding, 43 bounded layer-trunk plans, all trunk storage types covered by scalar references, plus exact gate/up IQ1_S and down IQ3_XXS parity on one real expert | One governed scalar CPU expert and synthetic trunk/storage vectors; real full payload not imported; no layer/token generation |
 | `unsloth/Laguna-S-2.1` at `1a646907...` | Public config, custom-code and shard metadata reviewed on 2026-08-10 | Adapter and execution not implemented |
 | Kimi K3-class profiles | Public-roadmap capacity/traffic study only | Not a reference-PC execution target unless one exact complete expert passes the single-tier gate |
 
@@ -66,6 +66,12 @@ All 43 layers also produce bounded non-routed plans: 1,193 tensors become 1,193 
 largest tile. These are metadata-derived plans; the official tile sources remain unavailable and
 no executable DeepSeek layer exists.
 
+The layer catalog uses F32, Q8_0, Q5_K, Q6_K, I32 and BF16. Bounded scalar handling now covers all
+1,193 tensors and all 6,390,088,008 encoded layer-trunk bytes: floating matrix formats have exact
+decode/reference matvec paths, while the three I32 `ffn_gate_tid2eid` router tables have a typed
+integer decoder. Q8_0/Q5_K/Q6_K synthetic raw blocks match pinned ggml fingerprints. This closes
+the storage-format gate only; no official trunk payload byte or complete layer has run.
+
 Three bounded ranges from the second shard have now been tested separately: the 1,638,400-byte
 gate and up IQ1_S matrices plus the 3,211,264-byte IQ3_XXS down matrix form the complete
 layer-0/expert-0 bundle. A fixed one-worker, one-entry loader pre-reserves and packs all 6,488,064
@@ -111,9 +117,10 @@ can couple fully hashed immutable shards to those ranges after capacity admissio
 and IQ3_XXS oracles execute one complete real extracted bundle through the shared governed loader.
 All non-routed `blk.N.*` tensors now retain their layer identity and feed a shared bounded tile
 planner/loader. The real 0731 metadata produces 43 complete layer plans, 1,193 tensors/tiles and a
-35,651,584-byte maximum tile under the 64 MiB ceiling. Only a synthetic tile payload has been
-loaded; the official full-shard import, a layer/token consumer, optimized kernels and the Laguna
-adapter remain open.
+35,651,584-byte maximum tile under the 64 MiB ceiling. Scalar storage handling covers every type
+and encoded byte in those layer plans, but only a synthetic tile payload has been loaded. The
+official full-shard import, architecture-specific layer/token consumer, optimized kernels and the
+Laguna adapter remain open.
 
 The shared runtime may then place a tensor or expert bundle in one of these explicit states:
 

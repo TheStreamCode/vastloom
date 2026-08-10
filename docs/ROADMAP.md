@@ -144,6 +144,9 @@ Safetensors payload and complete layer/token remain unvalidated.
 - [x] Preserve layer identity for every `blk.N.*` trunk tensor, produce deterministic per-layer
   plans with a 64 MiB tile ceiling and validate a governed single-tile payload transaction on a
   fault-injected fixture. No official weight payload was read.
+- [x] Match pinned ggml Q8_0/Q5_K/Q6_K storage math, add bounded BF16/F32 matvec and I32 router
+  decoding, and prove storage handling for all 1,193 / 6,390,088,008-byte layer-trunk tensors in
+  the real metadata. No official trunk payload was read or layer executed.
 - [x] Match pinned ggml IQ1_S dequantization/matvec output on one exact real 0731 expert-gate
   slice with bounded scalar CPU code.
 - [x] Match pinned ggml IQ3_XXS output and execute one complete real 0731 gate/up/down expert
@@ -178,6 +181,8 @@ The immutable import/source gate is recorded in the
 [M7 checkpoint-binding report](reports/M7_DEEPSEEK_GGUF_CHECKPOINT_BINDING_VALIDATION.md).
 The bounded per-layer trunk plan and tile transaction are recorded in the
 [M9 layer-trunk streaming report](reports/M9_LAYER_TRUNK_STREAMING_VALIDATION.md).
+The complete scalar layer-trunk storage-type gate is recorded in the
+[M9 trunk storage-kernel report](reports/M9_DEEPSEEK_TRUNK_STORAGE_KERNEL_VALIDATION.md).
 The first real packed-matrix parity gate is recorded in the
 [M7 IQ1_S kernel report](reports/M7_DEEPSEEK_IQ1S_KERNEL_VALIDATION.md).
 The completed one-expert gate/up/SwiGLU/down path is recorded in the
@@ -208,6 +213,10 @@ unbounded allocation and clean recovery from injected CUDA failures.
 - [x] Feed one complete real DeepSeek 0731 expert from governed packed RAM into a scalar kernel.
 - [x] Build deterministic non-routed per-layer trunk tile plans and complete a governed,
   cancellation-aware single-tile RAM load with fault cleanup.
+- [x] Add transactional scalar handling for every GGML storage type used by those 1,193 trunk
+  tensors, including a separate non-matvec I32 router-table path.
+- [ ] Bind streamed tensor identities to one architecture-specific quantized DeepSeek layer
+  fixture and match the pinned reference graph before reading official trunk payloads.
 - [ ] Connect those futures to expert compute and measure real compute/I/O overlap.
 - [ ] Pinned host buffers.
 - [ ] Direct/overlapped NVMe reads where supported.

@@ -13,6 +13,10 @@ hardware, commands, measurements and limitations.
 
 ## Current report
 
+- [`M9_DEEPSEEK_TRUNK_STORAGE_KERNEL_VALIDATION.md`](M9_DEEPSEEK_TRUNK_STORAGE_KERNEL_VALIDATION.md) —
+  pinned-ggml Q8_0/Q5_K/Q6_K parity, bounded BF16/F32 matvec and I32 router-table handling,
+  transactional output, and real metadata coverage for all 1,193 layer-trunk tensors while
+  full payload and layer/token execution remain absent.
 - [`M9_LAYER_TRUNK_STREAMING_VALIDATION.md`](M9_LAYER_TRUNK_STREAMING_VALIDATION.md) — exact
   `blk.N.*` identities, deterministic 64 MiB per-layer trunk plans, a governed single-tile loader,
   fault cleanup and real 43-layer 0731 metadata-plan results without downloading weight payloads.

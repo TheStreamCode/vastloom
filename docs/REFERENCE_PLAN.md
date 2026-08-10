@@ -108,7 +108,9 @@ same live single-tier admission; its real validation used only the 5,343,584-byt
 The bounded partial-range importer has separately accepted the 21-range / 138,867,160-byte trunk
 scope in dry-run mode. It created no target and made no payload request. A real transfer requires
 explicit authorization, remains capped and publishes a non-executable derived artifact; the
-native reader/binder must pass before asking for that authorization.
+native closed-world reader and exact trunk binder now pass synthetic corruption and source-identity
+tests. The next gate is a governed synthetic trunk consumer; only after it passes should the user
+be asked to authorize the real transfer.
 
 Kimi K3 is not a reference-PC execution target. The project treats it as metadata/capacity-only
 because no exact profile has proved that its complete expert bundle fits one real tier on the

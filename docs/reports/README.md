@@ -13,6 +13,10 @@ hardware, commands, measurements and limitations.
 
 ## Current report
 
+- [`M9_DEEPSEEK_RANGE_ARTIFACT_BINDING_VALIDATION.md`](M9_DEEPSEEK_RANGE_ARTIFACT_BINDING_VALIDATION.md) —
+  closed-world native artifact verification, full local range rehashing and exact trunk binding to
+  regenerated pinned GGUF catalog identities, validated with synthetic corruption and forgery
+  cases while remaining explicitly non-executing.
 - [`M9_DEEPSEEK_RANGE_ARTIFACT_IMPORT_VALIDATION.md`](M9_DEEPSEEK_RANGE_ARTIFACT_IMPORT_VALIDATION.md) —
   explicit-authority bounded HTTP range import, strict plan/source validation, per-range hashes,
   crash cleanup and read-only atomic publication, plus a real 138,867,160-byte trunk dry-run with

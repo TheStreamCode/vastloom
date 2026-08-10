@@ -267,7 +267,16 @@ The 0731 GGUF reader adds a metadata-only safety boundary:
   mandatory. A response partial is removed on failure and never resumed across responses;
 - range artifacts record the pinned complete-source SHA-256 as identity but explicitly state that
   the complete checkpoint is unverified. They retain `execution_supported=false`, are revalidated
-  before read-only atomic rename and cannot be consumed by the current native runtime;
+  before read-only atomic rename and cannot be executed by the current native runtime;
+- the native range verifier treats a published artifact as a closed directory, caps it at 4,096
+  rows, 1 GiB per range and 16 GiB total, rejects symlinks/traversal/unexpected files/overlap and
+  rehashes every local payload by default. Quick inspection may skip hashes, but such a result is
+  categorically refused by the DeepSeek binder;
+- the DeepSeek trunk binder reproduces the deterministic plan from separately hash-verified pinned
+  metadata and requires every label, source path/object, complete-object size/SHA-256, offset and
+  byte count to match. It exposes only local offset-zero views, preserves
+  `complete_checkpoint_verified=false` and `execution_supported=false`, and has no hash-bypass CLI
+  option;
 - selected-expert/all range scopes fail before network while routing authority is caller-supplied.
   A future authoritative source must be named explicitly; a forged flag/source combination is
   rejected. Target-scoped locks clean only their own stale partial/incoming artifacts after a

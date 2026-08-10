@@ -202,6 +202,8 @@ The exact non-executing checkpoint-shaped range boundary is recorded in the
 The explicit-authority bounded downloader and immutable partial-artifact publication gate are
 recorded in the
 [M9 range artifact import report](reports/M9_DEEPSEEK_RANGE_ARTIFACT_IMPORT_VALIDATION.md).
+The native closed-world verification and exact pinned-catalog trunk binding are recorded in the
+[M9 range artifact binding report](reports/M9_DEEPSEEK_RANGE_ARTIFACT_BINDING_VALIDATION.md).
 The first real packed-matrix parity gate is recorded in the
 [M7 IQ1_S kernel report](reports/M7_DEEPSEEK_IQ1S_KERNEL_VALIDATION.md).
 The completed one-expert gate/up/SwiGLU/down path is recorded in the
@@ -253,8 +255,11 @@ unbounded allocation and clean recovery from injected CUDA failures.
 - [x] Add an explicit-authority bounded range importer with exact HTTP range/length validation,
   per-range SHA-256, crash cleanup and read-only atomic publication. The real 138,867,160-byte
   trunk plan passed dry-run only; no official payload was downloaded.
-- [ ] Bind `vastloom.range-artifact.v1` back to exact catalog tensors in the native bounded reader
-  and exercise the trunk consumer on synthetic partial artifacts.
+- [x] Bind `vastloom.range-artifact.v1` back to exact catalog tensors in a closed-world native
+  reader, rehash all local ranges and expose exact local trunk tile views. Synthetic malformed,
+  corruption and forged-binding cases pass without an official payload download.
+- [ ] Feed those bound local tile views through the governed trunk loader and reduced scalar
+  consumer, including short-read, cancellation and reservation cleanup.
 - [ ] Execute that probe by acquiring the bounded official trunk ranges, decoding the real
   `tid2eid` route and loading only its six selected complete expert bundles.
 - [ ] Pinned host buffers.

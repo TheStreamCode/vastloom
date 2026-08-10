@@ -401,7 +401,27 @@ This prevents a small derived artifact from masquerading as the complete shard.
 Crash recovery is target-scoped under the same exclusive import lock. Process-unique partial
 responses are discarded instead of resumed across servers, stale unpublished trees are removed,
 and already complete cached ranges are rehashed before reuse. A native artifact reader/catalog
-binder does not exist yet, so even a successfully published range package cannot reach inference.
+binder now closes the next identity boundary, but a successfully bound package still cannot reach
+inference.
+
+```text
+vastloom.range-artifact.v1 directory
+  -> bounded JSON and closed file-set validation
+  -> local size plus SHA-256 verification for every range
+  -> reproduce trunk plan from hash-verified pinned GGUF metadata
+  -> exact model/revision/layer/label/source span/full-object identity match
+  -> offset-zero immutable local tile views
+  -> execution unsupported (governed tensor consumer not connected)
+```
+
+The generic verifier accepts at most 4,096 ranges, 1 GiB per range and 16 GiB total; callers may
+lower those bounds. It rejects root or payload symlinks, relative-path traversal, missing or extra
+files, source overlap, inconsistent object identity, size/hash mismatch and any artifact claiming
+to be a complete checkpoint or executable. The DeepSeek binder additionally requires full local
+range hashes, hash-verified pinned metadata and a plan reproducible from that catalog. It supports
+only trunk scope while routing authority remains false. The manifest's raw plan SHA-256 is retained
+as provenance; exact regenerated range identities, rather than a shell-dependent JSON newline or
+encoding, are the native binding authority.
 
 The scalar storage layer now recognizes every GGML type present in those 1,193 layer tensors.
 Q8_0, Q5_K and Q6_K follow the exact pinned ggml block layouts; BF16 and F32 are decoded from
@@ -637,14 +657,15 @@ router decisions or accepted output tokens.
 - `hardware/`: non-invasive machine probe.
 - `planner/`: conservative capacity and placement plan.
 - `safety/`: reservations, state machine and heartbeat.
-- `model/`: manifest/Safetensors/GGUF parsing, imported-checkpoint verification, immutable model
-  storage, the universal logical tensor/expert catalog and governed residency state.
+- `model/`: manifest/Safetensors/GGUF parsing, imported-checkpoint and closed-world partial-range
+  verification, immutable model storage, the universal logical tensor/expert catalog and governed
+  residency state.
 - `io/`: bounded asynchronous reads plus platform-labeled process-I/O counters.
 - `research/`: native-telemetry-driven no-cache/LRU/LFU/static-hot simulation and exact
   unique-expert reuse distance.
 - `inference/`: TinyTransformer, pinned SmolLM2 generation, pinned OLMoE routed CPU
   reference/streaming, DeepSeek Safetensors/GGUF inspection and the reduced router-first
-  selected-expert reference path.
+  selected-expert reference path, plus exact non-executing DeepSeek trunk-artifact binding.
 - `cli/`: interactive and one-shot model client commands.
 - `tools/`: pinned full/metadata import plus bounded non-executable range-artifact publication.
 

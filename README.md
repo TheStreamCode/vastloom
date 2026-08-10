@@ -154,6 +154,8 @@ documented in the
 [`M9 layer probe plan report`](docs/reports/M9_DEEPSEEK_LAYER_PROBE_PLAN_VALIDATION.md).
 The bounded immutable range importer and its real-metadata no-network gate are documented in the
 [`M9 range artifact import report`](docs/reports/M9_DEEPSEEK_RANGE_ARTIFACT_IMPORT_VALIDATION.md).
+The closed-world native verifier and exact pinned-catalog trunk binding are documented in the
+[`M9 range artifact binding report`](docs/reports/M9_DEEPSEEK_RANGE_ARTIFACT_BINDING_VALIDATION.md).
 The pinned importer and immutable full-source admission boundary are documented in the
 [`M7 checkpoint-binding report`](docs/reports/M7_DEEPSEEK_GGUF_CHECKPOINT_BINDING_VALIDATION.md).
 Current and candidate model support is kept explicit in the
@@ -353,6 +355,13 @@ portability target, not a validated platform claim.
   atomically under `models/optimized`. Current expert/all scopes fail before network access because
   routing authority is false. The real layer-0 trunk has passed dry-run only; no official payload
   range has been downloaded.
+- **Native range-artifact binding:** `range-artifact-inspect` parses the derived artifact under
+  fixed manifest/range/payload bounds, rejects symlinks, traversal and unexpected files, and
+  rehashes every local range by default. `deepseek-gguf-range-bind` then reproduces the trunk plan
+  from hash-verified pinned metadata and matches every local byte span to its exact complete-shard
+  path, size and SHA-256 identity. The result exposes offset-zero local tile views but still reports
+  `complete_checkpoint_verified=false` and `execution_supported=false`; no official payload was
+  acquired or executed for this gate.
 
 ### Runtime foundation
 
@@ -630,8 +639,22 @@ range is fetched by this command.
 
 The importer example is deliberately a dry-run. A real range transfer also needs
 `--allow-range-download`, enforces the selected-byte cap and publishes only a non-executable
-derived artifact. Do not add that flag yet: the native range-artifact consumer is the next
-correctness gate. UTF-8 and UTF-8-BOM plan files are accepted; UTF-16 shell redirection is not.
+derived artifact. The native verifier/binder has passed synthetic corruption and identity tests,
+but this is not authorization to add that flag: the real 138,867,160-byte transfer still requires
+the user's explicit approval. UTF-8 and UTF-8-BOM plan files are accepted; UTF-16 shell
+redirection is not.
+
+After an explicitly authorized import, the non-executing verification sequence is:
+
+```powershell
+vastloom range-artifact-inspect $artifact --json
+vastloom deepseek-gguf-range-bind $model $artifact `
+  --layer 0 --experts 0,1,2,3,4,5 --context 4096 --batch-size 1 --json
+```
+
+The second command always performs local range hashes and has no `--no-verify` bypass. The expert
+IDs must match those used to construct the plan, but remain layout-only until the official router
+table runs. Successful output proves exact trunk source binding, not a runnable DeepSeek layer.
 
 ## TinyChat CLI options
 
@@ -707,6 +730,9 @@ vastloom deepseek-gguf-checkpoint MODEL_DIRECTORY [--context N] [--batch-size N]
     [--no-verify] [--json]
 vastloom deepseek-gguf-probe-plan MODEL_DIRECTORY --layer N --experts CSV
     [--tile-size SIZE] [--context N] [--batch-size N] [--no-verify] [--json]
+vastloom range-artifact-inspect ARTIFACT_DIRECTORY [--no-verify] [--json]
+vastloom deepseek-gguf-range-bind MODEL_DIRECTORY ARTIFACT_DIRECTORY --layer N --experts CSV
+    [--tile-size SIZE] [--context N] [--batch-size N] [--json]
 vastloom moe-logits MODEL_DIRECTORY --text TEXT [--chat] [--top N]
     [--cache no-cache|lru|lfu|static-hot] [--cache-bytes SIZE]
     [--io sync|async] [--io-cache buffered|bypass] [--expert-read whole|staged]
@@ -813,8 +839,9 @@ It currently has:
   production kernel or CUDA path;
 - complete metadata-derived trunk plans and storage-type coverage plus a governed
   tile/expert-to-DeepSeek fixture consumer and reduced router-first bounded expert cache with an
-  opt-in single-owner asynchronous batch; partial immutable range publication exists, but no
-  native range-artifact binder, official trunk payload read or full-model loop;
+  opt-in single-owner asynchronous batch; partial immutable range publication and a native
+  closed-world verifier/exact trunk binder exist, but no bound-range-to-governed-tensor consumer,
+  official trunk payload read or full-model loop;
 - no VRAM expert tier or pinned host buffers; direct/unbuffered I/O is currently an
   opt-in OLMoE measurement protocol, not the production path for every adapter;
 - OLMoE currently exposes final-logit probes and route telemetry, not decoding/chat;
@@ -843,8 +870,8 @@ merely SSD throughput. It is:
 
 The next technical sequence remains incremental:
 
-1. add a native bounded reader/binder for `vastloom.range-artifact.v1`, rehash every local range
-   and match its model/revision/source span back to the verified GGUF catalog;
+1. connect the exact bound local trunk views to the governed tensor loader and reduced scalar
+   DeepSeek consumer, with synthetic short-read/cancellation/reservation tests;
 2. only after that synthetic consumer passes and the user explicitly approves, use the completed
    importer to acquire the exact 138,867,160-byte layer-0 trunk plan;
 3. decode the official `tid2eid` route for a pinned input, then acquire only its six complete

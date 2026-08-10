@@ -8,8 +8,9 @@ This file applies to the entire repository. Human-facing contribution rules are 
 Vastloom is a native, hardware-adaptive local inference runtime that treats VRAM, RAM and
 NVMe as a model-aware hierarchy. The current validated paths are the synthetic TinyTransformer,
 SmolLM2 dense CPU inference, OLMoE CPU expert streaming and a non-executing DeepSeek V4 Flash
-metadata/header inspector plus native tokenizer/basic chat framing and bounded equation-level
-reference operators. A deterministic two-layer DeepSeek float prefill plus one checkpoint-shaped
+metadata/header inspector plus a closed-world non-executing partial-range trunk binder, native
+tokenizer/basic chat framing and bounded equation-level reference operators. A deterministic
+two-layer DeepSeek float prefill plus one checkpoint-shaped
 MTP block now match the pinned preview graph for prefill and five incremental raw/compressed
 cache steps. Verified headers populate a universal tensor/expert catalog, and a buffer-free
 governed state machine validates legal NVMe/RAM/VRAM reservation transitions. Synchronous and
@@ -31,8 +32,9 @@ planner now combines the exact layer-0 trunk and six caller-supplied complete bu
 authority and none of the planned payload was fetched. A separate explicit-authority range
 importer now validates the plan, exact HTTP spans and per-range hashes, then publishes only a
 read-only non-executable derived artifact. The real 138,867,160-byte trunk passed dry-run only;
-selected-expert import remains blocked and no native artifact binder exists. All 43 layers now
-expose deterministic
+selected-expert import remains blocked. A native closed-world verifier and exact pinned-catalog
+trunk binder pass synthetic faults, but bound ranges do not yet reach a tensor consumer. All 43
+layers now expose deterministic
 non-routed trunk plans (1,193 tensors/tiles at a 64 MiB ceiling), and a synthetic governed tile
 transaction validates payload reads and cleanup. Scalar Q8_0/Q5_K/Q6_K/BF16/F32 references plus
 typed I32 router decoding cover all 1,193 layer-trunk storage types in metadata, but no official

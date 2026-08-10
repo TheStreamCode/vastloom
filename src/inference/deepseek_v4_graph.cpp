@@ -1,6 +1,8 @@
 #include "vastloom/inference/deepseek_v4_reference.hpp"
 
 #include "vastloom/inference/ggml_quantization.hpp"
+#include "vastloom/model/expert_loader.hpp"
+#include "vastloom/model/layer_streaming.hpp"
 
 #include <algorithm>
 #include <array>
@@ -18,6 +20,102 @@ namespace {
 constexpr std::size_t kMaximumGraphElements = 64U * 1024U * 1024U;
 constexpr std::size_t kMaximumReferenceTokens = 4096U;
 constexpr std::size_t kMaximumReferenceLayers = 16U;
+
+Result<std::span<const std::byte>> packed_payload(
+    const std::vector<std::byte>& encoded,
+    const std::shared_ptr<const model::ResidentByteBuffer>& resident,
+    std::size_t resident_offset,
+    std::size_t resident_bytes,
+    std::string_view context) {
+    if (resident != nullptr) {
+        if (!encoded.empty() || resident_bytes == 0U) {
+            return make_error(ErrorCode::invalid_format,
+                              "DeepSeek packed tensor has ambiguous resident storage",
+                              std::string(context));
+        }
+        const auto payload = resident->bytes();
+        if (resident_offset > payload.size() ||
+            resident_bytes > payload.size() - resident_offset) {
+            return make_error(ErrorCode::invalid_format,
+                              "DeepSeek packed tensor resident range is out of bounds",
+                              std::string(context));
+        }
+        return payload.subspan(resident_offset, resident_bytes);
+    }
+    if (resident_offset != 0U || resident_bytes != 0U || encoded.empty()) {
+        return make_error(ErrorCode::invalid_format,
+                          "DeepSeek packed tensor storage is empty or malformed",
+                          std::string(context));
+    }
+    return std::span<const std::byte>(encoded);
+}
+
+Result<DeepseekV4PackedMatrix> bind_resident_matrix(
+    std::shared_ptr<const model::ResidentByteBuffer> resident,
+    std::size_t offset,
+    std::size_t available_bytes,
+    std::uint32_t ggml_type,
+    std::size_t rows,
+    std::size_t logical_columns,
+    std::size_t storage_columns) {
+    if (resident == nullptr || logical_columns == 0U ||
+        logical_columns > storage_columns) {
+        return make_error(ErrorCode::invalid_argument,
+                          "DeepSeek resident matrix binding is invalid");
+    }
+    auto required = ggml_storage_bytes(
+        ggml_type, rows, storage_columns,
+        QuantizedKernelLimits{kMaximumGraphElements});
+    if (!required) return required.error();
+    if (available_bytes != required.value()) {
+        return make_error(ErrorCode::integrity_error,
+                          "DeepSeek resident matrix byte count does not match its descriptor");
+    }
+    const auto payload = resident->bytes();
+    if (offset > payload.size() || available_bytes > payload.size() - offset) {
+        return make_error(ErrorCode::integrity_error,
+                          "DeepSeek resident matrix range exceeds its retained buffer");
+    }
+    DeepseekV4PackedMatrix matrix;
+    matrix.ggml_type = ggml_type;
+    matrix.rows = rows;
+    matrix.logical_columns = logical_columns;
+    matrix.storage_columns = storage_columns;
+    matrix.resident = std::move(resident);
+    matrix.resident_offset = offset;
+    matrix.resident_bytes = available_bytes;
+    return matrix;
+}
+
+Result<DeepseekV4PackedIntegerTensor> bind_resident_i32(
+    std::shared_ptr<const model::ResidentByteBuffer> resident,
+    std::size_t offset,
+    std::size_t available_bytes,
+    std::size_t elements) {
+    if (resident == nullptr) {
+        return make_error(ErrorCode::invalid_argument,
+                          "DeepSeek resident I32 binding has no retained buffer");
+    }
+    auto required = ggml_storage_bytes(
+        kGgmlTypeI32, 1U, elements,
+        QuantizedKernelLimits{kMaximumGraphElements});
+    if (!required) return required.error();
+    if (available_bytes != required.value()) {
+        return make_error(ErrorCode::integrity_error,
+                          "DeepSeek resident I32 byte count does not match its descriptor");
+    }
+    const auto payload = resident->bytes();
+    if (offset > payload.size() || available_bytes > payload.size() - offset) {
+        return make_error(ErrorCode::integrity_error,
+                          "DeepSeek resident I32 range exceeds its retained buffer");
+    }
+    DeepseekV4PackedIntegerTensor tensor;
+    tensor.elements = elements;
+    tensor.resident = std::move(resident);
+    tensor.resident_offset = offset;
+    tensor.resident_bytes = available_bytes;
+    return tensor;
+}
 
 Result<std::size_t> bounded_product(std::initializer_list<std::size_t> factors,
                                     std::string context) {
@@ -80,8 +178,12 @@ Result<std::vector<std::uint32_t>> integer_tensor(
                               "DeepSeek packed integer tensor shape does not match",
                               std::string(name));
         }
+        auto payload = packed_payload(
+            packed->second.encoded, packed->second.resident,
+            packed->second.resident_offset, packed->second.resident_bytes, name);
+        if (!payload) return payload.error();
         std::vector<std::int32_t> decoded(expected.value());
-        auto status = decode_i32_le(packed->second.encoded, decoded);
+        auto status = decode_i32_le(payload.value(), decoded);
         if (!status) return status.error();
         std::vector<std::uint32_t> result(decoded.size());
         for (std::size_t index = 0U; index < decoded.size(); ++index) {
@@ -173,6 +275,10 @@ Result<std::vector<float>> linear_tensor(const DeepseekV4ReferenceGraph& graph,
     auto storage_count = bounded_product({matrix.rows, matrix.storage_columns},
                                          std::string(name) + " storage shape");
     if (!storage_count) return storage_count.error();
+    auto payload = packed_payload(
+        matrix.encoded, matrix.resident, matrix.resident_offset,
+        matrix.resident_bytes, name);
+    if (!payload) return payload.error();
     if (input.size() != input_count.value()) {
         return make_error(ErrorCode::invalid_argument,
                           "DeepSeek packed matrix input shape does not match",
@@ -191,7 +297,7 @@ Result<std::vector<float>> linear_tensor(const DeepseekV4ReferenceGraph& graph,
         std::copy_n(input.begin() + static_cast<std::ptrdiff_t>(row * input_width),
                     input_width, padded_input.begin());
         auto multiplied = matvec_ggml_f32_transactional(
-            matrix.ggml_type, matrix.encoded, matrix.rows, matrix.storage_columns,
+            matrix.ggml_type, payload.value(), matrix.rows, matrix.storage_columns,
             padded_input, scratch, row_output, limits);
         if (!multiplied) {
             return make_error(multiplied.error().code, multiplied.error().message,
@@ -1687,6 +1793,74 @@ Result<void> validate_reference_state(const DeepseekV4ReferenceGraph& graph,
 }
 
 }  // namespace
+
+Result<DeepseekV4PackedMatrix> deepseek_v4_bind_packed_matrix(
+    const model::LoadedTensorTile& tile,
+    std::uint32_t ggml_type,
+    std::size_t rows,
+    std::size_t logical_columns,
+    std::size_t storage_columns) {
+    const auto& identity = tile.identity();
+    if (identity.tensor_offset != 0U || !identity.final_tile ||
+        tile.bytes().size() != identity.source.bytes) {
+        return make_error(ErrorCode::invalid_argument,
+                          "DeepSeek matrix binding requires one complete tensor tile");
+    }
+    return bind_resident_matrix(tile.retain_buffer(), 0U, tile.bytes().size(),
+                                ggml_type, rows, logical_columns, storage_columns);
+}
+
+Result<DeepseekV4PackedMatrix> deepseek_v4_bind_packed_matrix(
+    const model::LoadedExpert& expert,
+    std::size_t catalog_tensor_index,
+    std::uint32_t ggml_type,
+    std::size_t rows,
+    std::size_t logical_columns,
+    std::size_t storage_columns) {
+    const auto found = std::find_if(
+        expert.tensor_slices().begin(), expert.tensor_slices().end(),
+        [catalog_tensor_index](const model::ExpertTensorSlice& slice) {
+            return slice.tensor_index == catalog_tensor_index;
+        });
+    if (found == expert.tensor_slices().end()) {
+        return make_error(ErrorCode::not_found,
+                          "DeepSeek expert matrix tensor is unavailable");
+    }
+    return bind_resident_matrix(
+        expert.retain_buffer(), static_cast<std::size_t>(found->packed_offset),
+        static_cast<std::size_t>(found->bytes), ggml_type, rows,
+        logical_columns, storage_columns);
+}
+
+Result<DeepseekV4PackedIntegerTensor> deepseek_v4_bind_packed_i32(
+    const model::LoadedTensorTile& tile,
+    std::size_t elements) {
+    const auto& identity = tile.identity();
+    if (identity.tensor_offset != 0U || !identity.final_tile ||
+        tile.bytes().size() != identity.source.bytes) {
+        return make_error(ErrorCode::invalid_argument,
+                          "DeepSeek I32 binding requires one complete tensor tile");
+    }
+    return bind_resident_i32(tile.retain_buffer(), 0U, tile.bytes().size(), elements);
+}
+
+Result<DeepseekV4PackedIntegerTensor> deepseek_v4_bind_packed_i32(
+    const model::LoadedExpert& expert,
+    std::size_t catalog_tensor_index,
+    std::size_t elements) {
+    const auto found = std::find_if(
+        expert.tensor_slices().begin(), expert.tensor_slices().end(),
+        [catalog_tensor_index](const model::ExpertTensorSlice& slice) {
+            return slice.tensor_index == catalog_tensor_index;
+        });
+    if (found == expert.tensor_slices().end()) {
+        return make_error(ErrorCode::not_found,
+                          "DeepSeek expert I32 tensor is unavailable");
+    }
+    return bind_resident_i32(
+        expert.retain_buffer(), static_cast<std::size_t>(found->packed_offset),
+        static_cast<std::size_t>(found->bytes), elements);
+}
 
 Result<DeepseekV4ReferenceForwardResult> deepseek_v4_reference_prefill(
     const DeepseekV4ReferenceGraph& graph,

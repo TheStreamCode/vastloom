@@ -51,7 +51,12 @@ public:
     LoadedExpert(LoadedExpert&&) noexcept = default;
     LoadedExpert& operator=(LoadedExpert&&) = delete;
 
-    [[nodiscard]] std::span<const std::byte> bytes() const noexcept { return bytes_; }
+    [[nodiscard]] std::span<const std::byte> bytes() const noexcept {
+        return buffer_ == nullptr ? std::span<const std::byte>{} : buffer_->bytes();
+    }
+    [[nodiscard]] std::shared_ptr<const ResidentByteBuffer> retain_buffer() const noexcept {
+        return buffer_;
+    }
     [[nodiscard]] Result<std::span<const std::byte>> tensor(std::size_t catalog_tensor_index) const;
     [[nodiscard]] std::span<const ExpertTensorSlice> tensor_slices() const noexcept { return tensor_slices_; }
     [[nodiscard]] const ExpertLoadTelemetry& telemetry() const noexcept { return telemetry_; }
@@ -72,10 +77,7 @@ private:
                  std::vector<ExpertTensorSlice> tensor_slices,
                  ExpertLoadTelemetry telemetry);
 
-    // Reverse destruction releases the physical bytes before the lease can make the
-    // associated Governor reservation evictable.
-    ResidencyUse lease_;
-    std::vector<std::byte> bytes_;
+    std::shared_ptr<const ResidentByteBuffer> buffer_;
     std::vector<ExpertTensorSlice> tensor_slices_;
     ExpertLoadTelemetry telemetry_;
 };

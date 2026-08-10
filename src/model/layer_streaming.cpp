@@ -137,9 +137,9 @@ LoadedTensorTile::LoadedTensorTile(ResidencyUse lease,
                                    LayerTensorTile identity,
                                    std::vector<std::byte> bytes,
                                    TensorTileLoadTelemetry telemetry)
-    : lease_(std::move(lease)),
-      identity_(std::move(identity)),
-      bytes_(std::move(bytes)),
+    : identity_(std::move(identity)),
+      buffer_(std::shared_ptr<const ResidentByteBuffer>(
+          new ResidentByteBuffer(std::move(lease), std::move(bytes)))),
       telemetry_(std::move(telemetry)) {}
 
 Result<LoadedTensorTile> load_tensor_tile(const LogicalTensorCatalog& catalog,

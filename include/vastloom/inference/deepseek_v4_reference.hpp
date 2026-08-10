@@ -4,12 +4,20 @@
 #include <cstdint>
 #include <functional>
 #include <map>
+#include <memory>
 #include <span>
 #include <string>
 #include <string_view>
+#include <utility>
 #include <vector>
 
 #include "vastloom/core/status.hpp"
+
+namespace vastloom::model {
+class LoadedExpert;
+class LoadedTensorTile;
+class ResidentByteBuffer;
+}  // namespace vastloom::model
 
 namespace vastloom::inference {
 
@@ -70,17 +78,66 @@ struct DeepseekV4ReferenceConfig {
 };
 
 struct DeepseekV4PackedMatrix {
+    DeepseekV4PackedMatrix() = default;
+    DeepseekV4PackedMatrix(std::uint32_t type,
+                           std::size_t output_rows,
+                           std::size_t input_columns,
+                           std::size_t physical_columns,
+                           std::vector<std::byte> bytes)
+        : ggml_type(type),
+          rows(output_rows),
+          logical_columns(input_columns),
+          storage_columns(physical_columns),
+          encoded(std::move(bytes)) {}
+
     std::uint32_t ggml_type{0U};
     std::size_t rows{0U};
     std::size_t logical_columns{0U};
     std::size_t storage_columns{0U};
     std::vector<std::byte> encoded;
+    std::shared_ptr<const model::ResidentByteBuffer> resident;
+    std::size_t resident_offset{0U};
+    std::size_t resident_bytes{0U};
 };
 
 struct DeepseekV4PackedIntegerTensor {
+    DeepseekV4PackedIntegerTensor() = default;
+    DeepseekV4PackedIntegerTensor(std::size_t element_count,
+                                  std::vector<std::byte> bytes)
+        : elements(element_count), encoded(std::move(bytes)) {}
+
     std::size_t elements{0U};
     std::vector<std::byte> encoded;
+    std::shared_ptr<const model::ResidentByteBuffer> resident;
+    std::size_t resident_offset{0U};
+    std::size_t resident_bytes{0U};
 };
+
+// Bind exact complete tensors from bounded file loaders without copying their payload. The
+// returned descriptor retains the loader's ResidencyUse through a shared immutable buffer.
+[[nodiscard]] Result<DeepseekV4PackedMatrix> deepseek_v4_bind_packed_matrix(
+    const model::LoadedTensorTile& tile,
+    std::uint32_t ggml_type,
+    std::size_t rows,
+    std::size_t logical_columns,
+    std::size_t storage_columns);
+
+[[nodiscard]] Result<DeepseekV4PackedMatrix> deepseek_v4_bind_packed_matrix(
+    const model::LoadedExpert& expert,
+    std::size_t catalog_tensor_index,
+    std::uint32_t ggml_type,
+    std::size_t rows,
+    std::size_t logical_columns,
+    std::size_t storage_columns);
+
+[[nodiscard]] Result<DeepseekV4PackedIntegerTensor> deepseek_v4_bind_packed_i32(
+    const model::LoadedTensorTile& tile,
+    std::size_t elements);
+
+[[nodiscard]] Result<DeepseekV4PackedIntegerTensor> deepseek_v4_bind_packed_i32(
+    const model::LoadedExpert& expert,
+    std::size_t catalog_tensor_index,
+    std::size_t elements);
 
 struct DeepseekV4ReferenceGraph {
     DeepseekV4ReferenceConfig config;

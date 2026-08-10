@@ -72,7 +72,12 @@ public:
     LoadedTensorTile& operator=(LoadedTensorTile&&) = delete;
 
     [[nodiscard]] const LayerTensorTile& identity() const noexcept { return identity_; }
-    [[nodiscard]] std::span<const std::byte> bytes() const noexcept { return bytes_; }
+    [[nodiscard]] std::span<const std::byte> bytes() const noexcept {
+        return buffer_ == nullptr ? std::span<const std::byte>{} : buffer_->bytes();
+    }
+    [[nodiscard]] std::shared_ptr<const ResidentByteBuffer> retain_buffer() const noexcept {
+        return buffer_;
+    }
     [[nodiscard]] const TensorTileLoadTelemetry& telemetry() const noexcept { return telemetry_; }
 
 private:
@@ -86,10 +91,8 @@ private:
                      std::vector<std::byte> bytes,
                      TensorTileLoadTelemetry telemetry);
 
-    // Reverse destruction frees physical bytes before the lease releases its RAM reservation.
-    ResidencyUse lease_;
     LayerTensorTile identity_;
-    std::vector<std::byte> bytes_;
+    std::shared_ptr<const ResidentByteBuffer> buffer_;
     TensorTileLoadTelemetry telemetry_;
 };
 

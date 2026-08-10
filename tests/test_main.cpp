@@ -967,6 +967,33 @@ void test_trunk_storage_reference_kernels() {
     CHECK(vastloom::inference::supports_reference_storage_ggml_type(
         vastloom::inference::kGgmlTypeI32));
     CHECK(!vastloom::inference::supports_reference_storage_ggml_type(1024U));
+    auto q8_bytes = vastloom::inference::ggml_storage_bytes(
+        vastloom::inference::kGgmlTypeQ8_0, 3U, 64U);
+    auto q5_bytes = vastloom::inference::ggml_storage_bytes(
+        vastloom::inference::kGgmlTypeQ5K, 3U, 512U);
+    auto q6_bytes = vastloom::inference::ggml_storage_bytes(
+        vastloom::inference::kGgmlTypeQ6K, 3U, 512U);
+    auto bf16_bytes = vastloom::inference::ggml_storage_bytes(
+        vastloom::inference::kGgmlTypeBf16, 2U, 4U);
+    auto f32_bytes = vastloom::inference::ggml_storage_bytes(
+        vastloom::inference::kGgmlTypeF32, 2U, 4U);
+    auto i32_bytes = vastloom::inference::ggml_storage_bytes(
+        vastloom::inference::kGgmlTypeI32, 1U, i32_values.size());
+    auto iq1_bytes = vastloom::inference::ggml_storage_bytes(
+        vastloom::inference::kGgmlTypeIq1S, 2U, 256U);
+    auto iq3_bytes = vastloom::inference::ggml_storage_bytes(
+        vastloom::inference::kGgmlTypeIq3Xxs, 2U, 256U);
+    CHECK(q8_bytes && q8_bytes.value() == q8.size());
+    CHECK(q5_bytes && q5_bytes.value() == q5.size());
+    CHECK(q6_bytes && q6_bytes.value() == q6.size());
+    CHECK(bf16_bytes && bf16_bytes.value() == bf16.size());
+    CHECK(f32_bytes && f32_bytes.value() == f32.size());
+    CHECK(i32_bytes && i32_bytes.value() == i32.size());
+    CHECK(iq1_bytes && iq1_bytes.value() == 2U * vastloom::inference::kIq1SBlockBytes);
+    CHECK(iq3_bytes && iq3_bytes.value() == 2U * vastloom::inference::kIq3XxsBlockBytes);
+    CHECK(!vastloom::inference::ggml_storage_bytes(
+        vastloom::inference::kGgmlTypeQ8_0, 1U, 31U));
+    CHECK(!vastloom::inference::ggml_storage_bytes(1024U, 1U, 1U));
 
     std::array<float, 3U> scratch{};
     std::array<float, 3U> published{17.0F, 17.0F, 17.0F};
@@ -2191,7 +2218,7 @@ void test_deepseek_v4_reference_operators() {
     }
 }
 
-void test_deepseek_v4_reference_graph() {
+void test_deepseek_v4_reference_graph(const std::filesystem::path& root) {
     const auto path = std::filesystem::path(VASTLOOM_SOURCE_DIR) / "tests" / "fixtures" /
                       "deepseek_v4_graph.json";
     vastloom::util::JsonLimits limits;
@@ -2649,12 +2676,27 @@ void test_deepseek_v4_reference_graph() {
         std::string name;
         std::size_t rows;
         std::size_t columns;
+        vastloom::model::TensorRole role;
+        std::optional<std::uint32_t> expert;
+
+        MatrixSpec(std::string tensor_name,
+                   std::size_t output_rows,
+                   std::size_t input_columns,
+                   vastloom::model::TensorRole tensor_role =
+                       vastloom::model::TensorRole::attention,
+                   std::optional<std::uint32_t> expert_id = std::nullopt)
+            : name(std::move(tensor_name)),
+              rows(output_rows),
+              columns(input_columns),
+              role(tensor_role),
+              expert(expert_id) {}
     };
     const std::size_t mix_width =
         (2U + config.hyper_multiplier) * config.hyper_multiplier;
     const std::size_t flattened_width = config.hyper_multiplier * config.width;
     std::vector<MatrixSpec> layer_matrices{
-        {"layers.0.hc_attn_fn", mix_width, flattened_width},
+        {"layers.0.hc_attn_fn", mix_width, flattened_width,
+         vastloom::model::TensorRole::hyper_connection},
         {"layers.0.attn.wq_a.weight", config.query_lora_rank, config.width},
         {"layers.0.attn.wq_b.weight", config.head_count * config.head_width,
          config.query_lora_rank},
@@ -2664,28 +2706,36 @@ void test_deepseek_v4_reference_graph() {
          config.head_count * config.head_width / config.output_groups},
         {"layers.0.attn.wo_b.weight", config.width,
          config.output_groups * config.output_lora_rank},
-        {"layers.0.hc_ffn_fn", mix_width, flattened_width},
-        {"layers.0.ffn.gate.weight", config.expert_count, config.width},
+        {"layers.0.hc_ffn_fn", mix_width, flattened_width,
+         vastloom::model::TensorRole::hyper_connection},
+        {"layers.0.ffn.gate.weight", config.expert_count, config.width,
+         vastloom::model::TensorRole::router},
     };
     for (std::size_t expert = 0U; expert < config.expert_count; ++expert) {
         const std::string base =
             "layers.0.ffn.experts." + std::to_string(expert);
         layer_matrices.push_back(
-            {base + ".w1.weight", config.intermediate_width, config.width});
+            {base + ".w1.weight", config.intermediate_width, config.width,
+             vastloom::model::TensorRole::routed_expert,
+             static_cast<std::uint32_t>(expert)});
         layer_matrices.push_back(
-            {base + ".w2.weight", config.width, config.intermediate_width});
+            {base + ".w2.weight", config.width, config.intermediate_width,
+             vastloom::model::TensorRole::routed_expert,
+             static_cast<std::uint32_t>(expert)});
         layer_matrices.push_back(
-            {base + ".w3.weight", config.intermediate_width, config.width});
+            {base + ".w3.weight", config.intermediate_width, config.width,
+             vastloom::model::TensorRole::routed_expert,
+             static_cast<std::uint32_t>(expert)});
     }
     layer_matrices.push_back(
         {"layers.0.ffn.shared_experts.w1.weight", config.intermediate_width,
-         config.width});
+         config.width, vastloom::model::TensorRole::shared_expert});
     layer_matrices.push_back(
         {"layers.0.ffn.shared_experts.w2.weight", config.width,
-         config.intermediate_width});
+         config.intermediate_width, vastloom::model::TensorRole::shared_expert});
     layer_matrices.push_back(
         {"layers.0.ffn.shared_experts.w3.weight", config.intermediate_width,
-         config.width});
+         config.width, vastloom::model::TensorRole::shared_expert});
     std::size_t packed_matrix_bytes = 0U;
     bool packed_ok = true;
     for (const auto& spec : layer_matrices) {
@@ -2833,6 +2883,323 @@ void test_deepseek_v4_reference_graph() {
             truncated_route.packed_integer_tensors.at(hash_table_name).encoded.pop_back();
             CHECK(!vastloom::inference::deepseek_v4_reference_prefill(
                 truncated_route, token_ids));
+        }
+
+        // Persist the exact packed fixture, load trunk tensors as complete bounded tiles and
+        // routed tensors as indivisible expert bundles, then let the graph retain only the
+        // Governor-owned immutable buffers. The loader result wrappers intentionally die before
+        // inference to prove that the graph itself owns the accounting lifetime.
+        const auto packed_path =
+            root / std::filesystem::path(std::u8string(u8"deepseek-packed-àccènt.bin"));
+        vastloom::model::LogicalTensorCatalog packed_catalog;
+        packed_catalog.model_id = "test/deepseek-v4-packed-layer";
+        packed_catalog.revision = "fixture-q8-0";
+        vastloom::ByteCount file_offset = 0U;
+        bool file_fixture_ok = true;
+        {
+            std::ofstream output(packed_path, std::ios::binary | std::ios::trunc);
+            const auto append = [&](std::span<const std::byte> bytes) {
+                if (!output || bytes.empty() ||
+                    bytes.size() > static_cast<std::size_t>(
+                                       std::numeric_limits<std::streamsize>::max())) {
+                    return false;
+                }
+                output.write(reinterpret_cast<const char*>(bytes.data()),
+                             static_cast<std::streamsize>(bytes.size()));
+                return static_cast<bool>(output);
+            };
+            for (const auto& spec : layer_matrices) {
+                const auto packed_matrix = packed_graph.packed_matrices.find(spec.name);
+                CHECK(packed_matrix != packed_graph.packed_matrices.end());
+                if (packed_matrix == packed_graph.packed_matrices.end() ||
+                    !append(packed_matrix->second.encoded)) {
+                    file_fixture_ok = false;
+                    break;
+                }
+                vastloom::model::LogicalTensorDescriptor descriptor;
+                descriptor.name = spec.name;
+                descriptor.dtype = vastloom::model::TensorDType::quantized;
+                descriptor.shape = {
+                    static_cast<std::uint64_t>(vastloom::inference::kQ8_0BlockElements),
+                    static_cast<std::uint64_t>(spec.rows)};
+                descriptor.role = spec.role;
+                descriptor.layer = 0U;
+                descriptor.expert = spec.expert;
+                descriptor.source = vastloom::model::TensorSourceRange{
+                    packed_path, file_offset,
+                    static_cast<vastloom::ByteCount>(packed_matrix->second.encoded.size())};
+                descriptor.ggml_type = vastloom::inference::kGgmlTypeQ8_0;
+                packed_catalog.tensors.push_back(std::move(descriptor));
+                file_offset += static_cast<vastloom::ByteCount>(
+                    packed_matrix->second.encoded.size());
+            }
+            if (file_fixture_ok) {
+                const auto route =
+                    packed_graph.packed_integer_tensors.find(hash_table_name);
+                CHECK(route != packed_graph.packed_integer_tensors.end());
+                if (route == packed_graph.packed_integer_tensors.end() ||
+                    !append(route->second.encoded)) {
+                    file_fixture_ok = false;
+                } else {
+                    vastloom::model::LogicalTensorDescriptor descriptor;
+                    descriptor.name = hash_table_name;
+                    descriptor.dtype = vastloom::model::TensorDType::i32;
+                    descriptor.shape = {
+                        static_cast<std::uint64_t>(route->second.elements)};
+                    descriptor.role = vastloom::model::TensorRole::router;
+                    descriptor.layer = 0U;
+                    descriptor.source = vastloom::model::TensorSourceRange{
+                        packed_path, file_offset,
+                        static_cast<vastloom::ByteCount>(route->second.encoded.size())};
+                    descriptor.ggml_type = vastloom::inference::kGgmlTypeI32;
+                    packed_catalog.tensors.push_back(std::move(descriptor));
+                    file_offset += static_cast<vastloom::ByteCount>(
+                        route->second.encoded.size());
+                }
+            }
+            output.flush();
+            file_fixture_ok = file_fixture_ok && static_cast<bool>(output);
+        }
+        CHECK(file_fixture_ok && file_offset == 5'364U);
+        auto finalized = vastloom::model::finalize_logical_tensor_catalog(packed_catalog);
+        CHECK(finalized && packed_catalog.tensor_bytes == file_offset &&
+              packed_catalog.experts.size() == config.expert_count);
+        auto file_plan = vastloom::model::build_layer_streaming_plan(
+            packed_catalog, 0U, 16U * vastloom::KiB);
+        const std::size_t routed_matrix_count = config.expert_count * 3U;
+        CHECK(file_plan &&
+              file_plan.value().tensor_count ==
+                  layer_matrices.size() - routed_matrix_count + 1U &&
+              file_plan.value().tiles.size() == file_plan.value().tensor_count);
+
+        if (file_fixture_ok && finalized && file_plan && !file_plan.value().tiles.empty()) {
+            vastloom::model::TensorTileLoadOptions tile_options;
+            tile_options.max_tile_bytes = 16U * vastloom::KiB;
+            tile_options.measure_process_io = false;
+
+            const auto& probe_tile = file_plan.value().tiles.front();
+            vastloom::safety::ResourceLimits refused_limits;
+            refused_limits.host_memory_hard_limit = probe_tile.source.bytes * 2U - 1U;
+            refused_limits.ram_hard_limit = probe_tile.source.bytes;
+            refused_limits.vram_hard_limit = 1U;
+            refused_limits.staging_hard_limit = probe_tile.source.bytes;
+            refused_limits.scratch_hard_limit = 1U;
+            vastloom::safety::ResourceGovernor refused_governor(refused_limits);
+            auto refused_residency = vastloom::model::ResidencyObject::create(
+                "deepseek/refused/trunk", probe_tile.source.bytes);
+            CHECK(refused_residency &&
+                  !vastloom::model::load_tensor_tile(
+                      packed_catalog, probe_tile, refused_residency.value(),
+                      refused_governor, tile_options));
+            CHECK(refused_governor.snapshot().reserved[0] == 0U &&
+                  refused_governor.snapshot().reserved[2] == 0U);
+
+            vastloom::safety::ResourceLimits resident_limits;
+            resident_limits.host_memory_hard_limit = 64U * vastloom::KiB;
+            resident_limits.ram_hard_limit = 32U * vastloom::KiB;
+            resident_limits.vram_hard_limit = 1U;
+            resident_limits.staging_hard_limit = 16U * vastloom::KiB;
+            resident_limits.scratch_hard_limit = 16U * vastloom::KiB;
+            vastloom::safety::ResourceGovernor governor(resident_limits);
+
+            unsigned cancellation_checks = 0U;
+            auto cancelled_options = tile_options;
+            cancelled_options.cancelled = [&] { return ++cancellation_checks >= 2U; };
+            auto cancelled_residency = vastloom::model::ResidencyObject::create(
+                "deepseek/cancelled/trunk", probe_tile.source.bytes);
+            CHECK(cancelled_residency &&
+                  !vastloom::model::load_tensor_tile(
+                      packed_catalog, probe_tile, cancelled_residency.value(),
+                      governor, cancelled_options));
+            CHECK(cancelled_residency && cancelled_residency.value().snapshot() &&
+                  cancelled_residency.value().snapshot().value().state ==
+                      vastloom::model::ResidencyState::failed &&
+                  governor.snapshot().reserved[0] == 0U &&
+                  governor.snapshot().reserved[2] == 0U);
+
+            const auto find_spec = [&](std::string_view name) -> const MatrixSpec* {
+                const auto found = std::find_if(
+                    layer_matrices.begin(), layer_matrices.end(),
+                    [name](const MatrixSpec& spec) { return spec.name == name; });
+                return found == layer_matrices.end() ? nullptr : &*found;
+            };
+
+            auto governed_graph = graph;
+            std::vector<vastloom::model::ResidencyObject> resident_objects;
+            resident_objects.reserve(file_plan.value().tiles.size() +
+                                     packed_catalog.experts.size());
+            bool bound_ok = true;
+            for (const auto& tile : file_plan.value().tiles) {
+                auto residency = vastloom::model::ResidencyObject::create(
+                    "deepseek/trunk/" + std::to_string(tile.tensor_index),
+                    tile.source.bytes);
+                CHECK(residency);
+                if (!residency) {
+                    bound_ok = false;
+                    break;
+                }
+                resident_objects.push_back(residency.take_value());
+                auto loaded = vastloom::model::load_tensor_tile(
+                    packed_catalog, tile, resident_objects.back(), governor,
+                    tile_options);
+                CHECK(loaded);
+                if (!loaded) {
+                    bound_ok = false;
+                    break;
+                }
+                const auto& descriptor = packed_catalog.tensors[tile.tensor_index];
+                if (descriptor.ggml_type == vastloom::inference::kGgmlTypeI32) {
+                    auto bound = vastloom::inference::deepseek_v4_bind_packed_i32(
+                        loaded.value(), descriptor.shape.front());
+                    CHECK(bound);
+                    if (!bound) {
+                        bound_ok = false;
+                        break;
+                    }
+                    governed_graph.packed_integer_tensors.emplace(
+                        descriptor.name, bound.take_value());
+                    governed_graph.integer_tensors.erase(descriptor.name);
+                } else {
+                    const auto* spec = find_spec(descriptor.name);
+                    CHECK(spec != nullptr && descriptor.ggml_type.has_value());
+                    if (spec == nullptr || !descriptor.ggml_type.has_value()) {
+                        bound_ok = false;
+                        break;
+                    }
+                    auto wrong_shape =
+                        vastloom::inference::deepseek_v4_bind_packed_matrix(
+                            loaded.value(), *descriptor.ggml_type, spec->rows + 1U,
+                            spec->columns,
+                            vastloom::inference::kQ8_0BlockElements);
+                    CHECK(!wrong_shape);
+                    auto bound = vastloom::inference::deepseek_v4_bind_packed_matrix(
+                        loaded.value(), *descriptor.ggml_type, spec->rows,
+                        spec->columns,
+                        vastloom::inference::kQ8_0BlockElements);
+                    CHECK(bound);
+                    if (!bound) {
+                        bound_ok = false;
+                        break;
+                    }
+                    governed_graph.packed_matrices.emplace(
+                        descriptor.name, bound.take_value());
+                    governed_graph.float_tensors.erase(descriptor.name);
+                }
+            }
+
+            vastloom::model::ExpertLoadOptions expert_options;
+            expert_options.max_expert_bytes = 16U * vastloom::KiB;
+            expert_options.max_range_bytes = 16U * vastloom::KiB;
+            expert_options.max_ranges = 4U;
+            expert_options.measure_process_io = false;
+            for (const auto& bundle : packed_catalog.experts) {
+                if (!bound_ok) break;
+                auto residency = vastloom::model::ResidencyObject::create(
+                    "deepseek/expert/" + std::to_string(bundle.expert),
+                    bundle.bytes);
+                CHECK(residency);
+                if (!residency) {
+                    bound_ok = false;
+                    break;
+                }
+                resident_objects.push_back(residency.take_value());
+                auto loaded = vastloom::model::load_expert_bundle(
+                    bundle, resident_objects.back(), governor, expert_options);
+                CHECK(loaded);
+                if (!loaded) {
+                    bound_ok = false;
+                    break;
+                }
+                CHECK(!vastloom::inference::deepseek_v4_bind_packed_matrix(
+                    loaded.value(), packed_catalog.tensors.size() + 1U,
+                    vastloom::inference::kGgmlTypeQ8_0, 1U, 1U,
+                    vastloom::inference::kQ8_0BlockElements));
+                for (const auto tensor_index : bundle.tensor_indices) {
+                    const auto& descriptor = packed_catalog.tensors[tensor_index];
+                    const auto* spec = find_spec(descriptor.name);
+                    CHECK(spec != nullptr && descriptor.ggml_type.has_value());
+                    if (spec == nullptr || !descriptor.ggml_type.has_value()) {
+                        bound_ok = false;
+                        break;
+                    }
+                    auto bound = vastloom::inference::deepseek_v4_bind_packed_matrix(
+                        loaded.value(), tensor_index, *descriptor.ggml_type,
+                        spec->rows, spec->columns,
+                        vastloom::inference::kQ8_0BlockElements);
+                    CHECK(bound);
+                    if (!bound) {
+                        bound_ok = false;
+                        break;
+                    }
+                    governed_graph.packed_matrices.emplace(
+                        descriptor.name, bound.take_value());
+                    governed_graph.float_tensors.erase(descriptor.name);
+                }
+            }
+
+            CHECK(bound_ok && governed_graph.packed_matrices.size() == 23U &&
+                  governed_graph.packed_integer_tensors.size() == 1U &&
+                  governor.snapshot().reserved[0] == file_offset &&
+                  governor.snapshot().reserved[2] == 0U);
+            for (auto& residency : resident_objects) {
+                auto snapshot = residency.snapshot();
+                CHECK(snapshot && snapshot.value().active_uses == 1U &&
+                      !snapshot.value().evictable && !residency.evict_ram());
+            }
+
+            if (bound_ok) {
+                vastloom::inference::DeepseekV4ReferenceState oracle_file_state;
+                vastloom::inference::DeepseekV4ReferenceState governed_state;
+                auto oracle_file = vastloom::inference::deepseek_v4_reference_prefill(
+                    quantized_oracle, token_ids, &oracle_file_state);
+                auto governed = vastloom::inference::deepseek_v4_reference_prefill(
+                    governed_graph, token_ids, &governed_state);
+                CHECK(oracle_file && governed);
+                if (oracle_file && governed) {
+                    compare_packed_forward(governed.value(), oracle_file.value());
+                    auto oracle_file_decode =
+                        vastloom::inference::deepseek_v4_reference_decode(
+                            quantized_oracle, 10U, oracle_file_state);
+                    auto governed_decode =
+                        vastloom::inference::deepseek_v4_reference_decode(
+                            governed_graph, 10U, governed_state);
+                    CHECK(oracle_file_decode && governed_decode);
+                    if (oracle_file_decode && governed_decode) {
+                        compare_packed_forward(governed_decode.value(),
+                                               oracle_file_decode.value());
+                    }
+
+                    {
+                        auto invalid_range = governed_graph;
+                        auto& matrix = invalid_range.packed_matrices.begin()->second;
+                        matrix.resident_offset = matrix.resident->bytes().size();
+                        const auto before = governed_state;
+                        CHECK(!vastloom::inference::deepseek_v4_reference_decode(
+                            invalid_range, 12U, governed_state));
+                        CHECK(governed_state.next_position == before.next_position &&
+                              governed_state.layers[0].window_key_values ==
+                                  before.layers[0].window_key_values);
+                    }
+                    {
+                        auto ambiguous = governed_graph;
+                        ambiguous.packed_matrices.begin()->second.encoded.push_back(
+                            std::byte{0U});
+                        CHECK(!vastloom::inference::deepseek_v4_reference_prefill(
+                            ambiguous, token_ids));
+                    }
+                }
+            }
+
+            governed_graph.packed_matrices.clear();
+            governed_graph.packed_integer_tensors.clear();
+            for (auto& residency : resident_objects) {
+                auto snapshot = residency.snapshot();
+                CHECK(snapshot && snapshot.value().active_uses == 0U &&
+                      snapshot.value().evictable && residency.evict_ram());
+            }
+            CHECK(governor.snapshot().reserved[0] == 0U &&
+                  governor.snapshot().reserved[1] == 0U &&
+                  governor.snapshot().reserved[2] == 0U);
         }
     }
 }
@@ -3632,7 +3999,7 @@ int main() {
     test_olmoe_config(root);
     test_deepseek_v4_config(root);
     test_deepseek_v4_reference_operators();
-    test_deepseek_v4_reference_graph();
+    test_deepseek_v4_reference_graph(root);
     test_model_store_and_runtime_policy(root);
     test_gpt2_tokenizer(root);
     test_manifest_and_verifier(root);

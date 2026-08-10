@@ -190,8 +190,8 @@ LoadedExpert::LoadedExpert(ResidencyUse lease,
                            std::vector<std::byte> bytes,
                            std::vector<ExpertTensorSlice> tensor_slices,
                            ExpertLoadTelemetry telemetry)
-    : lease_(std::move(lease)),
-      bytes_(std::move(bytes)),
+    : buffer_(std::shared_ptr<const ResidentByteBuffer>(
+          new ResidentByteBuffer(std::move(lease), std::move(bytes)))),
       tensor_slices_(std::move(tensor_slices)),
       telemetry_(std::move(telemetry)) {}
 
@@ -200,11 +200,12 @@ Result<std::span<const std::byte>> LoadedExpert::tensor(std::size_t catalog_tens
                                        [&](const ExpertTensorSlice& slice) {
                                            return slice.tensor_index == catalog_tensor_index;
                                        });
-    if (iterator == tensor_slices_.end() || iterator->packed_offset > bytes_.size() ||
-        iterator->bytes > bytes_.size() - iterator->packed_offset) {
+    const auto payload = bytes();
+    if (iterator == tensor_slices_.end() || iterator->packed_offset > payload.size() ||
+        iterator->bytes > payload.size() - iterator->packed_offset) {
         return make_error(ErrorCode::not_found, "Packed expert tensor is unavailable");
     }
-    return std::span<const std::byte>(bytes_.data() + static_cast<std::size_t>(iterator->packed_offset),
+    return std::span<const std::byte>(payload.data() + static_cast<std::size_t>(iterator->packed_offset),
                                       static_cast<std::size_t>(iterator->bytes));
 }
 

@@ -642,6 +642,54 @@ bool supports_reference_storage_ggml_type(std::uint32_t ggml_type) noexcept {
     return supports_reference_matvec_ggml_type(ggml_type) || ggml_type == kGgmlTypeI32;
 }
 
+Result<std::size_t> ggml_storage_bytes(std::uint32_t ggml_type,
+                                       std::size_t rows,
+                                       std::size_t columns,
+                                       const QuantizedKernelLimits& limits) {
+    std::size_t block_elements = 0U;
+    std::size_t block_bytes = 0U;
+    switch (ggml_type) {
+        case kGgmlTypeF32:
+            block_elements = 1U;
+            block_bytes = kF32ElementBytes;
+            break;
+        case kGgmlTypeQ8_0:
+            block_elements = kQ8_0BlockElements;
+            block_bytes = kQ8_0BlockBytes;
+            break;
+        case kGgmlTypeQ5K:
+            block_elements = kQ5KBlockElements;
+            block_bytes = kQ5KBlockBytes;
+            break;
+        case kGgmlTypeQ6K:
+            block_elements = kQ6KBlockElements;
+            block_bytes = kQ6KBlockBytes;
+            break;
+        case kGgmlTypeIq3Xxs:
+            block_elements = kIq3XxsBlockElements;
+            block_bytes = kIq3XxsBlockBytes;
+            break;
+        case kGgmlTypeIq1S:
+            block_elements = kIq1SBlockElements;
+            block_bytes = kIq1SBlockBytes;
+            break;
+        case kGgmlTypeI32:
+            block_elements = 1U;
+            block_bytes = kI32ElementBytes;
+            break;
+        case kGgmlTypeBf16:
+            block_elements = 1U;
+            block_bytes = kBf16ElementBytes;
+            break;
+        default:
+            return make_error(ErrorCode::unsupported,
+                              "GGML storage type has no reference byte layout");
+    }
+    auto elements = checked_matrix_elements(rows, columns, block_elements, limits);
+    if (!elements) return elements.error();
+    return checked_encoded_bytes(elements.value(), block_elements, block_bytes);
+}
+
 Result<void> dequantize_q8_0(std::span<const std::byte> encoded,
                              std::span<float> output,
                              const QuantizedKernelLimits& limits) {

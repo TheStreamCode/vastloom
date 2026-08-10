@@ -57,6 +57,14 @@ struct RoutedExpertScratch {
 // Includes non-matvec integer routing tables that have a bounded native decoder.
 [[nodiscard]] bool supports_reference_storage_ggml_type(std::uint32_t ggml_type) noexcept;
 
+// Returns the exact encoded byte count for one supported GGML matrix/storage tensor after
+// validating the shape and configured element ceiling.
+[[nodiscard]] Result<std::size_t> ggml_storage_bytes(
+    std::uint32_t ggml_type,
+    std::size_t rows,
+    std::size_t columns,
+    const QuantizedKernelLimits& limits = {});
+
 // Decodes complete little-endian GGML Q8_0 blocks into caller-owned FP32 storage.
 [[nodiscard]] Result<void> dequantize_q8_0(
     std::span<const std::byte> encoded,

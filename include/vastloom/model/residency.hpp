@@ -3,8 +3,10 @@
 #include <cstddef>
 #include <cstdint>
 #include <memory>
+#include <span>
 #include <string>
 #include <string_view>
+#include <utility>
 #include <vector>
 
 #include "vastloom/core/bytes.hpp"
@@ -13,6 +15,9 @@
 #include "vastloom/safety/resource_governor.hpp"
 
 namespace vastloom::model {
+
+class LoadedExpert;
+class LoadedTensorTile;
 
 enum class ResidencyState : std::uint8_t {
     nvme,
@@ -56,6 +61,31 @@ private:
     explicit ResidencyUse(std::shared_ptr<ResidencyControl> control);
 
     std::shared_ptr<ResidencyControl> control_;
+};
+
+// Immutable RAM payload whose lifetime retains the ResidencyUse that accounts for it.
+// Instances can only be created by the bounded model loaders. Shared consumers may outlive
+// the loader result wrapper, but the Governor reservation remains live until the last consumer
+// releases this buffer. The physical byte vector is destroyed before its lease.
+class ResidentByteBuffer {
+public:
+    ResidentByteBuffer(const ResidentByteBuffer&) = delete;
+    ResidentByteBuffer& operator=(const ResidentByteBuffer&) = delete;
+    ResidentByteBuffer(ResidentByteBuffer&&) = delete;
+    ResidentByteBuffer& operator=(ResidentByteBuffer&&) = delete;
+    ~ResidentByteBuffer() = default;
+
+    [[nodiscard]] std::span<const std::byte> bytes() const noexcept { return bytes_; }
+
+private:
+    friend class LoadedExpert;
+    friend class LoadedTensorTile;
+
+    ResidentByteBuffer(ResidencyUse lease, std::vector<std::byte> bytes)
+        : lease_(std::move(lease)), bytes_(std::move(bytes)) {}
+
+    ResidencyUse lease_;
+    std::vector<std::byte> bytes_;
 };
 
 class ResidencyTransfer {

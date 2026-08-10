@@ -171,7 +171,7 @@ def build_fixture(official_model: Path) -> dict:
         moe_inter_dim=6,
         n_layers=2,
         n_hash_layers=1,
-        n_mtp_layers=0,
+        n_mtp_layers=1,
         n_heads=2,
         n_routed_experts=4,
         n_shared_experts=1,
@@ -186,7 +186,7 @@ def build_fixture(official_model: Path) -> dict:
         o_groups=1,
         o_lora_rank=4,
         window_size=3,
-        compress_ratios=(0, 4),
+        compress_ratios=(0, 4, 0),
         compress_rope_theta=160000.0,
         original_seq_len=16,
         rope_theta=10000.0,
@@ -210,12 +210,14 @@ def build_fixture(official_model: Path) -> dict:
             )
 
     route_trace: list[dict] = []
-    for layer_id, layer in enumerate(model.layers):
+    mtp_route_trace: list[dict] = []
+
+    def attach_route_recorder(layer, layer_id: int, destination: list[dict]) -> None:
         original_forward = layer.ffn.gate.forward
 
         def record_route(x, input_ids=None, *, _layer=layer_id, _forward=original_forward):
             weights, indices = _forward(x, input_ids)
-            route_trace.append(
+            destination.append(
                 {
                     "layer": _layer,
                     "indices": [int(value) for value in indices.detach().cpu().reshape(-1).tolist()],
@@ -226,9 +228,21 @@ def build_fixture(official_model: Path) -> dict:
 
         layer.ffn.gate.forward = record_route
 
+    for layer_id, layer in enumerate(model.layers):
+        attach_route_recorder(layer, layer_id, route_trace)
+    for layer_id, layer in enumerate(model.mtp):
+        attach_route_recorder(layer, layer_id, mtp_route_trace)
+
     token_ids = torch.tensor([[2, 5, 7, 3, 11, 4, 9, 6]], dtype=torch.long)
     with torch.inference_mode():
-        logits = model(token_ids)
+        hidden = model.embed(token_ids)
+        hidden = hidden.unsqueeze(2).repeat(1, 1, model.hc_mult, 1)
+        for layer in model.layers:
+            hidden = layer(hidden, 0, token_ids)
+        logits = model.head(
+            hidden, model.hc_head_fn, model.hc_head_scale, model.hc_head_base, model.norm
+        )
+        mtp_logits = model.mtp[0](hidden, 0, token_ids)
 
     tensors: dict[str, list[float] | list[int]] = {}
     tensor_dtypes: dict[str, str] = {}
@@ -246,6 +260,7 @@ def build_fixture(official_model: Path) -> dict:
         "intermediate_width": args.moe_inter_dim,
         "layers": args.n_layers,
         "hash_layers": args.n_hash_layers,
+        "mtp_layers": args.n_mtp_layers,
         "heads": args.n_heads,
         "experts": args.n_routed_experts,
         "experts_per_token": args.n_activated_experts,
@@ -256,6 +271,9 @@ def build_fixture(official_model: Path) -> dict:
         "output_lora_rank": args.o_lora_rank,
         "window_size": args.window_size,
         "compression_ratios": list(args.compress_ratios[:args.n_layers]),
+        "mtp_compression_ratios": list(
+            args.compress_ratios[args.n_layers:args.n_layers + args.n_mtp_layers]
+        ),
         "compression_rope_theta": args.compress_rope_theta,
         "original_context": args.original_seq_len,
         "rope_theta": args.rope_theta,
@@ -288,7 +306,18 @@ def build_fixture(official_model: Path) -> dict:
             "routes": route_trace,
             "attention_indices": [
                 {"layer": layer, "indices": values}
-                for layer, values in enumerate(sys.modules["kernel"].sparse_attn_records)
+                for layer, values in enumerate(
+                    sys.modules["kernel"].sparse_attn_records[:args.n_layers]
+                )
+            ],
+            "mtp_logits": flattened(mtp_logits),
+            "mtp_greedy_token_id": int(mtp_logits.argmax(dim=-1).item()),
+            "mtp_routes": mtp_route_trace,
+            "mtp_attention_indices": [
+                {"layer": layer, "indices": values}
+                for layer, values in enumerate(
+                    sys.modules["kernel"].sparse_attn_records[args.n_layers:]
+                )
             ],
         },
     }
@@ -318,8 +347,14 @@ def validate_committed_fixture(output: Path) -> None:
         raise RuntimeError("DeepSeek graph fixture route reference is incomplete")
     if len(expected.get("attention_indices", [])) != config.get("layers"):
         raise RuntimeError("DeepSeek graph fixture attention reference is incomplete")
+    if len(expected.get("mtp_routes", [])) != config.get("mtp_layers"):
+        raise RuntimeError("DeepSeek graph fixture MTP route reference is incomplete")
+    if len(expected.get("mtp_attention_indices", [])) != config.get("mtp_layers"):
+        raise RuntimeError("DeepSeek graph fixture MTP attention reference is incomplete")
     if len(expected.get("logits", [])) != config.get("vocabulary_size"):
         raise RuntimeError("DeepSeek graph fixture logits do not match the vocabulary")
+    if len(expected.get("mtp_logits", [])) != config.get("vocabulary_size"):
+        raise RuntimeError("DeepSeek graph fixture MTP logits do not match the vocabulary")
     if len(payload.get("token_ids", [])) != 8:
         raise RuntimeError("DeepSeek graph fixture prompt length changed unexpectedly")
 

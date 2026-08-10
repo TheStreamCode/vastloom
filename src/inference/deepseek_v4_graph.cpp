@@ -424,11 +424,12 @@ struct AttentionResult {
 };
 
 Result<AttentionResult> attention_prefill(const DeepseekV4ReferenceGraph& graph,
-                                          std::size_t layer,
+                                          std::string_view block_prefix,
+                                          std::size_t ratio,
                                           std::span<const float> input,
                                           std::size_t token_count) {
     const auto& config = graph.config;
-    const std::string base = "layers." + std::to_string(layer) + ".attn";
+    const std::string base = std::string(block_prefix) + ".attn";
     auto wq_a = float_tensor(graph, base + ".wq_a.weight",
                              {config.query_lora_rank, config.width});
     if (!wq_a) return wq_a.error();
@@ -455,7 +456,6 @@ Result<AttentionResult> attention_prefill(const DeepseekV4ReferenceGraph& graph,
                                                         config.head_width,
                                                         config.norm_epsilon);
     if (!query_normalized) return query_normalized.error();
-    const std::size_t ratio = config.compression_ratios[layer];
     const std::size_t original_context = ratio == 0U ? 0U : config.original_context;
     const float theta = ratio == 0U ? config.rope_theta : config.compression_rope_theta;
     auto query_rope = apply_rope_tail(query.value(), token_count, config.head_count,
@@ -617,18 +617,19 @@ struct MoeResult {
 };
 
 Result<MoeResult> moe_forward(const DeepseekV4ReferenceGraph& graph,
-                              std::size_t layer,
+                              std::string_view block_prefix,
+                              bool hash_route,
                               std::span<const float> input,
                               std::span<const std::uint32_t> token_ids,
                               std::size_t token_count) {
     const auto& config = graph.config;
-    const std::string base = "layers." + std::to_string(layer) + ".ffn";
+    const std::string base = std::string(block_prefix) + ".ffn";
     auto gate_weight = float_tensor(graph, base + ".gate.weight",
                                     {config.expert_count, config.width});
     if (!gate_weight) return gate_weight.error();
     Result<DeepseekV4RouteResult> route = make_error(
         ErrorCode::internal_error, "DeepSeek route was not initialized");
-    if (layer < config.hash_layer_count) {
+    if (hash_route) {
         auto table = integer_tensor(graph, base + ".gate.tid2eid",
                                     {config.vocabulary_size, config.experts_per_token});
         if (!table) return table.error();
@@ -702,17 +703,77 @@ Result<DeepseekV4HyperConnectionPreResult> hc_pre(
                               config.hyper_epsilon);
 }
 
+struct BlockResult {
+    std::vector<float> hidden;
+    DeepseekV4LayerTrace trace;
+};
+
+Result<BlockResult> block_prefill(const DeepseekV4ReferenceGraph& graph,
+                                  std::string_view block_prefix,
+                                  std::size_t trace_layer,
+                                  std::size_t compression_ratio,
+                                  bool hash_route,
+                                  std::span<const float> input,
+                                  std::span<const std::uint32_t> token_ids) {
+    const auto& config = graph.config;
+    const std::size_t token_count = token_ids.size();
+    const std::string base(block_prefix);
+    const std::vector<float> residual_attention(input.begin(), input.end());
+    auto attention_mix = hc_pre(graph, base + ".hc_attn", input, token_count);
+    if (!attention_mix) return attention_mix.error();
+    auto attention_norm_weight = float_tensor(graph, base + ".attn_norm.weight",
+                                              {config.width});
+    if (!attention_norm_weight) return attention_norm_weight.error();
+    auto normalized_attention = deepseek_v4_rms_norm(
+        attention_mix.value().reduced, attention_norm_weight.value(), token_count,
+        config.width, config.norm_epsilon);
+    if (!normalized_attention) return normalized_attention.error();
+    auto attention = attention_prefill(graph, base, compression_ratio,
+                                       normalized_attention.value(), token_count);
+    if (!attention) return attention.error();
+    auto attention_post = deepseek_v4_hc_post(
+        attention.value().output, residual_attention, attention_mix.value().split,
+        config.width);
+    if (!attention_post) return attention_post.error();
+
+    const auto residual_ffn = attention_post.value();
+    auto ffn_mix = hc_pre(graph, base + ".hc_ffn", attention_post.value(), token_count);
+    if (!ffn_mix) return ffn_mix.error();
+    auto ffn_norm_weight = float_tensor(graph, base + ".ffn_norm.weight", {config.width});
+    if (!ffn_norm_weight) return ffn_norm_weight.error();
+    auto normalized_ffn = deepseek_v4_rms_norm(
+        ffn_mix.value().reduced, ffn_norm_weight.value(), token_count,
+        config.width, config.norm_epsilon);
+    if (!normalized_ffn) return normalized_ffn.error();
+    auto moe = moe_forward(graph, base, hash_route, normalized_ffn.value(), token_ids,
+                           token_count);
+    if (!moe) return moe.error();
+    auto ffn_post = deepseek_v4_hc_post(moe.value().output, residual_ffn,
+                                        ffn_mix.value().split, config.width);
+    if (!ffn_post) return ffn_post.error();
+
+    BlockResult result;
+    result.hidden = ffn_post.take_value();
+    result.trace.layer = trace_layer;
+    result.trace.route = std::move(moe.value().route);
+    result.trace.attention_indices = std::move(attention.value().indices);
+    result.trace.attention_selected_per_token = attention.value().selected_per_token;
+    return result;
+}
+
 Result<std::vector<float>> hc_head(const DeepseekV4ReferenceGraph& graph,
                                    std::span<const float> input,
-                                   std::size_t token_count) {
+                                   std::size_t token_count,
+                                   std::string_view tensor_prefix) {
     const auto& config = graph.config;
     const std::size_t flattened_width = config.hyper_multiplier * config.width;
-    auto function = float_tensor(graph, "hc_head_fn",
+    const std::string prefix(tensor_prefix);
+    auto function = float_tensor(graph, prefix + "hc_head_fn",
                                  {config.hyper_multiplier, flattened_width});
     if (!function) return function.error();
-    auto scale = float_tensor(graph, "hc_head_scale", {1U});
+    auto scale = float_tensor(graph, prefix + "hc_head_scale", {1U});
     if (!scale) return scale.error();
-    auto base = float_tensor(graph, "hc_head_base", {config.hyper_multiplier});
+    auto base = float_tensor(graph, prefix + "hc_head_base", {config.hyper_multiplier});
     if (!base) return base.error();
     auto mixes = linear(input, function.value(), token_count, flattened_width,
                         config.hyper_multiplier, "DeepSeek HC head");
@@ -747,6 +808,29 @@ Result<std::vector<float>> hc_head(const DeepseekV4ReferenceGraph& graph,
     return output;
 }
 
+Result<std::vector<float>> final_logits(const DeepseekV4ReferenceGraph& graph,
+                                        std::span<const float> hidden,
+                                        std::size_t token_count,
+                                        std::string_view tensor_prefix) {
+    const auto& config = graph.config;
+    const std::string prefix(tensor_prefix);
+    auto reduced = hc_head(graph, hidden, token_count, prefix);
+    if (!reduced) return reduced.error();
+    auto norm_weight = float_tensor(graph, prefix + "norm.weight", {config.width});
+    if (!norm_weight) return norm_weight.error();
+    auto normalized = deepseek_v4_rms_norm(reduced.value(), norm_weight.value(), token_count,
+                                           config.width, config.norm_epsilon);
+    if (!normalized) return normalized.error();
+    auto head = float_tensor(graph, "head.weight", {config.vocabulary_size, config.width});
+    if (!head) return head.error();
+    const std::span<const float> final_hidden(
+        normalized.value().data() +
+            static_cast<std::ptrdiff_t>((token_count - 1U) * config.width),
+        config.width);
+    return linear(final_hidden, head.value(), 1U, config.width,
+                  config.vocabulary_size, prefix + "LM head");
+}
+
 Result<void> validate_graph(const DeepseekV4ReferenceGraph& graph,
                             std::span<const std::uint32_t> token_ids) {
     const auto& config = graph.config;
@@ -754,6 +838,8 @@ Result<void> validate_graph(const DeepseekV4ReferenceGraph& graph,
         config.vocabulary_size == 0U || config.width == 0U ||
         config.intermediate_width == 0U || config.layer_count == 0U ||
         config.layer_count > kMaximumReferenceLayers ||
+        config.mtp_layer_count > kMaximumReferenceLayers - config.layer_count ||
+        config.mtp_layer_count > 1U ||
         config.hash_layer_count > config.layer_count || config.head_count == 0U ||
         config.expert_count == 0U || config.experts_per_token == 0U ||
         config.experts_per_token > config.expert_count || config.query_lora_rank == 0U ||
@@ -761,6 +847,7 @@ Result<void> validate_graph(const DeepseekV4ReferenceGraph& graph,
         config.rope_width > config.head_width || config.rope_width % 2U != 0U ||
         config.output_groups == 0U || config.output_lora_rank == 0U ||
         config.window_size == 0U || config.compression_ratios.size() != config.layer_count ||
+        config.mtp_compression_ratios.size() != config.mtp_layer_count ||
         config.index_head_count == 0U || config.index_head_width < config.rope_width ||
         config.index_top_k == 0U || config.hyper_multiplier == 0U ||
         config.hyper_multiplier > 16U || config.sinkhorn_iterations == 0U) {
@@ -794,6 +881,13 @@ Result<void> validate_graph(const DeepseekV4ReferenceGraph& graph,
         if (ratio != 0U && ratio != 4U && ratio != 128U) {
             return make_error(ErrorCode::unsupported,
                               "DeepSeek reference graph compression ratio is unsupported",
+                              std::to_string(ratio));
+        }
+    }
+    for (const auto ratio : config.mtp_compression_ratios) {
+        if (ratio != 0U && ratio != 4U && ratio != 128U) {
+            return make_error(ErrorCode::unsupported,
+                              "DeepSeek MTP compression ratio is unsupported",
                               std::to_string(ratio));
         }
     }
@@ -866,69 +960,82 @@ Result<DeepseekV4ReferenceForwardResult> deepseek_v4_reference_prefill(
     result.layers.reserve(config.layer_count);
     for (std::size_t layer = 0U; layer < config.layer_count; ++layer) {
         const std::string layer_base = "layers." + std::to_string(layer);
-        const auto residual_attention = hidden;
-        auto attention_mix = hc_pre(graph, layer_base + ".hc_attn", hidden, token_count);
-        if (!attention_mix) return attention_mix.error();
-        auto attention_norm_weight = float_tensor(graph, layer_base + ".attn_norm.weight",
-                                                  {config.width});
-        if (!attention_norm_weight) return attention_norm_weight.error();
-        auto normalized_attention = deepseek_v4_rms_norm(
-            attention_mix.value().reduced, attention_norm_weight.value(), token_count,
-            config.width, config.norm_epsilon);
-        if (!normalized_attention) return normalized_attention.error();
-        auto attention = attention_prefill(graph, layer, normalized_attention.value(),
-                                           token_count);
-        if (!attention) return attention.error();
-        auto attention_post = deepseek_v4_hc_post(
-            attention.value().output, residual_attention, attention_mix.value().split,
-            config.width);
-        if (!attention_post) return attention_post.error();
-        hidden = attention_post.take_value();
-
-        const auto residual_ffn = hidden;
-        auto ffn_mix = hc_pre(graph, layer_base + ".hc_ffn", hidden, token_count);
-        if (!ffn_mix) return ffn_mix.error();
-        auto ffn_norm_weight = float_tensor(graph, layer_base + ".ffn_norm.weight",
-                                            {config.width});
-        if (!ffn_norm_weight) return ffn_norm_weight.error();
-        auto normalized_ffn = deepseek_v4_rms_norm(
-            ffn_mix.value().reduced, ffn_norm_weight.value(), token_count,
-            config.width, config.norm_epsilon);
-        if (!normalized_ffn) return normalized_ffn.error();
-        auto moe = moe_forward(graph, layer, normalized_ffn.value(), token_ids, token_count);
-        if (!moe) return moe.error();
-        auto ffn_post = deepseek_v4_hc_post(moe.value().output, residual_ffn,
-                                            ffn_mix.value().split, config.width);
-        if (!ffn_post) return ffn_post.error();
-        hidden = ffn_post.take_value();
-
-        DeepseekV4LayerTrace trace;
-        trace.layer = layer;
-        trace.route = std::move(moe.value().route);
-        trace.attention_indices = std::move(attention.value().indices);
-        trace.attention_selected_per_token = attention.value().selected_per_token;
-        result.layers.push_back(std::move(trace));
+        auto block = block_prefill(graph, layer_base, layer,
+                                   config.compression_ratios[layer],
+                                   layer < config.hash_layer_count, hidden, token_ids);
+        if (!block) return block.error();
+        hidden = std::move(block.value().hidden);
+        result.layers.push_back(std::move(block.value().trace));
     }
-    auto reduced = hc_head(graph, hidden, token_count);
-    if (!reduced) return reduced.error();
-    auto norm_weight = float_tensor(graph, "norm.weight", {config.width});
-    if (!norm_weight) return norm_weight.error();
-    auto normalized = deepseek_v4_rms_norm(reduced.value(), norm_weight.value(), token_count,
-                                           config.width, config.norm_epsilon);
-    if (!normalized) return normalized.error();
-    auto head = float_tensor(graph, "head.weight", {config.vocabulary_size, config.width});
-    if (!head) return head.error();
-    const std::span<const float> final_hidden(
-        normalized.value().data() +
-            static_cast<std::ptrdiff_t>((token_count - 1U) * config.width),
-        config.width);
-    auto logits = linear(final_hidden, head.value(), 1U, config.width,
-                         config.vocabulary_size, "DeepSeek LM head");
+    auto logits = final_logits(graph, hidden, token_count, "");
     if (!logits) return logits.error();
     result.logits = logits.take_value();
     const auto maximum = std::max_element(result.logits.begin(), result.logits.end());
     result.greedy_token_id = static_cast<std::uint32_t>(
         std::distance(result.logits.begin(), maximum));
+
+    if (config.mtp_layer_count != 0U) {
+        const std::string mtp_base = "mtp.0";
+        std::vector<float> embedded(token_count * config.width);
+        for (std::size_t token = 0U; token < token_count; ++token) {
+            std::copy_n(embedding.value().begin() +
+                            static_cast<std::ptrdiff_t>(token_ids[token] * config.width),
+                        config.width,
+                        embedded.begin() +
+                            static_cast<std::ptrdiff_t>(token * config.width));
+        }
+        auto embedding_norm_weight = float_tensor(graph, mtp_base + ".enorm.weight",
+                                                  {config.width});
+        if (!embedding_norm_weight) return embedding_norm_weight.error();
+        auto normalized_embedding = deepseek_v4_rms_norm(
+            embedded, embedding_norm_weight.value(), token_count, config.width,
+            config.norm_epsilon);
+        if (!normalized_embedding) return normalized_embedding.error();
+        auto hidden_norm_weight = float_tensor(graph, mtp_base + ".hnorm.weight",
+                                               {config.width});
+        if (!hidden_norm_weight) return hidden_norm_weight.error();
+        auto normalized_hidden = deepseek_v4_rms_norm(
+            hidden, hidden_norm_weight.value(), token_count * config.hyper_multiplier,
+            config.width, config.norm_epsilon);
+        if (!normalized_hidden) return normalized_hidden.error();
+        auto embedding_projection_weight = float_tensor(
+            graph, mtp_base + ".e_proj.weight", {config.width, config.width});
+        if (!embedding_projection_weight) return embedding_projection_weight.error();
+        auto embedding_projection = linear(
+            normalized_embedding.value(), embedding_projection_weight.value(), token_count,
+            config.width, config.width, mtp_base + ".e_proj");
+        if (!embedding_projection) return embedding_projection.error();
+        auto hidden_projection_weight = float_tensor(
+            graph, mtp_base + ".h_proj.weight", {config.width, config.width});
+        if (!hidden_projection_weight) return hidden_projection_weight.error();
+        auto hidden_projection = linear(
+            normalized_hidden.value(), hidden_projection_weight.value(),
+            token_count * config.hyper_multiplier, config.width, config.width,
+            mtp_base + ".h_proj");
+        if (!hidden_projection) return hidden_projection.error();
+        std::vector<float> mtp_input = hidden_projection.take_value();
+        for (std::size_t token = 0U; token < token_count; ++token) {
+            for (std::size_t copy = 0U; copy < config.hyper_multiplier; ++copy) {
+                for (std::size_t column = 0U; column < config.width; ++column) {
+                    mtp_input[(token * config.hyper_multiplier + copy) * config.width + column] +=
+                        embedding_projection.value()[token * config.width + column];
+                }
+            }
+        }
+        auto mtp = block_prefill(graph, mtp_base, 0U,
+                                 config.mtp_compression_ratios[0], false,
+                                 mtp_input, token_ids);
+        if (!mtp) return mtp.error();
+        result.mtp_layers.push_back(std::move(mtp.value().trace));
+        auto mtp_logits = final_logits(graph, mtp.value().hidden, token_count,
+                                       mtp_base + ".");
+        if (!mtp_logits) return mtp_logits.error();
+        result.mtp_logits = mtp_logits.take_value();
+        const auto mtp_maximum = std::max_element(result.mtp_logits.begin(),
+                                                  result.mtp_logits.end());
+        result.mtp_greedy_token_id = static_cast<std::uint32_t>(
+            std::distance(result.mtp_logits.begin(), mtp_maximum));
+    }
     return result;
 }
 

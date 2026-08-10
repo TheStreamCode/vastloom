@@ -632,6 +632,7 @@ void test_deepseek_v4_reference_graph() {
     config.intermediate_width = size_value(config_value, "intermediate_width");
     config.layer_count = size_value(config_value, "layers");
     config.hash_layer_count = size_value(config_value, "hash_layers");
+    config.mtp_layer_count = size_value(config_value, "mtp_layers");
     config.head_count = size_value(config_value, "heads");
     config.expert_count = size_value(config_value, "experts");
     config.experts_per_token = size_value(config_value, "experts_per_token");
@@ -648,6 +649,14 @@ void test_deepseek_v4_reference_graph() {
         CHECK(parsed && parsed.value() <= std::numeric_limits<std::size_t>::max());
         if (!parsed || parsed.value() > std::numeric_limits<std::size_t>::max()) return;
         config.compression_ratios.push_back(static_cast<std::size_t>(parsed.value()));
+    }
+    const auto* mtp_ratios = array(config_value, "mtp_compression_ratios");
+    if (mtp_ratios == nullptr) return;
+    for (const auto& ratio : *mtp_ratios) {
+        auto parsed = ratio.as_u64();
+        CHECK(parsed && parsed.value() <= std::numeric_limits<std::size_t>::max());
+        if (!parsed || parsed.value() > std::numeric_limits<std::size_t>::max()) return;
+        config.mtp_compression_ratios.push_back(static_cast<std::size_t>(parsed.value()));
     }
     config.compression_rope_theta = float_value(config_value, "compression_rope_theta");
     config.original_context = size_value(config_value, "original_context");
@@ -737,6 +746,58 @@ void test_deepseek_v4_reference_graph() {
                            expected_weights[index]) <= tolerance);
         }
         CHECK(result.value().layers[layer].attention_indices ==
+              signed_indices(*attention_indices_value));
+    }
+
+    const auto expected_mtp_logits_value = expected_object->find("mtp_logits");
+    CHECK(expected_mtp_logits_value != expected_object->end());
+    if (expected_mtp_logits_value == expected_object->end()) return;
+    const auto expected_mtp_logits = floats(expected_mtp_logits_value->second);
+    CHECK(result.value().mtp_logits.size() == expected_mtp_logits.size());
+    for (std::size_t index = 0U;
+         index < std::min(result.value().mtp_logits.size(), expected_mtp_logits.size()); ++index) {
+        if (std::abs(result.value().mtp_logits[index] - expected_mtp_logits[index]) > tolerance) {
+            std::cerr << "DeepSeek graph MTP logit mismatch at " << index << ": "
+                      << result.value().mtp_logits[index] << " versus "
+                      << expected_mtp_logits[index] << '\n';
+            ++failures;
+            break;
+        }
+    }
+    CHECK(result.value().mtp_greedy_token_id ==
+          size_value(expected_value, "mtp_greedy_token_id"));
+    const auto* expected_mtp_routes = array(expected_value, "mtp_routes");
+    const auto* expected_mtp_attention = array(expected_value, "mtp_attention_indices");
+    if (expected_mtp_routes == nullptr || expected_mtp_attention == nullptr) return;
+    CHECK(result.value().mtp_layers.size() == expected_mtp_routes->size());
+    CHECK(result.value().mtp_layers.size() == expected_mtp_attention->size());
+    for (std::size_t layer = 0U;
+         layer < std::min(result.value().mtp_layers.size(), expected_mtp_routes->size()); ++layer) {
+        auto route_object = (*expected_mtp_routes)[layer].as_object();
+        auto attention_object = (*expected_mtp_attention)[layer].as_object();
+        CHECK(route_object && attention_object);
+        if (!route_object || !attention_object) return;
+        const vastloom::util::JsonValue route_value(*route_object.value());
+        const vastloom::util::JsonValue attention_value(*attention_object.value());
+        const auto* route_indices_value = route_value.find("indices");
+        const auto* route_weights_value = route_value.find("weights");
+        const auto* attention_indices_value = attention_value.find("indices");
+        CHECK(route_indices_value != nullptr && route_weights_value != nullptr &&
+              attention_indices_value != nullptr);
+        if (route_indices_value == nullptr || route_weights_value == nullptr ||
+            attention_indices_value == nullptr) {
+            return;
+        }
+        CHECK(result.value().mtp_layers[layer].route.indices == unsigneds(*route_indices_value));
+        const auto expected_weights = floats(*route_weights_value);
+        CHECK(result.value().mtp_layers[layer].route.weights.size() == expected_weights.size());
+        for (std::size_t index = 0U;
+             index < std::min(result.value().mtp_layers[layer].route.weights.size(),
+                              expected_weights.size()); ++index) {
+            CHECK(std::abs(result.value().mtp_layers[layer].route.weights[index] -
+                           expected_weights[index]) <= tolerance);
+        }
+        CHECK(result.value().mtp_layers[layer].attention_indices ==
               signed_indices(*attention_indices_value));
     }
 

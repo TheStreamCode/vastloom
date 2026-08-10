@@ -40,6 +40,7 @@ struct DeepseekV4ReferenceConfig {
     std::size_t intermediate_width{0};
     std::size_t layer_count{0};
     std::size_t hash_layer_count{0};
+    std::size_t mtp_layer_count{0};
     std::size_t head_count{0};
     std::size_t expert_count{0};
     std::size_t experts_per_token{0};
@@ -50,6 +51,7 @@ struct DeepseekV4ReferenceConfig {
     std::size_t output_lora_rank{0};
     std::size_t window_size{0};
     std::vector<std::size_t> compression_ratios;
+    std::vector<std::size_t> mtp_compression_ratios;
     float compression_rope_theta{0.0F};
     std::size_t original_context{0};
     float rope_theta{0.0F};
@@ -84,6 +86,9 @@ struct DeepseekV4ReferenceForwardResult {
     std::vector<float> logits;
     std::vector<DeepseekV4LayerTrace> layers;
     std::uint32_t greedy_token_id{0};
+    std::vector<float> mtp_logits;
+    std::vector<DeepseekV4LayerTrace> mtp_layers;
+    std::uint32_t mtp_greedy_token_id{0};
 };
 
 [[nodiscard]] Result<std::vector<float>> deepseek_v4_rms_norm(

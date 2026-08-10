@@ -84,11 +84,13 @@ public:
     [[nodiscard]] Result<void> skip(ByteCount bytes) {
         auto bounded = ensure(bytes);
         if (!bounded) return bounded.error();
-        if (bytes > static_cast<ByteCount>(std::numeric_limits<std::streamoff>::max())) {
+        if (bytes > static_cast<ByteCount>(std::numeric_limits<std::streamsize>::max())) {
             return make_error(ErrorCode::unsupported, "GGUF skip exceeds platform stream limits");
         }
-        input_.seekg(static_cast<std::streamoff>(bytes), std::ios::cur);
-        if (!input_) return make_error(ErrorCode::io_error, "Short seek in bounded GGUF header");
+        input_.ignore(static_cast<std::streamsize>(bytes));
+        if (input_.gcount() != static_cast<std::streamsize>(bytes)) {
+            return make_error(ErrorCode::io_error, "Short skip in bounded GGUF header");
+        }
         position_ += bytes;
         return {};
     }

@@ -8,6 +8,10 @@ permissions:
 
 jobs:
   review:
+    # GitHub only provides Dependency Review to public repositories and private
+    # repositories with GitHub Advanced Security. This check activates automatically
+    # when Vastloom is made public.
+    if: github.event.repository.visibility == 'public'
     timeout-minutes: 10
     runs-on: ubuntu-latest
     steps:

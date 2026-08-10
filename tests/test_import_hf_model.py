@@ -10,6 +10,8 @@ from pathlib import Path
 import sys
 import tempfile
 import threading
+from types import SimpleNamespace
+from unittest import mock
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -38,14 +40,19 @@ def main() -> int:
         (legacy_root / "cache").mkdir()
         (legacy_root / ".stargate-store").write_text(MODULE.LEGACY_MARKER, encoding="utf-8")
         require(MODULE.validate_store(legacy_root) == legacy_root.resolve(), "legacy store rejected")
-        target = MODULE.import_model(
-            root,
-            MODULE.SMOLLM2,
-            metadata_only=True,
-            reserve_bytes=20 * MODULE.GIB,
-            timeout=1.0,
-            dry_run=True,
-        )
+        with mock.patch.object(
+            MODULE.shutil,
+            "disk_usage",
+            return_value=SimpleNamespace(free=64 * MODULE.GIB),
+        ):
+            target = MODULE.import_model(
+                root,
+                MODULE.SMOLLM2,
+                metadata_only=True,
+                reserve_bytes=20 * MODULE.GIB,
+                timeout=1.0,
+                dry_run=True,
+            )
         require(target.name.endswith("--metadata"), "metadata target is not isolated")
         require(not target.exists(), "dry-run created an artifact")
         require(len(MODULE.selected_files(MODULE.SMOLLM2, True)) == 7, "weight was not excluded")

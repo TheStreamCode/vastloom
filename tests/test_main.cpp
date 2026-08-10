@@ -1,5 +1,6 @@
 #include <array>
 #include <atomic>
+#include <bit>
 #include <chrono>
 #include <cmath>
 #include <cstddef>
@@ -15,6 +16,7 @@
 #include "vastloom/core/bytes.hpp"
 #include "vastloom/hardware/hardware_probe.hpp"
 #include "vastloom/inference/gpt2_tokenizer.hpp"
+#include "vastloom/inference/ggml_quantization.hpp"
 #include "vastloom/inference/deepseek_v4_gguf.hpp"
 #include "vastloom/inference/deepseek_v4_model.hpp"
 #include "vastloom/inference/deepseek_v4_reference.hpp"
@@ -425,6 +427,78 @@ void test_gguf(const std::filesystem::path& root) {
                 header_catalog.value(), options));
         }
     }
+}
+
+void test_iq1_s_reference_kernel() {
+    constexpr std::array<std::uint16_t, 6U> scales{
+        0x3c00U, 0xb800U, 0x3555U, 0x4000U, 0x0400U, 0x0001U};
+    std::vector<std::byte> encoded(scales.size() * vastloom::inference::kIq1SBlockBytes);
+    for (std::size_t block = 0U; block < scales.size(); ++block) {
+        const std::size_t base = block * vastloom::inference::kIq1SBlockBytes;
+        encoded[base] = static_cast<std::byte>(scales[block] & 0xffU);
+        encoded[base + 1U] = static_cast<std::byte>(scales[block] >> 8U);
+        for (std::size_t index = 0U; index < 32U; ++index) {
+            encoded[base + 2U + index] = static_cast<std::byte>(
+                (block * 37U + index * 53U + 11U) & 0xffU);
+        }
+        for (std::size_t group = 0U; group < 8U; ++group) {
+            const auto high = static_cast<std::uint16_t>(
+                (((group * 5U + block) & 7U) << 12U) |
+                (((group + block) & 1U) != 0U ? 0x8000U : 0U) |
+                ((block * 733U + group * 97U + 0x123U) & 0x0fffU));
+            encoded[base + 34U + group * 2U] = static_cast<std::byte>(high & 0xffU);
+            encoded[base + 35U + group * 2U] = static_cast<std::byte>(high >> 8U);
+        }
+    }
+
+    std::vector<float> decoded(scales.size() * vastloom::inference::kIq1SBlockElements);
+    auto status = vastloom::inference::dequantize_iq1_s(encoded, decoded);
+    CHECK(status);
+    std::uint64_t hash = UINT64_C(14695981039346656037);
+    for (const float value : decoded) {
+        const std::uint32_t bits = std::bit_cast<std::uint32_t>(value);
+        for (unsigned shift = 0U; shift < 32U; shift += 8U) {
+            hash ^= static_cast<std::uint8_t>((bits >> shift) & 0xffU);
+            hash *= UINT64_C(1099511628211);
+        }
+    }
+    CHECK(hash == UINT64_C(0x9b66de452b7f3c8d));
+    CHECK(decoded[0] == 0.125F && decoded[7] == 0.125F && decoded[8] == -0.875F &&
+          decoded[31] == -0.875F && decoded[32] == 9.625F && decoded[255] == -7.875F &&
+          decoded[256] == 1.6875F && decoded[511] == -0.5625F);
+
+    std::vector<float> input(512U);
+    for (std::size_t column = 0U; column < input.size(); ++column) {
+        const int centered = static_cast<int>(column % 29U) - 14;
+        input[column] = static_cast<float>(centered) * 0.03125F +
+                        static_cast<float>(column % 3U) * 0.0078125F;
+    }
+    std::array<float, 3U> output{};
+    auto multiplied = vastloom::inference::matvec_iq1_s_f32(
+        encoded, 3U, 512U, input, output);
+    CHECK(multiplied);
+    CHECK(output[0] == -4.8994140625F);
+    CHECK(std::abs(output[1] - 22.142812728881836F) <= 1.0e-6F);
+    CHECK(std::abs(output[2] - (-0.0021024104207754135F)) <= 1.0e-9F);
+
+    auto truncated = encoded;
+    truncated.pop_back();
+    CHECK(!vastloom::inference::dequantize_iq1_s(truncated, decoded));
+    CHECK(!vastloom::inference::dequantize_iq1_s(encoded, std::span<float>{}));
+    vastloom::inference::QuantizedKernelLimits small_limits;
+    small_limits.max_elements = 256U;
+    CHECK(!vastloom::inference::dequantize_iq1_s(encoded, decoded, small_limits));
+    CHECK(!vastloom::inference::matvec_iq1_s_f32(encoded, 3U, 255U, input, output));
+    CHECK(!vastloom::inference::matvec_iq1_s_f32(truncated, 3U, 512U, input, output));
+
+    auto invalid_scale = encoded;
+    invalid_scale[0] = std::byte{0x00U};
+    invalid_scale[1] = std::byte{0x7cU};
+    auto unchanged = decoded;
+    CHECK(!vastloom::inference::dequantize_iq1_s(invalid_scale, decoded));
+    CHECK(decoded == unchanged);
+    input[0] = std::numeric_limits<float>::quiet_NaN();
+    CHECK(!vastloom::inference::matvec_iq1_s_f32(encoded, 3U, 512U, input, output));
 }
 
 void test_logical_tensor_catalog() {
@@ -1661,14 +1735,22 @@ void test_deepseek_v4_reference_graph() {
 }
 
 void test_model_store_and_runtime_policy(const std::filesystem::path& root) {
-    auto store = vastloom::model::ModelStore::initialize(root / "model-store", {20U * vastloom::GiB});
-    CHECK(store);
+    constexpr vastloom::ByteCount test_reserve = 20U * vastloom::GiB;
+    std::error_code space_error;
+    const auto available = std::filesystem::space(root, space_error).available;
+    auto store = vastloom::model::ModelStore::initialize(root / "model-store", {test_reserve});
+    if (!space_error && available >= test_reserve) {
+        CHECK(store);
+    } else {
+        CHECK(!store);
+        if (!store) CHECK(store.error().code == vastloom::ErrorCode::resource_exhausted);
+    }
     if (store) {
         CHECK(std::filesystem::is_directory(store.value().layout().original));
         CHECK(store.value().immutable_model_path("org/model", "revision-1"));
         CHECK(!store.value().immutable_model_path("../escape", "revision-1"));
         CHECK(!store.value().preflight_write(std::numeric_limits<vastloom::ByteCount>::max()));
-        CHECK(vastloom::model::ModelStore::open(root / "model-store", {20U * vastloom::GiB}));
+        CHECK(vastloom::model::ModelStore::open(root / "model-store", {test_reserve}));
     }
 
     const auto legacy_store = root / "legacy-model-store";
@@ -1683,7 +1765,7 @@ void test_model_store_and_runtime_policy(const std::filesystem::path& root) {
     for (const auto& directory : legacy_directories) std::filesystem::create_directories(directory);
     std::ofstream(legacy_store / ".stargate-store", std::ios::binary)
         << "format=stargate.store.v1\noriginal_weights=immutable\ncache=reconstructable\n";
-    CHECK(vastloom::model::ModelStore::open(legacy_store, {20U * vastloom::GiB}));
+    CHECK(vastloom::model::ModelStore::open(legacy_store, {test_reserve}));
 
     const auto symlink_store = root / "symlink-model-store";
     for (const auto& legacy_directory : legacy_directories) {
@@ -2298,6 +2380,7 @@ int main() {
     test_bounded_json();
     test_safetensors(root);
     test_gguf(root);
+    test_iq1_s_reference_kernel();
     test_logical_tensor_catalog();
     test_residency_state_machine();
     test_packed_expert_loader(root);

@@ -43,6 +43,8 @@ set(VASTLOOM_DEEPSEEK_V4_MODEL "" CACHE PATH
     "Optional pinned DeepSeek V4 Flash metadata/header import for inspection tests")
 set(VASTLOOM_DEEPSEEK_V4_GGUF_HEADER "" CACHE FILEPATH
     "Optional pinned DeepSeek V4 Flash 0731 GGUF split-zero metadata shard")
+set(VASTLOOM_DEEPSEEK_V4_IQ1S_SLICE "" CACHE FILEPATH
+    "Optional pinned DeepSeek V4 Flash 0731 layer-0 expert-0 IQ1_S gate slice")
 
 option(VASTLOOM_BUILD_TESTS "Build Vastloom tests" ON)
 option(VASTLOOM_ENABLE_SANITIZERS "Enable AddressSanitizer and UndefinedBehaviorSanitizer" OFF)
@@ -64,6 +66,7 @@ add_library(vastloom_core STATIC
     src/core/bytes.cpp
     src/hardware/hardware_probe.cpp
     src/inference/gpt2_tokenizer.cpp
+    src/inference/ggml_quantization.cpp
     src/inference/deepseek_v4_gguf.cpp
     src/inference/deepseek_v4_model.cpp
     src/inference/deepseek_v4_graph.cpp
@@ -138,6 +141,21 @@ if(BUILD_TESTING AND VASTLOOM_BUILD_TESTS)
     vastloom_set_project_warnings(vastloom_tests)
     vastloom_enable_sanitizers(vastloom_tests)
     add_test(NAME vastloom_tests COMMAND vastloom_tests)
+    if(VASTLOOM_DEEPSEEK_V4_IQ1S_SLICE)
+        add_executable(vastloom_iq1s_slice_test tests/test_iq1s_slice.cpp)
+        target_link_libraries(vastloom_iq1s_slice_test PRIVATE Vastloom::Core)
+        target_compile_features(vastloom_iq1s_slice_test PRIVATE cxx_std_20)
+        vastloom_set_project_warnings(vastloom_iq1s_slice_test)
+        vastloom_enable_sanitizers(vastloom_iq1s_slice_test)
+        add_test(
+            NAME vastloom_deepseek_v4_iq1s_slice
+            COMMAND vastloom_iq1s_slice_test ${VASTLOOM_DEEPSEEK_V4_IQ1S_SLICE}
+        )
+        set_tests_properties(vastloom_deepseek_v4_iq1s_slice PROPERTIES
+            TIMEOUT 30
+            RUN_SERIAL TRUE
+        )
+    endif()
     add_test(
         NAME vastloom_cli_tiny_chat
         COMMAND vastloom chat
@@ -268,6 +286,8 @@ install(TARGETS vastloom vastloom-watchdog vastloom_core
 install(DIRECTORY include/vastloom DESTINATION ${CMAKE_INSTALL_INCLUDEDIR})
 install(DIRECTORY examples/models/ DESTINATION ${CMAKE_INSTALL_DATADIR}/vastloom/models)
 install(FILES LICENSE NOTICE README.md DESTINATION ${CMAKE_INSTALL_DATADIR}/doc/vastloom)
+install(FILES third_party/ggml/LICENSE
+    DESTINATION ${CMAKE_INSTALL_DATADIR}/doc/vastloom/third_party/ggml)
 
 configure_package_config_file(
     cmake/VastloomConfig.cmake.in

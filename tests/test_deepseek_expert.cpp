@@ -90,6 +90,7 @@ vastloom::model::ExpertBundle make_bundle(std::vector<SourceTensor> sources) {
 
 vastloom::safety::ResourceLimits make_limits(vastloom::ByteCount ram_limit) {
     vastloom::safety::ResourceLimits limits;
+    limits.host_memory_hard_limit = 10U * vastloom::MiB;
     limits.ram_hard_limit = ram_limit;
     limits.vram_hard_limit = 1U * vastloom::MiB;
     limits.staging_hard_limit = 4U * vastloom::MiB;

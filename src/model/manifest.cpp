@@ -6,6 +6,7 @@
 #include <set>
 #include <sstream>
 #include <system_error>
+#include <utility>
 
 #include "vastloom/util/sha256.hpp"
 #include "vastloom/util/string.hpp"
@@ -221,7 +222,8 @@ Result<ModelManifest> load_manifest(const std::filesystem::path& path) {
     if (manifest.format != kManifestFormat && manifest.format != kLegacyManifestFormat) {
         return make_error(ErrorCode::invalid_format, "Unsupported manifest format", manifest.format);
     }
-    if (manifest.format == kLegacyManifestFormat) {
+    const bool legacy_format = manifest.format == kLegacyManifestFormat;
+    if (legacy_format) {
         manifest.warnings.emplace_back(
             "Legacy stargate.manifest.v1 accepted for compatibility; new artifacts use vastloom.manifest.v1.");
     }
@@ -253,8 +255,34 @@ Result<ModelManifest> load_manifest(const std::filesystem::path& path) {
     if (manifest.required_storage_bytes == 0) {
         manifest.required_storage_bytes = manifest.model_total_bytes;
     }
-    if (manifest.dense_bytes > manifest.model_total_bytes || manifest.routed_expert_bytes > manifest.model_total_bytes) {
-        return make_error(ErrorCode::integrity_error, "Dense or expert byte count exceeds model_total_bytes", path.string());
+    if (manifest.dense_bytes > manifest.model_total_bytes ||
+        manifest.routed_expert_bytes > manifest.model_total_bytes ||
+        manifest.active_bytes_per_token > manifest.model_total_bytes) {
+        return make_error(ErrorCode::integrity_error,
+                          "Dense, expert or active byte count exceeds model_total_bytes",
+                          path.string());
+    }
+    std::string moe_metadata_error;
+    if (manifest.expert_count == 0U) {
+        if (manifest.selected_experts_per_token != 0U || manifest.estimated_expert_bytes != 0U ||
+            manifest.routed_expert_bytes != 0U) {
+            moe_metadata_error = "Manifest declares expert data without a nonzero expert_count";
+        }
+    } else if (manifest.selected_experts_per_token == 0U ||
+               manifest.selected_experts_per_token > manifest.expert_count ||
+               manifest.estimated_expert_bytes == 0U || manifest.routed_expert_bytes == 0U ||
+               manifest.estimated_expert_bytes > manifest.routed_expert_bytes ||
+               manifest.minimum_ram_bytes == 0U || manifest.layer_count == 0U ||
+               manifest.max_context_tokens == 0U) {
+        moe_metadata_error =
+            "MoE manifests require layers, context, bounded expert selection, expert size and minimum RAM";
+    }
+    if (!moe_metadata_error.empty()) {
+        if (!legacy_format) {
+            return make_error(ErrorCode::invalid_format, std::move(moe_metadata_error), path.string());
+        }
+        manifest.warnings.emplace_back(
+            std::move(moe_metadata_error) + "; legacy artifact remains readable but cannot pass planning admission.");
     }
     if (manifest.recommended_ram_bytes != 0 && manifest.recommended_ram_bytes < manifest.minimum_ram_bytes) {
         return make_error(ErrorCode::invalid_format, "recommended_ram_bytes is below minimum_ram_bytes", path.string());

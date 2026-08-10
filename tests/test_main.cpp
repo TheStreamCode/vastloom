@@ -1914,6 +1914,7 @@ void test_model_store_and_runtime_policy(const std::filesystem::path& root) {
     auto policy = vastloom::safety::make_safe_runtime_policy(hardware);
     CHECK(policy && policy.value().resources.ram_hard_limit == 12U * vastloom::GiB);
     if (policy) {
+        CHECK(policy.value().resources.host_memory_hard_limit == 12U * vastloom::GiB);
         CHECK(policy.value().cpu_threads == 6U);
         CHECK(policy.value().io_workers == 2U && policy.value().max_queued_io == 4U);
         CHECK(policy.value().max_io_request_bytes == 64U * vastloom::MiB);
@@ -2016,6 +2017,35 @@ void test_manifest_and_verifier(const std::filesystem::path& root) {
     auto legacy_loaded = vastloom::model::load_manifest(root / "legacy-model.sgm");
     CHECK(legacy_loaded && !legacy_loaded.value().warnings.empty());
 
+    std::ofstream legacy_incomplete_moe(root / "legacy-incomplete-moe.sgm");
+    legacy_incomplete_moe << "format=stargate.manifest.v1\n"
+                          << "model_id=test/legacy-incomplete-moe\n"
+                          << "architecture=test_moe\n"
+                          << "metadata_only=true\n"
+                          << "model_total_bytes=1GiB\n"
+                          << "routed_expert_bytes=1GiB\n"
+                          << "minimum_ram_bytes=1GiB\n"
+                          << "expert_count=8\n"
+                          << "selected_experts_per_token=2\n"
+                          << "chunk_count=0\n";
+    legacy_incomplete_moe.close();
+    auto legacy_incomplete_loaded = vastloom::model::load_manifest(root / "legacy-incomplete-moe.sgm");
+    CHECK(legacy_incomplete_loaded && legacy_incomplete_loaded.value().warnings.size() >= 2U);
+
+    std::ofstream incomplete_moe(root / "incomplete-moe.sgm");
+    incomplete_moe << "format=vastloom.manifest.v1\n"
+                   << "model_id=test/incomplete-moe\n"
+                   << "architecture=test_moe\n"
+                   << "metadata_only=true\n"
+                   << "model_total_bytes=1GiB\n"
+                   << "routed_expert_bytes=1GiB\n"
+                   << "minimum_ram_bytes=1GiB\n"
+                   << "expert_count=8\n"
+                   << "selected_experts_per_token=2\n"
+                   << "chunk_count=0\n";
+    incomplete_moe.close();
+    CHECK(!vastloom::model::load_manifest(root / "incomplete-moe.sgm"));
+
     std::ofstream unsafe(root / "unsafe.sgm");
     unsafe << "format=vastloom.manifest.v1\nmodel_id=x\narchitecture=x\nmetadata_only=false\nchunk_count=1\n"
            << "chunk\t../escape.bin\t1\t0000000000000000000000000000000000000000000000000000000000000000\tdense\tfp16\t-\t-\ttrue\n";
@@ -2048,6 +2078,50 @@ void test_governor() {
     state = governor.update_pressure({8U * vastloom::GiB, 2U * vastloom::GiB, 100U * vastloom::GiB});
     state = governor.update_pressure({8U * vastloom::GiB, 2U * vastloom::GiB, 100U * vastloom::GiB});
     CHECK(state == vastloom::safety::SafetyState::critical);
+
+    vastloom::safety::ResourceLimits aggregate_limits;
+    aggregate_limits.host_memory_hard_limit = 10U * vastloom::MiB;
+    aggregate_limits.ram_hard_limit = 8U * vastloom::MiB;
+    aggregate_limits.vram_hard_limit = 8U * vastloom::MiB;
+    aggregate_limits.staging_hard_limit = 4U * vastloom::MiB;
+    aggregate_limits.scratch_hard_limit = 4U * vastloom::MiB;
+    aggregate_limits.minimum_system_ram_available = 1U * vastloom::MiB;
+    aggregate_limits.minimum_storage_available = 1U * vastloom::MiB;
+    vastloom::safety::ResourceGovernor aggregate_governor(aggregate_limits);
+    auto aggregate_ram = aggregate_governor.try_reserve(
+        vastloom::safety::ResourceKind::ram, 8U * vastloom::MiB, "aggregate-ram");
+    CHECK(aggregate_ram);
+    CHECK(!aggregate_governor.try_reserve(
+        vastloom::safety::ResourceKind::staging, 3U * vastloom::MiB, "aggregate-overflow"));
+    auto aggregate_staging = aggregate_governor.try_reserve(
+        vastloom::safety::ResourceKind::staging, 2U * vastloom::MiB, "aggregate-staging");
+    CHECK(aggregate_staging);
+    CHECK(!aggregate_governor.try_reserve(
+        vastloom::safety::ResourceKind::scratch, 1U, "aggregate-full"));
+    auto aggregate_vram = aggregate_governor.try_reserve(
+        vastloom::safety::ResourceKind::vram, 8U * vastloom::MiB, "separate-vram-tier");
+    CHECK(aggregate_vram);
+    CHECK(aggregate_governor.snapshot().reserved[0] == 8U * vastloom::MiB &&
+          aggregate_governor.snapshot().reserved[2] == 2U * vastloom::MiB);
+    if (aggregate_staging) aggregate_staging.value().release();
+    auto aggregate_scratch = aggregate_governor.try_reserve(
+        vastloom::safety::ResourceKind::scratch, 1U * vastloom::MiB, "aggregate-scratch");
+    CHECK(aggregate_scratch);
+
+    aggregate_limits.ram_hard_limit = 10U * vastloom::MiB;
+    aggregate_limits.staging_hard_limit = 10U * vastloom::MiB;
+    aggregate_limits.scratch_hard_limit = 10U * vastloom::MiB;
+    vastloom::safety::ResourceGovernor aggregate_pressure_governor(aggregate_limits);
+    auto pressure_ram = aggregate_pressure_governor.try_reserve(
+        vastloom::safety::ResourceKind::ram, 8U * vastloom::MiB, "pressure-ram");
+    auto pressure_staging = aggregate_pressure_governor.try_reserve(
+        vastloom::safety::ResourceKind::staging, 1U * vastloom::MiB, "pressure-staging");
+    CHECK(pressure_ram && pressure_staging);
+    const auto aggregate_state = aggregate_pressure_governor.update_pressure(
+        {10U * vastloom::GiB, 10U * vastloom::GiB, 10U * vastloom::GiB});
+    CHECK(aggregate_state == vastloom::safety::SafetyState::pressure);
+    CHECK(aggregate_pressure_governor.snapshot().last_reason.find("Aggregate host-memory") !=
+          std::string::npos);
 }
 
 void test_planner() {
@@ -2067,10 +2141,15 @@ void test_planner() {
     manifest.model_total_bytes = 180U * vastloom::GiB;
     manifest.required_storage_bytes = 200U * vastloom::GiB;
     manifest.dense_bytes = 18U * vastloom::GiB;
+    manifest.routed_expert_bytes = 150U * vastloom::GiB;
     manifest.estimated_expert_bytes = 48U * vastloom::MiB;
     manifest.minimum_ram_bytes = 16U * vastloom::GiB;
     manifest.recommended_ram_bytes = 32U * vastloom::GiB;
     manifest.recommended_vram_bytes = 12U * vastloom::GiB;
+    manifest.layer_count = 48U;
+    manifest.expert_count = 256U;
+    manifest.selected_experts_per_token = 6U;
+    manifest.max_context_tokens = 131'072U;
 
     auto plan = vastloom::planner::build_plan(hardware, manifest, vastloom::planner::Profile::balanced);
     CHECK(plan && plan.value().compatible);
@@ -2078,8 +2157,66 @@ void test_planner() {
         CHECK(plan.value().safe_ram_budget < hardware.memory.total_bytes);
         CHECK(plan.value().safe_vram_budget < hardware.gpus.front().total_vram_bytes);
         CHECK(plan.value().governor_limits.ram_hard_limit == plan.value().safe_ram_budget);
+        CHECK(plan.value().governor_limits.host_memory_hard_limit == plan.value().safe_ram_budget);
+        CHECK(plan.value().minimum_ram_working_set_bytes == 16U * vastloom::GiB);
+        CHECK(plan.value().expert_bundle_bytes == 48U * vastloom::MiB);
+        CHECK(plan.value().expert_admission_tier == "RAM");
+        CHECK(plan.value().scratch_ram_bytes != 0U);
+        CHECK(plan.value().governor_limits.scratch_hard_limit == plan.value().scratch_ram_bytes);
+        CHECK(plan.value().dense_ram_bytes + plan.value().expert_ram_bytes +
+                  plan.value().kv_ram_bytes + plan.value().staging_ram_bytes +
+                  plan.value().scratch_ram_bytes <=
+              plan.value().safe_ram_budget);
         CHECK(plan.value().strategy == "multitier-predictive");
     }
+
+    auto pressured_hardware = hardware;
+    pressured_hardware.memory.available_bytes = 17U * vastloom::GiB;
+    auto pressured = vastloom::planner::build_plan(
+        pressured_hardware, manifest, vastloom::planner::Profile::balanced);
+    CHECK(pressured && !pressured.value().compatible);
+
+    auto oversized_expert = manifest;
+    oversized_expert.estimated_expert_bytes = 20U * vastloom::GiB;
+    auto rejected_expert = vastloom::planner::build_plan(
+        hardware, oversized_expert, vastloom::planner::Profile::balanced);
+    CHECK(rejected_expert && !rejected_expert.value().compatible &&
+          rejected_expert.value().expert_admission_tier.empty());
+
+    auto vram_expert = manifest;
+    vram_expert.estimated_expert_bytes = 6U * vastloom::GiB;
+    auto admitted_to_vram = vastloom::planner::build_plan(
+        hardware, vram_expert, vastloom::planner::Profile::balanced);
+    CHECK(admitted_to_vram && admitted_to_vram.value().compatible &&
+          admitted_to_vram.value().expert_admission_tier == "VRAM" &&
+          admitted_to_vram.value().expert_tier_budget_bytes ==
+              admitted_to_vram.value().gpu_resident_bytes);
+    auto cpu_only_hardware = hardware;
+    cpu_only_hardware.gpus.clear();
+    auto rejected_without_tier = vastloom::planner::build_plan(
+        cpu_only_hardware, vram_expert, vastloom::planner::Profile::balanced);
+    CHECK(rejected_without_tier && !rejected_without_tier.value().compatible);
+
+    auto missing_expert_identity = manifest;
+    missing_expert_identity.estimated_expert_bytes = 0U;
+    auto rejected_missing = vastloom::planner::build_plan(
+        hardware, missing_expert_identity, vastloom::planner::Profile::balanced);
+    CHECK(rejected_missing && !rejected_missing.value().compatible);
+
+    auto missing_expert_count = manifest;
+    missing_expert_count.expert_count = 0U;
+    missing_expert_count.selected_experts_per_token = 0U;
+    auto rejected_incomplete_moe = vastloom::planner::build_plan(
+        hardware, missing_expert_count, vastloom::planner::Profile::balanced);
+    CHECK(rejected_incomplete_moe && !rejected_incomplete_moe.value().compatible);
+
+    auto overflow_hardware = hardware;
+    overflow_hardware.memory.total_bytes = std::numeric_limits<vastloom::ByteCount>::max();
+    overflow_hardware.memory.available_bytes = std::numeric_limits<vastloom::ByteCount>::max();
+    overflow_hardware.gpus.front().total_vram_bytes = std::numeric_limits<vastloom::ByteCount>::max();
+    overflow_hardware.gpus.front().free_vram_bytes = std::numeric_limits<vastloom::ByteCount>::max();
+    CHECK(!vastloom::planner::build_plan(
+        overflow_hardware, manifest, vastloom::planner::Profile::balanced));
 }
 
 void test_io_pool(const std::filesystem::path& root) {

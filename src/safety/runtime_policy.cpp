@@ -96,6 +96,7 @@ Result<RuntimePolicy> make_safe_runtime_policy(const hardware::HardwareSnapshot&
         return make_error(ErrorCode::resource_exhausted, "Safe real-model RAM budget is too small");
     }
     RuntimePolicy policy;
+    policy.resources.host_memory_hard_limit = ram_limit;
     policy.resources.ram_hard_limit = ram_limit;
     policy.resources.minimum_system_ram_available = kSystemHeadroom;
     policy.resources.minimum_storage_available = kStorageReserve;
@@ -116,7 +117,8 @@ Result<RuntimePolicy> make_safe_runtime_policy(const hardware::HardwareSnapshot&
 
 std::string to_json(const RuntimePolicy& policy) {
     std::ostringstream output;
-    output << "{\"ram_hard_limit\":" << policy.resources.ram_hard_limit
+    output << "{\"host_memory_hard_limit\":" << policy.resources.host_memory_hard_limit
+           << ",\"ram_hard_limit\":" << policy.resources.ram_hard_limit
            << ",\"vram_hard_limit\":" << policy.resources.vram_hard_limit
            << ",\"staging_hard_limit\":" << policy.resources.staging_hard_limit
            << ",\"scratch_hard_limit\":" << policy.resources.scratch_hard_limit
@@ -132,6 +134,7 @@ std::string to_json(const RuntimePolicy& policy) {
 std::string to_text(const RuntimePolicy& policy) {
     std::ostringstream output;
     output << "Safe runtime policy\n"
+           << "Host-memory limit:    " << format_bytes(policy.resources.host_memory_hard_limit) << '\n'
            << "RAM hard limit:       " << format_bytes(policy.resources.ram_hard_limit) << '\n'
            << "VRAM hard limit:      " << format_bytes(policy.resources.vram_hard_limit) << '\n'
            << "System RAM headroom:  " << format_bytes(policy.resources.minimum_system_ram_available) << '\n'

@@ -35,10 +35,16 @@ struct ExecutionPlan {
     ByteCount storage_reserve{0};
     ByteCount additional_storage_required{0};
 
+    ByteCount minimum_ram_working_set_bytes{0};
+    ByteCount expert_bundle_bytes{0};
+    ByteCount expert_tier_budget_bytes{0};
+    std::string expert_admission_tier;
+
     ByteCount dense_ram_bytes{0};
     ByteCount expert_ram_bytes{0};
     ByteCount kv_ram_bytes{0};
     ByteCount staging_ram_bytes{0};
+    ByteCount scratch_ram_bytes{0};
     ByteCount gpu_resident_bytes{0};
     ByteCount gpu_kv_bytes{0};
     ByteCount gpu_staging_bytes{0};

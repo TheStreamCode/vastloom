@@ -263,10 +263,13 @@ portability target, not a validated platform claim.
 
 - **Hardware probe:** CPU ISA, logical cores, RAM availability, NVIDIA VRAM and storage
   capacity.
-- **Fail-closed execution planner:** produces VRAM/RAM/NVMe budgets and rejects plans
-  that consume the OS or disk emergency reserve.
+- **Fail-closed execution planner:** produces VRAM/RAM/NVMe budgets, reserves explicit KV,
+  staging and scratch placement, and rejects MoE profiles whose declared minimum working set or
+  one complete expert cannot fit a real post-reserve RAM/VRAM tier.
 - **Resource Governor:** atomic reservations prevent concurrent workers from
-  oversubscribing RAM, VRAM, staging buffers or scratch space.
+  oversubscribing RAM, VRAM, staging buffers or scratch space. RAM destinations, staging and
+  scratch also share one aggregate host-memory ceiling, so their independent limits cannot add
+  up beyond the safe process budget.
 - **Governed residency:** logical objects move only through legal
   `NVME → READING → RAM_READY → COPYING_TO_VRAM → VRAM_READY` states. RAM, staging and
   VRAM destinations are reserved before work begins; pins and RAII use leases block eviction.

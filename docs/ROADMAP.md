@@ -19,12 +19,15 @@ A command existing in the CLI is not enough; it must run against a validated mod
 - [x] Atomic RAM/VRAM/staging/scratch reservations.
 - [x] Safety state machine with hysteresis.
 - [x] Fail-closed capacity planner.
+- [x] Minimum-working-set and complete-expert RAM/VRAM admission gate.
+- [x] Aggregate host-memory ceiling across RAM destinations, staging and scratch.
 - [x] Bounded asynchronous I/O.
 - [x] SHA-256 model verification and path confinement.
 - [x] Atomic heartbeat and independent watchdog.
 - [x] Strict warnings, ASan/UBSan and Linux/Windows CI definitions.
 
-**Gate:** no oversubscription, path escape or unbounded queue under tests.
+**Gate:** no oversubscription, path escape or unbounded queue under tests; independently legal
+host-memory reservations cannot exceed their aggregate post-reserve ceiling.
 
 ## M2 — Native validation slice — complete in alpha.2
 

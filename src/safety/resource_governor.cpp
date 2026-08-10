@@ -75,6 +75,25 @@ Result<Reservation> ResourceGovernor::try_reserve(ResourceKind kind, ByteCount b
                           std::move(tag));
     }
 
+    if (kind != ResourceKind::vram && limits_.host_memory_hard_limit != 0U) {
+        ByteCount remaining = limits_.host_memory_hard_limit;
+        for (const ResourceKind host_kind :
+             {ResourceKind::ram, ResourceKind::staging, ResourceKind::scratch}) {
+            const ByteCount reserved = reserved_[index_for(host_kind)];
+            if (reserved > remaining) {
+                return make_error(ErrorCode::integrity_error,
+                                  "Host-memory reservations exceed their aggregate hard limit",
+                                  std::move(tag));
+            }
+            remaining -= reserved;
+        }
+        if (bytes > remaining) {
+            return make_error(ErrorCode::resource_exhausted,
+                              "Reservation would exceed the aggregate host-memory budget",
+                              std::move(tag));
+        }
+    }
+
     reserved_[index] += bytes;
     return Reservation(this, kind, bytes, std::move(tag));
 }
@@ -103,6 +122,26 @@ SafetyState ResourceGovernor::update_pressure(const RuntimePressure& pressure) {
     const SafetyState staging_ratio_state = consider_ratio(ResourceKind::staging, limits_.staging_hard_limit);
     const SafetyState scratch_ratio_state = consider_ratio(ResourceKind::scratch, limits_.scratch_hard_limit);
     raw_state = max_state(max_state(ram_ratio_state, vram_ratio_state), max_state(staging_ratio_state, scratch_ratio_state));
+    if (limits_.host_memory_hard_limit != 0U) {
+        ByteCount host_reserved = 0U;
+        for (const ResourceKind host_kind :
+             {ResourceKind::ram, ResourceKind::staging, ResourceKind::scratch}) {
+            const ByteCount reserved = reserved_[index_for(host_kind)];
+            host_reserved = reserved > limits_.host_memory_hard_limit - host_reserved
+                                ? limits_.host_memory_hard_limit
+                                : host_reserved + reserved;
+        }
+        const double ratio = static_cast<double>(host_reserved) /
+                             static_cast<double>(limits_.host_memory_hard_limit);
+        const SafetyState aggregate_state =
+            ratio >= limits_.critical_ratio ? SafetyState::critical
+            : ratio >= limits_.pressure_ratio ? SafetyState::pressure
+                                              : SafetyState::normal;
+        raw_state = max_state(raw_state, aggregate_state);
+        if (aggregate_state != SafetyState::normal) {
+            reason = "Aggregate host-memory reservations are approaching their hard limit";
+        }
+    }
 
     if (pressure.system_ram_available <= limits_.minimum_system_ram_available / 4U) {
         raw_state = SafetyState::emergency;

@@ -24,6 +24,7 @@ struct ProfilePolicy {
     ByteCount maximum_storage_reserve;
     double staging_ratio;
     double kv_ratio;
+    double scratch_ratio;
     unsigned max_io_workers;
     unsigned speculative_window;
 };
@@ -32,19 +33,19 @@ ProfilePolicy policy_for(Profile profile) {
     switch (profile) {
         case Profile::safe:
             return {0.64, 0.25, 6U * GiB, 0.08, 2U * GiB, 0.16, 1536U * MiB,
-                    0.06, 24U * GiB, 100U * GiB, 0.055, 0.12, 6, 2};
+                    0.06, 24U * GiB, 100U * GiB, 0.055, 0.12, 0.05, 6, 2};
         case Profile::balanced:
             return {0.72, 0.20, 5U * GiB, 0.06, 2U * GiB, 0.13, 1280U * MiB,
-                    0.05, 20U * GiB, 100U * GiB, 0.065, 0.14, 10, 4};
+                    0.05, 20U * GiB, 100U * GiB, 0.065, 0.14, 0.04, 10, 4};
         case Profile::performance:
             return {0.80, 0.15, 4U * GiB, 0.05, 1536U * MiB, 0.10, 1024U * MiB,
-                    0.04, 20U * GiB, 80U * GiB, 0.08, 0.16, 16, 5};
+                    0.04, 20U * GiB, 80U * GiB, 0.08, 0.16, 0.035, 16, 5};
         case Profile::low_memory:
             return {0.56, 0.28, 6U * GiB, 0.09, 2U * GiB, 0.18, 1536U * MiB,
-                    0.07, 24U * GiB, 120U * GiB, 0.05, 0.09, 5, 1};
+                    0.07, 24U * GiB, 120U * GiB, 0.05, 0.09, 0.05, 5, 1};
         case Profile::quiet:
             return {0.68, 0.22, 5U * GiB, 0.07, 2U * GiB, 0.15, 1536U * MiB,
-                    0.06, 24U * GiB, 100U * GiB, 0.055, 0.12, 4, 2};
+                    0.06, 24U * GiB, 100U * GiB, 0.055, 0.12, 0.04, 4, 2};
     }
     return policy_for(Profile::balanced);
 }
@@ -144,14 +145,38 @@ Result<ExecutionPlan> build_plan(const hardware::HardwareSnapshot& hardware,
     plan.storage_reserve = clamp_bytes(percentage(hardware.storage.capacity_bytes, policy.storage_reserve_ratio),
                                        policy.minimum_storage_reserve,
                                        policy.maximum_storage_reserve);
+    plan.minimum_ram_working_set_bytes = manifest.minimum_ram_bytes;
+    plan.expert_bundle_bytes = manifest.estimated_expert_bytes;
+    const bool has_expert_metadata = manifest.expert_count != 0U ||
+                                     manifest.selected_experts_per_token != 0U ||
+                                     manifest.routed_expert_bytes != 0U ||
+                                     manifest.estimated_expert_bytes != 0U;
+    const bool complete_moe_metadata = manifest.expert_count != 0U &&
+                                       manifest.layer_count != 0U &&
+                                       manifest.max_context_tokens != 0U &&
+                                       manifest.selected_experts_per_token != 0U &&
+                                       manifest.selected_experts_per_token <= manifest.expert_count &&
+                                       manifest.routed_expert_bytes != 0U &&
+                                       manifest.estimated_expert_bytes != 0U &&
+                                       manifest.estimated_expert_bytes <= manifest.routed_expert_bytes &&
+                                       manifest.minimum_ram_bytes != 0U;
     const ByteCount existing_bytes = existing_size_matched_bytes(manifest);
     plan.additional_storage_required = safe_subtract(manifest.required_storage_bytes, existing_bytes);
 
     if (manifest.requires_avx2 && !hardware.cpu.avx2) {
         plan.blockers.emplace_back("The model adapter requires AVX2, but AVX2 was not detected.");
     }
-    if (manifest.minimum_ram_bytes != 0 && hardware.memory.total_bytes < manifest.minimum_ram_bytes) {
-        plan.blockers.emplace_back("Physical RAM is below the model's minimum requirement.");
+    if (manifest.minimum_ram_bytes != 0) {
+        if (hardware.memory.total_bytes < manifest.minimum_ram_bytes) {
+            plan.blockers.emplace_back("Physical RAM is below the model's minimum working set.");
+        } else if (plan.safe_ram_budget < manifest.minimum_ram_bytes) {
+            plan.blockers.emplace_back(
+                "The model's minimum RAM working set exceeds the live post-reserve budget.");
+        }
+    }
+    if (has_expert_metadata && !complete_moe_metadata) {
+        plan.blockers.emplace_back(
+            "The MoE manifest lacks complete layer, context, top-k, expert-size or minimum-RAM admission metadata.");
     }
     if (plan.safe_ram_budget < 4U * GiB) {
         plan.blockers.emplace_back("Less than 4 GiB can be assigned safely after OS and emergency reserves.");
@@ -184,7 +209,12 @@ Result<ExecutionPlan> build_plan(const hardware::HardwareSnapshot& hardware,
         plan.kv_ram_bytes = clamp_bytes(percentage(plan.safe_ram_budget, policy.kv_ratio),
                                         512U * MiB,
                                         std::min<ByteCount>(4U * GiB, plan.safe_ram_budget / 3U));
-        ByteCount remaining = safe_subtract(plan.safe_ram_budget, plan.staging_ram_bytes + plan.kv_ram_bytes);
+        plan.scratch_ram_bytes = clamp_bytes(percentage(plan.safe_ram_budget, policy.scratch_ratio),
+                                             256U * MiB,
+                                             std::min<ByteCount>(1U * GiB, plan.safe_ram_budget / 8U));
+        ByteCount remaining = safe_subtract(
+            plan.safe_ram_budget,
+            plan.staging_ram_bytes + plan.kv_ram_bytes + plan.scratch_ram_bytes);
         if (manifest.dense_bytes != 0) {
             plan.dense_ram_bytes = std::min(manifest.dense_bytes, percentage(remaining, 0.80));
         } else {
@@ -205,11 +235,38 @@ Result<ExecutionPlan> build_plan(const hardware::HardwareSnapshot& hardware,
                                                 plan.gpu_staging_bytes + plan.gpu_kv_bytes);
     }
 
+    if (has_expert_metadata) {
+        if (!complete_moe_metadata) {
+            plan.expert_tier_budget_bytes = std::max(plan.expert_ram_bytes, plan.gpu_resident_bytes);
+        } else if (manifest.estimated_expert_bytes <= plan.expert_ram_bytes) {
+            plan.expert_tier_budget_bytes = plan.expert_ram_bytes;
+            plan.expert_admission_tier = "RAM";
+        } else if (manifest.estimated_expert_bytes <= plan.gpu_resident_bytes) {
+            plan.expert_tier_budget_bytes = plan.gpu_resident_bytes;
+            plan.expert_admission_tier = "VRAM";
+        } else {
+            plan.expert_tier_budget_bytes = std::max(plan.expert_ram_bytes, plan.gpu_resident_bytes);
+            plan.blockers.emplace_back(
+                "One complete routed expert does not fit any safe RAM or VRAM tier.");
+        }
+    } else {
+        plan.expert_admission_tier = "not-applicable";
+    }
+
     plan.nvme_backing_bytes = manifest.model_total_bytes;
-    const ByteCount fast_memory = plan.safe_ram_budget + plan.safe_vram_budget;
-    if (manifest.model_total_bytes != 0 && manifest.model_total_bytes <= fast_memory) {
+    auto fast_memory = checked_add(plan.safe_ram_budget, plan.safe_vram_budget);
+    if (!fast_memory) {
+        return make_error(ErrorCode::resource_exhausted,
+                          "Combined safe RAM and VRAM budget overflows byte accounting");
+    }
+    auto dense_fast_memory = checked_add(plan.dense_ram_bytes, plan.gpu_resident_bytes);
+    if (!dense_fast_memory) {
+        return make_error(ErrorCode::resource_exhausted,
+                          "Combined dense RAM and GPU-resident budget overflows byte accounting");
+    }
+    if (manifest.model_total_bytes != 0 && manifest.model_total_bytes <= fast_memory.value()) {
         plan.strategy = "resident";
-    } else if (manifest.dense_bytes == 0 || manifest.dense_bytes <= plan.dense_ram_bytes + plan.gpu_resident_bytes) {
+    } else if (manifest.dense_bytes == 0 || manifest.dense_bytes <= dense_fast_memory.value()) {
         plan.strategy = "multitier-predictive";
     } else {
         plan.strategy = "extreme-streaming";
@@ -227,10 +284,11 @@ Result<ExecutionPlan> build_plan(const hardware::HardwareSnapshot& hardware,
     plan.prefetch_depth = static_cast<unsigned>(std::clamp<ByteCount>(staging_slots / 2U, 1U, 16U));
     plan.speculative_window = manifest.supports_speculation ? policy.speculative_window : 0U;
 
+    plan.governor_limits.host_memory_hard_limit = plan.safe_ram_budget;
     plan.governor_limits.ram_hard_limit = plan.safe_ram_budget;
     plan.governor_limits.vram_hard_limit = plan.safe_vram_budget;
     plan.governor_limits.staging_hard_limit = plan.staging_ram_bytes;
-    plan.governor_limits.scratch_hard_limit = std::min<ByteCount>(4U * GiB, safe_subtract(hardware.storage.available_bytes, plan.storage_reserve));
+    plan.governor_limits.scratch_hard_limit = plan.scratch_ram_bytes;
     plan.governor_limits.minimum_system_ram_available = plan.emergency_ram_reserve;
     plan.governor_limits.minimum_storage_available = plan.storage_reserve;
     plan.governor_limits.pressure_ratio = profile == Profile::performance ? 0.86 : 0.82;
@@ -257,11 +315,17 @@ std::string to_text(const ExecutionPlan& plan) {
            << "  Vastloom VRAM max: " << format_bytes(plan.safe_vram_budget) << '\n'
            << "  Storage reserve:   " << format_bytes(plan.storage_reserve) << '\n'
            << "  Storage to add:    " << format_bytes(plan.additional_storage_required) << '\n'
+           << "\nAdmission\n"
+           << "  Minimum RAM set:   " << format_bytes(plan.minimum_ram_working_set_bytes) << '\n'
+           << "  Complete expert:   " << format_bytes(plan.expert_bundle_bytes) << '\n'
+           << "  Expert tier cap:   " << format_bytes(plan.expert_tier_budget_bytes) << '\n'
+           << "  Expert tier:       " << plan.expert_admission_tier << '\n'
            << "\nPlacement\n"
            << "  Dense in RAM:      " << format_bytes(plan.dense_ram_bytes) << '\n'
            << "  Expert RAM cache:  " << format_bytes(plan.expert_ram_bytes) << '\n'
            << "  KV in RAM:         " << format_bytes(plan.kv_ram_bytes) << '\n'
            << "  RAM staging:       " << format_bytes(plan.staging_ram_bytes) << '\n'
+           << "  RAM scratch:       " << format_bytes(plan.scratch_ram_bytes) << '\n'
            << "  GPU resident:      " << format_bytes(plan.gpu_resident_bytes) << '\n'
            << "  GPU KV:            " << format_bytes(plan.gpu_kv_bytes) << '\n'
            << "  GPU staging:       " << format_bytes(plan.gpu_staging_bytes) << '\n'
@@ -295,11 +359,17 @@ std::string to_json(const ExecutionPlan& plan) {
            << "\"safe_vram\":" << plan.safe_vram_budget << ','
            << "\"storage_reserve\":" << plan.storage_reserve << ','
            << "\"additional_storage_required\":" << plan.additional_storage_required << "},"
+           << "\"admission\":{"
+           << "\"minimum_ram_working_set\":" << plan.minimum_ram_working_set_bytes << ','
+           << "\"expert_bundle\":" << plan.expert_bundle_bytes << ','
+           << "\"expert_tier_budget\":" << plan.expert_tier_budget_bytes << ','
+           << "\"expert_tier\":\"" << util::json_escape(plan.expert_admission_tier) << "\"},"
            << "\"placement\":{"
            << "\"dense_ram\":" << plan.dense_ram_bytes << ','
            << "\"expert_ram\":" << plan.expert_ram_bytes << ','
            << "\"kv_ram\":" << plan.kv_ram_bytes << ','
            << "\"staging_ram\":" << plan.staging_ram_bytes << ','
+           << "\"scratch_ram\":" << plan.scratch_ram_bytes << ','
            << "\"gpu_resident\":" << plan.gpu_resident_bytes << ','
            << "\"gpu_kv\":" << plan.gpu_kv_bytes << ','
            << "\"gpu_staging\":" << plan.gpu_staging_bytes << ','

@@ -450,6 +450,7 @@ int command_io_smoke(const std::vector<std::string>& args) {
     if (!size) return print_error(size.error());
 
     vastloom::safety::ResourceLimits limits;
+    limits.host_memory_hard_limit = 2U * vastloom::GiB;
     limits.ram_hard_limit = 2U * vastloom::GiB;
     limits.vram_hard_limit = 1U * vastloom::GiB;
     limits.staging_hard_limit = std::max<ByteCount>(size.value(), 16U * vastloom::MiB);

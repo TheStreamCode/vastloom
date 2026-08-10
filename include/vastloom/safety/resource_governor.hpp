@@ -27,6 +27,9 @@ enum class SafetyState : std::uint8_t {
 };
 
 struct ResourceLimits {
+    // Optional aggregate ceiling for all host-memory resources (RAM destination,
+    // staging and scratch). A zero value preserves legacy per-kind-only behavior.
+    ByteCount host_memory_hard_limit{0};
     ByteCount ram_hard_limit{0};
     ByteCount vram_hard_limit{0};
     ByteCount staging_hard_limit{0};

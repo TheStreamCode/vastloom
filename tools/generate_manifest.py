@@ -8,8 +8,10 @@ file in bounded chunks, and atomically publishes the completed manifest.
 from __future__ import annotations
 
 import argparse
+from decimal import Decimal, InvalidOperation, ROUND_HALF_UP
 import hashlib
 import os
+import re
 import sys
 import tempfile
 from dataclasses import dataclass
@@ -18,6 +20,26 @@ from typing import Iterable
 
 MAX_FILES = 100_000
 HASH_BUFFER_BYTES = 8 * 1024 * 1024
+MAX_U64 = (1 << 64) - 1
+BYTE_VALUE = re.compile(
+    r"^([+]?(?:\d+(?:\.\d*)?|\.\d+)(?:[eE][+-]?\d+)?)([A-Za-z]*)$"
+)
+BYTE_MULTIPLIERS = {
+    "": 1,
+    "b": 1,
+    "kb": 1_000,
+    "mb": 1_000_000,
+    "gb": 1_000_000_000,
+    "tb": 1_000_000_000_000,
+    "k": 1 << 10,
+    "kib": 1 << 10,
+    "m": 1 << 20,
+    "mib": 1 << 20,
+    "g": 1 << 30,
+    "gib": 1 << 30,
+    "t": 1 << 40,
+    "tib": 1 << 40,
+}
 
 
 @dataclass(frozen=True)
@@ -45,11 +67,88 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--routed-expert-bytes", default="0")
     parser.add_argument("--active-bytes-per-token", default="0")
     parser.add_argument("--estimated-expert-bytes", default="0")
+    parser.add_argument("--layer-count", type=int, default=0)
+    parser.add_argument("--expert-count", type=int, default=0)
+    parser.add_argument("--selected-experts-per-token", type=int, default=0)
+    parser.add_argument("--max-context-tokens", type=int, default=0)
     parser.add_argument("--requires-avx2", action="store_true")
     parser.add_argument("--supports-speculation", action="store_true")
     parser.add_argument("--allow-symlinks", action="store_true")
     parser.add_argument("--quiet", action="store_true")
     return parser.parse_args()
+
+
+def parse_byte_value(value: str, field: str) -> int:
+    if "\n" in value or "\r" in value or "\t" in value:
+        raise ValueError(f"{field} must be a single-line byte value")
+    normalized = value.strip().replace("_", "")
+    match = BYTE_VALUE.fullmatch(normalized)
+    if match is None:
+        raise ValueError(f"{field} is not a valid byte value: {value}")
+    suffix = match.group(2).lower()
+    if suffix not in BYTE_MULTIPLIERS:
+        raise ValueError(f"{field} uses an unsupported byte suffix: {suffix}")
+    try:
+        number = Decimal(match.group(1))
+    except InvalidOperation as error:
+        raise ValueError(f"{field} is not a valid byte value: {value}") from error
+    if not number.is_finite() or number < 0:
+        raise ValueError(f"{field} must be finite and non-negative")
+    result = int((number * BYTE_MULTIPLIERS[suffix]).to_integral_value(rounding=ROUND_HALF_UP))
+    if result > MAX_U64:
+        raise ValueError(f"{field} exceeds the uint64 byte range")
+    return result
+
+
+def validate_model_fields(args: argparse.Namespace, total: int) -> None:
+    byte_fields = {
+        "dense-bytes": args.dense_bytes,
+        "routed-expert-bytes": args.routed_expert_bytes,
+        "active-bytes-per-token": args.active_bytes_per_token,
+        "estimated-expert-bytes": args.estimated_expert_bytes,
+        "minimum-ram": args.minimum_ram,
+        "recommended-ram": args.recommended_ram,
+        "minimum-vram": args.minimum_vram,
+        "recommended-vram": args.recommended_vram,
+    }
+    parsed = {name: parse_byte_value(value, name) for name, value in byte_fields.items()}
+    for name in ("dense-bytes", "routed-expert-bytes", "active-bytes-per-token"):
+        if parsed[name] > total:
+            raise ValueError(f"{name} exceeds the checkpoint byte total")
+    if parsed["recommended-ram"] and parsed["recommended-ram"] < parsed["minimum-ram"]:
+        raise ValueError("recommended-ram is below minimum-ram")
+    if parsed["recommended-vram"] and parsed["recommended-vram"] < parsed["minimum-vram"]:
+        raise ValueError("recommended-vram is below minimum-vram")
+
+    counts = {
+        "layer-count": args.layer_count,
+        "expert-count": args.expert_count,
+        "selected-experts-per-token": args.selected_experts_per_token,
+        "max-context-tokens": args.max_context_tokens,
+    }
+    if any(value < 0 or value > 0xFFFFFFFF for value in counts.values()):
+        raise ValueError("Layer, expert and context counts must fit uint32 and be non-negative")
+    has_expert_data = (
+        parsed["routed-expert-bytes"] != 0
+        or parsed["estimated-expert-bytes"] != 0
+        or args.selected_experts_per_token != 0
+    )
+    if args.expert_count == 0:
+        if has_expert_data:
+            raise ValueError("Expert data requires --expert-count")
+    elif (
+        args.layer_count == 0
+        or args.max_context_tokens == 0
+        or args.selected_experts_per_token == 0
+        or args.selected_experts_per_token > args.expert_count
+        or parsed["routed-expert-bytes"] == 0
+        or parsed["estimated-expert-bytes"] == 0
+        or parsed["estimated-expert-bytes"] > parsed["routed-expert-bytes"]
+        or parsed["minimum-ram"] == 0
+    ):
+        raise ValueError(
+            "MoE manifests require layers, context, bounded top-k, expert bytes and minimum RAM"
+        )
 
 
 def classify_role(path: Path) -> str:
@@ -141,13 +240,17 @@ def build_chunks(root: Path, files: Iterable[Path], quiet: bool) -> list[Chunk]:
 
 def render_manifest(args: argparse.Namespace, chunks: list[Chunk]) -> str:
     total = sum(chunk.size for chunk in chunks)
+    validate_model_fields(args, total)
+    tokenizer_family = (
+        sanitize_scalar(args.tokenizer_family, "tokenizer-family") if args.tokenizer_family else ""
+    )
     lines = [
         "# Generated by tools/generate_manifest.py; do not edit chunk metadata manually.",
         "format=vastloom.manifest.v1",
         f"model_id={sanitize_scalar(args.model_id, 'model-id')}",
         f"revision={sanitize_scalar(args.revision, 'revision')}",
         f"architecture={sanitize_scalar(args.architecture, 'architecture')}",
-        f"tokenizer_family={args.tokenizer_family}",
+        f"tokenizer_family={tokenizer_family}",
         "metadata_only=false",
         f"requires_avx2={'true' if args.requires_avx2 else 'false'}",
         f"supports_speculation={'true' if args.supports_speculation else 'false'}",
@@ -161,6 +264,10 @@ def render_manifest(args: argparse.Namespace, chunks: list[Chunk]) -> str:
         f"recommended_ram_bytes={args.recommended_ram}",
         f"minimum_vram_bytes={args.minimum_vram}",
         f"recommended_vram_bytes={args.recommended_vram}",
+        f"layer_count={args.layer_count}",
+        f"expert_count={args.expert_count}",
+        f"selected_experts_per_token={args.selected_experts_per_token}",
+        f"max_context_tokens={args.max_context_tokens}",
         f"chunk_count={len(chunks)}",
     ]
     for chunk in chunks:

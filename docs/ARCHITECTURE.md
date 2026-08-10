@@ -52,6 +52,13 @@ The data plane must be small, bounded and predictable:
 
 No data-plane worker may allocate outside the Resource Governor.
 
+The planner first establishes a host budget after OS and emergency reserves, then deducts bounded
+KV, staging and scratch placement before assigning the optional expert cache. A MoE plan is
+capacity-compatible only if its adapter-declared minimum RAM working set fits this host budget and
+one complete expert bundle fits either the remaining RAM expert tier or one real GPU-resident
+tier. RAM, staging and scratch reservations share an aggregate Governor ceiling; VRAM is enforced
+separately.
+
 ## Current inference paths
 
 Alpha.2 retains the complete synthetic CPU-only reference slice:

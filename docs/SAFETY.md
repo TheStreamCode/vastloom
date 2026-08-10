@@ -23,6 +23,13 @@ Only `ResourceGovernor` owns mutable capacity counters. Workers request a move-o
 reservation before allocation. The reservation remains alive for as long as the buffer
 or model allocation is alive and is released automatically.
 
+RAM destinations, staging buffers and scratch allocations have both per-kind limits and one
+optional aggregate host-memory hard limit. Admission subtracts all three live reservation classes
+under the same lock. This prevents three individually legal reservations from jointly exceeding
+the safe host budget. Aggregate usage also participates in the `PRESSURE`/`CRITICAL` state
+calculation. VRAM remains a separate physical tier and is never added to host RAM as fictional
+allocatable memory.
+
 This prevents the classic race where multiple workers each observe the same free memory
 and all allocate it.
 
@@ -61,6 +68,10 @@ The planner creates separate reserves for:
 - minimum storage free space;
 - bounded I/O staging and scratch.
 
+Scratch is an explicit placement budget deducted before the expert RAM cache is sized. Optional
+cache therefore consumes only the true remainder and is the first part that can shrink under
+pressure.
+
 The safety profile is conservative. Performance mode may use more resources but never
 removes hard reserves.
 
@@ -77,6 +88,12 @@ and VRAM into fictional capacity, delegate the expert to uncontrolled swap, redu
 silently or proceed merely because the remaining weights fit on NVMe. On the reference PC this
 rule applies to the dynamic budgets derived from 32 GiB RAM and 12 GiB VRAM, not their nominal
 totals. Kimi K3 remains a metadata-only capacity study unless an exact profile passes this gate.
+
+The v1 planner implements the fail-closed manifest-level gate. It requires a nonzero complete
+expert-bundle size and exact MoE layer/top-k/context metadata, checks the adapter-declared minimum
+RAM working set against the live post-reserve RAM budget, and requires the complete expert to fit
+either the remaining expert RAM tier or the GPU-resident tier. Passing a metadata-only profile is
+a capacity result, not authorization to execute unverified weights.
 
 ## State machine
 
@@ -188,7 +205,8 @@ The 0731 GGUF reader adds a metadata-only safety boundary:
   dimensions, encoded size, all block scales, finite inputs and non-overlapping scratch, and has a
   64-million-element default ceiling;
 - one complete real expert test can consume only three separately size/SHA-256-pinned extracted
-  ranges under an 8 MiB RAM limit, 4 MiB staging limit, one worker and one queue entry;
+  ranges under an 8 MiB RAM limit, 4 MiB staging limit, 10 MiB aggregate host-memory limit, one
+  worker and one queue entry;
 - a one-byte RAM shortfall is rejected before worker I/O/allocation, the live use lease blocks
   eviction, and RAM/staging/scratch reservations must all return to zero after release;
 - this opt-in test is not a generic GGUF/catalog execution backend, so metadata snapshots and

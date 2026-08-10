@@ -49,6 +49,11 @@
   required active block, KV, scratch and staging inside live post-reserve RAM/VRAM budgets. Kimi K3
   is now capacity-study-only on the 32 GiB RAM / 12 GiB VRAM machine unless an exact profile passes
   that gate.
+- Implemented that gate in the native planner: strict MoE manifests now require complete expert,
+  layer, top-k, context and minimum-working-set metadata; scratch is an explicit placement; and
+  each plan names the real RAM or VRAM tier that can contain one complete expert. The Resource
+  Governor now enforces one aggregate ceiling across RAM destinations, staging and scratch, with
+  deterministic acceptance, pressure, rejection and overflow tests.
 - Replaced repeated GGUF metadata `seekg` calls with verified sequential discards. The same real
   5.26 MB header on Windows-mounted WSL storage improved from 37.42 s to 0.11 s while preserving
   strict bounded/truncation behavior.

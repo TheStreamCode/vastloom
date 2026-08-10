@@ -19,20 +19,28 @@ Storage reserve:  100.00 GiB
 
 Storage to add:   148.67 GiB
 
+Minimum RAM set:   16.00 GiB
+Complete expert:   12.75 MiB
+Expert tier cap:    9.00 GiB
+Expert tier:        RAM
+
 Dense in RAM:       8.40 GiB
-Expert RAM cache:   9.92 GiB
+Expert RAM cache:   9.00 GiB
 KV in RAM:          3.23 GiB
 RAM staging:        1.50 GiB
+RAM scratch:      943.72 MiB
 GPU resident:       7.97 GiB
 GPU KV:             1.64 GiB
 GPU staging:      627.92 MiB
 NVMe backing:     148.66 GiB
 ```
 
-This proves the planner keeps hard headroom on the target machine. It does not prove the
-generic placement strategy is executable or any tokens-per-second result. The capacity
-inputs now come from the exact M6 checkpoint/header catalog; DeepSeek fixture parity,
-kernels, KV sizing and the architecture-specific execution plan remain incomplete.
+This proves that the metadata profile passes the implemented capacity-admission calculation and
+that the planner keeps hard headroom on the target machine. It does not make a metadata-only
+manifest executable, validate its declared 16 GiB working-set estimate against the full packed
+graph, or prove a tokens-per-second result. The capacity inputs come from the exact M6
+checkpoint/header catalog; full payload binding, complete packed layer/token parity and the
+architecture-specific executable plan remain incomplete.
 
 ## Reference-PC model admission gate
 
@@ -61,7 +69,11 @@ shown above. A model/profile whose minimum working set exceeds either derived ha
 ineligible for execution on this machine; Vastloom must reject it and recommend a smaller model or
 explicitly validated quantization instead of swapping, overcommitting or silently losing quality.
 
-The 6,488,064-byte DeepSeek 0731 expert tested in M7 passes the isolated expert-residency part of
-this gate under an 8 MiB test RAM limit. The full DeepSeek trunk/KV/layer/token plan has not passed
-the complete admission gate yet. Kimi K3 is not a reference-PC execution target: it remains only a
-future capacity/traffic study unless an exact published profile independently passes this rule.
+The planner now enforces the manifest-level gate and reports the actual selected expert tier. A
+20 GiB simulated-RAM plan rejects the DeepSeek research profile because its post-reserve RAM
+budget is below the declared 16 GiB minimum. The 6,488,064-byte DeepSeek 0731 expert tested in M7
+also passes the isolated expert-residency part under a 10 MiB aggregate host-memory ceiling. The
+full DeepSeek trunk/KV/layer/token implementation has not validated the metadata profile's minimum
+working-set declaration yet, so DeepSeek execution remains unsupported. Kimi K3 is not a
+reference-PC execution target: it remains only a future capacity/traffic study unless an exact
+published profile independently passes this rule.

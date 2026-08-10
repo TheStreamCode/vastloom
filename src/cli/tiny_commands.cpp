@@ -248,6 +248,7 @@ Result<std::unique_ptr<safety::ResourceGovernor>> make_governor(const std::files
     const ByteCount safe_available = available - reserve;
     const ByteCount desired = std::max<ByteCount>(128U * MiB, required.value() * 2U);
     safety::ResourceLimits limits;
+    limits.host_memory_hard_limit = std::min(safe_available, desired);
     limits.ram_hard_limit = std::min(safe_available, desired);
     limits.vram_hard_limit = 1U * MiB;
     limits.staging_hard_limit = 64U * MiB;

@@ -343,6 +343,18 @@ if(BUILD_TESTING AND VASTLOOM_BUILD_TESTS)
                 PASS_REGULAR_EXPRESSION
                     "\"plan_only\":true.*\"routing_authority_verified\":false.*\"trunk_bytes\":138867160.*\"selected_expert_bytes\":38928384.*\"total_payload_bytes\":177795544.*\"total_range_count\":39.*\"unique_source_objects\":1"
             )
+            add_test(
+                NAME vastloom_deepseek_v4_range_import_dry_run
+                COMMAND ${Python3_EXECUTABLE}
+                    ${CMAKE_CURRENT_SOURCE_DIR}/tests/test_range_import_cli.py
+                    --vastloom $<TARGET_FILE:vastloom>
+                    --importer ${CMAKE_CURRENT_SOURCE_DIR}/tools/import_hf_ranges.py
+                    --model ${VASTLOOM_DEEPSEEK_V4_GGUF_CHECKPOINT}
+            )
+            set_tests_properties(vastloom_deepseek_v4_range_import_dry_run PROPERTIES
+                TIMEOUT 3600
+                RUN_SERIAL TRUE
+            )
         endif()
     else()
         message(STATUS "Python3 not found; skipping TinyChat CLI integration test")

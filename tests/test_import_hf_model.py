@@ -21,16 +21,99 @@ MODULE = importlib.util.module_from_spec(SPEC)
 sys.modules[SPEC.name] = MODULE
 SPEC.loader.exec_module(MODULE)
 
+RANGE_SPEC = importlib.util.spec_from_file_location(
+    "import_hf_ranges", ROOT / "tools" / "import_hf_ranges.py"
+)
+assert RANGE_SPEC and RANGE_SPEC.loader
+RANGE_MODULE = importlib.util.module_from_spec(RANGE_SPEC)
+sys.modules[RANGE_SPEC.name] = RANGE_MODULE
+RANGE_SPEC.loader.exec_module(RANGE_MODULE)
+
 
 def require(condition: bool, message: str) -> None:
     if not condition:
         raise AssertionError(message)
 
 
+def range_plan_document(
+    model_id: str,
+    revision: str,
+    *,
+    routing_authority_verified: bool = False,
+) -> dict[str, object]:
+    source = "test.gguf"
+    return {
+        "ok": True,
+        "format": RANGE_MODULE.PLAN_FORMAT,
+        "model_id": model_id,
+        "revision": revision,
+        "plan_only": True,
+        "execution_supported": False,
+        "layer": 0,
+        "expected_top_k": 2,
+        "selection_source": (
+            "official-tid2eid-verified"
+            if routing_authority_verified
+            else "caller-supplied-unverified"
+        ),
+        "routing_authority_verified": routing_authority_verified,
+        "payload_access": {
+            "metadata_only": True,
+            "imported_file_hashes_verified": True,
+            "full_payload_present": False,
+            "executable_source_binding_verified": False,
+        },
+        "tile_limit_bytes": 64 * 1024 * 1024,
+        "trunk_bytes": 12,
+        "selected_expert_bytes": 7,
+        "total_payload_bytes": 19,
+        "maximum_read_range_bytes": 7,
+        "minimum_expert_tier_bytes": 4,
+        "trunk_range_count": 2,
+        "selected_expert_range_count": 2,
+        "total_range_count": 4,
+        "unique_source_objects": 1,
+        "selected_experts": [0, 1],
+        "trunk_ranges": [
+            {
+                "tensor": "blk.0.attn_q.weight",
+                "role": "attention",
+                "tensor_offset": 0,
+                "final_tile": True,
+                "ggml_type": 8,
+                "source": {"object": source, "offset": 4, "bytes": 5},
+            },
+            {
+                "tensor": "blk.0.attn_k.weight",
+                "role": "attention",
+                "tensor_offset": 0,
+                "final_tile": True,
+                "ggml_type": 8,
+                "source": {"object": source, "offset": 20, "bytes": 7},
+            },
+        ],
+        "experts": [
+            {
+                "expert": 0,
+                "bytes": 3,
+                "read_ranges": [{"object": source, "offset": 40, "bytes": 3}],
+                "tensors": [],
+            },
+            {
+                "expert": 1,
+                "bytes": 4,
+                "read_ranges": [{"object": source, "offset": 50, "bytes": 4}],
+                "tensors": [],
+            },
+        ],
+    }
+
+
 def main() -> int:
     with tempfile.TemporaryDirectory(prefix="vastloom-import-test-") as temporary:
         root = Path(temporary)
         (root / "models" / "original").mkdir(parents=True)
+        (root / "models" / "optimized").mkdir()
         (root / "cache").mkdir()
         (root / ".vastloom-store").write_text(MODULE.MARKER, encoding="utf-8")
         require(MODULE.validate_store(root) == root.resolve(), "valid store rejected")
@@ -299,6 +382,241 @@ def main() -> int:
         finally:
             prefix_server.shutdown()
             prefix_worker.join(timeout=5)
+
+        range_payload = bytes(range(256))
+        range_spec = MODULE.ModelSpec(
+            "range-test",
+            "test/range-model",
+            "0123456789abcdef0123456789abcdef01234567",
+            (
+                MODULE.FileSpec(
+                    "UD/test.gguf",
+                    len(range_payload),
+                    hashlib.sha256(range_payload).hexdigest(),
+                    True,
+                ),
+            ),
+            artifact_name="range-test",
+        )
+        plan_path = root / "range-plan.json"
+        plan_path.write_text(
+            json.dumps(range_plan_document(range_spec.model_id, range_spec.revision)),
+            encoding="utf-8",
+        )
+        plan = RANGE_MODULE.load_plan(plan_path, range_spec)
+        require(len(plan.trunk_ranges) == 2, "range plan trunk was not parsed")
+        bom_plan_path = root / "range-plan-bom.json"
+        bom_plan_path.write_bytes(b"\xef\xbb\xbf" + plan_path.read_bytes())
+        require(
+            len(RANGE_MODULE.load_plan(bom_plan_path, range_spec).trunk_ranges) == 2,
+            "UTF-8 BOM range plan was not parsed",
+        )
+        try:
+            plan.selected("selected-experts")
+        except RuntimeError as error:
+            require("routing authority" in str(error), "unverified route refusal is not actionable")
+        else:
+            raise AssertionError("unverified selected-expert range import was accepted")
+        forged_route = range_plan_document(range_spec.model_id, range_spec.revision)
+        forged_route["routing_authority_verified"] = True
+        forged_route_path = root / "forged-route-plan.json"
+        forged_route_path.write_text(json.dumps(forged_route), encoding="utf-8")
+        try:
+            RANGE_MODULE.load_plan(forged_route_path, range_spec)
+        except RuntimeError:
+            pass
+        else:
+            raise AssertionError("inconsistent routing-authority source was accepted")
+
+        with mock.patch.object(
+            MODULE.shutil,
+            "disk_usage",
+            return_value=SimpleNamespace(free=64 * MODULE.GIB),
+        ):
+            dry_target = RANGE_MODULE.import_range_artifact(
+                root,
+                range_spec,
+                plan,
+                scope="trunk",
+                reserve_bytes=20 * MODULE.GIB,
+                timeout=1.0,
+                dry_run=True,
+                allow_range_download=False,
+                max_total_bytes=12,
+            )
+        require(not dry_target.exists(), "range dry-run created an artifact")
+        try:
+            RANGE_MODULE.import_range_artifact(
+                root,
+                range_spec,
+                plan,
+                scope="trunk",
+                reserve_bytes=20 * MODULE.GIB,
+                timeout=1.0,
+                dry_run=False,
+                allow_range_download=False,
+                max_total_bytes=12,
+            )
+        except RuntimeError as error:
+            require("--allow-range-download" in str(error), "range authorization refusal is not actionable")
+        else:
+            raise AssertionError("range import lacked explicit download authorization")
+        try:
+            RANGE_MODULE.import_range_artifact(
+                root,
+                range_spec,
+                plan,
+                scope="trunk",
+                reserve_bytes=20 * MODULE.GIB,
+                timeout=1.0,
+                dry_run=True,
+                allow_range_download=False,
+                max_total_bytes=11,
+            )
+        except RuntimeError as error:
+            require("exceed" in str(error), "range byte-cap refusal is not actionable")
+        else:
+            raise AssertionError("range import exceeded its explicit payload cap")
+
+        requested_ranges: list[str] = []
+
+        stale_cache = root / "cache" / "range-imports" / dry_target.name
+        stale_cache.mkdir(parents=True)
+        (stale_cache / ".0000.partial-crash").write_bytes(b"partial")
+        (stale_cache / "0000.bin").write_bytes(b"unpublished")
+        stale_incoming = root / "models" / "optimized" / f".incoming-{dry_target.name}-crash"
+        stale_incoming.mkdir()
+        (stale_incoming / "unpublished.bin").write_bytes(b"partial")
+
+        class ExactRangeHandler(BaseHTTPRequestHandler):
+            def do_GET(self) -> None:  # noqa: N802 - standard-library handler API
+                requested = self.headers.get("Range", "")
+                start_text, end_text = requested.removeprefix("bytes=").split("-", maxsplit=1)
+                start = int(start_text)
+                end = int(end_text)
+                require(0 <= start <= end < len(range_payload), "invalid exact range request")
+                requested_ranges.append(requested)
+                self.send_response(206)
+                self.send_header("Content-Range", f"bytes {start}-{end}/{len(range_payload)}")
+                self.send_header("Content-Length", str(end - start + 1))
+                self.end_headers()
+                self.wfile.write(range_payload[start : end + 1])
+
+            def log_message(self, _format: str, *_args: object) -> None:
+                return
+
+        range_server = ThreadingHTTPServer(("127.0.0.1", 0), ExactRangeHandler)
+        range_worker = threading.Thread(target=range_server.serve_forever, daemon=True)
+        range_worker.start()
+        try:
+            with (
+                mock.patch.object(
+                    MODULE.shutil,
+                    "disk_usage",
+                    return_value=SimpleNamespace(free=64 * MODULE.GIB),
+                ),
+                mock.patch.object(
+                    RANGE_MODULE.base,
+                    "file_url",
+                    return_value=f"http://127.0.0.1:{range_server.server_port}/test.gguf",
+                ),
+            ):
+                imported = RANGE_MODULE.import_range_artifact(
+                    root,
+                    range_spec,
+                    plan,
+                    scope="trunk",
+                    reserve_bytes=20 * MODULE.GIB,
+                    timeout=5.0,
+                    dry_run=False,
+                    allow_range_download=True,
+                    max_total_bytes=12,
+                    max_bytes_per_second=1024 * 1024,
+                )
+        finally:
+            range_server.shutdown()
+            range_worker.join(timeout=5)
+        require(requested_ranges == ["bytes=4-8", "bytes=20-26"], "exact source ranges changed")
+        require(not stale_incoming.exists(), "stale range staging directory was not cleaned")
+        require(not (stale_cache / ".0000.partial-crash").exists(),
+                "stale range partial was not cleaned")
+        manifest = json.loads(
+            (imported / RANGE_MODULE.ARTIFACT_MANIFEST_NAME).read_text(encoding="utf-8")
+        )
+        require(manifest["format"] == RANGE_MODULE.ARTIFACT_FORMAT, "range artifact format changed")
+        require(manifest["execution_supported"] is False, "partial artifact claimed execution")
+        require(manifest["complete_checkpoint_verified"] is False, "partial artifact claimed completeness")
+        require(manifest["payload_bytes"] == 12 and manifest["range_count"] == 2,
+                "range artifact accounting changed")
+        require((imported / "ranges" / "0000.bin").read_bytes() == range_payload[4:9],
+                "first immutable range payload changed")
+        require((imported / "ranges" / "0001.bin").read_bytes() == range_payload[20:27],
+                "second immutable range payload changed")
+        reused = RANGE_MODULE.import_range_artifact(
+            root,
+            range_spec,
+            plan,
+            scope="trunk",
+            reserve_bytes=20 * MODULE.GIB,
+            timeout=1.0,
+            dry_run=False,
+            allow_range_download=False,
+            max_total_bytes=12,
+        )
+        require(reused == imported, "verified immutable range artifact was not reused")
+
+        malformed = range_plan_document(range_spec.model_id, range_spec.revision)
+        malformed["total_payload_bytes"] = 20
+        malformed_path = root / "malformed-range-plan.json"
+        malformed_path.write_text(json.dumps(malformed), encoding="utf-8")
+        try:
+            RANGE_MODULE.load_plan(malformed_path, range_spec)
+        except RuntimeError:
+            pass
+        else:
+            raise AssertionError("inconsistent range plan totals were accepted")
+
+        duplicate_path = root / "duplicate-range-plan.json"
+        duplicate_path.write_text('{"format":"a","format":"b"}', encoding="utf-8")
+        try:
+            RANGE_MODULE.load_plan(duplicate_path, range_spec)
+        except RuntimeError:
+            pass
+        else:
+            raise AssertionError("duplicate range-plan JSON keys were accepted")
+
+        class WrongRangeHandler(BaseHTTPRequestHandler):
+            def do_GET(self) -> None:  # noqa: N802 - standard-library handler API
+                self.send_response(206)
+                self.send_header("Content-Range", f"bytes 0-4/{len(range_payload)}")
+                self.send_header("Content-Length", "5")
+                self.end_headers()
+                self.wfile.write(range_payload[:5])
+
+            def log_message(self, _format: str, *_args: object) -> None:
+                return
+
+        wrong_server = ThreadingHTTPServer(("127.0.0.1", 0), WrongRangeHandler)
+        wrong_worker = threading.Thread(target=wrong_server.serve_forever, daemon=True)
+        wrong_worker.start()
+        wrong_partial = root / "wrong-range.partial"
+        try:
+            try:
+                RANGE_MODULE.download_range(
+                    f"http://127.0.0.1:{wrong_server.server_port}/test.gguf",
+                    wrong_partial,
+                    plan.trunk_ranges[0],
+                    5.0,
+                    1024 * 1024,
+                )
+            except RuntimeError:
+                pass
+            else:
+                raise AssertionError("wrong HTTP Content-Range was accepted")
+        finally:
+            wrong_server.shutdown()
+            wrong_worker.join(timeout=5)
+        require(not wrong_partial.exists(), "failed range download left a partial artifact")
 
     print("Hugging Face importer offline tests: PASS")
     return 0

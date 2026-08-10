@@ -3,6 +3,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <span>
+#include <vector>
 
 #include "vastloom/core/status.hpp"
 
@@ -40,6 +41,15 @@ struct RoutedExpertScratch {
     std::span<float> up;
     std::span<float> down;
 };
+
+// Deterministic ggml-compatible reference encoder used by conversion/fixture tooling. Logical
+// rows are zero-padded to storage_columns; no file is written by this function.
+[[nodiscard]] Result<std::vector<std::byte>> quantize_q8_0_reference(
+    std::span<const float> matrix,
+    std::size_t rows,
+    std::size_t logical_columns,
+    std::size_t storage_columns,
+    const QuantizedKernelLimits& limits = {});
 
 // True only for storage formats with a bounded scalar reference matvec below.
 [[nodiscard]] bool supports_reference_matvec_ggml_type(std::uint32_t ggml_type) noexcept;

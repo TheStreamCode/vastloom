@@ -7,6 +7,7 @@
 #include <cstdint>
 #include <functional>
 #include <limits>
+#include <new>
 #include <string_view>
 #include <utility>
 
@@ -73,6 +74,30 @@ float fp16_to_float(std::uint16_t value) noexcept {
         bits |= mantissa << 13U;
     }
     return std::bit_cast<float>(bits);
+}
+
+std::uint16_t float_to_fp16(float value) noexcept {
+    constexpr float scale_to_infinity = 0x1.0p+112F;
+    constexpr float scale_to_zero = 0x1.0p-110F;
+    float base = (std::abs(value) * scale_to_infinity) * scale_to_zero;
+    const std::uint32_t word = std::bit_cast<std::uint32_t>(value);
+    const std::uint32_t shifted = word + word;
+    const std::uint32_t sign = word & UINT32_C(0x80000000);
+    std::uint32_t bias = shifted & UINT32_C(0xff000000);
+    if (bias < UINT32_C(0x71000000)) bias = UINT32_C(0x71000000);
+    base = std::bit_cast<float>((bias >> 1U) + UINT32_C(0x07800000)) + base;
+    const std::uint32_t bits = std::bit_cast<std::uint32_t>(base);
+    const std::uint32_t exponent = (bits >> 13U) & UINT32_C(0x00007c00);
+    const std::uint32_t mantissa = bits & UINT32_C(0x00000fff);
+    const std::uint32_t non_sign = exponent + mantissa;
+    return static_cast<std::uint16_t>(
+        (sign >> 16U) |
+        (shifted > UINT32_C(0xff000000) ? UINT16_C(0x7e00) : non_sign));
+}
+
+void write_u16_le(std::byte* bytes, std::uint16_t value) noexcept {
+    bytes[0] = static_cast<std::byte>(value & 0xffU);
+    bytes[1] = static_cast<std::byte>(value >> 8U);
 }
 
 std::uint16_t read_u16_le(const std::byte* bytes) noexcept {
@@ -528,6 +553,77 @@ bool overlaps(std::span<const float> first, std::span<const float> second) noexc
 }
 
 }  // namespace
+
+Result<std::vector<std::byte>> quantize_q8_0_reference(
+    std::span<const float> matrix,
+    std::size_t rows,
+    std::size_t logical_columns,
+    std::size_t storage_columns,
+    const QuantizedKernelLimits& limits) {
+    if (logical_columns == 0U || logical_columns > storage_columns ||
+        storage_columns % kQ8_0BlockElements != 0U) {
+        return make_error(ErrorCode::invalid_argument,
+                          "Q8_0 reference quantization dimensions are invalid");
+    }
+    auto elements = checked_matrix_elements(
+        rows, storage_columns, kQ8_0BlockElements, limits);
+    if (!elements) return elements.error();
+    if (rows > std::numeric_limits<std::size_t>::max() / logical_columns ||
+        matrix.size() != rows * logical_columns) {
+        return make_error(ErrorCode::invalid_argument,
+                          "Q8_0 reference source matrix shape does not match");
+    }
+    auto encoded_size = checked_encoded_bytes(
+        elements.value(), kQ8_0BlockElements, kQ8_0BlockBytes);
+    if (!encoded_size) return encoded_size.error();
+    std::vector<std::byte> encoded;
+    try {
+        encoded.resize(encoded_size.value());
+    } catch (const std::bad_alloc&) {
+        return make_error(ErrorCode::resource_exhausted,
+                          "Unable to allocate the bounded Q8_0 encoded buffer");
+    }
+    const std::size_t blocks_per_row = storage_columns / kQ8_0BlockElements;
+    for (std::size_t row = 0U; row < rows; ++row) {
+        for (std::size_t block = 0U; block < blocks_per_row; ++block) {
+            std::array<float, kQ8_0BlockElements> values{};
+            float maximum = 0.0F;
+            for (std::size_t index = 0U; index < values.size(); ++index) {
+                const std::size_t column = block * values.size() + index;
+                const float value = column < logical_columns
+                                        ? matrix[row * logical_columns + column]
+                                        : 0.0F;
+                if (!std::isfinite(value)) {
+                    return make_error(ErrorCode::invalid_argument,
+                                      "Q8_0 reference source contains a non-finite value",
+                                      std::to_string(row * logical_columns +
+                                                     std::min(column, logical_columns - 1U)));
+                }
+                values[index] = value;
+                maximum = std::max(maximum, std::abs(value));
+            }
+            const float scale = maximum / 127.0F;
+            const float inverse = scale != 0.0F ? 1.0F / scale : 0.0F;
+            const std::size_t encoded_offset =
+                (row * blocks_per_row + block) * kQ8_0BlockBytes;
+            const std::uint16_t encoded_scale = float_to_fp16(scale);
+            if (!std::isfinite(fp16_to_float(encoded_scale))) {
+                return make_error(ErrorCode::invalid_argument,
+                                  "Q8_0 reference scale is not representable as FP16",
+                                  std::to_string(row));
+            }
+            write_u16_le(encoded.data() + encoded_offset, encoded_scale);
+            for (std::size_t index = 0U; index < values.size(); ++index) {
+                const float rounded = std::round(values[index] * inverse);
+                const auto quantized = static_cast<std::int8_t>(
+                    std::clamp(rounded, -127.0F, 127.0F));
+                encoded[encoded_offset + 2U + index] =
+                    static_cast<std::byte>(std::bit_cast<std::uint8_t>(quantized));
+            }
+        }
+    }
+    return encoded;
+}
 
 bool supports_reference_matvec_ggml_type(std::uint32_t ggml_type) noexcept {
     switch (ggml_type) {

@@ -764,6 +764,52 @@ void test_trunk_storage_reference_kernels() {
         }
         return input;
     };
+    const auto byte_fingerprint = [](std::span<const std::byte> values) {
+        std::uint64_t hash = UINT64_C(14695981039346656037);
+        for (const std::byte value : values) {
+            hash ^= std::to_integer<std::uint8_t>(value);
+            hash *= UINT64_C(1099511628211);
+        }
+        return hash;
+    };
+    std::vector<float> q8_source(3U * 17U);
+    for (std::size_t row = 0U; row < 3U; ++row) {
+        for (std::size_t column = 0U; column < 17U; ++column) {
+            const int centered = static_cast<int>((row * 19U + column * 7U) % 31U) - 15;
+            q8_source[row * 17U + column] =
+                static_cast<float>(centered) * 0.017578125F +
+                static_cast<float>(column % 5U) * 0.00390625F;
+        }
+    }
+    auto q8_encoded = vastloom::inference::quantize_q8_0_reference(
+        q8_source, 3U, 17U, 32U);
+    CHECK(q8_encoded && q8_encoded.value().size() ==
+                            3U * vastloom::inference::kQ8_0BlockBytes);
+    if (q8_encoded) {
+        CHECK(byte_fingerprint(q8_encoded.value()) == UINT64_C(0x083a653165a92c21));
+        std::vector<float> padded(3U * 32U);
+        CHECK(vastloom::inference::dequantize_q8_0(q8_encoded.value(), padded));
+        for (std::size_t row = 0U; row < 3U; ++row) {
+            CHECK(std::all_of(
+                padded.begin() + static_cast<std::ptrdiff_t>(row * 32U + 17U),
+                padded.begin() + static_cast<std::ptrdiff_t>((row + 1U) * 32U),
+                [](float value) { return value == 0.0F; }));
+        }
+    }
+    CHECK(!vastloom::inference::quantize_q8_0_reference(
+        q8_source, 3U, 17U, 31U));
+    auto non_finite_source = q8_source;
+    non_finite_source[3] = std::numeric_limits<float>::infinity();
+    CHECK(!vastloom::inference::quantize_q8_0_reference(
+        non_finite_source, 3U, 17U, 32U));
+    auto unrepresentable_scale = q8_source;
+    unrepresentable_scale[3] = std::numeric_limits<float>::max();
+    CHECK(!vastloom::inference::quantize_q8_0_reference(
+        unrepresentable_scale, 3U, 17U, 32U));
+    vastloom::inference::QuantizedKernelLimits encoder_limit;
+    encoder_limit.max_elements = 95U;
+    CHECK(!vastloom::inference::quantize_q8_0_reference(
+        q8_source, 3U, 17U, 32U, encoder_limit));
     constexpr std::array<std::uint16_t, 6U> scales{
         0x3c00U, 0xb800U, 0x3555U, 0x4000U, 0x0400U, 0x0001U};
     constexpr std::array<std::uint16_t, 6U> minimum_scales{
@@ -2592,6 +2638,203 @@ void test_deepseek_v4_reference_graph() {
     vastloom::inference::DeepseekV4ReferenceState oversized_state;
     CHECK(!vastloom::inference::deepseek_v4_reference_prefill(
         malformed, token_ids, &oversized_state));
+
+    // Replace every matrix consumed by the first main layer with deterministic Q8_0
+    // storage. The float oracle uses the independently verified GGML dequantization of
+    // exactly those bytes, so this validates graph composition rather than merely a
+    // standalone kernel.
+    auto quantized_oracle = graph;
+    auto packed_graph = graph;
+    struct MatrixSpec {
+        std::string name;
+        std::size_t rows;
+        std::size_t columns;
+    };
+    const std::size_t mix_width =
+        (2U + config.hyper_multiplier) * config.hyper_multiplier;
+    const std::size_t flattened_width = config.hyper_multiplier * config.width;
+    std::vector<MatrixSpec> layer_matrices{
+        {"layers.0.hc_attn_fn", mix_width, flattened_width},
+        {"layers.0.attn.wq_a.weight", config.query_lora_rank, config.width},
+        {"layers.0.attn.wq_b.weight", config.head_count * config.head_width,
+         config.query_lora_rank},
+        {"layers.0.attn.wkv.weight", config.head_width, config.width},
+        {"layers.0.attn.wo_a.weight",
+         config.output_groups * config.output_lora_rank,
+         config.head_count * config.head_width / config.output_groups},
+        {"layers.0.attn.wo_b.weight", config.width,
+         config.output_groups * config.output_lora_rank},
+        {"layers.0.hc_ffn_fn", mix_width, flattened_width},
+        {"layers.0.ffn.gate.weight", config.expert_count, config.width},
+    };
+    for (std::size_t expert = 0U; expert < config.expert_count; ++expert) {
+        const std::string base =
+            "layers.0.ffn.experts." + std::to_string(expert);
+        layer_matrices.push_back(
+            {base + ".w1.weight", config.intermediate_width, config.width});
+        layer_matrices.push_back(
+            {base + ".w2.weight", config.width, config.intermediate_width});
+        layer_matrices.push_back(
+            {base + ".w3.weight", config.intermediate_width, config.width});
+    }
+    layer_matrices.push_back(
+        {"layers.0.ffn.shared_experts.w1.weight", config.intermediate_width,
+         config.width});
+    layer_matrices.push_back(
+        {"layers.0.ffn.shared_experts.w2.weight", config.width,
+         config.intermediate_width});
+    layer_matrices.push_back(
+        {"layers.0.ffn.shared_experts.w3.weight", config.intermediate_width,
+         config.width});
+    std::size_t packed_matrix_bytes = 0U;
+    bool packed_ok = true;
+    for (const auto& spec : layer_matrices) {
+        const auto found = graph.float_tensors.find(spec.name);
+        CHECK(found != graph.float_tensors.end());
+        if (found == graph.float_tensors.end()) {
+            packed_ok = false;
+            break;
+        }
+        CHECK(found->second.size() == spec.rows * spec.columns);
+        auto encoded = vastloom::inference::quantize_q8_0_reference(
+            found->second, spec.rows, spec.columns,
+            vastloom::inference::kQ8_0BlockElements);
+        CHECK(encoded);
+        if (!encoded) {
+            packed_ok = false;
+            break;
+        }
+        std::vector<float> padded(
+            spec.rows * vastloom::inference::kQ8_0BlockElements);
+        auto decoded = vastloom::inference::dequantize_q8_0(
+            encoded.value(), padded);
+        CHECK(decoded);
+        if (!decoded) {
+            packed_ok = false;
+            break;
+        }
+        std::vector<float> logical(spec.rows * spec.columns);
+        for (std::size_t row = 0U; row < spec.rows; ++row) {
+            std::copy_n(
+                padded.begin() + static_cast<std::ptrdiff_t>(
+                    row * vastloom::inference::kQ8_0BlockElements),
+                spec.columns,
+                logical.begin() + static_cast<std::ptrdiff_t>(row * spec.columns));
+        }
+        quantized_oracle.float_tensors[spec.name] = std::move(logical);
+        packed_matrix_bytes += encoded.value().size();
+        packed_graph.packed_matrices.emplace(
+            spec.name,
+            vastloom::inference::DeepseekV4PackedMatrix{
+                vastloom::inference::kGgmlTypeQ8_0, spec.rows, spec.columns,
+                vastloom::inference::kQ8_0BlockElements, encoded.take_value()});
+        packed_graph.float_tensors.erase(spec.name);
+    }
+    CHECK(layer_matrices.size() == 23U);
+    CHECK(packed_matrix_bytes == 5'236U);
+
+    const std::string hash_table_name = "layers.0.ffn.gate.tid2eid";
+    const auto hash_table = graph.integer_tensors.find(hash_table_name);
+    CHECK(hash_table != graph.integer_tensors.end());
+    if (hash_table != graph.integer_tensors.end()) {
+        std::vector<std::byte> encoded(hash_table->second.size() * 4U);
+        for (std::size_t index = 0U; index < hash_table->second.size(); ++index) {
+            for (unsigned byte = 0U; byte < 4U; ++byte) {
+                encoded[index * 4U + byte] = static_cast<std::byte>(
+                    (hash_table->second[index] >> (byte * 8U)) & 0xffU);
+            }
+        }
+        packed_graph.packed_integer_tensors.emplace(
+            hash_table_name,
+            vastloom::inference::DeepseekV4PackedIntegerTensor{
+                hash_table->second.size(), std::move(encoded)});
+        packed_graph.integer_tensors.erase(hash_table_name);
+    } else {
+        packed_ok = false;
+    }
+    CHECK(packed_graph.packed_matrices.size() == 23U);
+    CHECK(packed_graph.packed_integer_tensors.size() == 1U);
+
+    const auto compare_packed_values = [](std::span<const float> actual,
+                                          std::span<const float> expected,
+                                          float allowed) {
+        CHECK(actual.size() == expected.size());
+        for (std::size_t index = 0U;
+             index < std::min(actual.size(), expected.size()); ++index) {
+            CHECK(std::abs(actual[index] - expected[index]) <= allowed);
+        }
+    };
+    const auto compare_packed_forward = [&](const auto& actual,
+                                            const auto& expected) {
+        compare_packed_values(actual.logits, expected.logits, 3.0e-5F);
+        compare_packed_values(actual.mtp_logits, expected.mtp_logits, 3.0e-5F);
+        CHECK(actual.greedy_token_id == expected.greedy_token_id);
+        CHECK(actual.mtp_greedy_token_id == expected.mtp_greedy_token_id);
+        const auto compare_layers = [&](const auto& actual_layers,
+                                        const auto& expected_layers) {
+            CHECK(actual_layers.size() == expected_layers.size());
+            for (std::size_t layer = 0U;
+                 layer < std::min(actual_layers.size(), expected_layers.size()); ++layer) {
+                CHECK(actual_layers[layer].route.indices ==
+                      expected_layers[layer].route.indices);
+                compare_packed_values(actual_layers[layer].route.weights,
+                                      expected_layers[layer].route.weights,
+                                      3.0e-5F);
+                CHECK(actual_layers[layer].attention_indices ==
+                      expected_layers[layer].attention_indices);
+            }
+        };
+        compare_layers(actual.layers, expected.layers);
+        compare_layers(actual.mtp_layers, expected.mtp_layers);
+    };
+
+    if (packed_ok) {
+        vastloom::inference::DeepseekV4ReferenceState oracle_packed_state;
+        vastloom::inference::DeepseekV4ReferenceState packed_state;
+        auto oracle_packed = vastloom::inference::deepseek_v4_reference_prefill(
+            quantized_oracle, token_ids, &oracle_packed_state);
+        auto packed = vastloom::inference::deepseek_v4_reference_prefill(
+            packed_graph, token_ids, &packed_state);
+        CHECK(oracle_packed && packed);
+        if (oracle_packed && packed) {
+            compare_packed_forward(packed.value(), oracle_packed.value());
+            CHECK(packed_state.next_position == oracle_packed_state.next_position);
+            auto oracle_decoded = vastloom::inference::deepseek_v4_reference_decode(
+                quantized_oracle, 10U, oracle_packed_state);
+            auto packed_decoded = vastloom::inference::deepseek_v4_reference_decode(
+                packed_graph, 10U, packed_state);
+            CHECK(oracle_decoded && packed_decoded);
+            if (oracle_decoded && packed_decoded) {
+                compare_packed_forward(packed_decoded.value(), oracle_decoded.value());
+            }
+
+            auto truncated_graph = packed_graph;
+            truncated_graph.packed_matrices.begin()->second.encoded.pop_back();
+            const auto state_before_truncation = packed_state;
+            CHECK(!vastloom::inference::deepseek_v4_reference_decode(
+                truncated_graph, 12U, packed_state));
+            CHECK(packed_state.next_position == state_before_truncation.next_position);
+            CHECK(packed_state.layers[0].window_key_values ==
+                  state_before_truncation.layers[0].window_key_values);
+
+            auto malformed_descriptor = packed_graph;
+            malformed_descriptor.packed_matrices.begin()->second.logical_columns += 1U;
+            CHECK(!vastloom::inference::deepseek_v4_reference_prefill(
+                malformed_descriptor, token_ids));
+
+            auto negative_route = packed_graph;
+            auto& route_bytes =
+                negative_route.packed_integer_tensors.at(hash_table_name).encoded;
+            std::fill_n(route_bytes.begin(), 4U, std::byte{0xffU});
+            CHECK(!vastloom::inference::deepseek_v4_reference_prefill(
+                negative_route, token_ids));
+
+            auto truncated_route = packed_graph;
+            truncated_route.packed_integer_tensors.at(hash_table_name).encoded.pop_back();
+            CHECK(!vastloom::inference::deepseek_v4_reference_prefill(
+                truncated_route, token_ids));
+        }
+    }
 }
 
 void test_model_store_and_runtime_policy(const std::filesystem::path& root) {

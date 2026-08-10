@@ -69,10 +69,25 @@ struct DeepseekV4ReferenceConfig {
     float swiglu_limit{0.0F};
 };
 
+struct DeepseekV4PackedMatrix {
+    std::uint32_t ggml_type{0U};
+    std::size_t rows{0U};
+    std::size_t logical_columns{0U};
+    std::size_t storage_columns{0U};
+    std::vector<std::byte> encoded;
+};
+
+struct DeepseekV4PackedIntegerTensor {
+    std::size_t elements{0U};
+    std::vector<std::byte> encoded;
+};
+
 struct DeepseekV4ReferenceGraph {
     DeepseekV4ReferenceConfig config;
     std::map<std::string, std::vector<float>, std::less<>> float_tensors;
     std::map<std::string, std::vector<std::uint32_t>, std::less<>> integer_tensors;
+    std::map<std::string, DeepseekV4PackedMatrix, std::less<>> packed_matrices;
+    std::map<std::string, DeepseekV4PackedIntegerTensor, std::less<>> packed_integer_tensors;
 };
 
 struct DeepseekV4ReferenceCompressorState {
@@ -133,6 +148,26 @@ struct DeepseekV4ReferenceForwardResult {
     std::span<const std::uint32_t> token_to_experts,
     std::size_t token_count,
     std::size_t width,
+    std::size_t vocabulary_size,
+    std::size_t expert_count,
+    std::size_t top_k,
+    float route_scale);
+
+// These entry points accept the raw router projection before sqrt-softplus. They let the
+// architecture graph consume a packed GGML matrix without materializing a float weight matrix.
+[[nodiscard]] Result<DeepseekV4RouteResult> deepseek_v4_route_learned_logits(
+    std::span<const float> logits,
+    std::span<const float> selection_bias,
+    std::size_t token_count,
+    std::size_t expert_count,
+    std::size_t top_k,
+    float route_scale);
+
+[[nodiscard]] Result<DeepseekV4RouteResult> deepseek_v4_route_hash_logits(
+    std::span<const float> logits,
+    std::span<const std::uint32_t> token_ids,
+    std::span<const std::uint32_t> token_to_experts,
+    std::size_t token_count,
     std::size_t vocabulary_size,
     std::size_t expert_count,
     std::size_t top_k,

@@ -1,5 +1,7 @@
 #include "vastloom/inference/deepseek_v4_reference.hpp"
 
+#include "vastloom/inference/ggml_quantization.hpp"
+
 #include <algorithm>
 #include <array>
 #include <cmath>
@@ -65,12 +67,33 @@ Result<std::span<const float>> float_tensor(const DeepseekV4ReferenceGraph& grap
     return std::span<const float>(found->second);
 }
 
-Result<std::span<const std::uint32_t>> integer_tensor(
+Result<std::vector<std::uint32_t>> integer_tensor(
     const DeepseekV4ReferenceGraph& graph,
     std::string_view name,
     std::initializer_list<std::size_t> shape) {
     auto expected = bounded_product(shape, std::string(name));
     if (!expected) return expected.error();
+    const auto packed = graph.packed_integer_tensors.find(name);
+    if (packed != graph.packed_integer_tensors.end()) {
+        if (packed->second.elements != expected.value()) {
+            return make_error(ErrorCode::invalid_format,
+                              "DeepSeek packed integer tensor shape does not match",
+                              std::string(name));
+        }
+        std::vector<std::int32_t> decoded(expected.value());
+        auto status = decode_i32_le(packed->second.encoded, decoded);
+        if (!status) return status.error();
+        std::vector<std::uint32_t> result(decoded.size());
+        for (std::size_t index = 0U; index < decoded.size(); ++index) {
+            if (decoded[index] < 0) {
+                return make_error(ErrorCode::invalid_format,
+                                  "DeepSeek packed integer tensor contains a negative index",
+                                  std::string(name) + "[" + std::to_string(index) + "]");
+            }
+            result[index] = static_cast<std::uint32_t>(decoded[index]);
+        }
+        return result;
+    }
     const auto found = graph.integer_tensors.find(name);
     if (found == graph.integer_tensors.end()) {
         return make_error(ErrorCode::invalid_format,
@@ -81,7 +104,7 @@ Result<std::span<const std::uint32_t>> integer_tensor(
                           "DeepSeek graph integer tensor shape does not match",
                           std::string(name));
     }
-    return std::span<const std::uint32_t>(found->second);
+    return found->second;
 }
 
 Result<std::vector<float>> linear(std::span<const float> input,
@@ -114,6 +137,70 @@ Result<std::vector<float>> linear(std::span<const float> input,
         }
     }
     auto finite = finite_values(output, context);
+    if (!finite) return finite.error();
+    return output;
+}
+
+Result<std::vector<float>> linear_tensor(const DeepseekV4ReferenceGraph& graph,
+                                         std::string_view name,
+                                         std::span<const float> input,
+                                         std::size_t rows,
+                                         std::size_t input_width,
+                                         std::size_t output_width,
+                                         std::string_view context) {
+    const auto packed = graph.packed_matrices.find(name);
+    if (packed == graph.packed_matrices.end()) {
+        auto weight = float_tensor(graph, name, {output_width, input_width});
+        if (!weight) return weight.error();
+        return linear(input, weight.value(), rows, input_width, output_width, context);
+    }
+    const auto& matrix = packed->second;
+    if (!supports_reference_matvec_ggml_type(matrix.ggml_type)) {
+        return make_error(ErrorCode::unsupported,
+                          "DeepSeek packed matrix type has no reference matvec",
+                          std::string(name));
+    }
+    if (matrix.rows != output_width || matrix.logical_columns != input_width ||
+        matrix.storage_columns < matrix.logical_columns || matrix.storage_columns == 0U) {
+        return make_error(ErrorCode::invalid_format,
+                          "DeepSeek packed matrix descriptor does not match the graph",
+                          std::string(name));
+    }
+    auto input_count = bounded_product({rows, input_width}, std::string(context) + " input");
+    if (!input_count) return input_count.error();
+    auto output_count = bounded_product({rows, output_width}, std::string(context) + " output");
+    if (!output_count) return output_count.error();
+    auto storage_count = bounded_product({matrix.rows, matrix.storage_columns},
+                                         std::string(name) + " storage shape");
+    if (!storage_count) return storage_count.error();
+    if (input.size() != input_count.value()) {
+        return make_error(ErrorCode::invalid_argument,
+                          "DeepSeek packed matrix input shape does not match",
+                          std::string(context));
+    }
+    auto finite = finite_values(input, context);
+    if (!finite) return finite.error();
+    std::vector<float> padded_input(matrix.storage_columns, 0.0F);
+    std::vector<float> scratch(output_width);
+    std::vector<float> row_output(output_width);
+    std::vector<float> output(output_count.value());
+    QuantizedKernelLimits limits;
+    limits.max_elements = kMaximumGraphElements;
+    for (std::size_t row = 0U; row < rows; ++row) {
+        std::fill(padded_input.begin(), padded_input.end(), 0.0F);
+        std::copy_n(input.begin() + static_cast<std::ptrdiff_t>(row * input_width),
+                    input_width, padded_input.begin());
+        auto multiplied = matvec_ggml_f32_transactional(
+            matrix.ggml_type, matrix.encoded, matrix.rows, matrix.storage_columns,
+            padded_input, scratch, row_output, limits);
+        if (!multiplied) {
+            return make_error(multiplied.error().code, multiplied.error().message,
+                              std::string(name) + ": " + multiplied.error().context);
+        }
+        std::copy(row_output.begin(), row_output.end(),
+                  output.begin() + static_cast<std::ptrdiff_t>(row * output_width));
+    }
+    finite = finite_values(output, context);
     if (!finite) return finite.error();
     return output;
 }
@@ -243,19 +330,15 @@ Result<CompressionResult> compress_prefill(const DeepseekV4ReferenceGraph& graph
     const std::size_t coefficient = overlap ? 2U : 1U;
     const std::size_t projected_width = coefficient * output_width;
     const std::string base(prefix);
-    auto wkv = float_tensor(graph, base + ".wkv.weight", {projected_width, config.width});
-    if (!wkv) return wkv.error();
-    auto wgate = float_tensor(graph, base + ".wgate.weight", {projected_width, config.width});
-    if (!wgate) return wgate.error();
     auto ape = float_tensor(graph, base + ".ape", {ratio, projected_width});
     if (!ape) return ape.error();
     auto norm = float_tensor(graph, base + ".norm.weight", {output_width});
     if (!norm) return norm.error();
-    auto projected = linear(input, wkv.value(), token_count, config.width,
-                            projected_width, base + ".wkv");
+    auto projected = linear_tensor(graph, base + ".wkv.weight", input, token_count,
+                                   config.width, projected_width, base + ".wkv");
     if (!projected) return projected.error();
-    auto scores = linear(input, wgate.value(), token_count, config.width,
-                         projected_width, base + ".wgate");
+    auto scores = linear_tensor(graph, base + ".wgate.weight", input, token_count,
+                                config.width, projected_width, base + ".wgate");
     if (!scores) return scores.error();
     const std::size_t cutoff = token_count - token_count % ratio;
     if (state != nullptr) {
@@ -375,19 +458,17 @@ Result<bool> compress_incremental(const DeepseekV4ReferenceGraph& graph,
         return make_error(ErrorCode::invalid_argument,
                           "DeepSeek compressor incremental state is malformed", base);
     }
-    auto wkv = float_tensor(graph, base + ".wkv.weight", {projected_width, config.width});
-    if (!wkv) return wkv.error();
-    auto wgate = float_tensor(graph, base + ".wgate.weight", {projected_width, config.width});
-    if (!wgate) return wgate.error();
     auto ape = float_tensor(graph, base + ".ape", {ratio, projected_width});
     if (!ape) return ape.error();
     auto norm = float_tensor(graph, base + ".norm.weight", {output_width});
     if (!norm) return norm.error();
-    auto projected = linear(input, wkv.value(), 1U, config.width, projected_width,
-                            base + ".wkv incremental");
+    auto projected = linear_tensor(graph, base + ".wkv.weight", input, 1U,
+                                   config.width, projected_width,
+                                   base + ".wkv incremental");
     if (!projected) return projected.error();
-    auto scores = linear(input, wgate.value(), 1U, config.width, projected_width,
-                         base + ".wgate incremental");
+    auto scores = linear_tensor(graph, base + ".wgate.weight", input, 1U,
+                                config.width, projected_width,
+                                base + ".wgate incremental");
     if (!scores) return scores.error();
     const std::size_t position = start_position % ratio;
     const std::size_t destination = (overlap ? ratio : 0U) + position;
@@ -485,14 +566,10 @@ Result<std::vector<std::int32_t>> indexer_indices(
     DeepseekV4ReferenceCompressorState* state = nullptr) {
     const auto& config = graph.config;
     const std::string base(prefix);
-    auto query_weight = float_tensor(graph, base + ".wq_b.weight",
-                                     {config.index_head_count * config.index_head_width,
-                                      config.query_lora_rank});
-    if (!query_weight) return query_weight.error();
-    auto projected_query = linear(query_rank, query_weight.value(), token_count,
-                                  config.query_lora_rank,
-                                  config.index_head_count * config.index_head_width,
-                                  base + ".wq_b");
+    auto projected_query = linear_tensor(
+        graph, base + ".wq_b.weight", query_rank, token_count,
+        config.query_lora_rank, config.index_head_count * config.index_head_width,
+        base + ".wq_b");
     if (!projected_query) return projected_query.error();
     auto query_rope = apply_rope_tail(projected_query.value(), token_count,
                                       config.index_head_count, config.index_head_width,
@@ -508,11 +585,9 @@ Result<std::vector<std::int32_t>> indexer_indices(
         return make_error(ErrorCode::invalid_format,
                           "DeepSeek indexer compression count does not match");
     }
-    auto projection_weight = float_tensor(graph, base + ".weights_proj.weight",
-                                          {config.index_head_count, config.width});
-    if (!projection_weight) return projection_weight.error();
-    auto head_weights = linear(input, projection_weight.value(), token_count, config.width,
-                               config.index_head_count, base + ".weights_proj");
+    auto head_weights = linear_tensor(
+        graph, base + ".weights_proj.weight", input, token_count, config.width,
+        config.index_head_count, base + ".weights_proj");
     if (!head_weights) return head_weights.error();
     const double head_scale = 1.0 / std::sqrt(static_cast<double>(config.index_head_width)) /
                               std::sqrt(static_cast<double>(config.index_head_count));
@@ -570,14 +645,10 @@ Result<std::vector<std::int32_t>> indexer_indices_incremental(
     DeepseekV4ReferenceCompressorState& state) {
     const auto& config = graph.config;
     const std::string base(prefix);
-    auto query_weight = float_tensor(graph, base + ".wq_b.weight",
-                                     {config.index_head_count * config.index_head_width,
-                                      config.query_lora_rank});
-    if (!query_weight) return query_weight.error();
-    auto projected_query = linear(query_rank, query_weight.value(), 1U,
-                                  config.query_lora_rank,
-                                  config.index_head_count * config.index_head_width,
-                                  base + ".wq_b incremental");
+    auto projected_query = linear_tensor(
+        graph, base + ".wq_b.weight", query_rank, 1U, config.query_lora_rank,
+        config.index_head_count * config.index_head_width,
+        base + ".wq_b incremental");
     if (!projected_query) return projected_query.error();
     auto query_rope = apply_rope_tail(
         projected_query.value(), 1U, config.index_head_count, config.index_head_width,
@@ -598,12 +669,9 @@ Result<std::vector<std::int32_t>> indexer_indices_incremental(
         return make_error(ErrorCode::invalid_argument,
                           "DeepSeek indexer incremental cache length is malformed", base);
     }
-    auto projection_weight = float_tensor(graph, base + ".weights_proj.weight",
-                                          {config.index_head_count, config.width});
-    if (!projection_weight) return projection_weight.error();
-    auto head_weights = linear(input, projection_weight.value(), 1U, config.width,
-                               config.index_head_count,
-                               base + ".weights_proj incremental");
+    auto head_weights = linear_tensor(
+        graph, base + ".weights_proj.weight", input, 1U, config.width,
+        config.index_head_count, base + ".weights_proj incremental");
     if (!head_weights) return head_weights.error();
     const double head_scale = 1.0 / std::sqrt(static_cast<double>(config.index_head_width)) /
                               std::sqrt(static_cast<double>(config.index_head_count));
@@ -673,38 +741,60 @@ Result<AttentionResult> finish_attention(const DeepseekV4ReferenceGraph& graph,
     if (!inverse_rope) return inverse_rope.error();
     const std::size_t group_input =
         config.head_count * config.head_width / config.output_groups;
-    auto wo_a = float_tensor(
-        graph, std::string(base) + ".wo_a.weight",
-        {config.output_groups * config.output_lora_rank, group_input});
-    if (!wo_a) return wo_a.error();
+    const std::string wo_a_name = std::string(base) + ".wo_a.weight";
     auto group_count = bounded_product(
         {token_count, config.output_groups, config.output_lora_rank},
         std::string(base) + ".wo_a output");
     if (!group_count) return group_count.error();
     std::vector<float> grouped(group_count.value());
-    for (std::size_t token = 0U; token < token_count; ++token) {
-        for (std::size_t group = 0U; group < config.output_groups; ++group) {
-            for (std::size_t rank = 0U; rank < config.output_lora_rank; ++rank) {
-                double sum = 0.0;
-                for (std::size_t column = 0U; column < group_input; ++column) {
-                    sum += static_cast<double>(attended.value()[
-                               token * config.head_count * config.head_width +
-                               group * group_input + column]) *
-                           static_cast<double>(wo_a.value()[
-                               (group * config.output_lora_rank + rank) * group_input + column]);
+    if (graph.packed_matrices.contains(wo_a_name)) {
+        for (std::size_t token = 0U; token < token_count; ++token) {
+            for (std::size_t group = 0U; group < config.output_groups; ++group) {
+                const std::span<const float> group_values(
+                    attended.value().data() + static_cast<std::ptrdiff_t>(
+                        token * config.head_count * config.head_width +
+                        group * group_input),
+                    group_input);
+                auto projected_group = linear_tensor(
+                    graph, wo_a_name, group_values, 1U, group_input,
+                    config.output_groups * config.output_lora_rank, wo_a_name);
+                if (!projected_group) return projected_group.error();
+                std::copy_n(
+                    projected_group.value().begin() + static_cast<std::ptrdiff_t>(
+                        group * config.output_lora_rank),
+                    config.output_lora_rank,
+                    grouped.begin() + static_cast<std::ptrdiff_t>(
+                        (token * config.output_groups + group) *
+                        config.output_lora_rank));
+            }
+        }
+    } else {
+        auto wo_a = float_tensor(
+            graph, wo_a_name,
+            {config.output_groups * config.output_lora_rank, group_input});
+        if (!wo_a) return wo_a.error();
+        for (std::size_t token = 0U; token < token_count; ++token) {
+            for (std::size_t group = 0U; group < config.output_groups; ++group) {
+                for (std::size_t rank = 0U; rank < config.output_lora_rank; ++rank) {
+                    double sum = 0.0;
+                    for (std::size_t column = 0U; column < group_input; ++column) {
+                        sum += static_cast<double>(attended.value()[
+                                   token * config.head_count * config.head_width +
+                                   group * group_input + column]) *
+                               static_cast<double>(wo_a.value()[
+                                   (group * config.output_lora_rank + rank) * group_input +
+                                   column]);
+                    }
+                    grouped[(token * config.output_groups + group) *
+                                config.output_lora_rank + rank] = static_cast<float>(sum);
                 }
-                grouped[(token * config.output_groups + group) *
-                            config.output_lora_rank + rank] = static_cast<float>(sum);
             }
         }
     }
-    auto wo_b = float_tensor(
-        graph, std::string(base) + ".wo_b.weight",
-        {config.width, config.output_groups * config.output_lora_rank});
-    if (!wo_b) return wo_b.error();
-    auto projected = linear(grouped, wo_b.value(), token_count,
-                            config.output_groups * config.output_lora_rank,
-                            config.width, std::string(base) + ".wo_b");
+    auto projected = linear_tensor(
+        graph, std::string(base) + ".wo_b.weight", grouped, token_count,
+        config.output_groups * config.output_lora_rank, config.width,
+        std::string(base) + ".wo_b");
     if (!projected) return projected.error();
     result.output = projected.take_value();
     return result;
@@ -718,11 +808,9 @@ Result<AttentionResult> attention_prefill(const DeepseekV4ReferenceGraph& graph,
                                           DeepseekV4ReferenceAttentionState* state = nullptr) {
     const auto& config = graph.config;
     const std::string base = std::string(block_prefix) + ".attn";
-    auto wq_a = float_tensor(graph, base + ".wq_a.weight",
-                             {config.query_lora_rank, config.width});
-    if (!wq_a) return wq_a.error();
-    auto query_rank = linear(input, wq_a.value(), token_count, config.width,
-                             config.query_lora_rank, base + ".wq_a");
+    auto query_rank = linear_tensor(graph, base + ".wq_a.weight", input,
+                                    token_count, config.width,
+                                    config.query_lora_rank, base + ".wq_a");
     if (!query_rank) return query_rank.error();
     auto query_norm_weight = float_tensor(graph, base + ".q_norm.weight",
                                           {config.query_lora_rank});
@@ -731,13 +819,10 @@ Result<AttentionResult> attention_prefill(const DeepseekV4ReferenceGraph& graph,
         query_rank.value(), query_norm_weight.value(), token_count,
         config.query_lora_rank, config.norm_epsilon);
     if (!normalized_query_rank) return normalized_query_rank.error();
-    auto wq_b = float_tensor(graph, base + ".wq_b.weight",
-                             {config.head_count * config.head_width,
-                              config.query_lora_rank});
-    if (!wq_b) return wq_b.error();
-    auto query = linear(normalized_query_rank.value(), wq_b.value(), token_count,
-                        config.query_lora_rank, config.head_count * config.head_width,
-                        base + ".wq_b");
+    auto query = linear_tensor(
+        graph, base + ".wq_b.weight", normalized_query_rank.value(), token_count,
+        config.query_lora_rank, config.head_count * config.head_width,
+        base + ".wq_b");
     if (!query) return query.error();
     auto query_normalized = normalize_attention_queries(query.value(), token_count,
                                                         config.head_count,
@@ -752,11 +837,9 @@ Result<AttentionResult> attention_prefill(const DeepseekV4ReferenceGraph& graph,
                                       config.beta_fast, config.beta_slow, 1U);
     if (!query_rope) return query_rope.error();
 
-    auto wkv = float_tensor(graph, base + ".wkv.weight",
-                            {config.head_width, config.width});
-    if (!wkv) return wkv.error();
-    auto key_value = linear(input, wkv.value(), token_count, config.width,
-                            config.head_width, base + ".wkv");
+    auto key_value = linear_tensor(graph, base + ".wkv.weight", input,
+                                   token_count, config.width, config.head_width,
+                                   base + ".wkv");
     if (!key_value) return key_value.error();
     auto kv_norm_weight = float_tensor(graph, base + ".kv_norm.weight",
                                        {config.head_width});
@@ -867,11 +950,9 @@ Result<AttentionResult> attention_incremental(
         return make_error(ErrorCode::invalid_argument,
                           "DeepSeek incremental attention state is malformed", base);
     }
-    auto wq_a = float_tensor(graph, base + ".wq_a.weight",
-                             {config.query_lora_rank, config.width});
-    if (!wq_a) return wq_a.error();
-    auto query_rank = linear(input, wq_a.value(), 1U, config.width,
-                             config.query_lora_rank, base + ".wq_a incremental");
+    auto query_rank = linear_tensor(graph, base + ".wq_a.weight", input, 1U,
+                                    config.width, config.query_lora_rank,
+                                    base + ".wq_a incremental");
     if (!query_rank) return query_rank.error();
     auto query_norm_weight = float_tensor(graph, base + ".q_norm.weight",
                                           {config.query_lora_rank});
@@ -880,13 +961,10 @@ Result<AttentionResult> attention_incremental(
         query_rank.value(), query_norm_weight.value(), 1U, config.query_lora_rank,
         config.norm_epsilon);
     if (!normalized_query_rank) return normalized_query_rank.error();
-    auto wq_b = float_tensor(graph, base + ".wq_b.weight",
-                             {config.head_count * config.head_width,
-                              config.query_lora_rank});
-    if (!wq_b) return wq_b.error();
-    auto query = linear(normalized_query_rank.value(), wq_b.value(), 1U,
-                        config.query_lora_rank, config.head_count * config.head_width,
-                        base + ".wq_b incremental");
+    auto query = linear_tensor(
+        graph, base + ".wq_b.weight", normalized_query_rank.value(), 1U,
+        config.query_lora_rank, config.head_count * config.head_width,
+        base + ".wq_b incremental");
     if (!query) return query.error();
     auto query_normalized = normalize_attention_queries(
         query.value(), 1U, config.head_count, config.head_width, config.norm_epsilon);
@@ -899,11 +977,9 @@ Result<AttentionResult> attention_incremental(
         1U, false, start_position);
     if (!query_rope) return query_rope.error();
 
-    auto wkv = float_tensor(graph, base + ".wkv.weight",
-                            {config.head_width, config.width});
-    if (!wkv) return wkv.error();
-    auto key_value = linear(input, wkv.value(), 1U, config.width, config.head_width,
-                            base + ".wkv incremental");
+    auto key_value = linear_tensor(graph, base + ".wkv.weight", input, 1U,
+                                   config.width, config.head_width,
+                                   base + ".wkv incremental");
     if (!key_value) return key_value.error();
     auto kv_norm_weight = float_tensor(graph, base + ".kv_norm.weight",
                                        {config.head_width});
@@ -984,18 +1060,50 @@ Result<std::vector<float>> execute_expert(const DeepseekV4ReferenceGraph& graph,
                                           std::size_t tokens) {
     const auto& config = graph.config;
     const std::string base(prefix);
-    auto gate = float_tensor(graph, base + ".w1.weight",
-                             {config.intermediate_width, config.width});
+    if (tokens == 0U || !std::isfinite(config.swiglu_limit) ||
+        config.swiglu_limit < 0.0F) {
+        return make_error(ErrorCode::invalid_argument,
+                          "DeepSeek graph expert dimensions or clamp are invalid", base);
+    }
+    if (!routing.empty() && routing.size() != tokens) {
+        return make_error(ErrorCode::invalid_argument,
+                          "DeepSeek graph expert routing shape does not match", base);
+    }
+    auto routing_finite = finite_values(routing, base + " routing");
+    if (!routing_finite) return routing_finite.error();
+    auto gate = linear_tensor(graph, base + ".w1.weight", input, tokens,
+                              config.width, config.intermediate_width,
+                              base + ".w1");
     if (!gate) return gate.error();
-    auto down = float_tensor(graph, base + ".w2.weight",
-                             {config.width, config.intermediate_width});
-    if (!down) return down.error();
-    auto up = float_tensor(graph, base + ".w3.weight",
-                           {config.intermediate_width, config.width});
+    auto up = linear_tensor(graph, base + ".w3.weight", input, tokens,
+                            config.width, config.intermediate_width,
+                            base + ".w3");
     if (!up) return up.error();
-    return deepseek_v4_expert_swiglu(input, gate.value(), down.value(), up.value(),
-                                     routing, tokens, config.width,
-                                     config.intermediate_width, config.swiglu_limit);
+    auto activated_count = bounded_product(
+        {tokens, config.intermediate_width}, base + " activated values");
+    if (!activated_count) return activated_count.error();
+    std::vector<float> activated(activated_count.value());
+    for (std::size_t token = 0U; token < tokens; ++token) {
+        for (std::size_t column = 0U; column < config.intermediate_width; ++column) {
+            double gate_value = static_cast<double>(
+                gate.value()[token * config.intermediate_width + column]);
+            double up_value = static_cast<double>(
+                up.value()[token * config.intermediate_width + column]);
+            if (config.swiglu_limit > 0.0F) {
+                gate_value = std::min(gate_value,
+                                      static_cast<double>(config.swiglu_limit));
+                up_value = std::clamp(up_value,
+                                      -static_cast<double>(config.swiglu_limit),
+                                      static_cast<double>(config.swiglu_limit));
+            }
+            double value = gate_value / (1.0 + std::exp(-gate_value)) * up_value;
+            if (!routing.empty()) value *= static_cast<double>(routing[token]);
+            activated[token * config.intermediate_width + column] =
+                static_cast<float>(value);
+        }
+    }
+    return linear_tensor(graph, base + ".w2.weight", activated, tokens,
+                         config.intermediate_width, config.width, base + ".w2");
 }
 
 struct MoeResult {
@@ -1011,25 +1119,26 @@ Result<MoeResult> moe_forward(const DeepseekV4ReferenceGraph& graph,
                               std::size_t token_count) {
     const auto& config = graph.config;
     const std::string base = std::string(block_prefix) + ".ffn";
-    auto gate_weight = float_tensor(graph, base + ".gate.weight",
-                                    {config.expert_count, config.width});
-    if (!gate_weight) return gate_weight.error();
+    auto gate_logits = linear_tensor(graph, base + ".gate.weight", input,
+                                     token_count, config.width,
+                                     config.expert_count, base + ".gate");
+    if (!gate_logits) return gate_logits.error();
     Result<DeepseekV4RouteResult> route = make_error(
         ErrorCode::internal_error, "DeepSeek route was not initialized");
     if (hash_route) {
         auto table = integer_tensor(graph, base + ".gate.tid2eid",
                                     {config.vocabulary_size, config.experts_per_token});
         if (!table) return table.error();
-        route = deepseek_v4_route_hash(input, gate_weight.value(), token_ids, table.value(),
-                                       token_count, config.width, config.vocabulary_size,
-                                       config.expert_count, config.experts_per_token,
-                                       config.route_scale);
+        route = deepseek_v4_route_hash_logits(
+            gate_logits.value(), token_ids, table.value(), token_count,
+            config.vocabulary_size, config.expert_count,
+            config.experts_per_token, config.route_scale);
     } else {
         auto bias = float_tensor(graph, base + ".gate.bias", {config.expert_count});
         if (!bias) return bias.error();
-        route = deepseek_v4_route_learned(input, gate_weight.value(), bias.value(),
-                                          token_count, config.width, config.expert_count,
-                                          config.experts_per_token, config.route_scale);
+        route = deepseek_v4_route_learned_logits(
+            gate_logits.value(), bias.value(), token_count, config.expert_count,
+            config.experts_per_token, config.route_scale);
     }
     if (!route) return route.error();
     auto output_count = bounded_product({token_count, config.width}, base + " output");
@@ -1077,17 +1186,76 @@ Result<DeepseekV4HyperConnectionPreResult> hc_pre(
     const auto& config = graph.config;
     const std::string base(prefix);
     const std::size_t mix_width = (2U + config.hyper_multiplier) * config.hyper_multiplier;
-    auto function = float_tensor(graph, base + "_fn",
-                                 {mix_width, config.hyper_multiplier * config.width});
-    if (!function) return function.error();
     auto scale = float_tensor(graph, base + "_scale", {3U});
     if (!scale) return scale.error();
     auto bias = float_tensor(graph, base + "_base", {mix_width});
     if (!bias) return bias.error();
-    return deepseek_v4_hc_pre(input, function.value(), scale.value(), bias.value(),
-                              token_count, config.hyper_multiplier, config.width,
-                              config.sinkhorn_iterations, config.norm_epsilon,
-                              config.hyper_epsilon);
+    const std::string function_name = base + "_fn";
+    if (!graph.packed_matrices.contains(function_name)) {
+        auto function = float_tensor(
+            graph, function_name,
+            {mix_width, config.hyper_multiplier * config.width});
+        if (!function) return function.error();
+        return deepseek_v4_hc_pre(input, function.value(), scale.value(), bias.value(),
+                                  token_count, config.hyper_multiplier, config.width,
+                                  config.sinkhorn_iterations, config.norm_epsilon,
+                                  config.hyper_epsilon);
+    }
+    const std::size_t flattened_width = config.hyper_multiplier * config.width;
+    auto input_count = bounded_product({token_count, flattened_width}, base + " input");
+    if (!input_count) return input_count.error();
+    if (input.size() != input_count.value() || !std::isfinite(config.norm_epsilon) ||
+        config.norm_epsilon <= 0.0F) {
+        return make_error(ErrorCode::invalid_argument,
+                          "DeepSeek packed Hyper-Connection input is invalid", base);
+    }
+    auto input_finite = finite_values(input, base + " input");
+    if (!input_finite) return input_finite.error();
+    std::vector<float> normalized(input.size());
+    for (std::size_t token = 0U; token < token_count; ++token) {
+        double squares = 0.0;
+        for (std::size_t column = 0U; column < flattened_width; ++column) {
+            const double value = static_cast<double>(
+                input[token * flattened_width + column]);
+            squares += value * value;
+        }
+        const double inverse = 1.0 / std::sqrt(
+            squares / static_cast<double>(flattened_width) +
+            static_cast<double>(config.norm_epsilon));
+        for (std::size_t column = 0U; column < flattened_width; ++column) {
+            normalized[token * flattened_width + column] = static_cast<float>(
+                static_cast<double>(input[token * flattened_width + column]) * inverse);
+        }
+    }
+    auto mixes = linear_tensor(graph, function_name, normalized, token_count,
+                               flattened_width, mix_width, base + " mixes");
+    if (!mixes) return mixes.error();
+    auto split = deepseek_v4_hc_split_sinkhorn(
+        mixes.value(), scale.value(), bias.value(), token_count,
+        config.hyper_multiplier, config.sinkhorn_iterations, config.hyper_epsilon);
+    if (!split) return split.error();
+    DeepseekV4HyperConnectionPreResult result;
+    result.width = config.width;
+    result.split = split.take_value();
+    auto reduced_count = bounded_product({token_count, config.width}, base + " reduced");
+    if (!reduced_count) return reduced_count.error();
+    result.reduced.resize(reduced_count.value());
+    for (std::size_t token = 0U; token < token_count; ++token) {
+        for (std::size_t column = 0U; column < config.width; ++column) {
+            double value = 0.0;
+            for (std::size_t copy = 0U; copy < config.hyper_multiplier; ++copy) {
+                value += static_cast<double>(
+                             result.split.pre[token * config.hyper_multiplier + copy]) *
+                         static_cast<double>(input[
+                             (token * config.hyper_multiplier + copy) * config.width +
+                             column]);
+            }
+            result.reduced[token * config.width + column] = static_cast<float>(value);
+        }
+    }
+    auto reduced_finite = finite_values(result.reduced, base + " reduced");
+    if (!reduced_finite) return reduced_finite.error();
+    return result;
 }
 
 struct BlockResult {
@@ -1212,15 +1380,13 @@ Result<std::vector<float>> hc_head(const DeepseekV4ReferenceGraph& graph,
     const auto& config = graph.config;
     const std::size_t flattened_width = config.hyper_multiplier * config.width;
     const std::string prefix(tensor_prefix);
-    auto function = float_tensor(graph, prefix + "hc_head_fn",
-                                 {config.hyper_multiplier, flattened_width});
-    if (!function) return function.error();
     auto scale = float_tensor(graph, prefix + "hc_head_scale", {1U});
     if (!scale) return scale.error();
     auto base = float_tensor(graph, prefix + "hc_head_base", {config.hyper_multiplier});
     if (!base) return base.error();
-    auto mixes = linear(input, function.value(), token_count, flattened_width,
-                        config.hyper_multiplier, "DeepSeek HC head");
+    auto mixes = linear_tensor(graph, prefix + "hc_head_fn", input, token_count,
+                               flattened_width, config.hyper_multiplier,
+                               "DeepSeek HC head");
     if (!mixes) return mixes.error();
     auto output_count = bounded_product({token_count, config.width}, "DeepSeek HC head output");
     if (!output_count) return output_count.error();
@@ -1265,14 +1431,12 @@ Result<std::vector<float>> final_logits(const DeepseekV4ReferenceGraph& graph,
     auto normalized = deepseek_v4_rms_norm(reduced.value(), norm_weight.value(), token_count,
                                            config.width, config.norm_epsilon);
     if (!normalized) return normalized.error();
-    auto head = float_tensor(graph, "head.weight", {config.vocabulary_size, config.width});
-    if (!head) return head.error();
     const std::span<const float> final_hidden(
         normalized.value().data() +
             static_cast<std::ptrdiff_t>((token_count - 1U) * config.width),
         config.width);
-    return linear(final_hidden, head.value(), 1U, config.width,
-                  config.vocabulary_size, prefix + "LM head");
+    return linear_tensor(graph, "head.weight", final_hidden, 1U, config.width,
+                         config.vocabulary_size, prefix + "LM head");
 }
 
 Result<void> validate_graph(const DeepseekV4ReferenceGraph& graph,
@@ -1600,18 +1764,12 @@ Result<DeepseekV4ReferenceForwardResult> deepseek_v4_reference_prefill(
             hidden, hidden_norm_weight.value(), token_count * config.hyper_multiplier,
             config.width, config.norm_epsilon);
         if (!normalized_hidden) return normalized_hidden.error();
-        auto embedding_projection_weight = float_tensor(
-            graph, mtp_base + ".e_proj.weight", {config.width, config.width});
-        if (!embedding_projection_weight) return embedding_projection_weight.error();
-        auto embedding_projection = linear(
-            normalized_embedding.value(), embedding_projection_weight.value(), token_count,
-            config.width, config.width, mtp_base + ".e_proj");
+        auto embedding_projection = linear_tensor(
+            graph, mtp_base + ".e_proj.weight", normalized_embedding.value(),
+            token_count, config.width, config.width, mtp_base + ".e_proj");
         if (!embedding_projection) return embedding_projection.error();
-        auto hidden_projection_weight = float_tensor(
-            graph, mtp_base + ".h_proj.weight", {config.width, config.width});
-        if (!hidden_projection_weight) return hidden_projection_weight.error();
-        auto hidden_projection = linear(
-            normalized_hidden.value(), hidden_projection_weight.value(),
+        auto hidden_projection = linear_tensor(
+            graph, mtp_base + ".h_proj.weight", normalized_hidden.value(),
             token_count * config.hyper_multiplier, config.width, config.width,
             mtp_base + ".h_proj");
         if (!hidden_projection) return hidden_projection.error();
@@ -1718,18 +1876,12 @@ Result<DeepseekV4ReferenceForwardResult> deepseek_v4_reference_decode(
             hidden, hidden_norm_weight.value(), config.hyper_multiplier,
             config.width, config.norm_epsilon);
         if (!normalized_hidden) return normalized_hidden.error();
-        auto embedding_projection_weight = float_tensor(
-            graph, mtp_base + ".e_proj.weight", {config.width, config.width});
-        if (!embedding_projection_weight) return embedding_projection_weight.error();
-        auto embedding_projection = linear(
-            normalized_embedding.value(), embedding_projection_weight.value(), 1U,
+        auto embedding_projection = linear_tensor(
+            graph, mtp_base + ".e_proj.weight", normalized_embedding.value(), 1U,
             config.width, config.width, mtp_base + ".e_proj incremental");
         if (!embedding_projection) return embedding_projection.error();
-        auto hidden_projection_weight = float_tensor(
-            graph, mtp_base + ".h_proj.weight", {config.width, config.width});
-        if (!hidden_projection_weight) return hidden_projection_weight.error();
-        auto hidden_projection = linear(
-            normalized_hidden.value(), hidden_projection_weight.value(),
+        auto hidden_projection = linear_tensor(
+            graph, mtp_base + ".h_proj.weight", normalized_hidden.value(),
             config.hyper_multiplier, config.width, config.width,
             mtp_base + ".h_proj incremental");
         if (!hidden_projection) return hidden_projection.error();

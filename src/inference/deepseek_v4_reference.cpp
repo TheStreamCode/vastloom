@@ -120,11 +120,15 @@ Result<DeepseekV4RouteResult> route_from_indices(
     return result;
 }
 
-Result<std::vector<float>> gate_scores(std::span<const float> input,
+Result<std::vector<float>> gate_logits(std::span<const float> input,
                                        std::span<const float> gate_weight,
                                        std::size_t token_count,
                                        std::size_t width,
                                        std::size_t expert_count) {
+    if (token_count == 0U || width == 0U || expert_count == 0U) {
+        return make_error(ErrorCode::invalid_argument,
+                          "DeepSeek gate projection dimensions are invalid");
+    }
     auto input_size = require_size(input.size(), {token_count, width}, "gate input");
     if (!input_size) return input_size.error();
     auto weight_size = require_size(gate_weight.size(), {expert_count, width}, "gate weight");
@@ -133,7 +137,7 @@ Result<std::vector<float>> gate_scores(std::span<const float> input,
     if (!input_finite) return input_finite.error();
     auto weight_finite = require_finite(gate_weight, "gate weight");
     if (!weight_finite) return weight_finite.error();
-    auto output_size = checked_product({token_count, expert_count}, "gate scores");
+    auto output_size = checked_product({token_count, expert_count}, "gate logits");
     if (!output_size) return output_size.error();
     std::vector<float> scores(output_size.value());
     for (std::size_t token = 0U; token < token_count; ++token) {
@@ -143,9 +147,21 @@ Result<std::vector<float>> gate_scores(std::span<const float> input,
                 sum += static_cast<double>(input[token * width + column]) *
                        static_cast<double>(gate_weight[expert * width + column]);
             }
-            scores[token * expert_count + expert] = sqrt_softplus(static_cast<float>(sum));
+            scores[token * expert_count + expert] = static_cast<float>(sum);
         }
     }
+    return scores;
+}
+
+Result<std::vector<float>> activate_gate_logits(std::span<const float> logits,
+                                                std::size_t token_count,
+                                                std::size_t expert_count) {
+    auto size = require_size(logits.size(), {token_count, expert_count}, "gate logits");
+    if (!size) return size.error();
+    auto finite = require_finite(logits, "gate logits");
+    if (!finite) return finite.error();
+    std::vector<float> scores(logits.size());
+    std::transform(logits.begin(), logits.end(), scores.begin(), sqrt_softplus);
     return scores;
 }
 
@@ -198,14 +214,27 @@ Result<DeepseekV4RouteResult> deepseek_v4_route_learned(
     std::size_t expert_count,
     std::size_t top_k,
     float route_scale) {
-    if (top_k == 0U || top_k > expert_count || expert_count == 0U || width == 0U || token_count == 0U) {
+    auto logits = gate_logits(input, gate_weight, token_count, width, expert_count);
+    if (!logits) return logits.error();
+    return deepseek_v4_route_learned_logits(
+        logits.value(), selection_bias, token_count, expert_count, top_k, route_scale);
+}
+
+Result<DeepseekV4RouteResult> deepseek_v4_route_learned_logits(
+    std::span<const float> logits,
+    std::span<const float> selection_bias,
+    std::size_t token_count,
+    std::size_t expert_count,
+    std::size_t top_k,
+    float route_scale) {
+    if (top_k == 0U || top_k > expert_count || expert_count == 0U || token_count == 0U) {
         return make_error(ErrorCode::invalid_argument, "DeepSeek learned route dimensions are invalid");
     }
     auto bias_size = require_size(selection_bias.size(), {expert_count}, "gate selection bias");
     if (!bias_size) return bias_size.error();
     auto bias_finite = require_finite(selection_bias, "gate selection bias");
     if (!bias_finite) return bias_finite.error();
-    auto scores = gate_scores(input, gate_weight, token_count, width, expert_count);
+    auto scores = activate_gate_logits(logits, token_count, expert_count);
     if (!scores) return scores.error();
     std::vector<std::uint32_t> indices(token_count * top_k);
     std::vector<std::uint32_t> order(expert_count);
@@ -236,14 +265,31 @@ Result<DeepseekV4RouteResult> deepseek_v4_route_hash(
     std::size_t expert_count,
     std::size_t top_k,
     float route_scale) {
-    if (top_k == 0U || top_k > expert_count || token_count == 0U || width == 0U || vocabulary_size == 0U) {
+    auto logits = gate_logits(input, gate_weight, token_count, width, expert_count);
+    if (!logits) return logits.error();
+    return deepseek_v4_route_hash_logits(
+        logits.value(), token_ids, token_to_experts, token_count, vocabulary_size,
+        expert_count, top_k, route_scale);
+}
+
+Result<DeepseekV4RouteResult> deepseek_v4_route_hash_logits(
+    std::span<const float> logits,
+    std::span<const std::uint32_t> token_ids,
+    std::span<const std::uint32_t> token_to_experts,
+    std::size_t token_count,
+    std::size_t vocabulary_size,
+    std::size_t expert_count,
+    std::size_t top_k,
+    float route_scale) {
+    if (top_k == 0U || top_k > expert_count || token_count == 0U ||
+        vocabulary_size == 0U || expert_count == 0U) {
         return make_error(ErrorCode::invalid_argument, "DeepSeek hash route dimensions are invalid");
     }
     auto token_size = require_size(token_ids.size(), {token_count}, "hash route token ids");
     if (!token_size) return token_size.error();
     auto map_size = require_size(token_to_experts.size(), {vocabulary_size, top_k}, "hash route table");
     if (!map_size) return map_size.error();
-    auto scores = gate_scores(input, gate_weight, token_count, width, expert_count);
+    auto scores = activate_gate_logits(logits, token_count, expert_count);
     if (!scores) return scores.error();
     std::vector<std::uint32_t> indices(token_count * top_k);
     for (std::size_t token = 0U; token < token_count; ++token) {

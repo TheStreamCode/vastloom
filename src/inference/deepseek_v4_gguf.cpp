@@ -12,6 +12,7 @@
 #include <string_view>
 
 #include "vastloom/model/imported_checkpoint.hpp"
+#include "vastloom/model/layer_streaming.hpp"
 #include "vastloom/util/json.hpp"
 #include "vastloom/util/sha256.hpp"
 #include "vastloom/util/string.hpp"
@@ -26,7 +27,7 @@ struct ParsedExpertTensor {
     ExpertProjection projection{ExpertProjection::down};
 };
 
-std::optional<ParsedExpertTensor> parse_expert_tensor_name(std::string_view name) {
+std::optional<std::uint32_t> parse_block_layer(std::string_view name) {
     constexpr std::string_view prefix = "blk.";
     if (!util::starts_with(name, prefix)) return std::nullopt;
     const auto separator = name.find('.', prefix.size());
@@ -34,10 +35,18 @@ std::optional<ParsedExpertTensor> parse_expert_tensor_name(std::string_view name
     std::uint32_t layer = 0U;
     const auto converted = std::from_chars(name.data() + prefix.size(), name.data() + separator, layer);
     if (converted.ec != std::errc{} || converted.ptr != name.data() + separator) return std::nullopt;
+    return layer;
+}
+
+std::optional<ParsedExpertTensor> parse_expert_tensor_name(std::string_view name) {
+    const auto layer = parse_block_layer(name);
+    if (!layer.has_value()) return std::nullopt;
+    constexpr std::string_view prefix = "blk.";
+    const auto separator = name.find('.', prefix.size());
     const auto suffix = name.substr(separator);
-    if (suffix == ".ffn_down_exps.weight") return ParsedExpertTensor{layer, ExpertProjection::down};
-    if (suffix == ".ffn_gate_exps.weight") return ParsedExpertTensor{layer, ExpertProjection::gate};
-    if (suffix == ".ffn_up_exps.weight") return ParsedExpertTensor{layer, ExpertProjection::up};
+    if (suffix == ".ffn_down_exps.weight") return ParsedExpertTensor{*layer, ExpertProjection::down};
+    if (suffix == ".ffn_gate_exps.weight") return ParsedExpertTensor{*layer, ExpertProjection::gate};
+    if (suffix == ".ffn_up_exps.weight") return ParsedExpertTensor{*layer, ExpertProjection::up};
     return std::nullopt;
 }
 
@@ -444,12 +453,19 @@ Result<DeepseekV4GgufCatalogReport> build_deepseek_v4_gguf_catalog(
             }
             const auto parsed = parse_expert_tensor_name(tensor.name);
             if (!parsed.has_value()) {
+                const auto block_layer = parse_block_layer(tensor.name);
+                if ((util::starts_with(tensor.name, "blk.") && !block_layer.has_value()) ||
+                    (block_layer.has_value() && *block_layer >= options.layers)) {
+                    return make_error(ErrorCode::invalid_format,
+                                      "DeepSeek GGUF block tensor layer identity is invalid",
+                                      tensor.name);
+                }
                 logical.tensors.push_back(model::LogicalTensorDescriptor{
                     tensor.name,
                     logical_dtype(tensor.ggml_type),
                     tensor.shape,
                     classify_always_active(tensor.name),
-                    std::nullopt,
+                    block_layer,
                     std::nullopt,
                     false,
                     model::TensorSourceRange{source_path, tensor.absolute_offset, *tensor.encoded_bytes},
@@ -522,6 +538,41 @@ Result<DeepseekV4GgufCatalogReport> build_deepseek_v4_gguf_catalog(
                               options.model_id);
         }
 
+        ByteCount minimum_layer_trunk_bytes = std::numeric_limits<ByteCount>::max();
+        ByteCount maximum_layer_trunk_bytes = 0U;
+        ByteCount maximum_layer_trunk_tensor_bytes = 0U;
+        ByteCount maximum_layer_trunk_tile_bytes = 0U;
+        std::size_t layer_trunk_planned_layers = 0U;
+        std::size_t layer_trunk_tensor_count = 0U;
+        std::size_t layer_trunk_tile_count = 0U;
+        for (std::uint32_t layer = 0U; layer < options.layers; ++layer) {
+            auto plan = model::build_layer_streaming_plan(logical, layer);
+            if (!plan) {
+                if (plan.error().code == ErrorCode::not_found) continue;
+                return plan.error();
+            }
+            if (layer_trunk_tensor_count > std::numeric_limits<std::size_t>::max() -
+                                               plan.value().tensor_count ||
+                layer_trunk_tile_count > std::numeric_limits<std::size_t>::max() -
+                                             plan.value().tiles.size()) {
+                return make_error(ErrorCode::invalid_format,
+                                  "DeepSeek GGUF layer streaming totals overflow",
+                                  options.model_id);
+            }
+            ++layer_trunk_planned_layers;
+            layer_trunk_tensor_count += plan.value().tensor_count;
+            layer_trunk_tile_count += plan.value().tiles.size();
+            minimum_layer_trunk_bytes =
+                std::min(minimum_layer_trunk_bytes, plan.value().trunk_tensor_bytes);
+            maximum_layer_trunk_bytes =
+                std::max(maximum_layer_trunk_bytes, plan.value().trunk_tensor_bytes);
+            maximum_layer_trunk_tensor_bytes =
+                std::max(maximum_layer_trunk_tensor_bytes, plan.value().maximum_tensor_bytes);
+            maximum_layer_trunk_tile_bytes =
+                std::max(maximum_layer_trunk_tile_bytes, plan.value().maximum_tile_bytes);
+        }
+        if (layer_trunk_planned_layers == 0U) minimum_layer_trunk_bytes = 0U;
+
         std::vector<std::optional<ByteCount>> layer_bundle_bytes(options.layers);
         ByteCount minimum = std::numeric_limits<ByteCount>::max();
         ByteCount maximum = 0U;
@@ -567,6 +618,14 @@ Result<DeepseekV4GgufCatalogReport> build_deepseek_v4_gguf_catalog(
         report.no_cache_expert_bytes_per_token = no_cache_bytes;
         report.minimum_expert_bundle_bytes = minimum;
         report.maximum_expert_bundle_bytes = maximum;
+        report.layer_streaming_tile_limit_bytes = model::kDefaultLayerStreamingTileBytes;
+        report.minimum_layer_trunk_bytes = minimum_layer_trunk_bytes;
+        report.maximum_layer_trunk_bytes = maximum_layer_trunk_bytes;
+        report.maximum_layer_trunk_tensor_bytes = maximum_layer_trunk_tensor_bytes;
+        report.maximum_layer_trunk_tile_bytes = maximum_layer_trunk_tile_bytes;
+        report.layer_trunk_planned_layers = layer_trunk_planned_layers;
+        report.layer_trunk_tensor_count = layer_trunk_tensor_count;
+        report.layer_trunk_tile_count = layer_trunk_tile_count;
         report.context_tokens = options.context_tokens;
         report.maximum_context_tokens = working_set.value().maximum_context_tokens;
         report.batch_size = options.batch_size;
@@ -808,6 +867,15 @@ std::string to_json(const DeepseekV4GgufCatalogReport& report) {
            << ",\"routed_expert_bytes\":" << report.catalog.routed_expert_bytes
            << ",\"minimum_expert_bundle_bytes\":" << report.minimum_expert_bundle_bytes
            << ",\"maximum_expert_bundle_bytes\":" << report.maximum_expert_bundle_bytes
+           << ",\"layer_streaming\":{\"tile_limit_bytes\":"
+           << report.layer_streaming_tile_limit_bytes
+           << ",\"planned_layers\":" << report.layer_trunk_planned_layers
+           << ",\"tensor_count\":" << report.layer_trunk_tensor_count
+           << ",\"tile_count\":" << report.layer_trunk_tile_count
+           << ",\"minimum_layer_trunk_bytes\":" << report.minimum_layer_trunk_bytes
+           << ",\"maximum_layer_trunk_bytes\":" << report.maximum_layer_trunk_bytes
+           << ",\"maximum_tensor_bytes\":" << report.maximum_layer_trunk_tensor_bytes
+           << ",\"maximum_tile_bytes\":" << report.maximum_layer_trunk_tile_bytes << '}'
            << ",\"working_set\":{\"context_tokens\":" << report.context_tokens
            << ",\"maximum_context_tokens\":" << report.maximum_context_tokens
            << ",\"batch_size\":" << report.batch_size
@@ -866,6 +934,16 @@ std::string to_text(const DeepseekV4GgufCatalogReport& report) {
            << "Routed expert bytes: " << format_bytes(report.catalog.routed_expert_bytes) << '\n'
            << "Expert bundle range: " << format_bytes(report.minimum_expert_bundle_bytes)
            << " - " << format_bytes(report.maximum_expert_bundle_bytes) << '\n'
+           << "Layer trunk plans:   " << report.layer_trunk_planned_layers << " / "
+           << report.layers << ", " << report.layer_trunk_tensor_count << " tensors, "
+           << report.layer_trunk_tile_count << " tiles" << '\n'
+           << "Layer trunk range:   " << format_bytes(report.minimum_layer_trunk_bytes)
+           << " - " << format_bytes(report.maximum_layer_trunk_bytes) << '\n'
+           << "Largest trunk tensor:" << ' '
+           << format_bytes(report.maximum_layer_trunk_tensor_bytes) << '\n'
+           << "Bounded tile maximum:" << ' '
+           << format_bytes(report.maximum_layer_trunk_tile_bytes) << " / "
+           << format_bytes(report.layer_streaming_tile_limit_bytes) << '\n'
            << "Context assumption:  " << report.context_tokens << " / "
            << report.maximum_context_tokens << " tokens, batch " << report.batch_size << '\n'
            << "Persistent KV:       " << format_bytes(report.persistent_kv_bytes) << '\n'

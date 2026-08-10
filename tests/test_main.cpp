@@ -1,3 +1,4 @@
+#include <algorithm>
 #include <array>
 #include <atomic>
 #include <bit>
@@ -31,6 +32,7 @@
 #include "vastloom/model/imported_checkpoint.hpp"
 #include "vastloom/model/expert_loader.hpp"
 #include "vastloom/model/gguf.hpp"
+#include "vastloom/model/layer_streaming.hpp"
 #include "vastloom/model/model_store.hpp"
 #include "vastloom/model/residency.hpp"
 #include "vastloom/model/safetensors.hpp"
@@ -345,6 +347,18 @@ void test_gguf(const std::filesystem::path& root) {
     write_bytes(oversized_architecture_path, oversized_architecture);
     auto oversized_architecture_file = vastloom::model::GgufFile::open(
         oversized_architecture_path, deepseek_limits);
+    auto malformed_layer = full;
+    constexpr std::string_view layer_name = "blk.0.ffn_down_exps.weight";
+    const auto layer_name_position = std::search(malformed_layer.begin(), malformed_layer.end(),
+                                                 layer_name.begin(), layer_name.end());
+    CHECK(layer_name_position != malformed_layer.end());
+    if (layer_name_position != malformed_layer.end()) {
+        *(layer_name_position + 4) = static_cast<unsigned char>('x');
+    }
+    const auto malformed_layer_path = directory / "malformed-layer.gguf";
+    write_bytes(malformed_layer_path, malformed_layer);
+    auto malformed_layer_file = vastloom::model::GgufFile::open(
+        malformed_layer_path, deepseek_limits);
     CHECK(gguf && gguf.value().version() == 3U && gguf.value().alignment() == 32U &&
           gguf.value().data_offset() == data_offset && !gguf.value().header_only() &&
           gguf.value().metadata().size() == 22U && gguf.value().tensors().size() == 3U);
@@ -440,7 +454,7 @@ void test_gguf(const std::filesystem::path& root) {
     append_u32_le(continuation, static_cast<std::uint32_t>(vastloom::model::GgufValueType::uint16));
     continuation.push_back(2U);
     continuation.push_back(0U);
-    append_gguf_string(continuation, "output.weight");
+    append_gguf_string(continuation, "blk.0.attn_output.weight");
     append_u32_le(continuation, 1U);
     append_u64_le(continuation, 1U);
     append_u32_le(continuation, 0U);
@@ -475,6 +489,13 @@ void test_gguf(const std::filesystem::path& root) {
                   mapped.value().catalog.experts.size() == 2U &&
                   mapped.value().catalog.routed_expert_bytes == 204U &&
                   mapped.value().catalog.always_active_bytes == 4U &&
+                  mapped.value().layer_trunk_planned_layers == 1U &&
+                  mapped.value().layer_trunk_tensor_count == 1U &&
+                  mapped.value().layer_trunk_tile_count == 1U &&
+                  mapped.value().minimum_layer_trunk_bytes == 4U &&
+                  mapped.value().maximum_layer_trunk_bytes == 4U &&
+                  mapped.value().maximum_layer_trunk_tensor_bytes == 4U &&
+                  mapped.value().maximum_layer_trunk_tile_bytes == 4U &&
                   mapped.value().minimum_expert_bundle_bytes == 102U &&
                   mapped.value().maximum_expert_bundle_bytes == 102U &&
                   mapped.value().no_cache_expert_bytes_per_token == 102U &&
@@ -546,6 +567,26 @@ void test_gguf(const std::filesystem::path& root) {
             options.context_tokens = 128U;
             CHECK(!vastloom::inference::build_deepseek_v4_gguf_catalog(
                 oversized_catalog.value(), options));
+        }
+    }
+
+    if (malformed_layer_file && continuation_file) {
+        std::vector<vastloom::model::GgufFile> malformed_parts;
+        malformed_parts.push_back(malformed_layer_file.take_value());
+        malformed_parts.push_back(continuation_file.value());
+        auto malformed_catalog = vastloom::model::finalize_gguf_split_catalog(
+            std::move(malformed_parts));
+        CHECK(malformed_catalog);
+        if (malformed_catalog) {
+            vastloom::inference::DeepseekV4GgufCatalogOptions options;
+            options.model_id = "test/deepseek4-malformed-layer";
+            options.revision = "fixture";
+            options.layers = 1U;
+            options.experts_per_layer = 2U;
+            options.top_k = 1U;
+            options.context_tokens = 128U;
+            CHECK(!vastloom::inference::build_deepseek_v4_gguf_catalog(
+                malformed_catalog.value(), options));
         }
     }
 
@@ -1327,6 +1368,174 @@ void test_packed_expert_loader(const std::filesystem::path& root) {
             CHECK(running_result);
         }
         CHECK(running_residency.value().evict_ram());
+    }
+    CHECK(governor.snapshot().reserved[0] == 0U && governor.snapshot().reserved[2] == 0U);
+}
+
+void test_layer_streaming(const std::filesystem::path& root) {
+    using vastloom::model::LayerTensorTile;
+    using vastloom::model::LogicalTensorCatalog;
+    using vastloom::model::LogicalTensorDescriptor;
+    using vastloom::model::ResidencyObject;
+    using vastloom::model::ResidencyState;
+    using vastloom::model::TensorDType;
+    using vastloom::model::TensorRole;
+    using vastloom::model::TensorSourceRange;
+
+    const auto path = root / std::filesystem::path(std::u8string(u8"trunk-àccènt.bin"));
+    {
+        std::ofstream output(path, std::ios::binary);
+        for (unsigned value = 0U; value < 32U; ++value) output.put(static_cast<char>(value));
+    }
+    LogicalTensorCatalog catalog;
+    catalog.model_id = "test/layer-streaming";
+    catalog.revision = "fixture";
+    catalog.tensors = {
+        LogicalTensorDescriptor{"blk.3.attn.weight", TensorDType::quantized, {10U},
+                                TensorRole::attention, 3U, std::nullopt, false,
+                                TensorSourceRange{path, 0U, 10U}, 8U},
+        LogicalTensorDescriptor{"blk.3.ffn_norm.weight", TensorDType::f32, {5U},
+                                TensorRole::normalization, 3U, std::nullopt, false,
+                                TensorSourceRange{path, 12U, 5U}, 0U},
+        LogicalTensorDescriptor{"blk.3.ffn_gate_exps.weight.expert.0", TensorDType::quantized,
+                                {4U}, TensorRole::routed_expert, 3U, 0U, false,
+                                TensorSourceRange{path, 20U, 4U}, 19U},
+        LogicalTensorDescriptor{"output.weight", TensorDType::f32, {4U},
+                                TensorRole::output_head, std::nullopt, std::nullopt, false,
+                                TensorSourceRange{path, 24U, 4U}, 0U},
+    };
+    CHECK(vastloom::model::finalize_logical_tensor_catalog(catalog));
+
+    auto plan = vastloom::model::build_layer_streaming_plan(catalog, 3U, 4U);
+    CHECK(plan && plan.value().tensor_count == 2U && plan.value().tiles.size() == 5U &&
+          plan.value().trunk_tensor_bytes == 15U && plan.value().maximum_tensor_bytes == 10U &&
+          plan.value().maximum_tile_bytes == 4U);
+    if (!plan || plan.value().tiles.size() != 5U) return;
+    CHECK(plan.value().tiles[0].tensor_index == 0U &&
+          plan.value().tiles[0].tensor_offset == 0U &&
+          plan.value().tiles[0].source.offset == 0U &&
+          plan.value().tiles[0].source.bytes == 4U && !plan.value().tiles[0].final_tile);
+    CHECK(plan.value().tiles[2].tensor_index == 0U &&
+          plan.value().tiles[2].tensor_offset == 8U &&
+          plan.value().tiles[2].source.bytes == 2U && plan.value().tiles[2].final_tile);
+    CHECK(plan.value().tiles[4].tensor_index == 1U &&
+          plan.value().tiles[4].tensor_offset == 4U &&
+          plan.value().tiles[4].source.offset == 16U &&
+          plan.value().tiles[4].source.bytes == 1U && plan.value().tiles[4].final_tile);
+    CHECK(!vastloom::model::build_layer_streaming_plan(catalog, 2U, 4U));
+    CHECK(!vastloom::model::build_layer_streaming_plan(catalog, 3U, 0U));
+    CHECK(!vastloom::model::build_layer_streaming_plan(catalog, 3U, 4U, 1U, 10U));
+    CHECK(!vastloom::model::build_layer_streaming_plan(catalog, 3U, 4U, 10U, 4U));
+
+    vastloom::safety::ResourceLimits limits;
+    limits.host_memory_hard_limit = 16U;
+    limits.ram_hard_limit = 8U;
+    limits.vram_hard_limit = 8U;
+    limits.staging_hard_limit = 8U;
+    limits.scratch_hard_limit = 8U;
+    vastloom::safety::ResourceGovernor governor(limits);
+    auto residency = ResidencyObject::create("test/layer/3/tensor/0/tile/0", 4U);
+    CHECK(residency);
+    if (!residency) return;
+    vastloom::model::TensorTileLoadOptions load_options;
+    load_options.max_tile_bytes = 4U;
+    load_options.measure_process_io = false;
+    {
+        auto loaded = vastloom::model::load_tensor_tile(
+            catalog, plan.value().tiles[0], residency.value(), governor, load_options);
+        CHECK(loaded && loaded.value().bytes().size() == 4U &&
+              loaded.value().identity().tensor_index == 0U &&
+              loaded.value().telemetry().logical_bytes == 4U);
+        if (loaded) {
+            for (std::size_t index = 0U; index < loaded.value().bytes().size(); ++index) {
+                CHECK(std::to_integer<unsigned char>(loaded.value().bytes()[index]) == index);
+            }
+        }
+        auto ready = residency.value().snapshot();
+        CHECK(ready && ready.value().state == ResidencyState::ram_ready &&
+              ready.value().ram_reserved_bytes == 4U &&
+              ready.value().staging_reserved_bytes == 0U && ready.value().active_uses == 1U);
+    }
+    CHECK(residency.value().snapshot() && residency.value().snapshot().value().active_uses == 0U);
+    CHECK(residency.value().evict_ram());
+    CHECK(governor.snapshot().reserved[0] == 0U && governor.snapshot().reserved[2] == 0U);
+
+    auto metadata = catalog;
+    metadata.metadata_only = true;
+    auto metadata_residency = ResidencyObject::create("metadata", 4U);
+    CHECK(metadata_residency &&
+          !vastloom::model::load_tensor_tile(metadata, plan.value().tiles[0],
+                                             metadata_residency.value(), governor, load_options));
+    CHECK(metadata_residency && metadata_residency.value().snapshot() &&
+          metadata_residency.value().snapshot().value().state == ResidencyState::nvme);
+
+    auto tampered = plan.value().tiles[0];
+    ++tampered.source.offset;
+    auto tampered_residency = ResidencyObject::create("tampered", 4U);
+    CHECK(tampered_residency &&
+          !vastloom::model::load_tensor_tile(catalog, tampered, tampered_residency.value(),
+                                             governor, load_options));
+
+    auto bounded_options = load_options;
+    bounded_options.max_tile_bytes = 3U;
+    auto bounded_residency = ResidencyObject::create("tile-too-large", 4U);
+    CHECK(bounded_residency &&
+          !vastloom::model::load_tensor_tile(catalog, plan.value().tiles[0],
+                                             bounded_residency.value(), governor,
+                                             bounded_options));
+    auto wrong_size_residency = ResidencyObject::create("wrong-tile-size", 3U);
+    CHECK(wrong_size_residency &&
+          !vastloom::model::load_tensor_tile(catalog, plan.value().tiles[0],
+                                             wrong_size_residency.value(), governor,
+                                             load_options));
+
+    auto cancelled_residency = ResidencyObject::create("cancelled-tile", 4U);
+    auto cancelled_options = load_options;
+    cancelled_options.cancelled = [] { return true; };
+    CHECK(cancelled_residency &&
+          !vastloom::model::load_tensor_tile(catalog, plan.value().tiles[0],
+                                             cancelled_residency.value(), governor,
+                                             cancelled_options));
+    CHECK(cancelled_residency && cancelled_residency.value().snapshot() &&
+          cancelled_residency.value().snapshot().value().state == ResidencyState::nvme);
+
+    unsigned cancellation_checks = 0U;
+    auto late_cancel_options = load_options;
+    late_cancel_options.cancelled = [&] { return ++cancellation_checks >= 2U; };
+    auto late_cancel_residency = ResidencyObject::create("late-cancelled-tile", 4U);
+    CHECK(late_cancel_residency &&
+          !vastloom::model::load_tensor_tile(catalog, plan.value().tiles[0],
+                                             late_cancel_residency.value(), governor,
+                                             late_cancel_options));
+    CHECK(late_cancel_residency && late_cancel_residency.value().snapshot() &&
+          late_cancel_residency.value().snapshot().value().state == ResidencyState::failed &&
+          late_cancel_residency.value().snapshot().value().ram_reserved_bytes == 0U &&
+          late_cancel_residency.value().snapshot().value().staging_reserved_bytes == 0U);
+
+    vastloom::safety::ResourceLimits small_limits = limits;
+    small_limits.host_memory_hard_limit = 7U;
+    vastloom::safety::ResourceGovernor small_governor(small_limits);
+    auto refused_residency = ResidencyObject::create("budget-refused-tile", 4U);
+    CHECK(refused_residency &&
+          !vastloom::model::load_tensor_tile(catalog, plan.value().tiles[0],
+                                             refused_residency.value(), small_governor,
+                                             load_options));
+    CHECK(small_governor.snapshot().reserved[0] == 0U &&
+          small_governor.snapshot().reserved[2] == 0U);
+
+    auto short_catalog = catalog;
+    short_catalog.tensors[0].source = TensorSourceRange{path, 30U, 10U};
+    auto short_plan = vastloom::model::build_layer_streaming_plan(short_catalog, 3U, 4U);
+    CHECK(short_plan);
+    if (short_plan) {
+        auto short_residency = ResidencyObject::create("short-tile", 4U);
+        CHECK(short_residency &&
+              !vastloom::model::load_tensor_tile(short_catalog, short_plan.value().tiles[0],
+                                                 short_residency.value(), governor, load_options));
+        CHECK(short_residency && short_residency.value().snapshot() &&
+              short_residency.value().snapshot().value().state == ResidencyState::failed &&
+              short_residency.value().snapshot().value().ram_reserved_bytes == 0U &&
+              short_residency.value().snapshot().value().staging_reserved_bytes == 0U);
     }
     CHECK(governor.snapshot().reserved[0] == 0U && governor.snapshot().reserved[2] == 0U);
 }
@@ -2901,6 +3110,7 @@ int main() {
     test_logical_tensor_catalog();
     test_residency_state_machine();
     test_packed_expert_loader(root);
+    test_layer_streaming(root);
     test_imported_checkpoint_and_llama_config(root);
     test_olmoe_config(root);
     test_deepseek_v4_config(root);

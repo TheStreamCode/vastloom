@@ -37,6 +37,14 @@ struct DeepseekV4GgufCatalogReport {
     ByteCount no_cache_expert_bytes_per_token{0U};
     ByteCount minimum_expert_bundle_bytes{0U};
     ByteCount maximum_expert_bundle_bytes{0U};
+    ByteCount layer_streaming_tile_limit_bytes{0U};
+    ByteCount minimum_layer_trunk_bytes{0U};
+    ByteCount maximum_layer_trunk_bytes{0U};
+    ByteCount maximum_layer_trunk_tensor_bytes{0U};
+    ByteCount maximum_layer_trunk_tile_bytes{0U};
+    std::size_t layer_trunk_planned_layers{0U};
+    std::size_t layer_trunk_tensor_count{0U};
+    std::size_t layer_trunk_tile_count{0U};
     std::uint32_t context_tokens{0U};
     std::uint32_t maximum_context_tokens{0U};
     std::uint32_t batch_size{0U};

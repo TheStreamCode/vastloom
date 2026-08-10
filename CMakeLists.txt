@@ -87,6 +87,7 @@ add_library(vastloom_core STATIC
     src/model/imported_checkpoint.cpp
     src/model/expert_loader.cpp
     src/model/gguf.cpp
+    src/model/layer_streaming.cpp
     src/model/manifest.cpp
     src/model/model_store.cpp
     src/model/residency.cpp
@@ -323,7 +324,8 @@ if(BUILD_TESTING AND VASTLOOM_BUILD_TESTS)
             set_tests_properties(vastloom_deepseek_v4_gguf_checkpoint PROPERTIES
                 TIMEOUT 3600
                 RUN_SERIAL TRUE
-                PASS_REGULAR_EXPRESSION "\"imported_manifest_verified\":true"
+                PASS_REGULAR_EXPRESSION
+                    "\"imported_manifest_verified\":true.*\"planned_layers\":43"
             )
         endif()
     else()

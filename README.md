@@ -37,7 +37,10 @@ model conversion.
 > two-layer FP32 prefill matches the pinned official graph for logits, greedy token, expert
 > routes and attention indices. Its 69,187 tensors are now bound to a shared logical catalog:
 > 11,264 main/MTP expert bundles collapse from six tensors to exactly two contiguous source
-> ranges each. Full-checkpoint DeepSeek loading, generation and CUDA remain unimplemented.
+> ranges each. A governed fixed-worker pool can now reserve, queue and asynchronously load those
+> generic multi-range bundles into packed RAM buffers, but it has only been exercised on a tiny
+> fixture because the header-only DeepSeek import contains no payload. Full-checkpoint DeepSeek
+> loading, generation and CUDA remain unimplemented.
 
 ## Why Vastloom exists
 
@@ -85,6 +88,8 @@ The reservation-backed NVMe/RAM/VRAM control plane is documented in the
 [`M9 residency-state report`](docs/reports/M9_RESIDENCY_STATE_VALIDATION.md).
 The first governed multi-range-to-packed-buffer transaction is documented in the
 [`M9 packed expert load report`](docs/reports/M9_PACKED_EXPERT_LOAD_VALIDATION.md).
+The bounded shared worker/queue transaction is documented in the
+[`M9 asynchronous expert-load report`](docs/reports/M9_ASYNC_EXPERT_LOAD_VALIDATION.md).
 Current and candidate model support is kept explicit in the
 [`model compatibility matrix`](docs/MODEL_COMPATIBILITY.md).
 
@@ -231,8 +236,9 @@ allocation plan is derived from detected capacity and conservative headroom.
   `NVME → READING → RAM_READY → COPYING_TO_VRAM → VRAM_READY` states. RAM, staging and
   VRAM destinations are reserved before work begins; pins and RAII use leases block eviction.
 - **Packed expert baseline:** canonical source ranges can be loaded into one reserved RAM buffer
-  with exact per-tensor slices. This path is synchronous and fixture-validated; it is not yet the
-  asynchronous DeepSeek token path.
+  with exact per-tensor slices through either the synchronous oracle or a fixed-worker,
+  fixed-capacity asynchronous pool. Both are fixture-validated; no DeepSeek token loop consumes
+  these buffers yet.
 - **Safety state machine:** `NORMAL → PRESSURE → CRITICAL → EMERGENCY`, with immediate
   escalation and hysteretic recovery.
 - **Bounded asynchronous I/O:** fixed worker, queue and request limits; every buffer
@@ -604,8 +610,8 @@ research metric is not merely SSD throughput. It is:
 
 The next technical sequence remains incremental:
 
-1. connect the verified logical expert bundles and governed residency states to bounded packed
-   FP4/FP8 reads, then add a target-verified MTP decoding loop;
+1. bind the official 0731 GGUF metadata and quantized payloads to the verified logical expert
+   bundles, then connect packed FP4/FP8 kernels and a target-verified MTP decoding loop;
 2. CUDA dense, attention, router and packed expert kernels;
 3. explicit VRAM/RAM/NVMe placement with pinned buffers and direct/overlapped I/O;
 4. adaptive placement, predictive routing and speculative expert deduplication;

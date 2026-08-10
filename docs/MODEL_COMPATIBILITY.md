@@ -81,9 +81,10 @@ NVME -> READING -> RAM_READY -> COPYING_TO_VRAM -> VRAM_READY
 ```
 
 The shared control object now implements the displayed states, a terminal/retryable `FAILED`
-state, a pin flag and counted RAII use leases. RAM, VRAM and staging transitions are budgeted by
-the Resource Governor. Physical buffers and transfer completion are not connected yet; future
-read/copy adapters may publish a ready state only after their range/content validation succeeds.
+state, a pin flag, counted RAII use leases and an exclusive transfer lease. RAM, VRAM and staging
+transitions are budgeted by the Resource Governor. The shared synchronous loader and bounded
+worker pool now publish a physical packed RAM buffer only after every canonical range completes.
+VRAM copies and quantized kernel consumption are not connected yet.
 
 ## Residency policy
 
@@ -122,10 +123,12 @@ prefetch bytes, queue/read/copy/compute timestamps, PCIe bytes, GPU idle time an
 Ready-order execution may change scheduling, but never the router choice or numerical reduction
 order without an explicit quality-changing mode.
 
-The first synchronous reference transaction now implements the bounded range-read, compaction,
-per-tensor-slice and `RAM_READY` publication portion on a synthetic immutable fixture. It is a
-correctness baseline; cache lookup, async prefetch, direct I/O and kernel execution remain in the
-existing OLMoE-specific path until the shared loader gains those features.
+The shared synchronous oracle and bounded asynchronous pool now implement range reads,
+compaction, per-tensor slices and `RAM_READY` publication on a synthetic immutable fixture. The
+pool supports one to four workers, a queue of at most 64 requests, pre-enqueue reservations and
+safe queued-work cancellation. It makes next-expert overlap possible but does not yet connect a
+kernel consumer or measure useful overlap. Cache lookup and direct I/O remain in the existing
+OLMoE-specific path.
 
 ## Format policy
 

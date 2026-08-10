@@ -35,13 +35,21 @@ Logical tensor/expert residency uses the same rule. `begin_read` reserves the fu
 destination and bounded staging capacity before publishing work; `begin_vram_copy` reserves
 VRAM while the RAM source remains valid. A failed second reservation rolls back without changing
 state. Pins and counted RAII use leases reject eviction, and failure cleanup refuses to release a
-buffer still in active use. Residency handles and leases must never outlive their governor.
+buffer still in active use. A separate exclusive transfer lease protects `READING` and
+`COPYING_TO_VRAM` work from a concurrent failure, eviction or second transfer. Residency handles
+and leases must never outlive their governor.
 
 The shared packed-expert loader allocates only after those reservations. It caps expert bytes,
 individual range bytes and range count; rejects non-canonical ranges and incomplete/overlapping
 tensor slices; destroys scratch before releasing staging; and keeps its use lease alive until the
 packed bytes are destroyed. Short reads, bounds failures and cancellation publish `FAILED` only
 after temporary buffers have been released.
+
+The shared asynchronous expert pool keeps one to four fixed workers and one to 64 queued
+requests. Each request reserves its complete destination and bounded staging before enqueue. A
+second capacity check rolls those reservations back if another submitter filled the queue or
+shutdown began. Shutdown fails queued requests, completes their futures, releases their
+reservations and joins any already-running bounded transaction.
 
 ## Headroom
 
@@ -254,6 +262,8 @@ integration remains required before long-running large-model inference.
   concurrent read admission, pin/use-lease eviction guards and final reservation release.
 - Unicode buffered multi-range expert loading, exact packed tensor slices, pre-allocation limits,
   out-of-bounds read cleanup, cancellation and zero residual reservations.
+- exclusive transfer leases, deterministic asynchronous queue saturation, reservation rollback,
+  queued-request shutdown cancellation and ThreadSanitizer coverage.
 
 ## Safety tests still required for production adapters
 

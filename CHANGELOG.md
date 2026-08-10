@@ -41,6 +41,10 @@
   reserved compact RAM buffer, every expert tensor receives an exact packed slice and an RAII use
   lease prevents eviction until the bytes are destroyed. The synchronous fixture baseline is not
   a DeepSeek or physical-NVMe performance claim.
+- Added a shared bounded asynchronous expert-load pool with one to four fixed workers, a queue of
+  at most 64 requests, pre-enqueue RAM/staging reservations, exclusive transfer leases, safe
+  queue-full rollback, shutdown cancellation and queue/service/total telemetry. This enables a
+  future compute/I/O overlap path but does not itself prove DeepSeek throughput.
 - Added an explicit `--allow-large-download` gate for checkpoint imports containing at
   least 20 GiB of weight payload. DeepSeek execution remains unsupported and is reported
   as such by the CLI.

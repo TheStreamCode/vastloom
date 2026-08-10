@@ -171,7 +171,8 @@ unbounded allocation and clean recovery from injected CUDA failures.
 - [x] Universal logical tensor/expert catalog with validated immutable source ranges.
 - [x] Legal NVMe/RAM/VRAM state transitions, reservation ownership and use-lease eviction guards.
 - [x] Couple a synchronous packed buffer and validated multi-range completion to `RAM_READY`.
-- [ ] Add asynchronous multi-range transactions and compute/I/O overlap.
+- [x] Add bounded asynchronous multi-range transactions with exclusive transfer leases.
+- [ ] Connect those futures to expert compute and measure real compute/I/O overlap.
 - [ ] Pinned host buffers.
 - [ ] Direct/overlapped NVMe reads where supported.
 - [ ] Dense-trunk-first placement.

@@ -329,10 +329,13 @@ or numerical reduction order.
 The shared residency control object now enforces those transitions and owns move-only Governor
 reservations. It reserves the complete RAM destination plus bounded read staging before exposing
 `READING`, retains RAM while reserving VRAM, and blocks eviction while pinned or protected by an
-RAII use lease. A synchronous reference transaction now connects canonical ranges to a physical
-packed RAM buffer, destroys scratch before ready-state publication and keeps a lease alive until
-the buffer is destroyed. Asynchronous scheduling, direct I/O and CUDA copy events are not
-connected yet.
+RAII use lease. A transfer lease additionally gives one worker exclusive ownership of an active
+read/copy transaction and prevents concurrent failure cleanup from freeing its buffers. The
+synchronous oracle and a fixed-worker, fixed-capacity asynchronous pool both connect canonical
+ranges to physical packed RAM buffers, destroy scratch before ready-state publication and keep a
+use lease alive until the buffer is destroyed. The asynchronous result exposes queue, service and
+total timing so a future execution loop can overlap expert N+1 with compute on expert N. Actual
+compute coupling, shared direct I/O and CUDA copy events are not connected yet.
 
 For TinyChat only L1 is active:
 

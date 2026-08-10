@@ -29,6 +29,7 @@ enum class TensorDType : std::uint8_t {
     f64,
     u64,
     i64,
+    quantized,
 };
 
 struct TensorDescriptor {

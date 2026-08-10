@@ -41,6 +41,8 @@ vastloom_import_legacy_path(STARGATE_OLMOE_FULL_MODEL VASTLOOM_OLMOE_FULL_MODEL
     "Optional complete pinned OLMoE checkpoint for streamed runtime tests")
 set(VASTLOOM_DEEPSEEK_V4_MODEL "" CACHE PATH
     "Optional pinned DeepSeek V4 Flash metadata/header import for inspection tests")
+set(VASTLOOM_DEEPSEEK_V4_GGUF_HEADER "" CACHE FILEPATH
+    "Optional pinned DeepSeek V4 Flash 0731 GGUF split-zero metadata shard")
 
 option(VASTLOOM_BUILD_TESTS "Build Vastloom tests" ON)
 option(VASTLOOM_ENABLE_SANITIZERS "Enable AddressSanitizer and UndefinedBehaviorSanitizer" OFF)
@@ -62,6 +64,7 @@ add_library(vastloom_core STATIC
     src/core/bytes.cpp
     src/hardware/hardware_probe.cpp
     src/inference/gpt2_tokenizer.cpp
+    src/inference/deepseek_v4_gguf.cpp
     src/inference/deepseek_v4_model.cpp
     src/inference/deepseek_v4_graph.cpp
     src/inference/deepseek_v4_reference.cpp
@@ -74,6 +77,7 @@ add_library(vastloom_core STATIC
     src/io/process_io_counters.cpp
     src/model/imported_checkpoint.cpp
     src/model/expert_loader.cpp
+    src/model/gguf.cpp
     src/model/manifest.cpp
     src/model/model_store.cpp
     src/model/residency.cpp
@@ -188,6 +192,13 @@ if(BUILD_TESTING AND VASTLOOM_BUILD_TESTS)
                 --validate-only
         )
         set_tests_properties(vastloom_deepseek_v4_graph_fixture PROPERTIES TIMEOUT 30)
+        add_test(
+            NAME vastloom_deepseek_v4_gguf_cli
+            COMMAND ${Python3_EXECUTABLE}
+                ${CMAKE_CURRENT_SOURCE_DIR}/tests/test_gguf_cli.py
+                --vastloom $<TARGET_FILE:vastloom>
+        )
+        set_tests_properties(vastloom_deepseek_v4_gguf_cli PROPERTIES TIMEOUT 60)
         if(VASTLOOM_SMOLLM2_MODEL)
             add_test(
                 NAME vastloom_smollm2_reference
@@ -229,6 +240,19 @@ if(BUILD_TESTING AND VASTLOOM_BUILD_TESTS)
                     --model ${VASTLOOM_DEEPSEEK_V4_MODEL}
             )
             set_tests_properties(vastloom_deepseek_v4_inspection PROPERTIES TIMEOUT 120 RUN_SERIAL TRUE)
+        endif()
+        if(VASTLOOM_DEEPSEEK_V4_GGUF_HEADER)
+            add_test(
+                NAME vastloom_deepseek_v4_gguf_header
+                COMMAND $<TARGET_FILE:vastloom> inspect
+                    ${VASTLOOM_DEEPSEEK_V4_GGUF_HEADER}
+                    --json
+            )
+            set_tests_properties(vastloom_deepseek_v4_gguf_header PROPERTIES
+                TIMEOUT 30
+                RUN_SERIAL TRUE
+                PASS_REGULAR_EXPRESSION "\\\"architecture\\\":\\\"deepseek4\\\""
+            )
         endif()
     else()
         message(STATUS "Python3 not found; skipping TinyChat CLI integration test")

@@ -15,6 +15,7 @@
 #include "vastloom/core/bytes.hpp"
 #include "vastloom/hardware/hardware_probe.hpp"
 #include "vastloom/inference/gpt2_tokenizer.hpp"
+#include "vastloom/inference/deepseek_v4_gguf.hpp"
 #include "vastloom/inference/deepseek_v4_model.hpp"
 #include "vastloom/inference/deepseek_v4_reference.hpp"
 #include "vastloom/inference/llama_model.hpp"
@@ -27,6 +28,7 @@
 #include "vastloom/model/manifest.hpp"
 #include "vastloom/model/imported_checkpoint.hpp"
 #include "vastloom/model/expert_loader.hpp"
+#include "vastloom/model/gguf.hpp"
 #include "vastloom/model/model_store.hpp"
 #include "vastloom/model/residency.hpp"
 #include "vastloom/model/safetensors.hpp"
@@ -116,6 +118,29 @@ void write_u64_le(std::ofstream& output, std::uint64_t value) {
     output.write(reinterpret_cast<const char*>(bytes.data()), static_cast<std::streamsize>(bytes.size()));
 }
 
+void append_u32_le(std::vector<unsigned char>& output, std::uint32_t value) {
+    for (std::size_t index = 0U; index < 4U; ++index) {
+        output.push_back(static_cast<unsigned char>((value >> (index * 8U)) & 0xffU));
+    }
+}
+
+void append_u64_le(std::vector<unsigned char>& output, std::uint64_t value) {
+    for (std::size_t index = 0U; index < 8U; ++index) {
+        output.push_back(static_cast<unsigned char>((value >> (index * 8U)) & 0xffU));
+    }
+}
+
+void append_gguf_string(std::vector<unsigned char>& output, std::string_view value) {
+    append_u64_le(output, value.size());
+    output.insert(output.end(), value.begin(), value.end());
+}
+
+void write_bytes(const std::filesystem::path& path, std::span<const unsigned char> bytes) {
+    std::ofstream output(path, std::ios::binary);
+    output.write(reinterpret_cast<const char*>(bytes.data()),
+                 static_cast<std::streamsize>(bytes.size()));
+}
+
 void test_safetensors(const std::filesystem::path& root) {
     const auto checkpoint = root / "safetensors";
     std::filesystem::create_directories(checkpoint);
@@ -186,6 +211,222 @@ void test_safetensors(const std::filesystem::path& root) {
     CHECK(!vastloom::model::SafetensorsFile::open(checkpoint / "invalid.safetensors"));
 }
 
+void test_gguf(const std::filesystem::path& root) {
+    const auto directory = root / std::filesystem::path(std::u8string(u8"gguf-àccènt"));
+    std::filesystem::create_directories(directory);
+    std::vector<unsigned char> header;
+    append_u32_le(header, 0x46554747U);
+    append_u32_le(header, 3U);
+    append_u64_le(header, 3U);
+    append_u64_le(header, 6U);
+
+    append_gguf_string(header, "general.architecture");
+    append_u32_le(header, static_cast<std::uint32_t>(vastloom::model::GgufValueType::string));
+    append_gguf_string(header, "deepseek4");
+
+    append_gguf_string(header, "general.alignment");
+    append_u32_le(header, static_cast<std::uint32_t>(vastloom::model::GgufValueType::uint32));
+    const std::size_t alignment_value_offset = header.size();
+    append_u32_le(header, 32U);
+
+    append_gguf_string(header, "general.quantization_version");
+    append_u32_le(header, static_cast<std::uint32_t>(vastloom::model::GgufValueType::uint32));
+    append_u32_le(header, 2U);
+
+    append_gguf_string(header, "split.no");
+    append_u32_le(header, static_cast<std::uint32_t>(vastloom::model::GgufValueType::uint16));
+    header.push_back(0U);
+    header.push_back(0U);
+    append_gguf_string(header, "split.count");
+    append_u32_le(header, static_cast<std::uint32_t>(vastloom::model::GgufValueType::uint16));
+    header.push_back(2U);
+    header.push_back(0U);
+
+    append_gguf_string(header, "tokenizer.ggml.tokens");
+    append_u32_le(header, static_cast<std::uint32_t>(vastloom::model::GgufValueType::array));
+    append_u32_le(header, static_cast<std::uint32_t>(vastloom::model::GgufValueType::string));
+    append_u64_le(header, 2U);
+    append_gguf_string(header, "a");
+    append_gguf_string(header, "\xc3\xa8");
+
+    append_gguf_string(header, "blk.0.ffn_down_exps.weight");
+    append_u32_le(header, 3U);
+    append_u64_le(header, 32U);
+    append_u64_le(header, 1U);
+    append_u64_le(header, 2U);
+    append_u32_le(header, 8U);
+    append_u64_le(header, 0U);
+
+    append_gguf_string(header, "blk.0.ffn_gate_exps.weight");
+    append_u32_le(header, 3U);
+    append_u64_le(header, 32U);
+    append_u64_le(header, 1U);
+    append_u64_le(header, 2U);
+    append_u32_le(header, 8U);
+    const std::size_t second_tensor_offset = header.size();
+    append_u64_le(header, 96U);
+
+    append_gguf_string(header, "blk.0.ffn_up_exps.weight");
+    append_u32_le(header, 3U);
+    append_u64_le(header, 32U);
+    append_u64_le(header, 1U);
+    append_u64_le(header, 2U);
+    append_u32_le(header, 8U);
+    append_u64_le(header, 192U);
+
+    while (header.size() % 32U != 0U) header.push_back(0U);
+    const vastloom::ByteCount data_offset = header.size();
+    std::vector<unsigned char> full = header;
+    full.resize(full.size() + 288U, 0U);
+    const auto full_path = directory / "model.gguf";
+    write_bytes(full_path, full);
+
+    auto gguf = vastloom::model::GgufFile::open(full_path);
+    CHECK(gguf && gguf.value().version() == 3U && gguf.value().alignment() == 32U &&
+          gguf.value().data_offset() == data_offset && !gguf.value().header_only() &&
+          gguf.value().metadata().size() == 6U && gguf.value().tensors().size() == 3U);
+    if (gguf) {
+        auto architecture = gguf.value().architecture();
+        CHECK(architecture && architecture.value() == "deepseek4");
+        const auto* tokens = gguf.value().find_metadata("tokenizer.ggml.tokens");
+        CHECK(tokens != nullptr && tokens->type == vastloom::model::GgufValueType::array &&
+              tokens->array_type == vastloom::model::GgufValueType::string &&
+              tokens->array_elements == 2U);
+        const auto* down = gguf.value().find_tensor("blk.0.ffn_down_exps.weight");
+        const auto* gate = gguf.value().find_tensor("blk.0.ffn_gate_exps.weight");
+        const auto* up = gguf.value().find_tensor("blk.0.ffn_up_exps.weight");
+        CHECK(down != nullptr && down->element_count == 64U && down->encoded_bytes == 68U &&
+              down->absolute_offset == data_offset && down->available_span_bytes == 96U);
+        CHECK(gate != nullptr && gate->relative_offset == 96U && gate->encoded_bytes == 68U &&
+              gate->absolute_offset == data_offset + 96U && gate->available_span_bytes == 96U);
+        CHECK(up != nullptr && up->relative_offset == 192U && up->encoded_bytes == 68U &&
+              up->available_span_bytes == 96U);
+        CHECK(gguf.value().find_tensor("missing") == nullptr);
+    }
+
+    const auto snapshot_path = directory / "model.gguf.header";
+    write_bytes(snapshot_path, header);
+    auto snapshot = vastloom::model::GgufFile::open_header_prefix(snapshot_path, full.size());
+    CHECK(snapshot && snapshot.value().header_only() && snapshot.value().file_bytes() == full.size() &&
+          snapshot.value().data_offset() == data_offset && snapshot.value().tensors().size() == 3U);
+
+    auto bad_magic = full;
+    bad_magic[0] = 0U;
+    const auto bad_magic_path = directory / "bad-magic.gguf";
+    write_bytes(bad_magic_path, bad_magic);
+    CHECK(!vastloom::model::GgufFile::open(bad_magic_path));
+
+    auto bad_count = full;
+    std::fill(bad_count.begin() + 8, bad_count.begin() + 16,
+              static_cast<unsigned char>(0xffU));
+    const auto bad_count_path = directory / "bad-count.gguf";
+    write_bytes(bad_count_path, bad_count);
+    CHECK(!vastloom::model::GgufFile::open(bad_count_path));
+
+    auto bad_alignment = full;
+    bad_alignment[alignment_value_offset] = 7U;
+    bad_alignment[alignment_value_offset + 1U] = 0U;
+    bad_alignment[alignment_value_offset + 2U] = 0U;
+    bad_alignment[alignment_value_offset + 3U] = 0U;
+    const auto bad_alignment_path = directory / "bad-alignment.gguf";
+    write_bytes(bad_alignment_path, bad_alignment);
+    CHECK(!vastloom::model::GgufFile::open(bad_alignment_path));
+
+    auto bad_offset = full;
+    bad_offset[second_tensor_offset] = 97U;
+    const auto bad_offset_path = directory / "bad-offset.gguf";
+    write_bytes(bad_offset_path, bad_offset);
+    CHECK(!vastloom::model::GgufFile::open(bad_offset_path));
+
+    vastloom::model::GgufReaderLimits array_limits;
+    array_limits.max_array_elements = 1U;
+    CHECK(!vastloom::model::GgufFile::open(full_path, array_limits));
+
+    auto truncated_header = header;
+    truncated_header.pop_back();
+    const auto truncated_path = directory / "truncated.gguf.header";
+    write_bytes(truncated_path, truncated_header);
+    CHECK(!vastloom::model::GgufFile::open_header_prefix(truncated_path, full.size()));
+
+    std::vector<unsigned char> continuation;
+    append_u32_le(continuation, 0x46554747U);
+    append_u32_le(continuation, 3U);
+    append_u64_le(continuation, 1U);
+    append_u64_le(continuation, 2U);
+    append_gguf_string(continuation, "split.no");
+    append_u32_le(continuation, static_cast<std::uint32_t>(vastloom::model::GgufValueType::uint16));
+    continuation.push_back(1U);
+    continuation.push_back(0U);
+    append_gguf_string(continuation, "split.count");
+    append_u32_le(continuation, static_cast<std::uint32_t>(vastloom::model::GgufValueType::uint16));
+    continuation.push_back(2U);
+    continuation.push_back(0U);
+    append_gguf_string(continuation, "output.weight");
+    append_u32_le(continuation, 1U);
+    append_u64_le(continuation, 1U);
+    append_u32_le(continuation, 0U);
+    append_u64_le(continuation, 0U);
+    while (continuation.size() % 32U != 0U) continuation.push_back(0U);
+    continuation.resize(continuation.size() + 4U, 0U);
+    const auto continuation_path = directory / "continuation.gguf";
+    write_bytes(continuation_path, continuation);
+    auto continuation_file = vastloom::model::GgufFile::open(continuation_path);
+    CHECK(continuation_file && !continuation_file.value().architecture() &&
+          continuation_file.value().tensors().size() == 1U);
+    if (gguf && continuation_file) {
+        std::vector<vastloom::model::GgufFile> parts;
+        parts.push_back(gguf.value());
+        parts.push_back(continuation_file.value());
+        auto catalog = vastloom::model::finalize_gguf_split_catalog(std::move(parts));
+        CHECK(catalog && catalog.value().architecture == "deepseek4" &&
+              catalog.value().shards.size() == 2U && catalog.value().tensors.size() == 4U &&
+              catalog.value().known_tensor_bytes == 208U &&
+              catalog.value().unknown_tensor_sizes == 0U);
+        if (catalog) {
+            vastloom::inference::DeepseekV4GgufCatalogOptions options;
+            options.model_id = "test/deepseek4-gguf";
+            options.revision = "fixture";
+            options.layers = 1U;
+            options.experts_per_layer = 2U;
+            options.top_k = 1U;
+            auto mapped = vastloom::inference::build_deepseek_v4_gguf_catalog(
+                catalog.value(), options);
+            CHECK(mapped && mapped.value().catalog.tensors.size() == 7U &&
+                  mapped.value().catalog.experts.size() == 2U &&
+                  mapped.value().catalog.routed_expert_bytes == 204U &&
+                  mapped.value().catalog.always_active_bytes == 4U &&
+                  mapped.value().minimum_expert_bundle_bytes == 102U &&
+                  mapped.value().maximum_expert_bundle_bytes == 102U &&
+                  mapped.value().no_cache_expert_bytes_per_token == 102U);
+            if (mapped) {
+                CHECK(mapped.value().catalog.experts.front().read_ranges.size() == 3U &&
+                      mapped.value().catalog.experts.front().tensor_slices.size() == 3U);
+            }
+        }
+    }
+    if (snapshot && continuation_file) {
+        std::vector<vastloom::model::GgufFile> header_parts;
+        header_parts.push_back(snapshot.value());
+        header_parts.push_back(continuation_file.value());
+        auto header_catalog = vastloom::model::finalize_gguf_split_catalog(
+            std::move(header_parts));
+        CHECK(header_catalog);
+        if (header_catalog) {
+            vastloom::inference::DeepseekV4GgufCatalogOptions options;
+            options.model_id = "test/deepseek4-header-only";
+            options.revision = "fixture";
+            options.layers = 1U;
+            options.experts_per_layer = 2U;
+            options.top_k = 1U;
+            CHECK(!vastloom::inference::build_deepseek_v4_gguf_catalog(
+                header_catalog.value(), options));
+            options.metadata_only = true;
+            CHECK(vastloom::inference::build_deepseek_v4_gguf_catalog(
+                header_catalog.value(), options));
+        }
+    }
+}
+
 void test_logical_tensor_catalog() {
     using vastloom::model::LogicalTensorDescriptor;
     using vastloom::model::TensorDType;
@@ -197,13 +438,13 @@ void test_logical_tensor_catalog() {
     catalog.revision = "revision";
     catalog.tensors = {
         LogicalTensorDescriptor{"embed", TensorDType::f32, {2U}, TensorRole::embedding,
-                                std::nullopt, std::nullopt, false, TensorSourceRange{"shard-a", 0U, 8U}},
+                                std::nullopt, std::nullopt, false, TensorSourceRange{"shard-a", 0U, 8U}, std::nullopt},
         LogicalTensorDescriptor{"expert.weight", TensorDType::f32, {1U}, TensorRole::routed_expert,
-                                2U, 7U, false, TensorSourceRange{"shard-a", 8U, 4U}},
+                                2U, 7U, false, TensorSourceRange{"shard-a", 8U, 4U}, std::nullopt},
         LogicalTensorDescriptor{"expert.scale", TensorDType::f32, {1U}, TensorRole::routed_expert,
-                                2U, 7U, false, TensorSourceRange{"shard-a", 12U, 4U}},
+                                2U, 7U, false, TensorSourceRange{"shard-a", 12U, 4U}, std::nullopt},
         LogicalTensorDescriptor{"expert.bias", TensorDType::f16, {1U}, TensorRole::routed_expert,
-                                2U, 7U, false, TensorSourceRange{"shard-b", 0U, 2U}},
+                                2U, 7U, false, TensorSourceRange{"shard-b", 0U, 2U}, std::nullopt},
     };
     auto finalized = vastloom::model::finalize_logical_tensor_catalog(catalog);
     CHECK(finalized);
@@ -240,7 +481,7 @@ void test_logical_tensor_catalog() {
     auto duplicate = catalog;
     duplicate.tensors.push_back(LogicalTensorDescriptor{
         "embed", TensorDType::f32, {1U}, TensorRole::other,
-        std::nullopt, std::nullopt, false, TensorSourceRange{"shard-a", 20U, 4U}});
+        std::nullopt, std::nullopt, false, TensorSourceRange{"shard-a", 20U, 4U}, std::nullopt});
     CHECK(!vastloom::model::finalize_logical_tensor_catalog(duplicate));
 
     auto missing_identity = catalog;
@@ -2056,6 +2297,7 @@ int main() {
     test_json_escape();
     test_bounded_json();
     test_safetensors(root);
+    test_gguf(root);
     test_logical_tensor_catalog();
     test_residency_state_machine();
     test_packed_expert_loader(root);

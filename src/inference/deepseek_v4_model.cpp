@@ -450,6 +450,7 @@ Result<CatalogSummary> validate_headers(const std::filesystem::path& root,
                 identity.value().expert,
                 identity.value().speculative,
                 model::TensorSourceRange{root / std::string(shard.name), tensor.absolute_offset, tensor.byte_count},
+                std::nullopt,
             });
         }
     }

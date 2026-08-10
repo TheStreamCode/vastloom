@@ -23,6 +23,7 @@
 #include "vastloom/core/bytes.hpp"
 #include "vastloom/hardware/hardware_probe.hpp"
 #include "vastloom/inference/gpt2_tokenizer.hpp"
+#include "vastloom/inference/deepseek_v4_gguf.hpp"
 #include "vastloom/inference/deepseek_v4_model.hpp"
 #include "vastloom/inference/llama_model.hpp"
 #include "vastloom/inference/olmoe_model.hpp"
@@ -30,6 +31,7 @@
 #include "vastloom/io/bounded_io_pool.hpp"
 #include "vastloom/model/manifest.hpp"
 #include "vastloom/model/imported_checkpoint.hpp"
+#include "vastloom/model/gguf.hpp"
 #include "vastloom/model/model_store.hpp"
 #include "vastloom/model/safetensors.hpp"
 #include "vastloom/model/verifier.hpp"
@@ -101,11 +103,27 @@ bool has_flag(const std::vector<std::string>& args, std::string_view flag) {
     });
 }
 
+std::filesystem::path cli_path(std::string_view utf8) {
+    std::u8string encoded;
+    encoded.reserve(utf8.size());
+    for (const char byte : utf8) {
+        encoded.push_back(static_cast<char8_t>(static_cast<unsigned char>(byte)));
+    }
+    return std::filesystem::path(encoded);
+}
+
 std::optional<std::string> option_value(const std::vector<std::string>& args, std::string_view name) {
     for (std::size_t index = 0; index < args.size(); ++index) {
         if (args[index] == name && index + 1U < args.size()) return args[index + 1U];
     }
     return std::nullopt;
+}
+
+std::filesystem::path option_path(const std::vector<std::string>& args,
+                                  std::string_view name,
+                                  const std::filesystem::path& fallback) {
+    const auto value = option_value(args, name);
+    return value.has_value() ? cli_path(*value) : fallback;
 }
 
 Result<ByteCount> optional_bytes(const std::vector<std::string>& args, std::string_view name, ByteCount fallback) {
@@ -209,8 +227,8 @@ void print_help() {
         << "      Run adapter-specific deterministic end-to-end generation probes.\n\n"
         << "  doctor [--storage PATH] [--json]\n"
         << "      Detect CPU, RAM, NVIDIA VRAM and storage without allocating model memory.\n\n"
-        << "  inspect MANIFEST_OR_SAFETENSORS [--json]\n"
-        << "      Inspect a manifest or bounded Safetensors checkpoint without loading weights.\n\n"
+        << "  inspect MANIFEST_OR_MODEL_HEADERS [--declared-size SIZE] [--tensor-limit N] [--json]\n"
+        << "      Inspect a manifest, bounded Safetensors checkpoint or GGUF v3 header.\n\n"
         << "  verify MANIFEST [--model-root PATH] [--full] [--json]\n"
         << "      Verify chunk paths and sizes; --full also checks SHA-256.\n\n"
         << "  plan MANIFEST [--profile safe|balanced|performance|low-memory|quiet]\n"
@@ -235,6 +253,8 @@ void print_help() {
         << "      Validate the pinned OLMoE metadata and estimate safe streaming budgets.\n\n"
         << "  deepseek-inspect MODEL_DIRECTORY [--no-verify] [--json]\n"
         << "      Validate pinned DeepSeek V4 Flash metadata and Safetensors header snapshots.\n\n"
+        << "  deepseek-gguf-inspect SHARD... [--declared-sizes CSV] [--revision ID] [--json]\n"
+        << "      Build a metadata-only DeepSeek V4 Flash catalog from bounded GGUF v3 headers.\n\n"
         << "  moe-logits MODEL_DIRECTORY --text TEXT [--chat] [--top N]\n"
         << "       [--cache no-cache|lru|lfu|static-hot] [--cache-bytes SIZE]\n"
         << "       [--io sync|async] [--io-cache buffered|bypass] [--expert-read whole|staged]\n"
@@ -277,7 +297,7 @@ Result<vastloom::safety::SafetyState> parse_safety_state(std::string_view value)
 
 int command_doctor(const std::vector<std::string>& args) {
     const bool json = has_flag(args, "--json");
-    const auto storage = option_value(args, "--storage").value_or(std::filesystem::current_path().string());
+    const auto storage = option_path(args, "--storage", std::filesystem::current_path());
     auto hardware = vastloom::hardware::HardwareProbe::collect(storage);
     if (!hardware) return print_error(hardware.error(), json);
     std::cout << (json ? vastloom::hardware::to_json(hardware.value()) : vastloom::hardware::to_text(hardware.value())) << '\n';
@@ -287,8 +307,45 @@ int command_doctor(const std::vector<std::string>& args) {
 int command_inspect(const std::vector<std::string>& args) {
     if (args.empty()) return print_error(vastloom::make_error(vastloom::ErrorCode::invalid_argument, "inspect requires a manifest or checkpoint path"));
     const bool json = has_flag(args, "--json");
+    auto valid = validate_options(args, 1U, {"--declared-size", "--tensor-limit"}, {"--json"});
+    if (!valid) return print_error(valid.error(), json);
     std::error_code error;
-    const std::filesystem::path path = args[0];
+    const std::filesystem::path path = cli_path(args[0]);
+    if (vastloom::util::to_lower(path.extension().string()) == ".gguf") {
+        auto tensor_limit = optional_size(args, "--tensor-limit", 0U);
+        if (!tensor_limit || tensor_limit.value() > 1'000U) {
+            return print_error(tensor_limit ? vastloom::make_error(
+                                                  vastloom::ErrorCode::invalid_argument,
+                                                  "GGUF --tensor-limit cannot exceed 1000")
+                                            : tensor_limit.error(),
+                               json);
+        }
+        Result<vastloom::model::GgufFile> gguf = vastloom::make_error(
+            vastloom::ErrorCode::internal_error, "GGUF inspection was not initialized");
+        if (option_value(args, "--declared-size").has_value()) {
+            auto declared_size = optional_bytes(args, "--declared-size", 0U);
+            if (!declared_size || declared_size.value() == 0U) {
+                return print_error(declared_size ? vastloom::make_error(
+                                                       vastloom::ErrorCode::invalid_argument,
+                                                       "GGUF --declared-size must be positive")
+                                                 : declared_size.error(),
+                                   json);
+            }
+            gguf = vastloom::model::GgufFile::open_header_prefix(path, declared_size.value());
+        } else {
+            gguf = vastloom::model::GgufFile::open(path);
+        }
+        if (!gguf) return print_error(gguf.error(), json);
+        std::cout << (json ? vastloom::model::to_json(gguf.value(), tensor_limit.value())
+                          : vastloom::model::to_text(gguf.value(), tensor_limit.value())) << '\n';
+        return 0;
+    }
+    if (option_value(args, "--declared-size").has_value() ||
+        option_value(args, "--tensor-limit").has_value()) {
+        return print_error(vastloom::make_error(vastloom::ErrorCode::invalid_argument,
+                                                "GGUF inspection options require a .gguf path"),
+                           json);
+    }
     if (std::filesystem::is_directory(path, error) ||
         vastloom::util::to_lower(path.extension().string()) == ".safetensors") {
         auto catalog = vastloom::model::inspect_safetensors_checkpoint(path);
@@ -296,7 +353,7 @@ int command_inspect(const std::vector<std::string>& args) {
         std::cout << (json ? vastloom::model::to_json(catalog.value()) : vastloom::model::to_text(catalog.value())) << '\n';
         return 0;
     }
-    auto manifest = vastloom::model::load_manifest(args[0]);
+    auto manifest = vastloom::model::load_manifest(cli_path(args[0]));
     if (!manifest) return print_error(manifest.error(), json);
     std::cout << (json ? vastloom::model::to_json(manifest.value()) : vastloom::model::to_text(manifest.value())) << '\n';
     return 0;
@@ -305,10 +362,11 @@ int command_inspect(const std::vector<std::string>& args) {
 int command_verify(const std::vector<std::string>& args) {
     if (args.empty()) return print_error(vastloom::make_error(vastloom::ErrorCode::invalid_argument, "verify requires a manifest path"));
     const bool json = has_flag(args, "--json");
-    auto manifest = vastloom::model::load_manifest(args[0]);
+    auto manifest = vastloom::model::load_manifest(cli_path(args[0]));
     if (!manifest) return print_error(manifest.error(), json);
-    const std::filesystem::path root = option_value(args, "--model-root").value_or(
-        manifest.value().source_path.parent_path().empty() ? "." : manifest.value().source_path.parent_path().string());
+    const std::filesystem::path default_root = manifest.value().source_path.parent_path().empty()
+        ? std::filesystem::path(".") : manifest.value().source_path.parent_path();
+    const std::filesystem::path root = option_path(args, "--model-root", default_root);
     const auto mode = has_flag(args, "--full") ? vastloom::model::VerificationMode::full : vastloom::model::VerificationMode::quick;
     auto report = vastloom::model::verify_model(manifest.value(), root, mode);
     if (!report) return print_error(report.error(), json);
@@ -319,11 +377,11 @@ int command_verify(const std::vector<std::string>& args) {
 int command_plan(const std::vector<std::string>& args) {
     if (args.empty()) return print_error(vastloom::make_error(vastloom::ErrorCode::invalid_argument, "plan requires a manifest path"));
     const bool json = has_flag(args, "--json");
-    auto manifest = vastloom::model::load_manifest(args[0]);
+    auto manifest = vastloom::model::load_manifest(cli_path(args[0]));
     if (!manifest) return print_error(manifest.error(), json);
     auto profile = vastloom::planner::parse_profile(option_value(args, "--profile").value_or("balanced"));
     if (!profile) return print_error(profile.error(), json);
-    const auto storage_path = option_value(args, "--storage").value_or(std::filesystem::current_path().string());
+    const auto storage_path = option_path(args, "--storage", std::filesystem::current_path());
 
     vastloom::hardware::HardwareSnapshot hardware;
     if (has_flag(args, "--reference-pc")) {
@@ -378,7 +436,7 @@ int command_trace_sim(const std::vector<std::string>& args) {
     config.vram_cache_bytes = vram.value();
     config.ram_cache_bytes = ram.value();
     config.policy = policy.value();
-    auto report = vastloom::research::simulate_trace(args[0], config);
+    auto report = vastloom::research::simulate_trace(cli_path(args[0]), config);
     if (!report) return print_error(report.error(), json);
     std::cout << (json ? vastloom::research::to_json(report.value()) : vastloom::research::to_text(report.value())) << '\n';
     return 0;
@@ -402,7 +460,7 @@ int command_io_smoke(const std::vector<std::string>& args) {
     pool_options.max_queued_requests = 8U;
     pool_options.max_request_bytes = limits.staging_hard_limit;
     vastloom::io::BoundedIoPool pool(pool_options, governor);
-    auto submitted = pool.submit_read(args[0], offset.value(), size.value(), "cli-io-smoke");
+    auto submitted = pool.submit_read(cli_path(args[0]), offset.value(), size.value(), "cli-io-smoke");
     if (!submitted) return print_error(submitted.error());
     auto result = submitted.value().get();
     if (!result) return print_error(result.error());
@@ -416,7 +474,7 @@ int command_store_init(const std::vector<std::string>& args) {
     const bool json = has_flag(args, "--json");
     auto reserve = optional_bytes(args, "--reserve", 300U * vastloom::GiB);
     if (!reserve) return print_error(reserve.error(), json);
-    auto store = vastloom::model::ModelStore::initialize(args[0], {reserve.value()});
+    auto store = vastloom::model::ModelStore::initialize(cli_path(args[0]), {reserve.value()});
     if (!store) return print_error(store.error(), json);
     std::cout << (json ? vastloom::model::to_json(store.value().layout())
                       : vastloom::model::to_text(store.value().layout())) << '\n';
@@ -428,7 +486,7 @@ int command_store_info(const std::vector<std::string>& args) {
     const bool json = has_flag(args, "--json");
     auto reserve = optional_bytes(args, "--reserve", 300U * vastloom::GiB);
     if (!reserve) return print_error(reserve.error(), json);
-    auto store = vastloom::model::ModelStore::open(args[0], {reserve.value()});
+    auto store = vastloom::model::ModelStore::open(cli_path(args[0]), {reserve.value()});
     if (!store) return print_error(store.error(), json);
     std::cout << (json ? vastloom::model::to_json(store.value().layout())
                       : vastloom::model::to_text(store.value().layout())) << '\n';
@@ -437,7 +495,7 @@ int command_store_info(const std::vector<std::string>& args) {
 
 int command_runtime_policy(const std::vector<std::string>& args) {
     const bool json = has_flag(args, "--json");
-    const auto storage = option_value(args, "--storage").value_or(std::filesystem::current_path().string());
+    const auto storage = option_path(args, "--storage", std::filesystem::current_path());
     auto hardware = vastloom::hardware::HardwareProbe::collect(storage);
     if (!hardware) return print_error(hardware.error(), json);
     auto policy = vastloom::safety::make_safe_runtime_policy(hardware.value());
@@ -453,13 +511,14 @@ int command_moe_inspect(const std::vector<std::string>& args) {
     if (!valid) return print_error(valid.error(), json);
 
     ByteCount safe_ram_cap = 0U;
-    auto hardware = vastloom::hardware::HardwareProbe::collect(args[0]);
+    const auto model_path = cli_path(args[0]);
+    auto hardware = vastloom::hardware::HardwareProbe::collect(model_path);
     if (hardware) {
         auto policy = vastloom::safety::make_safe_runtime_policy(hardware.value());
         if (policy) safe_ram_cap = policy.value().resources.ram_hard_limit;
     }
     auto inspection = vastloom::inference::inspect_olmoe_checkpoint(
-        args[0], !has_flag(args, "--no-verify"), safe_ram_cap);
+        model_path, !has_flag(args, "--no-verify"), safe_ram_cap);
     if (!inspection) return print_error(inspection.error(), json);
     std::cout << (json ? vastloom::inference::to_json(inspection.value())
                       : vastloom::inference::to_text(inspection.value())) << '\n';
@@ -472,16 +531,88 @@ int command_deepseek_inspect(const std::vector<std::string>& args) {
     if (!valid) return print_error(valid.error(), json);
 
     ByteCount safe_ram_cap = 0U;
-    auto hardware = vastloom::hardware::HardwareProbe::collect(args[0]);
+    const auto model_path = cli_path(args[0]);
+    auto hardware = vastloom::hardware::HardwareProbe::collect(model_path);
     if (hardware) {
         auto policy = vastloom::safety::make_safe_runtime_policy(hardware.value());
         if (policy) safe_ram_cap = policy.value().resources.ram_hard_limit;
     }
     auto inspection = vastloom::inference::inspect_deepseek_v4_checkpoint(
-        args[0], !has_flag(args, "--no-verify"), safe_ram_cap);
+        model_path, !has_flag(args, "--no-verify"), safe_ram_cap);
     if (!inspection) return print_error(inspection.error(), json);
     std::cout << (json ? vastloom::inference::to_json(inspection.value())
                       : vastloom::inference::to_text(inspection.value())) << '\n';
+    return 0;
+}
+
+Result<std::vector<ByteCount>> parse_declared_sizes(std::string_view value,
+                                                    std::size_t expected_count) {
+    std::vector<ByteCount> sizes;
+    sizes.reserve(expected_count);
+    std::size_t begin = 0U;
+    while (begin <= value.size()) {
+        const auto separator = value.find(',', begin);
+        const auto item = value.substr(
+            begin, separator == std::string_view::npos ? value.size() - begin : separator - begin);
+        auto parsed = vastloom::parse_bytes(item);
+        if (!parsed || parsed.value() == 0U) {
+            return parsed ? vastloom::make_error(vastloom::ErrorCode::invalid_argument,
+                                                  "DeepSeek GGUF declared sizes must be positive")
+                          : parsed.error();
+        }
+        sizes.push_back(parsed.value());
+        if (separator == std::string_view::npos) break;
+        begin = separator + 1U;
+    }
+    if (sizes.size() != expected_count) {
+        return vastloom::make_error(vastloom::ErrorCode::invalid_argument,
+                                    "DeepSeek GGUF declared-size count differs from shard count");
+    }
+    return sizes;
+}
+
+int command_deepseek_gguf_inspect(const std::vector<std::string>& args) {
+    std::size_t positional_count = 0U;
+    while (positional_count < args.size() && !vastloom::util::starts_with(args[positional_count], "--")) {
+        ++positional_count;
+    }
+    const bool json = has_flag(args, "--json");
+    auto valid = validate_options(args, positional_count,
+                                  {"--declared-sizes", "--revision"}, {"--json"});
+    if (!valid) return print_error(valid.error(), json);
+    if (positional_count == 0U || positional_count > 1'024U) {
+        return print_error(vastloom::make_error(
+                               vastloom::ErrorCode::invalid_argument,
+                               "deepseek-gguf-inspect requires between 1 and 1024 shard paths"),
+                           json);
+    }
+
+    std::vector<ByteCount> declared_sizes;
+    if (const auto values = option_value(args, "--declared-sizes")) {
+        auto parsed = parse_declared_sizes(*values, positional_count);
+        if (!parsed) return print_error(parsed.error(), json);
+        declared_sizes = parsed.take_value();
+    }
+
+    std::vector<vastloom::model::GgufFile> shards;
+    shards.reserve(positional_count);
+    for (std::size_t index = 0U; index < positional_count; ++index) {
+        Result<vastloom::model::GgufFile> opened = declared_sizes.empty()
+            ? vastloom::model::GgufFile::open(cli_path(args[index]))
+            : vastloom::model::GgufFile::open_header_prefix(
+                  cli_path(args[index]), declared_sizes[index]);
+        if (!opened) return print_error(opened.error(), json);
+        shards.push_back(opened.take_value());
+    }
+    auto split = vastloom::model::finalize_gguf_split_catalog(std::move(shards));
+    if (!split) return print_error(split.error(), json);
+    vastloom::inference::DeepseekV4GgufCatalogOptions options;
+    options.revision = option_value(args, "--revision").value_or("unverified-local-headers");
+    options.metadata_only = true;
+    auto report = vastloom::inference::build_deepseek_v4_gguf_catalog(split.value(), options);
+    if (!report) return print_error(report.error(), json);
+    std::cout << (json ? vastloom::inference::to_json(report.value())
+                      : vastloom::inference::to_text(report.value())) << '\n';
     return 0;
 }
 
@@ -583,7 +714,8 @@ int command_moe_logits(const std::vector<std::string>& args) {
                                                 "--io-cache bypass requires --cache no-cache"), json);
     }
 
-    auto hardware = vastloom::hardware::HardwareProbe::collect(args[0]);
+    const auto model_path = cli_path(args[0]);
+    auto hardware = vastloom::hardware::HardwareProbe::collect(model_path);
     if (!hardware) return print_error(hardware.error(), json);
     auto policy = vastloom::safety::make_safe_runtime_policy(hardware.value());
     if (!policy) return print_error(policy.error(), json);
@@ -591,7 +723,7 @@ int command_moe_logits(const std::vector<std::string>& args) {
     if (!guard) return print_error(guard.error(), json);
     vastloom::safety::ResourceGovernor governor(policy.value().resources);
     auto model = vastloom::inference::OlmoeRuntimeModel::load(
-        args[0], governor, {!has_flag(args, "--no-verify"), policy.value().cpu_threads});
+        model_path, governor, {!has_flag(args, "--no-verify"), policy.value().cpu_threads});
     if (!model) return print_error(model.error(), json);
     auto checked = guard.value().sample_and_check();
     if (!checked) return print_error(checked.error(), json);
@@ -623,7 +755,7 @@ int command_moe_logits(const std::vector<std::string>& args) {
 
     const auto trace_path = option_value(args, "--trace");
     if (trace_path) {
-        auto written = write_olmoe_trace_atomic(*trace_path, forwarded.value().trace);
+        auto written = write_olmoe_trace_atomic(cli_path(*trace_path), forwarded.value().trace);
         if (!written) return print_error(written.error(), json);
     }
     std::vector<std::size_t> order(forwarded.value().logits.size());
@@ -752,14 +884,15 @@ int command_tokenize(const std::vector<std::string>& args) {
     if (!valid) return print_error(valid.error(), json);
     const auto text = option_value(args, "--text");
     if (!text) return print_error(vastloom::make_error(vastloom::ErrorCode::invalid_argument, "tokenize requires --text"), json);
-    auto tokenizer = vastloom::inference::Gpt2Tokenizer::load(args[0]);
+    const auto model_path = cli_path(args[0]);
+    auto tokenizer = vastloom::inference::Gpt2Tokenizer::load(model_path);
     if (!tokenizer) return print_error(tokenizer.error(), json);
     std::string input = *text;
     if (has_flag(args, "--chat")) {
         std::vector<vastloom::inference::ChatMessage> messages;
         if (const auto system = option_value(args, "--system")) messages.push_back({"system", *system});
         messages.push_back({"user", input});
-        const auto config_path = std::filesystem::path(args[0]) / "config.json";
+        const auto config_path = model_path / "config.json";
         auto olmoe = vastloom::inference::load_olmoe_config(config_path);
         auto formatted = tokenizer.value().is_deepseek_v4()
                              ? tokenizer.value().apply_deepseek_v4_chat_template(messages, true)
@@ -797,13 +930,14 @@ int command_real_model_info(const std::vector<std::string>& args) {
     if (args.empty()) return print_error(vastloom::make_error(vastloom::ErrorCode::invalid_argument, "model-info requires a model directory"), json);
     auto valid = validate_options(args, 1U, {}, {"--no-verify", "--json"});
     if (!valid) return print_error(valid.error(), json);
-    auto imported = vastloom::model::verify_imported_checkpoint(args[0], !has_flag(args, "--no-verify"));
+    const auto model_path = cli_path(args[0]);
+    auto imported = vastloom::model::verify_imported_checkpoint(model_path, !has_flag(args, "--no-verify"));
     if (!imported) return print_error(imported.error(), json);
-    auto config = vastloom::inference::load_llama_config(std::filesystem::path(args[0]) / "config.json");
+    auto config = vastloom::inference::load_llama_config(model_path / "config.json");
     if (!config) return print_error(config.error(), json);
-    auto tokenizer = vastloom::inference::Gpt2Tokenizer::load(args[0]);
+    auto tokenizer = vastloom::inference::Gpt2Tokenizer::load(model_path);
     if (!tokenizer) return print_error(tokenizer.error(), json);
-    auto catalog = vastloom::model::inspect_safetensors_checkpoint(args[0]);
+    auto catalog = vastloom::model::inspect_safetensors_checkpoint(model_path);
     if (!catalog) return print_error(catalog.error(), json);
     if (json) {
         std::cout << "{\"ok\":true,\"model_id\":\"" << vastloom::util::json_escape(imported.value().model_id)
@@ -868,9 +1002,10 @@ int command_real_logits(const std::vector<std::string>& args) {
     if (!text) return print_error(vastloom::make_error(vastloom::ErrorCode::invalid_argument, "real-logits requires --text"), json);
     auto top = optional_size(args, "--top", 10U);
     if (!top || top.value() == 0U || top.value() > 100U) return print_error(top ? vastloom::make_error(vastloom::ErrorCode::invalid_argument, "--top must be between 1 and 100") : top.error(), json);
-    auto runtime = start_real_runtime(args[0]);
+    const auto model_path = cli_path(args[0]);
+    auto runtime = start_real_runtime(model_path);
     if (!runtime) return print_error(runtime.error(), json);
-    auto model = load_real_model(args[0], runtime.value(), !has_flag(args, "--no-verify"));
+    auto model = load_real_model(model_path, runtime.value(), !has_flag(args, "--no-verify"));
     if (!model) return print_error(model.error(), json);
     std::string input = *text;
     if (has_flag(args, "--chat")) {
@@ -924,9 +1059,10 @@ int command_real_chat(const std::vector<std::string>& args) {
     if (!timeout_ms || timeout_ms.value() > static_cast<std::size_t>(std::numeric_limits<std::int64_t>::max())) {
         return print_error(timeout_ms ? vastloom::make_error(vastloom::ErrorCode::invalid_argument, "Invalid --timeout-ms") : timeout_ms.error(), json);
     }
-    auto runtime = start_real_runtime(args[0]);
+    const auto model_path = cli_path(args[0]);
+    auto runtime = start_real_runtime(model_path);
     if (!runtime) return print_error(runtime.error(), json);
-    auto model = load_real_model(args[0], runtime.value(), !has_flag(args, "--no-verify"));
+    auto model = load_real_model(model_path, runtime.value(), !has_flag(args, "--no-verify"));
     if (!model) return print_error(model.error(), json);
     std::vector<vastloom::inference::ChatMessage> messages;
     if (const auto system = option_value(args, "--system")) messages.push_back({"system", *system});
@@ -1040,9 +1176,10 @@ int command_real_self_test(const std::vector<std::string>& args) {
     if (args.empty()) return print_error(vastloom::make_error(vastloom::ErrorCode::invalid_argument, "self-test requires a model directory"), json);
     auto valid = validate_options(args, 1U, {}, {"--no-verify", "--json"});
     if (!valid) return print_error(valid.error(), json);
-    auto runtime = start_real_runtime(args[0]);
+    const auto model_path = cli_path(args[0]);
+    auto runtime = start_real_runtime(model_path);
     if (!runtime) return print_error(runtime.error(), json);
-    auto model = load_real_model(args[0], runtime.value(), !has_flag(args, "--no-verify"));
+    auto model = load_real_model(model_path, runtime.value(), !has_flag(args, "--no-verify"));
     if (!model) return print_error(model.error(), json);
 
     struct Case {
@@ -1106,7 +1243,7 @@ int command_heartbeat_write(const std::vector<std::string>& args) {
     heartbeat.sequence = 1;
     heartbeat.unix_time_ms = vastloom::safety::unix_time_ms();
     heartbeat.state = state.value();
-    auto written = vastloom::safety::write_heartbeat_atomic(args[0], heartbeat);
+    auto written = vastloom::safety::write_heartbeat_atomic(cli_path(args[0]), heartbeat);
     if (!written) return print_error(written.error());
     std::cout << "Wrote atomic heartbeat to " << args[0] << '\n';
     return 0;
@@ -1123,17 +1260,17 @@ int dispatch_cli(const std::vector<std::string>& arguments) {
 
         if (command == "chat") {
             std::error_code error;
-            if (!args.empty() && std::filesystem::is_directory(args[0], error)) return command_real_chat(args);
+            if (!args.empty() && std::filesystem::is_directory(cli_path(args[0]), error)) return command_real_chat(args);
             return vastloom::cli::command_chat(args);
         }
         if (command == "model-info") {
             std::error_code error;
-            if (!args.empty() && std::filesystem::is_directory(args[0], error)) return command_real_model_info(args);
+            if (!args.empty() && std::filesystem::is_directory(cli_path(args[0]), error)) return command_real_model_info(args);
             return vastloom::cli::command_model_info(args);
         }
         if (command == "self-test") {
             std::error_code error;
-            if (!args.empty() && std::filesystem::is_directory(args[0], error)) return command_real_self_test(args);
+            if (!args.empty() && std::filesystem::is_directory(cli_path(args[0]), error)) return command_real_self_test(args);
             return vastloom::cli::command_self_test(args);
         }
         if (command == "doctor") return command_doctor(args);
@@ -1149,6 +1286,7 @@ int dispatch_cli(const std::vector<std::string>& arguments) {
         if (command == "real-logits") return command_real_logits(args);
         if (command == "moe-inspect") return command_moe_inspect(args);
         if (command == "deepseek-inspect") return command_deepseek_inspect(args);
+        if (command == "deepseek-gguf-inspect") return command_deepseek_gguf_inspect(args);
         if (command == "moe-logits") return command_moe_logits(args);
         if (command == "heartbeat-write") return command_heartbeat_write(args);
         if (command == "version" || command == "--version") {

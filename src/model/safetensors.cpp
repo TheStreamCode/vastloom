@@ -56,6 +56,7 @@ ByteCount dtype_bytes(TensorDType dtype) noexcept {
         case TensorDType::f64:
         case TensorDType::u64:
         case TensorDType::i64: return 8;
+        case TensorDType::quantized: return 0;
     }
     return 0;
 }
@@ -358,6 +359,7 @@ std::string_view to_string(TensorDType dtype) noexcept {
         case TensorDType::f64: return "F64";
         case TensorDType::u64: return "U64";
         case TensorDType::i64: return "I64";
+        case TensorDType::quantized: return "QUANTIZED";
     }
     return "UNKNOWN";
 }

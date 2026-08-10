@@ -59,6 +59,11 @@ Result<void> finalize_catalog(LogicalTensorCatalog& catalog,
                               "Logical tensor source range is empty or overflows",
                               tensor.name);
         }
+        if (tensor.dtype == TensorDType::quantized && !tensor.ggml_type.has_value()) {
+            return make_error(ErrorCode::invalid_format,
+                              "Quantized logical tensor is missing its GGML storage type",
+                              tensor.name);
+        }
 
         auto total = add_bytes(tensor_bytes, tensor.source.bytes, tensor.name);
         if (!total) return total.error();

@@ -48,6 +48,7 @@ struct LogicalTensorDescriptor {
     std::optional<std::uint32_t> expert;
     bool speculative{false};
     TensorSourceRange source;
+    std::optional<std::uint32_t> ggml_type;
 };
 
 struct ExpertBundle {

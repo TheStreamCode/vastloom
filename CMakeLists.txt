@@ -76,6 +76,7 @@ add_library(vastloom_core STATIC
     src/inference/deepseek_v4_gguf.cpp
     src/inference/deepseek_v4_model.cpp
     src/inference/deepseek_v4_graph.cpp
+    src/inference/deepseek_v4_expert_provider.cpp
     src/inference/deepseek_v4_reference.cpp
     src/inference/llama_model.cpp
     src/inference/olmoe_model.cpp

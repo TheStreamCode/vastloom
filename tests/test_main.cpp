@@ -9,6 +9,9 @@
 #include <fstream>
 #include <iostream>
 #include <limits>
+#include <map>
+#include <memory>
+#include <numeric>
 #include <optional>
 #include <string>
 #include <thread>
@@ -19,6 +22,7 @@
 #include "vastloom/inference/gpt2_tokenizer.hpp"
 #include "vastloom/inference/ggml_quantization.hpp"
 #include "vastloom/inference/deepseek_v4_gguf.hpp"
+#include "vastloom/inference/deepseek_v4_expert_provider.hpp"
 #include "vastloom/inference/deepseek_v4_model.hpp"
 #include "vastloom/inference/deepseek_v4_reference.hpp"
 #include "vastloom/inference/llama_model.hpp"
@@ -3190,12 +3194,298 @@ void test_deepseek_v4_reference_graph(const std::filesystem::path& root) {
                 }
             }
 
+            // Keep only the trunk buffers and replace static expert tensors with a router-first,
+            // two-entry file-backed cache. One-token prefill selects experts 2/3, the next decode
+            // hits them, and the following decode selects 0/1 and evicts the old pair.
+            auto dynamic_graph = governed_graph;
+            for (const auto& spec : layer_matrices) {
+                if (spec.expert.has_value()) {
+                    dynamic_graph.packed_matrices.erase(spec.name);
+                    governed_graph.packed_matrices.erase(spec.name);
+                }
+            }
             governed_graph.packed_matrices.clear();
             governed_graph.packed_integer_tensors.clear();
-            for (auto& residency : resident_objects) {
-                auto snapshot = residency.snapshot();
+            const std::size_t trunk_residency_count = file_plan.value().tiles.size();
+            CHECK(resident_objects.size() ==
+                  trunk_residency_count + packed_catalog.experts.size());
+            for (std::size_t index = trunk_residency_count;
+                 index < resident_objects.size(); ++index) {
+                auto snapshot = resident_objects[index].snapshot();
                 CHECK(snapshot && snapshot.value().active_uses == 0U &&
-                      snapshot.value().evictable && residency.evict_ram());
+                      snapshot.value().evictable &&
+                      resident_objects[index].evict_ram());
+            }
+
+            std::vector<vastloom::inference::DeepseekV4ExpertBundleBinding>
+                expert_bindings;
+            bool expert_bindings_ok = true;
+            for (const auto& bundle : packed_catalog.experts) {
+                vastloom::inference::DeepseekV4ExpertBundleBinding binding;
+                binding.expert_id = bundle.expert;
+                binding.bundle = bundle;
+                std::size_t matrix_count = 0U;
+                for (const auto tensor_index : bundle.tensor_indices) {
+                    const auto& descriptor = packed_catalog.tensors[tensor_index];
+                    const auto* spec = find_spec(descriptor.name);
+                    std::optional<vastloom::inference::DeepseekV4ExpertWeight>
+                        weight;
+                    if (descriptor.name.ends_with(".w1.weight")) {
+                        weight = vastloom::inference::DeepseekV4ExpertWeight::w1;
+                    } else if (descriptor.name.ends_with(".w2.weight")) {
+                        weight = vastloom::inference::DeepseekV4ExpertWeight::w2;
+                    } else if (descriptor.name.ends_with(".w3.weight")) {
+                        weight = vastloom::inference::DeepseekV4ExpertWeight::w3;
+                    }
+                    if (matrix_count >= binding.matrices.size() || spec == nullptr ||
+                        !weight.has_value() || !descriptor.ggml_type.has_value()) {
+                        expert_bindings_ok = false;
+                        break;
+                    }
+                    binding.matrices[matrix_count++] =
+                        vastloom::inference::DeepseekV4ExpertMatrixBinding{
+                            *weight, tensor_index, *descriptor.ggml_type,
+                            spec->rows, spec->columns,
+                            vastloom::inference::kQ8_0BlockElements};
+                }
+                if (!expert_bindings_ok || matrix_count != binding.matrices.size()) {
+                    expert_bindings_ok = false;
+                    break;
+                }
+                expert_bindings.push_back(std::move(binding));
+            }
+            CHECK(expert_bindings_ok &&
+                  expert_bindings.size() == packed_catalog.experts.size());
+
+            vastloom::inference::DeepseekV4ExpertCacheOptions cache_options;
+            cache_options.block_prefix = "layers.0.ffn";
+            cache_options.max_cached_experts = 2U;
+            cache_options.max_experts_per_request = 2U;
+            cache_options.load = expert_options;
+            if (expert_bindings_ok) {
+                auto invalid_options = cache_options;
+                invalid_options.max_experts_per_request = 3U;
+                CHECK(!vastloom::inference::DeepseekV4BoundedExpertCache::create(
+                    expert_bindings, governor, invalid_options));
+                auto duplicate_bindings = expert_bindings;
+                duplicate_bindings.push_back(expert_bindings.front());
+                CHECK(!vastloom::inference::DeepseekV4BoundedExpertCache::create(
+                    std::move(duplicate_bindings), governor, cache_options));
+                auto malformed_bindings = expert_bindings;
+                malformed_bindings.front().matrices.front().logical_columns =
+                    malformed_bindings.front().matrices.front().storage_columns + 1U;
+                CHECK(!vastloom::inference::DeepseekV4BoundedExpertCache::create(
+                    std::move(malformed_bindings), governor, cache_options));
+            }
+            auto cache_result =
+                vastloom::inference::DeepseekV4BoundedExpertCache::create(
+                    expert_bindings, governor, cache_options);
+            CHECK(cache_result);
+            std::shared_ptr<vastloom::inference::DeepseekV4BoundedExpertCache>
+                expert_cache;
+            if (cache_result) {
+                expert_cache = cache_result.take_value();
+                auto validation_provider = expert_cache->provider_binding();
+                const std::array<std::uint32_t, 2U> duplicate_request{0U, 0U};
+                const std::array<std::uint32_t, 1U> unknown_request{
+                    static_cast<std::uint32_t>(config.expert_count)};
+                const std::array<std::uint32_t, 3U> oversized_request{0U, 1U, 2U};
+                CHECK(!validation_provider.resolve(
+                          "layers.1.ffn", unknown_request) &&
+                      !validation_provider.resolve(
+                          "layers.0.ffn", duplicate_request) &&
+                      !validation_provider.resolve(
+                          "layers.0.ffn", unknown_request) &&
+                      !validation_provider.resolve(
+                          "layers.0.ffn", oversized_request));
+                const auto validation_snapshot = expert_cache->snapshot();
+                CHECK(validation_snapshot.requests == 0U &&
+                      validation_snapshot.cached_experts == 0U &&
+                      validation_snapshot.resident_bytes == 0U);
+
+                vastloom::safety::ResourceLimits cache_refused_limits;
+                cache_refused_limits.host_memory_hard_limit = 2U;
+                cache_refused_limits.ram_hard_limit = 1U;
+                cache_refused_limits.vram_hard_limit = 1U;
+                cache_refused_limits.staging_hard_limit = 1U;
+                cache_refused_limits.scratch_hard_limit = 1U;
+                vastloom::safety::ResourceGovernor cache_refused_governor(
+                    cache_refused_limits);
+                auto refused_cache =
+                    vastloom::inference::DeepseekV4BoundedExpertCache::create(
+                        expert_bindings, cache_refused_governor, cache_options);
+                CHECK(refused_cache);
+                if (refused_cache) {
+                    auto refused_provider =
+                        refused_cache.value()->provider_binding();
+                    const std::array<std::uint32_t, 1U> one_expert{0U};
+                    CHECK(!refused_provider.resolve(
+                        "layers.0.ffn", one_expert));
+                    CHECK(refused_cache.value()->snapshot().cached_experts == 0U &&
+                          cache_refused_governor.snapshot().reserved[0] == 0U &&
+                          cache_refused_governor.snapshot().reserved[2] == 0U);
+                }
+                dynamic_graph.expert_providers.emplace(
+                    "layers.0.ffn", expert_cache->provider_binding());
+            }
+
+            const std::array<std::uint32_t, 1U> dynamic_prompt{token_ids.front()};
+            vastloom::inference::DeepseekV4ReferenceState dynamic_oracle_state;
+            vastloom::inference::DeepseekV4ReferenceState dynamic_state;
+            auto dynamic_oracle = vastloom::inference::deepseek_v4_reference_prefill(
+                quantized_oracle, dynamic_prompt, &dynamic_oracle_state);
+            auto dynamic = vastloom::inference::deepseek_v4_reference_prefill(
+                dynamic_graph, dynamic_prompt, &dynamic_state);
+            CHECK(dynamic_oracle && dynamic);
+            if (dynamic_oracle && dynamic) {
+                compare_packed_forward(dynamic.value(), dynamic_oracle.value());
+                CHECK(dynamic.value().layers[0].expert_accesses.size() == 2U);
+                for (const auto& access :
+                     dynamic.value().layers[0].expert_accesses) {
+                    CHECK(!access.cache_hit && access.logical_bytes_read ==
+                                                  access.resident_bytes);
+                }
+            }
+            const auto first_cache_snapshot =
+                expert_cache != nullptr
+                    ? expert_cache->snapshot()
+                    : vastloom::inference::DeepseekV4ExpertCacheSnapshot{};
+            CHECK(first_cache_snapshot.requests == 1U &&
+                  first_cache_snapshot.requested_experts == 2U &&
+                  first_cache_snapshot.misses == 2U &&
+                  first_cache_snapshot.hits == 0U &&
+                  first_cache_snapshot.evictions == 0U &&
+                  first_cache_snapshot.cached_experts == 2U);
+            const auto requests_before_oversized_prefill =
+                first_cache_snapshot.requests;
+            CHECK(!vastloom::inference::deepseek_v4_reference_prefill(
+                dynamic_graph, token_ids));
+            CHECK(expert_cache != nullptr &&
+                  expert_cache->snapshot().requests ==
+                      requests_before_oversized_prefill);
+
+            auto dynamic_oracle_hit =
+                vastloom::inference::deepseek_v4_reference_decode(
+                    quantized_oracle, 10U, dynamic_oracle_state);
+            auto dynamic_hit = vastloom::inference::deepseek_v4_reference_decode(
+                dynamic_graph, 10U, dynamic_state);
+            CHECK(dynamic_oracle_hit && dynamic_hit);
+            if (dynamic_oracle_hit && dynamic_hit) {
+                compare_packed_forward(dynamic_hit.value(),
+                                       dynamic_oracle_hit.value());
+                CHECK(dynamic_hit.value().layers[0].expert_accesses.size() == 2U);
+                for (const auto& access :
+                     dynamic_hit.value().layers[0].expert_accesses) {
+                    CHECK(access.cache_hit && access.logical_bytes_read == 0U);
+                }
+            }
+            const auto hit_cache_snapshot =
+                expert_cache != nullptr
+                    ? expert_cache->snapshot()
+                    : vastloom::inference::DeepseekV4ExpertCacheSnapshot{};
+            CHECK(hit_cache_snapshot.misses == 2U &&
+                  hit_cache_snapshot.hits == 2U &&
+                  hit_cache_snapshot.evictions == 0U &&
+                  hit_cache_snapshot.logical_bytes_read ==
+                      first_cache_snapshot.logical_bytes_read);
+
+            auto dynamic_oracle_miss =
+                vastloom::inference::deepseek_v4_reference_decode(
+                    quantized_oracle, 12U, dynamic_oracle_state);
+            auto dynamic_miss = vastloom::inference::deepseek_v4_reference_decode(
+                dynamic_graph, 12U, dynamic_state);
+            CHECK(dynamic_oracle_miss && dynamic_miss);
+            if (dynamic_oracle_miss && dynamic_miss) {
+                compare_packed_forward(dynamic_miss.value(),
+                                       dynamic_oracle_miss.value());
+                CHECK(dynamic_miss.value().layers[0].expert_accesses.size() == 2U);
+                for (const auto& access :
+                     dynamic_miss.value().layers[0].expert_accesses) {
+                    CHECK(!access.cache_hit && access.logical_bytes_read ==
+                                                  access.resident_bytes);
+                }
+            }
+            const auto miss_cache_snapshot =
+                expert_cache != nullptr
+                    ? expert_cache->snapshot()
+                    : vastloom::inference::DeepseekV4ExpertCacheSnapshot{};
+            CHECK(miss_cache_snapshot.misses == 4U &&
+                  miss_cache_snapshot.hits == 2U &&
+                  miss_cache_snapshot.evictions == 2U &&
+                  miss_cache_snapshot.logical_bytes_read ==
+                      packed_catalog.routed_expert_bytes &&
+                  miss_cache_snapshot.cached_experts == 2U);
+
+            {
+                auto wrong_count = dynamic_graph;
+                wrong_count.expert_providers["layers.0.ffn"].resolve =
+                    [](std::string_view,
+                       std::span<const std::uint32_t>)
+                        -> vastloom::Result<std::vector<
+                            vastloom::inference::DeepseekV4ResolvedExpert>> {
+                        return std::vector<
+                            vastloom::inference::DeepseekV4ResolvedExpert>{};
+                    };
+                const auto before = dynamic_state;
+                CHECK(!vastloom::inference::deepseek_v4_reference_decode(
+                    wrong_count, 14U, dynamic_state));
+                CHECK(dynamic_state.next_position == before.next_position &&
+                      dynamic_state.layers[0].window_key_values ==
+                          before.layers[0].window_key_values);
+            }
+            {
+                auto throwing = dynamic_graph;
+                throwing.expert_providers["layers.0.ffn"].resolve =
+                    [](std::string_view,
+                       std::span<const std::uint32_t>)
+                        -> vastloom::Result<std::vector<
+                            vastloom::inference::DeepseekV4ResolvedExpert>> {
+                        throw 7;
+                    };
+                CHECK(!vastloom::inference::deepseek_v4_reference_prefill(
+                    throwing, dynamic_prompt));
+            }
+
+            const vastloom::ByteCount dynamic_cache_bytes =
+                miss_cache_snapshot.resident_bytes;
+            CHECK(governor.snapshot().reserved[0] ==
+                  packed_catalog.always_active_bytes + dynamic_cache_bytes);
+
+            // A second request cannot evict a bundle still retained by an in-flight
+            // consumer. The failed clear/request leave the cache and Governor accounting
+            // unchanged; once the retained result dies, explicit clear succeeds.
+            if (expert_cache != nullptr) {
+                auto direct_provider = expert_cache->provider_binding();
+                const std::array<std::uint32_t, 2U> cached_ids{0U, 1U};
+                const std::array<std::uint32_t, 2U> replacement_ids{2U, 3U};
+                {
+                    auto retained = direct_provider.resolve(
+                        "layers.0.ffn", cached_ids);
+                    CHECK(retained &&
+                          !direct_provider.resolve(
+                              "layers.0.ffn", replacement_ids));
+                    CHECK(!expert_cache->clear());
+                    const auto retained_snapshot = expert_cache->snapshot();
+                    CHECK(retained_snapshot.cached_experts == 2U &&
+                          retained_snapshot.evictions ==
+                              miss_cache_snapshot.evictions &&
+                          retained_snapshot.resident_bytes == dynamic_cache_bytes &&
+                          governor.snapshot().reserved[0] ==
+                              packed_catalog.always_active_bytes +
+                                  dynamic_cache_bytes);
+                }
+            }
+
+            dynamic_graph.expert_providers.clear();
+            dynamic_graph.packed_matrices.clear();
+            dynamic_graph.packed_integer_tensors.clear();
+            CHECK(expert_cache != nullptr && expert_cache->clear());
+            expert_cache.reset();
+            for (std::size_t index = 0U; index < trunk_residency_count; ++index) {
+                auto snapshot = resident_objects[index].snapshot();
+                CHECK(snapshot && snapshot.value().active_uses == 0U &&
+                      snapshot.value().evictable &&
+                      resident_objects[index].evict_ram());
             }
             CHECK(governor.snapshot().reserved[0] == 0U &&
                   governor.snapshot().reserved[1] == 0U &&

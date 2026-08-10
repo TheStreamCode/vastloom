@@ -113,6 +113,30 @@ struct DeepseekV4PackedIntegerTensor {
     std::size_t resident_bytes{0U};
 };
 
+struct DeepseekV4ResolvedExpert {
+    std::uint32_t expert_id{0U};
+    DeepseekV4PackedMatrix w1;
+    DeepseekV4PackedMatrix w2;
+    DeepseekV4PackedMatrix w3;
+    std::uint64_t resident_bytes{0U};
+    std::uint64_t logical_bytes_read{0U};
+    bool cache_hit{false};
+};
+
+using DeepseekV4ExpertProvider = std::function<Result<std::vector<DeepseekV4ResolvedExpert>>(
+    std::string_view block_prefix,
+    std::span<const std::uint32_t> unique_expert_ids)>;
+
+struct DeepseekV4ExpertProviderBinding {
+    DeepseekV4ExpertProviderBinding() = default;
+    DeepseekV4ExpertProviderBinding(std::size_t request_limit,
+                                    DeepseekV4ExpertProvider resolver)
+        : max_experts_per_request(request_limit), resolve(std::move(resolver)) {}
+
+    std::size_t max_experts_per_request{0U};
+    DeepseekV4ExpertProvider resolve;
+};
+
 // Bind exact complete tensors from bounded file loaders without copying their payload. The
 // returned descriptor retains the loader's ResidencyUse through a shared immutable buffer.
 [[nodiscard]] Result<DeepseekV4PackedMatrix> deepseek_v4_bind_packed_matrix(
@@ -145,6 +169,7 @@ struct DeepseekV4ReferenceGraph {
     std::map<std::string, std::vector<std::uint32_t>, std::less<>> integer_tensors;
     std::map<std::string, DeepseekV4PackedMatrix, std::less<>> packed_matrices;
     std::map<std::string, DeepseekV4PackedIntegerTensor, std::less<>> packed_integer_tensors;
+    std::map<std::string, DeepseekV4ExpertProviderBinding, std::less<>> expert_providers;
 };
 
 struct DeepseekV4ReferenceCompressorState {
@@ -166,8 +191,16 @@ struct DeepseekV4ReferenceState {
 };
 
 struct DeepseekV4LayerTrace {
+    struct ExpertAccess {
+        std::uint32_t expert_id{0U};
+        std::uint64_t resident_bytes{0U};
+        std::uint64_t logical_bytes_read{0U};
+        bool cache_hit{false};
+    };
+
     std::size_t layer{0};
     DeepseekV4RouteResult route;
+    std::vector<ExpertAccess> expert_accesses;
     std::vector<std::int32_t> attention_indices;
     std::size_t attention_selected_per_token{0};
 };

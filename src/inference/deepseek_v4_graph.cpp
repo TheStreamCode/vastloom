@@ -7,7 +7,9 @@
 #include <algorithm>
 #include <array>
 #include <cmath>
+#include <exception>
 #include <limits>
+#include <new>
 #include <numbers>
 #include <numeric>
 #include <span>
@@ -243,20 +245,14 @@ Result<std::vector<float>> linear(std::span<const float> input,
     return output;
 }
 
-Result<std::vector<float>> linear_tensor(const DeepseekV4ReferenceGraph& graph,
-                                         std::string_view name,
-                                         std::span<const float> input,
-                                         std::size_t rows,
-                                         std::size_t input_width,
-                                         std::size_t output_width,
-                                         std::string_view context) {
-    const auto packed = graph.packed_matrices.find(name);
-    if (packed == graph.packed_matrices.end()) {
-        auto weight = float_tensor(graph, name, {output_width, input_width});
-        if (!weight) return weight.error();
-        return linear(input, weight.value(), rows, input_width, output_width, context);
-    }
-    const auto& matrix = packed->second;
+Result<std::vector<float>> linear_packed_matrix(
+    const DeepseekV4PackedMatrix& matrix,
+    std::string_view name,
+    std::span<const float> input,
+    std::size_t rows,
+    std::size_t input_width,
+    std::size_t output_width,
+    std::string_view context) {
     if (!supports_reference_matvec_ggml_type(matrix.ggml_type)) {
         return make_error(ErrorCode::unsupported,
                           "DeepSeek packed matrix type has no reference matvec",
@@ -309,6 +305,23 @@ Result<std::vector<float>> linear_tensor(const DeepseekV4ReferenceGraph& graph,
     finite = finite_values(output, context);
     if (!finite) return finite.error();
     return output;
+}
+
+Result<std::vector<float>> linear_tensor(const DeepseekV4ReferenceGraph& graph,
+                                         std::string_view name,
+                                         std::span<const float> input,
+                                         std::size_t rows,
+                                         std::size_t input_width,
+                                         std::size_t output_width,
+                                         std::string_view context) {
+    const auto packed = graph.packed_matrices.find(name);
+    if (packed != graph.packed_matrices.end()) {
+        return linear_packed_matrix(packed->second, name, input, rows,
+                                    input_width, output_width, context);
+    }
+    auto weight = float_tensor(graph, name, {output_width, input_width});
+    if (!weight) return weight.error();
+    return linear(input, weight.value(), rows, input_width, output_width, context);
 }
 
 double rope_frequency(std::size_t pair,
@@ -1163,7 +1176,8 @@ Result<std::vector<float>> execute_expert(const DeepseekV4ReferenceGraph& graph,
                                           std::string_view prefix,
                                           std::span<const float> input,
                                           std::span<const float> routing,
-                                          std::size_t tokens) {
+                                          std::size_t tokens,
+                                          const DeepseekV4ResolvedExpert* resolved = nullptr) {
     const auto& config = graph.config;
     const std::string base(prefix);
     if (tokens == 0U || !std::isfinite(config.swiglu_limit) ||
@@ -1177,13 +1191,27 @@ Result<std::vector<float>> execute_expert(const DeepseekV4ReferenceGraph& graph,
     }
     auto routing_finite = finite_values(routing, base + " routing");
     if (!routing_finite) return routing_finite.error();
-    auto gate = linear_tensor(graph, base + ".w1.weight", input, tokens,
-                              config.width, config.intermediate_width,
-                              base + ".w1");
+    const auto expert_linear = [&](const DeepseekV4PackedMatrix* matrix,
+                                   std::string_view suffix,
+                                   std::span<const float> values,
+                                   std::size_t input_columns,
+                                   std::size_t output_rows) {
+        const std::string name = base + std::string(suffix) + ".weight";
+        if (matrix != nullptr) {
+            return linear_packed_matrix(*matrix, name, values, tokens,
+                                        input_columns, output_rows,
+                                        base + std::string(suffix));
+        }
+        return linear_tensor(graph, name, values, tokens, input_columns,
+                             output_rows, base + std::string(suffix));
+    };
+    auto gate = expert_linear(resolved == nullptr ? nullptr : &resolved->w1,
+                              ".w1", input, config.width,
+                              config.intermediate_width);
     if (!gate) return gate.error();
-    auto up = linear_tensor(graph, base + ".w3.weight", input, tokens,
-                            config.width, config.intermediate_width,
-                            base + ".w3");
+    auto up = expert_linear(resolved == nullptr ? nullptr : &resolved->w3,
+                            ".w3", input, config.width,
+                            config.intermediate_width);
     if (!up) return up.error();
     auto activated_count = bounded_product(
         {tokens, config.intermediate_width}, base + " activated values");
@@ -1208,13 +1236,15 @@ Result<std::vector<float>> execute_expert(const DeepseekV4ReferenceGraph& graph,
                 static_cast<float>(value);
         }
     }
-    return linear_tensor(graph, base + ".w2.weight", activated, tokens,
-                         config.intermediate_width, config.width, base + ".w2");
+    return expert_linear(resolved == nullptr ? nullptr : &resolved->w2,
+                         ".w2", activated, config.intermediate_width,
+                         config.width);
 }
 
 struct MoeResult {
     std::vector<float> output;
     DeepseekV4RouteResult route;
+    std::vector<DeepseekV4LayerTrace::ExpertAccess> expert_accesses;
 };
 
 Result<MoeResult> moe_forward(const DeepseekV4ReferenceGraph& graph,
@@ -1247,10 +1277,110 @@ Result<MoeResult> moe_forward(const DeepseekV4ReferenceGraph& graph,
             config.experts_per_token, config.route_scale);
     }
     if (!route) return route.error();
+    std::vector<std::uint32_t> requested_experts;
+    try {
+        requested_experts.reserve(std::min(route.value().indices.size(),
+                                           config.expert_count));
+        for (const auto expert_id : route.value().indices) {
+            if (expert_id >= config.expert_count) {
+                return make_error(ErrorCode::invalid_format,
+                                  "DeepSeek router selected an out-of-range expert",
+                                  base);
+            }
+            if (std::find(requested_experts.begin(), requested_experts.end(),
+                          expert_id) == requested_experts.end()) {
+                requested_experts.push_back(expert_id);
+            }
+        }
+    } catch (const std::bad_alloc&) {
+        return make_error(ErrorCode::resource_exhausted,
+                          "Unable to allocate the bounded selected-expert set",
+                          base);
+    }
+
+    std::vector<DeepseekV4ResolvedExpert> resolved_experts;
+    std::vector<DeepseekV4LayerTrace::ExpertAccess> expert_accesses;
+    const auto provider = graph.expert_providers.find(base);
+    if (provider != graph.expert_providers.end()) {
+        if (!provider->second.resolve ||
+            provider->second.max_experts_per_request == 0U ||
+            requested_experts.size() > provider->second.max_experts_per_request) {
+            return make_error(ErrorCode::resource_exhausted,
+                              "Selected-expert request exceeds its configured bound",
+                              base);
+        }
+        auto provided = [&]() -> Result<std::vector<DeepseekV4ResolvedExpert>> {
+            try {
+                return provider->second.resolve(base, requested_experts);
+            } catch (const std::bad_alloc&) {
+                return make_error(ErrorCode::resource_exhausted,
+                                  "Selected-expert provider exhausted memory",
+                                  base);
+            } catch (const std::exception& exception) {
+                return make_error(ErrorCode::internal_error,
+                                  "Selected-expert provider failed",
+                                  exception.what());
+            } catch (...) {
+                return make_error(ErrorCode::internal_error,
+                                  "Selected-expert provider failed",
+                                  base);
+            }
+        }();
+        if (!provided) return provided.error();
+        resolved_experts = provided.take_value();
+        if (resolved_experts.size() != requested_experts.size()) {
+            return make_error(ErrorCode::integrity_error,
+                              "Selected-expert provider returned the wrong bundle count",
+                              base);
+        }
+        try {
+            expert_accesses.reserve(requested_experts.size());
+            for (const auto expert_id : requested_experts) {
+                const auto found = std::find_if(
+                    resolved_experts.begin(), resolved_experts.end(),
+                    [expert_id](const DeepseekV4ResolvedExpert& expert) {
+                        return expert.expert_id == expert_id;
+                    });
+                if (found == resolved_experts.end() || found->resident_bytes == 0U ||
+                    found->logical_bytes_read > found->resident_bytes ||
+                    (found->cache_hit && found->logical_bytes_read != 0U)) {
+                    return make_error(ErrorCode::integrity_error,
+                                      "Selected-expert provider returned malformed telemetry",
+                                      base + ".experts." + std::to_string(expert_id));
+                }
+                if (std::count_if(
+                        resolved_experts.begin(), resolved_experts.end(),
+                        [expert_id](const DeepseekV4ResolvedExpert& expert) {
+                            return expert.expert_id == expert_id;
+                        }) != 1) {
+                    return make_error(ErrorCode::integrity_error,
+                                      "Selected-expert provider returned duplicate identities",
+                                      base + ".experts." + std::to_string(expert_id));
+                }
+                expert_accesses.push_back(DeepseekV4LayerTrace::ExpertAccess{
+                    found->expert_id, found->resident_bytes,
+                    found->logical_bytes_read, found->cache_hit});
+            }
+        } catch (const std::bad_alloc&) {
+            return make_error(ErrorCode::resource_exhausted,
+                              "Unable to retain selected-expert telemetry",
+                              base);
+        }
+    }
     auto output_count = bounded_product({token_count, config.width}, base + " output");
     if (!output_count) return output_count.error();
     std::vector<float> output(output_count.value(), 0.0F);
     for (std::size_t expert = 0U; expert < config.expert_count; ++expert) {
+        const DeepseekV4ResolvedExpert* resolved = nullptr;
+        if (provider != graph.expert_providers.end()) {
+            const auto found = std::find_if(
+                resolved_experts.begin(), resolved_experts.end(),
+                [expert](const DeepseekV4ResolvedExpert& value) {
+                    return value.expert_id == expert;
+                });
+            if (found == resolved_experts.end()) continue;
+            resolved = &*found;
+        }
         for (std::size_t token = 0U; token < token_count; ++token) {
             for (std::size_t slot = 0U; slot < config.experts_per_token; ++slot) {
                 if (route.value().indices[token * config.experts_per_token + slot] != expert) {
@@ -1263,7 +1393,7 @@ Result<MoeResult> moe_forward(const DeepseekV4ReferenceGraph& graph,
                     route.value().weights[token * config.experts_per_token + slot];
                 auto expert_output = execute_expert(
                     graph, base + ".experts." + std::to_string(expert), token_input,
-                    std::span<const float>(&route_weight, 1U), 1U);
+                    std::span<const float>(&route_weight, 1U), 1U, resolved);
                 if (!expert_output) return expert_output.error();
                 for (std::size_t column = 0U; column < config.width; ++column) {
                     output[token * config.width + column] += expert_output.value()[column];
@@ -1281,6 +1411,7 @@ Result<MoeResult> moe_forward(const DeepseekV4ReferenceGraph& graph,
     MoeResult result;
     result.output = std::move(output);
     result.route = route.take_value();
+    result.expert_accesses = std::move(expert_accesses);
     return result;
 }
 
@@ -1418,6 +1549,7 @@ Result<BlockResult> block_prefill(const DeepseekV4ReferenceGraph& graph,
     result.hidden = ffn_post.take_value();
     result.trace.layer = trace_layer;
     result.trace.route = std::move(moe.value().route);
+    result.trace.expert_accesses = std::move(moe.value().expert_accesses);
     result.trace.attention_indices = std::move(attention.value().indices);
     result.trace.attention_selected_per_token = attention.value().selected_per_token;
     return result;
@@ -1474,6 +1606,7 @@ Result<BlockResult> block_incremental(
     result.hidden = ffn_post.take_value();
     result.trace.layer = trace_layer;
     result.trace.route = std::move(moe.value().route);
+    result.trace.expert_accesses = std::move(moe.value().expert_accesses);
     result.trace.attention_indices = std::move(attention.value().indices);
     result.trace.attention_selected_per_token = attention.value().selected_per_token;
     return result;

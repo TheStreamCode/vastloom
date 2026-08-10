@@ -35,8 +35,9 @@ model conversion.
 > reference. Bounded CPU primitives now cover normalization, routing, expert SwiGLU,
 > Hyper-Connections, YaRN, compressed attention and its learned indexer. A deterministic
 > two-layer FP32 prefill matches the pinned official graph for logits, greedy token, expert
-> routes and attention indices. Full-checkpoint DeepSeek loading, generation and CUDA remain
-> unimplemented.
+> routes and attention indices. Its 69,187 tensors are now bound to a shared logical catalog:
+> 11,264 main/MTP expert bundles collapse from six tensors to exactly two contiguous source
+> ranges each. Full-checkpoint DeepSeek loading, generation and CUDA remain unimplemented.
 
 ## Why Vastloom exists
 
@@ -78,6 +79,8 @@ The checkpoint-shaped MTP reference gate is documented in the
 [`M7 MTP validation report`](docs/reports/M7_DEEPSEEK_MTP_VALIDATION.md).
 The five-step raw/compressed cache gate is documented in the
 [`M7 incremental-state report`](docs/reports/M7_DEEPSEEK_INCREMENTAL_VALIDATION.md).
+The model-independent role/range binding is documented in the
+[`M7 logical tensor catalog report`](docs/reports/M7_LOGICAL_TENSOR_CATALOG_VALIDATION.md).
 Current and candidate model support is kept explicit in the
 [`model compatibility matrix`](docs/MODEL_COMPATIBILITY.md).
 
@@ -184,6 +187,9 @@ allocation plan is derived from detected capacity and conservative headroom.
 - **Exact native catalog:** `deepseek-inspect` verifies 46 shard identities, 69,187
   tensor names/mappings, shapes, offsets, dtype totals and the 150,592,290,816-byte
   routed-expert layout.
+- **Universal expert identity:** the pinned layout now produces 11,264 logical main/MTP
+  expert bundles of 13,369,344 bytes. Exact adjacency safely coalesces their 67,584 tensors
+  into 22,528 bounded source ranges, two per expert.
 - **Native prompt path:** the exact Sequence/Split/ByteLevel tokenizer, all 1,283
   added-token definitions and basic system/user/assistant chat framing match the pinned
   Hugging Face tokenizer across multilingual vectors.
@@ -588,8 +594,8 @@ research metric is not merely SSD throughput. It is:
 
 The next technical sequence remains incremental:
 
-1. bind the verified DeepSeek tensor catalog and packed FP4/FP8 weights through the universal
-   tensor/expert residency contract, then add a target-verified MTP decoding loop;
+1. connect the verified logical expert bundles to Resource-Governor-backed residency states and
+   packed FP4/FP8 reads, then add a target-verified MTP decoding loop;
 2. CUDA dense, attention, router and packed expert kernels;
 3. explicit VRAM/RAM/NVMe placement with pinned buffers and direct/overlapped I/O;
 4. adaptive placement, predictive routing and speculative expert deduplication;

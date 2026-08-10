@@ -67,6 +67,11 @@ model revision
   + immutable source shard and bounded byte range
 ```
 
+The shared catalog and Safetensors-backed binding are now implemented for the pinned DeepSeek
+preview. Its 69,187 tensors produce 11,264 logical expert bundles and 22,528 coalesced immutable
+source ranges. Format/architecture adapters for the official 0731 release, GGUF and Laguna still
+need to populate and validate the same contract before they can use it.
+
 The shared runtime may then place a tensor or expert bundle in one of these explicit states:
 
 ```text

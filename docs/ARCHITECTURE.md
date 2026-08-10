@@ -271,6 +271,27 @@ The prefill/MTP oracle is batch-one FP32, capped at 4,096 tokens, 16 total layer
 and 64 million state elements. It intentionally has no target-verification loop or packed
 checkpoint kernels, and is not selected by `deepseek-inspect` for the full checkpoint.
 
+M7 now binds verified storage metadata into a shared model-independent catalog:
+
+```text
+architecture adapter + verified tensor headers
+      │ role · dtype · shape · logical layer/expert
+      │ immutable shard · absolute offset · byte count
+      ▼
+universal logical tensor catalog
+      │ duplicate/overflow/overlap/count validation
+      ▼
+deterministic routed-expert bundles
+      │ exact same-shard adjacency coalescing
+      ▼
+bounded source ranges for the future residency scheduler
+```
+
+For the pinned DeepSeek preview, 67,584 routed tensors become 11,264 main/MTP expert
+bundles. Each bundle is 13,369,344 bytes and its six tensors coalesce into exactly two source
+ranges, for 22,528 ranges total. These are validated addresses, not issued I/O requests; the
+header-only inspection still has no payload and reports execution as unsupported.
+
 ## TinyTransformer adapter boundary
 
 The alpha.2 adapter defines:
@@ -384,8 +405,8 @@ router decisions or accepted output tokens.
 - `hardware/`: non-invasive machine probe.
 - `planner/`: conservative capacity and placement plan.
 - `safety/`: reservations, state machine and heartbeat.
-- `model/`: manifest/Safetensors parsing, imported-checkpoint verification and immutable
-  model storage.
+- `model/`: manifest/Safetensors parsing, imported-checkpoint verification, immutable model
+  storage and the universal logical tensor/expert catalog.
 - `io/`: bounded asynchronous reads plus platform-labeled process-I/O counters.
 - `research/`: native-telemetry-driven no-cache/LRU/LFU/static-hot simulation and exact
   unique-expert reuse distance.

@@ -31,6 +31,9 @@ hardware, commands, measurements and limitations.
 - [`M7_DEEPSEEK_INCREMENTAL_VALIDATION.md`](M7_DEEPSEEK_INCREMENTAL_VALIDATION.md) — five
   official main+MTP decode steps with transactional circular raw state, independent learned
   attention/indexer compression and exact cache-boundary parity.
+- [`M7_LOGICAL_TENSOR_CATALOG_VALIDATION.md`](M7_LOGICAL_TENSOR_CATALOG_VALIDATION.md) —
+  model-independent tensor roles, immutable source ranges and 11,264 pinned DeepSeek expert
+  bundles coalesced into exactly 22,528 bounded ranges.
 
 M6 is complete for its reduced float correctness gate, and the first M7 MTP component gate is
 complete together with the reduced incremental-state gate. Full-checkpoint DeepSeek execution,

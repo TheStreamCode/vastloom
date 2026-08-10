@@ -128,8 +128,9 @@ is tracked as a separate, not-yet-validated target in the
 
 ## M7 — DeepSeek CPU reference inference
 
-- [ ] Adapter binding verified shard/GGUF catalogs to universal tensor/expert roles and packed
-  FP4/FP8 weights.
+- [x] Bind the pinned preview Safetensors header catalog to universal tensor/expert roles and
+  exact coalesced source ranges.
+- [ ] Bind full payload/GGUF catalogs and packed FP4/FP8 weights to executable kernels.
 - [x] Bounded operator primitives for normalization, base RoPE, selected-latent attention,
   learned/hash routing, routed SwiGLU and Hyper-Connections.
 - [x] Reduced float main graph with YaRN, overlapping compression, learned indexer,
@@ -150,6 +151,8 @@ checkpoint-compatible component equations, not speculative decoding or full-chec
 execution.
 The cache-state slice is recorded in the
 [M7 incremental validation report](reports/M7_DEEPSEEK_INCREMENTAL_VALIDATION.md).
+The model-independent tensor/expert binding is recorded in the
+[M7 logical catalog report](reports/M7_LOGICAL_TENSOR_CATALOG_VALIDATION.md).
 
 ## M8 — CUDA path for the RTX 4070 Super
 
@@ -165,7 +168,8 @@ unbounded allocation and clean recovery from injected CUDA failures.
 
 ## M9 — Explicit multitier execution
 
-- [ ] Universal logical tensor/expert catalog and legal NVMe/RAM/VRAM state transitions.
+- [x] Universal logical tensor/expert catalog with validated immutable source ranges.
+- [ ] Legal NVMe/RAM/VRAM state transitions and reservation ownership.
 - [ ] Pinned host buffers.
 - [ ] Direct/overlapped NVMe reads where supported.
 - [ ] Dense-trunk-first placement.

@@ -29,6 +29,10 @@
   its Unsloth GGUF profiles and Laguna S 2.1 as separate compatibility targets. None inherits
   the preview checkpoint's execution claims; the universal tensor/expert residency contract
   and per-adapter acceptance ladder are now explicit.
+- Added the shared logical tensor catalog and bound all 69,187 pinned DeepSeek preview tensors
+  to role, shape, dtype and immutable source ranges. Its 67,584 routed tensors form 11,264
+  main/MTP expert bundles whose six tensors coalesce into exactly two ranges per expert; no
+  payload read or execution support is claimed.
 - Added an explicit `--allow-large-download` gate for checkpoint imports containing at
   least 20 GiB of weight payload. DeepSeek execution remains unsupported and is reported
   as such by the CLI.

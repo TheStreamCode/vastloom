@@ -23,7 +23,7 @@ consumer hardware—without uncontrolled swapping, surprise resource exhaustion 
 model conversion.
 
 > [!IMPORTANT]
-> **Current source — `0.4.0-alpha.4` plus unreleased M6 DeepSeek foundation slices.**
+> **Current source — `0.4.0-alpha.4` plus unreleased DeepSeek and multitier-control slices.**
 > Vastloom now runs the routed token path of the pinned 13.84 GB
 > `allenai/OLMoE-1B-7B-0924-Instruct` checkpoint on CPU while keeping only the
 > always-active trunk and a bounded expert cache in RAM. Native logits, top-8 routes
@@ -81,6 +81,8 @@ The five-step raw/compressed cache gate is documented in the
 [`M7 incremental-state report`](docs/reports/M7_DEEPSEEK_INCREMENTAL_VALIDATION.md).
 The model-independent role/range binding is documented in the
 [`M7 logical tensor catalog report`](docs/reports/M7_LOGICAL_TENSOR_CATALOG_VALIDATION.md).
+The reservation-backed NVMe/RAM/VRAM control plane is documented in the
+[`M9 residency-state report`](docs/reports/M9_RESIDENCY_STATE_VALIDATION.md).
 Current and candidate model support is kept explicit in the
 [`model compatibility matrix`](docs/MODEL_COMPATIBILITY.md).
 
@@ -223,6 +225,9 @@ allocation plan is derived from detected capacity and conservative headroom.
   that consume the OS or disk emergency reserve.
 - **Resource Governor:** atomic reservations prevent concurrent workers from
   oversubscribing RAM, VRAM, staging buffers or scratch space.
+- **Governed residency:** logical objects move only through legal
+  `NVME → READING → RAM_READY → COPYING_TO_VRAM → VRAM_READY` states. RAM, staging and
+  VRAM destinations are reserved before work begins; pins and RAII use leases block eviction.
 - **Safety state machine:** `NORMAL → PRESSURE → CRITICAL → EMERGENCY`, with immediate
   escalation and hysteretic recovery.
 - **Bounded asynchronous I/O:** fixed worker, queue and request limits; every buffer
@@ -594,8 +599,8 @@ research metric is not merely SSD throughput. It is:
 
 The next technical sequence remains incremental:
 
-1. connect the verified logical expert bundles to Resource-Governor-backed residency states and
-   packed FP4/FP8 reads, then add a target-verified MTP decoding loop;
+1. connect the verified logical expert bundles and governed residency states to bounded packed
+   FP4/FP8 reads, then add a target-verified MTP decoding loop;
 2. CUDA dense, attention, router and packed expert kernels;
 3. explicit VRAM/RAM/NVMe placement with pinned buffers and direct/overlapped I/O;
 4. adaptive placement, predictive routing and speculative expert deduplication;

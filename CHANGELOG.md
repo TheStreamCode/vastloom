@@ -33,6 +33,10 @@
   to role, shape, dtype and immutable source ranges. Its 67,584 routed tensors form 11,264
   main/MTP expert bundles whose six tensors coalesce into exactly two ranges per expert; no
   payload read or execution support is claimed.
+- Added the governed multitier residency state machine. RAM plus bounded staging and later VRAM
+  destinations are reserved before transition publication; failed compound reservations roll
+  back, while pins and RAII use leases prevent unsafe eviction. The state-only slice allocates no
+  tensor buffer and makes no new inference claim.
 - Added an explicit `--allow-large-download` gate for checkpoint imports containing at
   least 20 GiB of weight payload. DeepSeek execution remains unsupported and is reported
   as such by the CLI.

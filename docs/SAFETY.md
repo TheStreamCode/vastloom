@@ -31,6 +31,12 @@ therefore outlive the model. The CLI encodes that lifetime in member declaration
 and regression tests verify that the reservation returns to zero when the model is
 destroyed.
 
+Logical tensor/expert residency uses the same rule. `begin_read` reserves the full RAM
+destination and bounded staging capacity before publishing work; `begin_vram_copy` reserves
+VRAM while the RAM source remains valid. A failed second reservation rolls back without changing
+state. Pins and counted RAII use leases reject eviction, and failure cleanup refuses to release a
+buffer still in active use. Residency handles and leases must never outlive their governor.
+
 ## Headroom
 
 The planner creates separate reserves for:
@@ -238,6 +244,8 @@ integration remains required before long-running large-model inference.
   snapshots, 69,187 tensor/shard mappings, FP8 dtype parsing and large-download refusal;
 - regression protection against fragmented Windows expert reads and exact reuse-distance
   results for synthetic and real repeated-route traces.
+- legal NVMe/RAM/VRAM residency transitions, atomic multi-resource rollback, pressure refusal,
+  concurrent read admission, pin/use-lease eviction guards and final reservation release.
 
 ## Safety tests still required for production adapters
 

@@ -11,8 +11,10 @@ SmolLM2 dense CPU inference, OLMoE CPU expert streaming and a non-executing Deep
 metadata/header inspector plus native tokenizer/basic chat framing and bounded equation-level
 reference operators. A deterministic two-layer DeepSeek float prefill plus one checkpoint-shaped
 MTP block now match the pinned preview graph for prefill and five incremental raw/compressed
-cache steps. Full-checkpoint loading, speculative verification/generation and CUDA do not exist
-yet. The newer official 0731 release, its Unsloth GGUF conversions and Laguna S 2.1 are reviewed
+cache steps. Verified headers populate a universal tensor/expert catalog, and a buffer-free
+governed state machine validates legal NVMe/RAM/VRAM reservation transitions. Full-checkpoint
+payload binding, physical multitier buffers, speculative generation and CUDA do not exist yet.
+The newer official 0731 release, its Unsloth GGUF conversions and Laguna S 2.1 are reviewed
 compatibility targets, not validated execution paths.
 
 Do not restart or generically redesign the project. Inspect the relevant implementation,

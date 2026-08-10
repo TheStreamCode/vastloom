@@ -324,6 +324,12 @@ residency before expert cache capacity. Selected expert bundles move through exp
 NVMe→RAM→VRAM transitions; scheduling can change readiness order but not authoritative routing
 or numerical reduction order.
 
+The shared residency control object now enforces those transitions and owns move-only Governor
+reservations. It reserves the complete RAM destination plus bounded read staging before exposing
+`READING`, retains RAM while reserving VRAM, and blocks eviction while pinned or protected by an
+RAII use lease. This is control-plane validation only: buffer ownership, I/O completion and CUDA
+copy events are not connected yet.
+
 For TinyChat only L1 is active:
 
 ```text
@@ -406,7 +412,7 @@ router decisions or accepted output tokens.
 - `planner/`: conservative capacity and placement plan.
 - `safety/`: reservations, state machine and heartbeat.
 - `model/`: manifest/Safetensors parsing, imported-checkpoint verification, immutable model
-  storage and the universal logical tensor/expert catalog.
+  storage, the universal logical tensor/expert catalog and governed residency state.
 - `io/`: bounded asynchronous reads plus platform-labeled process-I/O counters.
 - `research/`: native-telemetry-driven no-cache/LRU/LFU/static-hot simulation and exact
   unique-expert reuse distance.

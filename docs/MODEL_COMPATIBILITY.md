@@ -80,9 +80,10 @@ NVME -> READING -> RAM_READY -> COPYING_TO_VRAM -> VRAM_READY
                     +---------- EVICTABLE <-------+
 ```
 
-`PINNED`, `IN_USE`, `FAILED` and cancellation are orthogonal state flags. Transitions are
-budgeted by the Resource Governor and published only after the read, checksum/range validation
-and transfer succeed.
+The shared control object now implements the displayed states, a terminal/retryable `FAILED`
+state, a pin flag and counted RAII use leases. RAM, VRAM and staging transitions are budgeted by
+the Resource Governor. Physical buffers and transfer completion are not connected yet; future
+read/copy adapters may publish a ready state only after their range/content validation succeeds.
 
 ## Residency policy
 

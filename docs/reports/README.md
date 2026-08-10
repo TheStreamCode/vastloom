@@ -34,6 +34,9 @@ hardware, commands, measurements and limitations.
 - [`M7_LOGICAL_TENSOR_CATALOG_VALIDATION.md`](M7_LOGICAL_TENSOR_CATALOG_VALIDATION.md) —
   model-independent tensor roles, immutable source ranges and 11,264 pinned DeepSeek expert
   bundles coalesced into exactly 22,528 bounded ranges.
+- [`M9_RESIDENCY_STATE_VALIDATION.md`](M9_RESIDENCY_STATE_VALIDATION.md) — legal
+  NVMe/RAM/VRAM transitions, atomic Governor reservation ownership, RAII use leases,
+  concurrent admission and fail-closed cleanup.
 
 M6 is complete for its reduced float correctness gate, and the first M7 MTP component gate is
 complete together with the reduced incremental-state gate. Full-checkpoint DeepSeek execution,

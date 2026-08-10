@@ -169,7 +169,8 @@ unbounded allocation and clean recovery from injected CUDA failures.
 ## M9 — Explicit multitier execution
 
 - [x] Universal logical tensor/expert catalog with validated immutable source ranges.
-- [ ] Legal NVMe/RAM/VRAM state transitions and reservation ownership.
+- [x] Legal NVMe/RAM/VRAM state transitions, reservation ownership and use-lease eviction guards.
+- [ ] Couple physical buffer ownership and validated I/O completion to ready-state publication.
 - [ ] Pinned host buffers.
 - [ ] Direct/overlapped NVMe reads where supported.
 - [ ] Dense-trunk-first placement.

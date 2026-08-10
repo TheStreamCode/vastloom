@@ -78,10 +78,19 @@ removes hard reserves.
 ## Minimum working-set admission
 
 SSD capacity alone never makes a model runnable. Before a large MoE may download or execute on a
-host, its adapter must prove that one complete routed expert plus the required always-active
-block, router/reduction state, requested KV, activation scratch and one bounded staging slot fit
-the live RAM/VRAM hard budgets after OS and driver reserves. Optional cache, additional resident
-experts and prefetch are excluded from this minimum and are reduced first.
+host, its adapter must prove that one complete routed-expert bundle fits wholly in one governed
+RAM or VRAM tier. Router/reduction state, requested KV, activation scratch and one bounded
+read/kernel tile must fit the host budget separately. Optional cache, additional resident experts
+and prefetch are excluded from this minimum and are reduced first.
+
+Two explicit trunk profiles are allowed:
+
+- `resident-trunk`: all always-active encoded weights remain in RAM/VRAM, reducing recurrent SSD
+  traffic but increasing the minimum working set;
+- `streamed-trunk`: always-active weights remain immutable on SSD and are consumed through bounded
+  verified tiles. Only the current tile is resident, so admission uses runtime state plus one
+  complete expert, but the plan must report the resulting trunk bytes/token and may be too slow
+  for interactive use.
 
 If the irreducible set does not fit, Vastloom rejects the model/profile. It does not combine RAM
 and VRAM into fictional capacity, delegate the expert to uncontrolled swap, reduce precision
@@ -89,11 +98,16 @@ silently or proceed merely because the remaining weights fit on NVMe. On the ref
 rule applies to the dynamic budgets derived from 32 GiB RAM and 12 GiB VRAM, not their nominal
 totals. Kimi K3 remains a metadata-only capacity study unless an exact profile passes this gate.
 
-The v1 planner implements the fail-closed manifest-level gate. It requires a nonzero complete
-expert-bundle size and exact MoE layer/top-k/context metadata, checks the adapter-declared minimum
-RAM working set against the live post-reserve RAM budget, and requires the complete expert to fit
-either the remaining expert RAM tier or the GPU-resident tier. Passing a metadata-only profile is
-a capacity result, not authorization to execute unverified weights.
+The v1 manifest planner implements the fail-closed resident-trunk gate. It requires a nonzero
+complete expert-bundle size and exact MoE layer/top-k/context metadata, checks the adapter-declared
+minimum RAM working set against the live post-reserve RAM budget, and requires the complete expert
+to fit either the remaining expert RAM tier or the GPU-resident tier. Passing a metadata-only
+profile is a capacity result, not authorization to execute unverified weights.
+
+The DeepSeek GGUF inspector additionally derives both trunk profiles from exact scalar metadata,
+the retained bounded compression schedule and encoded tensor ranges. It never adds RAM and VRAM
+together to make an oversized expert appear admissible. The streamed-trunk result is currently a
+planning result only; no DeepSeek trunk-streaming token path exists yet.
 
 ## State machine
 

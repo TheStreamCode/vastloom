@@ -56,6 +56,12 @@ it is not installed RAM and does not include optional cache. The planner checks 
 the live post-reserve RAM budget and independently requires one complete expert to fit an actual
 RAM or VRAM tier.
 
+This v1 field retains resident-trunk semantics for compatibility. The newer DeepSeek GGUF
+inspector can derive a separate streamed-trunk capacity profile with only a bounded current trunk
+tile resident, but v1 manifests cannot select that execution mode and no DeepSeek streamed-trunk
+token path exists yet. A future manifest revision must name the placement profile explicitly
+rather than reinterpret existing artifacts.
+
 The reader rejects MoE metadata unless all of the following are true:
 
 - `expert_count`, `layer_count` and `max_context_tokens` are nonzero;

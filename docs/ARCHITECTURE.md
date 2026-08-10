@@ -53,11 +53,13 @@ The data plane must be small, bounded and predictable:
 No data-plane worker may allocate outside the Resource Governor.
 
 The planner first establishes a host budget after OS and emergency reserves, then deducts bounded
-KV, staging and scratch placement before assigning the optional expert cache. A MoE plan is
-capacity-compatible only if its adapter-declared minimum RAM working set fits this host budget and
-one complete expert bundle fits either the remaining RAM expert tier or one real GPU-resident
-tier. RAM, staging and scratch reservations share an aggregate Governor ceiling; VRAM is enforced
-separately.
+KV, staging, scratch and current trunk-tile placement before assigning the optional expert cache.
+A MoE plan is capacity-compatible only if this runtime state fits host RAM and one complete expert
+bundle fits either the remaining RAM expert tier or one real GPU-resident tier. A resident-trunk
+profile additionally budgets every always-active encoded weight; a streamed-trunk profile leaves
+those immutable weights on SSD and reports the recurrent traffic. RAM, staging and scratch share
+an aggregate Governor ceiling; VRAM is enforced separately and is never summed with RAM to fit one
+expert.
 
 ## Current inference paths
 
@@ -322,6 +324,15 @@ immutable full-shard paths; the CLI never makes that promotion. Exact encoded by
 available to planning, while complete full-shard verification and layer/token execution remain
 outside this slice.
 
+The primary GGUF metadata shard also supplies the exact compression schedule through an explicit
+bounded-retention request; other metadata arrays remain skipped. For batch 1 and 4,096 context
+tokens, the native calculator accounts for 33,816,576 bytes of persistent BF16 KV, 12,206,080
+bytes of FP32 compressor state, a 1,048,576-byte shared RoPE table and 69,052,440 bytes of bounded
+activation/kernel scratch. Together with the largest 8,781,824-byte expert, this yields a
+124,905,496-byte streamed-trunk CPU floor. Adding the complete encoded always-active catalog yields
+a 7,110,994,292-byte resident-trunk CPU floor. These are capacity profiles; neither executes a
+DeepSeek layer/token.
+
 The first quantized compute oracle is deliberately narrower than the catalog. It accepts complete
 GGML IQ1_S and IQ3_XXS blocks, validates every FP16 scale and all dimensions before final output
 publication, decodes through fixed 256-float scratch and performs scalar FP64-accumulated matvecs.
@@ -367,8 +378,9 @@ Vastloom does not ask the OS to discover this hierarchy through page faults. Pla
 is model-aware and explicit. NVMe is a backing tier, not fake RAM.
 
 Architecture adapters map exact checkpoint tensors into the shared role/tier contract described
-in [`MODEL_COMPATIBILITY.md`](MODEL_COMPATIBILITY.md). Always-active trunk and live state receive
-residency before expert cache capacity. Selected expert bundles move through explicit bounded
+in [`MODEL_COMPATIBILITY.md`](MODEL_COMPATIBILITY.md). Live state and the current bounded trunk
+tile receive residency before expert cache capacity; the resident-trunk profile also pins the
+complete always-active catalog. Selected expert bundles move through explicit bounded
 NVMe→RAM→VRAM transitions; scheduling can change readiness order but not authoritative routing
 or numerical reduction order.
 

@@ -13,6 +13,9 @@ hardware, commands, measurements and limitations.
 
 ## Current report
 
+- [`M7_DEEPSEEK_WORKING_SET_VALIDATION.md`](M7_DEEPSEEK_WORKING_SET_VALIDATION.md) —
+  bounded compression-schedule retention, metadata-derived resident/streamed trunk floors,
+  complete-expert single-tier admission and real 0731 `UD-IQ1_S` header results.
 - [`M1_MODEL_ADMISSION_VALIDATION.md`](M1_MODEL_ADMISSION_VALIDATION.md) — native
   minimum-working-set and complete-expert RAM/VRAM capacity gate, aggregate host-memory
   governance, strict/legacy manifest behavior and reference-PC accept/reject evidence.

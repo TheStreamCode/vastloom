@@ -126,8 +126,9 @@ The completed graph gate is recorded in the
 [M6 reduced-graph report](reports/M6_DEEPSEEK_GRAPH_VALIDATION.md).
 It pins official commit `60d8d70770c6776ff598c94bb586a859a38244f1`; the former
 “0731” label was provisional for that preview. A newer official 0731 repository now exists and
-is tracked as a separate, not-yet-validated target in the
-[model compatibility matrix](MODEL_COMPATIBILITY.md).
+is tracked as a separate target in the [model compatibility matrix](MODEL_COMPATIBILITY.md). Its
+derived `UD-IQ1_S` GGUF headers and one expert are now validated in M7; the official full
+Safetensors payload and complete layer/token remain unvalidated.
 
 ## M7 — DeepSeek CPU reference inference
 
@@ -135,6 +136,8 @@ is tracked as a separate, not-yet-validated target in the
   exact coalesced source ranges.
 - [x] Parse the official 0731 `UD-IQ1_S` GGUF split headers and bind packed expert subranges to
   the universal catalog without reading payloads.
+- [x] Derive bounded KV/compressor/scratch and resident-versus-streamed trunk working sets from
+  retained exact GGUF metadata; require one complete expert to fit a single RAM or VRAM tier.
 - [x] Match pinned ggml IQ1_S dequantization/matvec output on one exact real 0731 expert-gate
   slice with bounded scalar CPU code.
 - [x] Match pinned ggml IQ3_XXS output and execute one complete real 0731 gate/up/down expert
@@ -169,6 +172,8 @@ The first real packed-matrix parity gate is recorded in the
 The completed one-expert gate/up/SwiGLU/down path is recorded in the
 [M7 real-expert report](reports/M7_DEEPSEEK_REAL_EXPERT_VALIDATION.md); it does not yet execute a
 complete layer or token.
+The capacity-only resident/streamed trunk derivation is recorded in the
+[M7 working-set report](reports/M7_DEEPSEEK_WORKING_SET_VALIDATION.md).
 
 ## M8 — CUDA path for the RTX 4070 Super
 
@@ -193,7 +198,7 @@ unbounded allocation and clean recovery from injected CUDA failures.
 - [ ] Connect those futures to expert compute and measure real compute/I/O overlap.
 - [ ] Pinned host buffers.
 - [ ] Direct/overlapped NVMe reads where supported.
-- [ ] Dense-trunk-first placement.
+- [ ] Resident-trunk and bounded streamed-trunk placement profiles.
 - [ ] VRAM/RAM expert tiers.
 - [ ] Bounded staging and cancellation-aware prefetch.
 
@@ -256,9 +261,10 @@ and the server binds to loopback unless remote access is explicitly configured.
 - [ ] Multi-NVMe and optional LAN tier experiments.
 
 Kimi K3 remains an extreme capacity study, not a reference-PC inference target. Practical model
-validation is limited to MoE profiles whose complete minimum live working set—including one full
-expert, required active block, KV, scratch and staging—fits the dynamic safe budgets derived from
-32 GiB RAM and 12 GiB VRAM with host headroom preserved.
+validation is limited to MoE profiles whose runtime state and bounded trunk tile fit safe host RAM
+and whose complete indivisible expert bundle fits either one remaining RAM tier or one real VRAM
+tier. The gate uses dynamic budgets derived from 32 GiB RAM and 12 GiB VRAM with host headroom
+preserved; RAM and VRAM are never summed to admit one oversized expert.
 
 ### Public macOS and Metal track
 

@@ -49,13 +49,18 @@ Vastloom must derive a live plan and prove that this minimum irreducible working
 preserving host headroom:
 
 ```text
-largest required always-active block
-  + one complete routed expert bundle
-  + router/reduction state
-  + bounded KV for the requested context
-  + activation and kernel scratch
-  + one bounded read/transfer staging slot
-  <= safe RAM and optional VRAM budgets after OS reserves
+runtime state (router/reduction + bounded KV + compression state)
+  + activation/kernel scratch and one bounded trunk tile
+  <= safe host RAM after OS reserves
+
+one complete routed-expert bundle
+  <= one actual remaining RAM tier OR one actual VRAM tier
+
+resident-trunk profile only:
+  all always-active encoded weights
+  + runtime state
+  + expert tier
+  <= their separately governed destinations
 ```
 
 Cache, extra resident experts and prefetch depth are optional and must shrink first. The complete
@@ -72,8 +77,15 @@ explicitly validated quantization instead of swapping, overcommitting or silentl
 The planner now enforces the manifest-level gate and reports the actual selected expert tier. A
 20 GiB simulated-RAM plan rejects the DeepSeek research profile because its post-reserve RAM
 budget is below the declared 16 GiB minimum. The 6,488,064-byte DeepSeek 0731 expert tested in M7
-also passes the isolated expert-residency part under a 10 MiB aggregate host-memory ceiling. The
-full DeepSeek trunk/KV/layer/token implementation has not validated the metadata profile's minimum
-working-set declaration yet, so DeepSeek execution remains unsupported. Kimi K3 is not a
-reference-PC execution target: it remains only a future capacity/traffic study unless an exact
-published profile independently passes this rule.
+also passes the isolated expert-residency part under a 10 MiB aggregate host-memory ceiling.
+
+The official 0731 `UD-IQ1_S` GGUF headers now produce a derived batch-1, 4,096-token plan: the
+runtime state is 116,123,672 bytes, the largest complete expert bundle is 8,781,824 bytes, the
+streamed-trunk CPU floor is 124,905,496 bytes, and the resident-trunk CPU floor is 7,110,994,292
+bytes. This proves metadata-level capacity accounting, not DeepSeek execution; full payload
+verification, trunk streaming and a layer/token path remain absent.
+
+Kimi K3 is not a reference-PC execution target. The project treats it as metadata/capacity-only
+because no exact profile has proved that its complete expert bundle fits one real tier on the
+32 GiB RAM / 12 GiB VRAM machine. It must not be downloaded or forced through swap to manufacture
+a result.

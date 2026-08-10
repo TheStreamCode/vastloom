@@ -100,6 +100,8 @@ The first real quantized matrix parity gate is documented in the
 [`M7 IQ1_S kernel report`](docs/reports/M7_DEEPSEEK_IQ1S_KERNEL_VALIDATION.md).
 The first complete real quantized expert and governed-load gate is documented in the
 [`M7 real-expert report`](docs/reports/M7_DEEPSEEK_REAL_EXPERT_VALIDATION.md).
+The derived resident/streamed trunk capacity gate is documented in the
+[`M7 working-set report`](docs/reports/M7_DEEPSEEK_WORKING_SET_VALIDATION.md).
 Current and candidate model support is kept explicit in the
 [`model compatibility matrix`](docs/MODEL_COMPATIBILITY.md).
 
@@ -630,6 +632,13 @@ These are planning outputs, not performance claims. The DeepSeek manifest is now
 from an exact checkpoint/header catalog but remains metadata-only because execution has
 not passed the fixture and reference-parity gates.
 
+The official 0731 `UD-IQ1_S` GGUF catalog now also derives two batch-1, 4,096-token capacity
+profiles from exact metadata. The streamed-trunk floor is 124,905,496 bytes including one complete
+8,781,824-byte expert; the resident-trunk floor is 7,110,994,292 bytes. This makes the intended
+low-memory contract explicit: trunk weights may remain immutable on SSD and move through bounded
+tiles, but one expert is never split across RAM and VRAM. This is capacity accounting only; the
+DeepSeek trunk-streaming token path is not implemented.
+
 ## Current limitations
 
 Alpha.4 proves one real dense path and one real CPU MoE streaming path with an
@@ -659,10 +668,11 @@ fixture is smaller than one megabyte and remains resident in CPU RAM.
 ## Research path
 
 The first production target is DeepSeek V4 Flash-class memory pressure, followed only by MoE
-profiles whose minimum live working set fits the reference PC's safe RAM/VRAM budgets. Kimi K3 is
-a future metadata/capacity stress study, not an execution target for the 32 GiB RAM / 12 GiB VRAM
-reference machine unless an exact profile passes the public admission gate. The main research
-metric is not merely SSD throughput. It is:
+profiles whose runtime state fits safe host RAM and whose complete expert bundle fits one real RAM
+or VRAM tier. RAM and VRAM are never added together to admit an indivisible expert. Kimi K3 is a
+future metadata/capacity stress study, not an execution target for the 32 GiB RAM / 12 GiB VRAM
+reference machine unless an exact profile passes that public gate. The main research metric is not
+merely SSD throughput. It is:
 
 > **How few bytes must be fetched from NVMe for each accepted token?**
 

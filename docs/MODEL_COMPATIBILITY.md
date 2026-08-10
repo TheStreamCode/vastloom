@@ -14,7 +14,7 @@ or matching tensor dimensions is never enough to enable execution automatically.
 | OLMoE-1B-7B-0924-Instruct | Pinned shards, top-k routes, expert streaming and I/O telemetry | Validated CPU expert streaming |
 | `deepseek-ai/DeepSeek-V4-Flash` preview at `60d8d707...` | Header catalog, tokenizer, reduced main+MTP prefill and five incremental cache steps | Reduced FP32 reference execution only |
 | `deepseek-ai/DeepSeek-V4-Flash-0731` at `7872f01b...` | Public metadata/config reviewed on 2026-08-10 | Not imported, inspected or executed by Vastloom yet |
-| `unsloth/DeepSeek-V4-Flash-0731-GGUF` at `fbbb5b93...` | Bounded headers/catalog plus exact gate/up IQ1_S and down IQ3_XXS parity on one real expert | One governed scalar CPU expert only; no layer/token generation |
+| `unsloth/DeepSeek-V4-Flash-0731-GGUF` at `fbbb5b93...` | Bounded headers/catalog, derived resident/streamed working sets, plus exact gate/up IQ1_S and down IQ3_XXS parity on one real expert | One governed scalar CPU expert only; no layer/token generation |
 | `unsloth/Laguna-S-2.1` at `1a646907...` | Public config, custom-code and shard metadata reviewed on 2026-08-10 | Adapter and execution not implemented |
 
 Historical DeepSeek reports remain tied to the preview revision they actually tested. The newer
@@ -44,6 +44,13 @@ into 11,008 logical layer/expert bundles. The catalog accounts for 75,547,803,64
 bytes and 6,986,088,796 always-active bytes. A top-6 no-cache schedule would request
 1,770,651,648 logical expert bytes/token. This is header-derived planning data: the two large
 payload shards were not downloaded and no full artifact hash was verified.
+
+The inspector retains only the explicitly requested 46-entry integral compression schedule under
+a separate array bound, cross-checks the 43-layer/256-expert/top-6 scalar metadata and derives the
+batch-1, 4,096-token memory components. Runtime state is 116,123,672 bytes; the largest expert is
+8,781,824 bytes. A streamed-trunk CPU floor is therefore 124,905,496 bytes, while keeping all
+6,986,088,796 always-active encoded bytes resident raises the CPU floor to 7,110,994,292 bytes.
+Both are metadata-only capacity profiles, not executable DeepSeek plans.
 
 Three bounded ranges from the second shard have now been tested separately: the 1,638,400-byte
 gate and up IQ1_S matrices plus the 3,211,264-byte IQ3_XXS down matrix form the complete
@@ -106,9 +113,11 @@ use lease. VRAM copies and a model-wide quantized consumer remain unconnected.
 
 ## Residency policy
 
-The default safe plan is:
+The safe placement policies are:
 
-- keep the always-active trunk, routers and current KV/state resident in RAM and/or VRAM;
+- prefer a resident trunk when the live plan can preserve host headroom;
+- allow an explicit low-memory streamed-trunk profile that keeps immutable trunk weights on SSD
+  and reserves only bounded verified tiles, while exposing its recurrent bytes/token cost;
 - keep hot expert bundles in VRAM, warm bundles in RAM and cold bundles immutable on NVMe;
 - read every selected expert completely into reserved RAM or VRAM staging before its kernel
   consumes that region;
@@ -118,16 +127,16 @@ The default safe plan is:
   cannot preserve operating-system headroom.
 
 Model admission is based on the minimum live working set, not total SSD capacity or marketing
-“active parameter” counts. At least one complete routed-expert bundle, the largest required
-always-active block, router/reduction state, requested KV, activation scratch and one bounded
-staging slot must fit the live Governor budgets after OS/driver reserves. If that irreducible set
-does not fit, the model/profile is unsupported on that host even when all weights fit on SSD.
-Vastloom does not split an indivisible expert through generic swap or promise that RAM plus VRAM
-can be added as one oversubscribed allocation.
+“active parameter” counts. Router/reduction state, requested KV, activation scratch and one
+bounded trunk tile must fit safe host RAM. At least one complete routed-expert bundle must fit
+wholly in either the remaining RAM tier or one real VRAM tier. The resident-trunk profile adds all
+always-active encoded weights to its destinations; the streamed profile does not. Vastloom does
+not split an indivisible expert through generic swap or pretend RAM plus VRAM is one allocation.
 
-Streaming the always-active trunk from SSD on every layer/token is technically possible but is
-not the normal interactive plan: it multiplies unavoidable traffic. The runtime must reduce
-bytes per accepted token, not merely maximize sequential benchmark bandwidth.
+Streaming the always-active trunk from SSD on every layer/token is a first-class low-memory plan,
+but not a performance result: it multiplies unavoidable traffic. The runtime must reduce bytes per
+accepted token through residency, reuse, overlap and model-specific tiling, not merely maximize a
+sequential disk benchmark.
 
 ## Expert-streaming pipeline
 

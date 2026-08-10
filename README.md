@@ -42,8 +42,11 @@ model conversion.
 > reader now also maps the pinned 82.54 GB `UD-IQ1_S` 0731 profile from three headers into 11,008
 > logical expert bundles without downloading its complete payload. One complete 6.49 MB real
 > layer-0/expert-0 bundle now passes bit-for-bit gate/up IQ1_S, SwiGLU and down IQ3_XXS parity
-> against pinned ggml after a governed one-worker load into RAM. Full-shard payload binding, a
-> complete DeepSeek layer/token path, generation and CUDA remain unimplemented.
+> against pinned ggml after a governed one-worker load into RAM. The exact three-object GGUF
+> distribution now has a bounded immutable importer and a fail-closed source-binding command:
+> only a fully hashed payload that passes the single-tier expert gate can expose executable source
+> ranges. The real 82.54 GB payload has not been downloaded or executed; a complete DeepSeek
+> layer/token path, generation and CUDA remain unimplemented.
 
 ## Why Vastloom exists
 
@@ -102,6 +105,8 @@ The first complete real quantized expert and governed-load gate is documented in
 [`M7 real-expert report`](docs/reports/M7_DEEPSEEK_REAL_EXPERT_VALIDATION.md).
 The derived resident/streamed trunk capacity gate is documented in the
 [`M7 working-set report`](docs/reports/M7_DEEPSEEK_WORKING_SET_VALIDATION.md).
+The pinned importer and immutable full-source admission boundary are documented in the
+[`M7 checkpoint-binding report`](docs/reports/M7_DEEPSEEK_GGUF_CHECKPOINT_BINDING_VALIDATION.md).
 Current and candidate model support is kept explicit in the
 [`model compatibility matrix`](docs/MODEL_COMPATIBILITY.md).
 
@@ -260,6 +265,10 @@ portability target, not a validated platform claim.
 - **GGUF safety boundary:** `deepseek-gguf-inspect` reads metadata only. Header prefixes cannot
   become executable sources. The real-expert test uses three separately hash-pinned extracted
   ranges; it does not promote a header prefix or unverified full shard into an executable source.
+  `deepseek-gguf-checkpoint` accepts only the pinned immutable import identity. A complete import
+  must pass full-file SHA-256 and the live single-tier expert admission gate before it can expose
+  executable source ranges; even then, `execution_supported=false` until a layer/token consumer
+  exists.
 
 ### Runtime foundation
 
@@ -493,6 +502,26 @@ revision, read tensor payloads or authorize inference. Use only exact sizes from
 verified artifact manifest; a user-entered revision is reported as a label, not cryptographic
 proof.
 
+The preferred 0731 path uses the pinned importer contract. Metadata-only mode transfers exactly
+5,343,584 bytes, verifies all three objects and atomically publishes a Windows-safe artifact name:
+
+```powershell
+python tools\import_hf_model.py `
+  --model deepseek-v4-flash-0731-gguf-iq1s `
+  --store C:\VastloomModels `
+  --metadata-only
+
+$model = 'C:\VastloomModels\models\original\deepseek-v4-flash-0731-iq1s-fbbb5b93--metadata'
+vastloom deepseek-gguf-checkpoint $model --context 4096 --batch-size 1 --json
+```
+
+The command requires the exact model ID, 40-character revision, paths, sizes and SHA-256 values.
+Raw GGUF paths are rejected. A future full import is 82,539,237,792 bytes and additionally requires
+`--allow-large-download`; with the default policy it also preserves 300 GiB of free storage. Do not
+run that import merely to test the CLI: the real full payload has not yet passed a Vastloom
+layer/token execution gate. `--no-verify` is inspection-only and can never create an executable
+source binding.
+
 ## TinyChat CLI options
 
 ```text
@@ -563,6 +592,8 @@ vastloom real-logits MODEL_DIRECTORY --text TEXT [--chat] [--top N] [--json]
 vastloom moe-inspect MODEL_DIRECTORY [--no-verify] [--json]
 vastloom deepseek-inspect MODEL_DIRECTORY [--no-verify] [--json]
 vastloom deepseek-gguf-inspect SHARD... [--declared-sizes CSV] [--revision ID] [--json]
+vastloom deepseek-gguf-checkpoint MODEL_DIRECTORY [--context N] [--batch-size N]
+    [--no-verify] [--json]
 vastloom moe-logits MODEL_DIRECTORY --text TEXT [--chat] [--top N]
     [--cache no-cache|lru|lfu|static-hot] [--cache-bytes SIZE]
     [--io sync|async] [--io-cache buffered|bypass] [--expert-read whole|staged]
@@ -646,8 +677,8 @@ opt-in bounded asynchronous reader, not the final Vastloom research thesis.
 It currently has:
 
 - two executable pinned Hugging Face adapters plus a DeepSeek metadata/tokenizer, reduced
-  FP32 prefill oracle and official 0731 GGUF metadata catalog; no full-checkpoint DeepSeek,
-  MiniMax, Kimi or GGUF execution adapter;
+  FP32 prefill oracle, official 0731 GGUF metadata catalog and verified source-binding boundary;
+  no full-checkpoint DeepSeek, MiniMax, Kimi or GGUF layer/token execution adapter;
 - no CUDA, ROCm, Vulkan or Metal inference backend;
 - one scalar IQ1_S/IQ3_XXS reference path validated on a complete real expert, but no complete
   quantized layer/token, SIMD/fused production kernel or CUDA quantized path;
@@ -678,8 +709,8 @@ merely SSD throughput. It is:
 
 The next technical sequence remains incremental:
 
-1. bind immutable verified full shards to the header-derived ranges, then execute one complete
-   quantized layer/token probe and connect a target-verified MTP decoding loop;
+1. import and fully hash the real pinned shards, consume bounded trunk tiles plus routed experts
+   in one complete quantized layer/token probe, then connect a target-verified MTP decoding loop;
 2. CUDA dense, attention, router and packed expert kernels;
 3. explicit VRAM/RAM/NVMe placement with pinned buffers and direct/overlapped I/O;
 4. adaptive placement, predictive routing and speculative expert deduplication;

@@ -83,7 +83,9 @@ The official 0731 `UD-IQ1_S` GGUF headers now produce a derived batch-1, 4,096-t
 runtime state is 116,123,672 bytes, the largest complete expert bundle is 8,781,824 bytes, the
 streamed-trunk CPU floor is 124,905,496 bytes, and the resident-trunk CPU floor is 7,110,994,292
 bytes. This proves metadata-level capacity accounting, not DeepSeek execution; full payload
-verification, trunk streaming and a layer/token path remain absent.
+verification on the official local objects, trunk streaming and a layer/token path remain absent.
+The pinned importer/checkpoint gate can now bind complete shards only after full SHA-256 and this
+same live single-tier admission; its real validation used only the 5,343,584-byte metadata import.
 
 Kimi K3 is not a reference-PC execution target. The project treats it as metadata/capacity-only
 because no exact profile has proved that its complete expert bundle fits one real tier on the

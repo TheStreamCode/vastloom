@@ -36,6 +36,11 @@
   34,223 logical descriptors and 11,008 packed expert bundles from bounded headers. The derived
   1,770,651,648 no-cache expert bytes/token is a planning value, not measured SSD traffic;
   complete quantized execution remains unsupported.
+- Added the exact 0731 `UD-IQ1_S` three-object importer and `deepseek-gguf-checkpoint` source
+  gate. Metadata-only mode downloads and verifies 5,343,584 bytes; full source ranges require an
+  immutable manifest, every complete-file SHA-256 and live single-tier expert admission.
+  `--no-verify` remains metadata-only, the official 82.54 GB payload was not downloaded, and the
+  CLI still reports `execution_supported=false` until a layer/token consumer exists.
 - Added a bounded scalar IQ1_S dequantization/matvec reference kernel derived from pinned ggml
   equations and licensed codebook data. Synthetic vectors and one exact 1,638,400-byte real
   DeepSeek 0731 expert-gate slice match the upstream oracle bit for bit across all 2,048 rows.

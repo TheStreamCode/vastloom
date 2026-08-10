@@ -198,9 +198,11 @@ The pinned DeepSeek V4 Flash preview inspection path is intentionally non-execut
 
 The opt-in authorizes only an immutable download. It does not imply that the runtime can
 execute the checkpoint, and it does not relax the 300 GiB default free-space reserve.
-The newer official 0731 release, Unsloth GGUF variants and Laguna S 2.1 have separate
-identities and no executable import authorization. A user-supplied URL never bypasses revision
-pinning, license review, exact size/hash catalogs or the large-download interlock.
+The newer official 0731 release, Unsloth GGUF variants and Laguna S 2.1 have separate identities.
+The exact 0731 `UD-IQ1_S` profile now has its own pinned importer and source-admission boundary;
+this is not authorization to execute a layer or generate tokens. A user-supplied URL never
+bypasses revision pinning, license review, exact size/hash catalogs or the large-download
+interlock.
 
 The 0731 GGUF reader adds a metadata-only safety boundary:
 
@@ -212,9 +214,16 @@ The 0731 GGUF reader adds a metadata-only safety boundary:
   nonzero padding, truncation and inconsistent split numbering fail closed;
 - `deepseek-gguf-inspect` never reads tensor payloads and always publishes a `metadata_only`
   catalog;
-- a header-prefix path cannot be used as an executable tensor source. A library caller must
-  explicitly supply separate full-shard paths, after which normal immutable import and checksum
-  gates are still required before execution;
+- metadata-only import for the pinned profile is exactly 5,343,584 bytes: the complete metadata
+  split plus two exact HTTP range prefixes. Every object has an independent SHA-256 and is
+  atomically published under a short stable artifact name to preserve Windows path safety;
+- `deepseek-gguf-checkpoint` rejects raw files, wrong revisions, missing/extra manifest entries,
+  wrong paths/sizes/hashes, corruption and header snapshots presented as complete payloads;
+- a header-prefix path cannot be used as an executable tensor source. Full source paths are
+  exposed only for a complete immutable import after every full-file SHA-256 succeeds and one
+  expert bundle fits wholly in safe RAM or wholly in safe VRAM. `--no-verify` forces metadata-only
+  behavior, and the command still reports `execution_supported=false` because no layer/token
+  consumer exists;
 - the scalar IQ1_S/IQ3_XXS oracle accepts caller-supplied bounded spans only, prevalidates
   dimensions, encoded size, all block scales, finite inputs and non-overlapping scratch, and has a
   64-million-element default ceiling;

@@ -13,6 +13,10 @@ hardware, commands, measurements and limitations.
 
 ## Current report
 
+- [`M7_DEEPSEEK_GGUF_CHECKPOINT_BINDING_VALIDATION.md`](M7_DEEPSEEK_GGUF_CHECKPOINT_BINDING_VALIDATION.md) —
+  exact 0731 `UD-IQ1_S` object identities, bounded atomic metadata/full importer, immutable
+  checkpoint binding, full-hash and single-tier admission gates, plus real 5.34 MB metadata
+  validation without downloading the 82.54 GB payload.
 - [`M7_DEEPSEEK_WORKING_SET_VALIDATION.md`](M7_DEEPSEEK_WORKING_SET_VALIDATION.md) —
   bounded compression-schedule retention, metadata-derived resident/streamed trunk floors,
   complete-expert single-tier admission and real 0731 `UD-IQ1_S` header results.

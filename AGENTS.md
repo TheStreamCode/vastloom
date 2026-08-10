@@ -14,16 +14,17 @@ MTP block now match the pinned preview graph for prefill and five incremental ra
 cache steps. Verified headers populate a universal tensor/expert catalog, and a buffer-free
 governed state machine validates legal NVMe/RAM/VRAM reservation transitions. Synchronous and
 bounded asynchronous fixture paths now load canonical ranges into governed packed RAM buffers
-with exact tensor slices and exclusive transfer leases. Full-checkpoint payload binding,
-compute-coupled shared streaming, speculative generation and CUDA do not exist yet. The newer
+with exact tensor slices and exclusive transfer leases. Compute-coupled shared streaming,
+speculative generation and CUDA do not exist yet. The newer
 official 0731 Unsloth `UD-IQ1_S` GGUF profile now has a bounded v3/split-header reader and a
 metadata-only packed-expert catalog: 1,328 physical tensors map to 11,008 logical expert bundles.
 A bounded scalar IQ1_S dequantization/matvec oracle matches pinned ggml output on one exact real
 layer-0/expert-0 gate slice. Scalar IQ3_XXS parity and one complete real gate/up/SwiGLU/down
-expert now also match pinned ggml bit for bit after a governed asynchronous RAM load. Direct
-verified full-shard binding, a complete 0731 layer/token path, generation and CUDA remain
-unvalidated. Windows and Linux CPU paths are tested; macOS/Metal remain unvalidated. Laguna S 2.1
-remains a reviewed compatibility target, not a validated execution path.
+expert now also match pinned ggml bit for bit after a governed asynchronous RAM load. Its exact
+three-object importer and full-hash/single-tier source-binding gate are implemented, but the real
+82.54 GB payload has not been imported or executed. A complete 0731 quantized layer/token path,
+generation and CUDA remain unvalidated. Windows and Linux CPU paths are tested; macOS/Metal remain
+unvalidated. Laguna S 2.1 remains a reviewed compatibility target, not a validated execution path.
 
 Reference-PC execution targets must pass the public minimum-working-set gate: one complete routed
 expert, the required always-active block, KV, scratch and staging must fit live post-reserve

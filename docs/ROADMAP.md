@@ -138,11 +138,15 @@ Safetensors payload and complete layer/token remain unvalidated.
   the universal catalog without reading payloads.
 - [x] Derive bounded KV/compressor/scratch and resident-versus-streamed trunk working sets from
   retained exact GGUF metadata; require one complete expert to fit a single RAM or VRAM tier.
+- [x] Pin the three exact 0731 `UD-IQ1_S` object sizes/SHA-256 values, import bounded headers or
+  complete immutable shards atomically, and expose full source ranges only after complete hash
+  verification plus live single-tier admission. The real 82.54 GB payload remains undownloaded.
 - [x] Match pinned ggml IQ1_S dequantization/matvec output on one exact real 0731 expert-gate
   slice with bounded scalar CPU code.
 - [x] Match pinned ggml IQ3_XXS output and execute one complete real 0731 gate/up/down expert
   through the governed asynchronous loader with bit-identical final output.
-- [ ] Bind verified full GGUF payloads and packed IQ/FP4/FP8 weights to executable kernels.
+- [ ] Consume the verified full GGUF source binding through packed IQ/FP4/FP8 trunk/expert
+  kernels in one complete layer/token probe.
 - [x] Bounded operator primitives for normalization, base RoPE, selected-latent attention,
   learned/hash routing, routed SwiGLU and Hyper-Connections.
 - [x] Reduced float main graph with YaRN, overlapping compression, learned indexer,
@@ -167,6 +171,8 @@ The model-independent tensor/expert binding is recorded in the
 [M7 logical catalog report](reports/M7_LOGICAL_TENSOR_CATALOG_VALIDATION.md).
 The separate official 0731 GGUF header binding is recorded in the
 [M7 0731 GGUF catalog report](reports/M7_DEEPSEEK_0731_GGUF_CATALOG_VALIDATION.md).
+The immutable import/source gate is recorded in the
+[M7 checkpoint-binding report](reports/M7_DEEPSEEK_GGUF_CHECKPOINT_BINDING_VALIDATION.md).
 The first real packed-matrix parity gate is recorded in the
 [M7 IQ1_S kernel report](reports/M7_DEEPSEEK_IQ1S_KERNEL_VALIDATION.md).
 The completed one-expert gate/up/SwiGLU/down path is recorded in the

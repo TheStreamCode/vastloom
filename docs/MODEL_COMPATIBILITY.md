@@ -14,7 +14,7 @@ or matching tensor dimensions is never enough to enable execution automatically.
 | OLMoE-1B-7B-0924-Instruct | Pinned shards, top-k routes, expert streaming and I/O telemetry | Validated CPU expert streaming |
 | `deepseek-ai/DeepSeek-V4-Flash` preview at `60d8d707...` | Header catalog, tokenizer, reduced main+MTP prefill and five incremental cache steps | Reduced FP32 reference execution only |
 | `deepseek-ai/DeepSeek-V4-Flash-0731` at `7872f01b...` | Public metadata/config reviewed on 2026-08-10 | Not imported, inspected or executed by Vastloom yet |
-| `unsloth/DeepSeek-V4-Flash-0731-GGUF` at `fbbb5b93...` | Bounded headers/catalog, derived resident/streamed working sets, plus exact gate/up IQ1_S and down IQ3_XXS parity on one real expert | One governed scalar CPU expert only; no layer/token generation |
+| `unsloth/DeepSeek-V4-Flash-0731-GGUF` at `fbbb5b93...` | Pinned atomic importer, verified metadata binding, derived resident/streamed working sets, plus exact gate/up IQ1_S and down IQ3_XXS parity on one real expert | One governed scalar CPU expert only; real full payload not imported; no layer/token generation |
 | `unsloth/Laguna-S-2.1` at `1a646907...` | Public config, custom-code and shard metadata reviewed on 2026-08-10 | Adapter and execution not implemented |
 
 Historical DeepSeek reports remain tied to the preview revision they actually tested. The newer
@@ -38,12 +38,22 @@ profiles range from 82,539,237,792 bytes (`UD-IQ1_S`) to 161,869,615,520 bytes
 bounded GGUF metadata/tensor reader and quantization-specific parity tests; no profile may be
 selected through silent quality degradation.
 
-The first half of that boundary is now implemented for `UD-IQ1_S`. Native inspection of the
+The bounded catalog and immutable source-admission boundary are now implemented for `UD-IQ1_S`.
+Native inspection of the
 three split headers validates 1,328 physical tensors and slices the 129 packed expert matrices
 into 11,008 logical layer/expert bundles. The catalog accounts for 75,547,803,648 routed-expert
 bytes and 6,986,088,796 always-active bytes. A top-6 no-cache schedule would request
 1,770,651,648 logical expert bytes/token. This is header-derived planning data: the two large
-payload shards were not downloaded and no full artifact hash was verified.
+payload shards were not downloaded and no full payload hash was verified locally.
+
+The importer pins all three complete object paths, sizes and SHA-256 values at revision
+`fbbb5b93fb787c21338159b0af3318bb3f4d9768`. Metadata-only mode imports the complete first split
+plus exact 52,320- and 33,600-byte prefixes, totaling 5,343,584 bytes. The native checkpoint
+command revalidates the immutable manifest and every imported hash. A full import with skipped
+hashes remains metadata-only; only complete full-file verification plus live single-tier expert
+admission can expose executable source ranges. This source binding is implemented and covered by
+a synthetic full-payload test, but the official 82,539,237,792-byte payload has not been imported
+or executed.
 
 The inspector retains only the explicitly requested 46-entry integral compression schedule under
 a separate array bound, cross-checks the 43-layer/256-expert/top-6 scalar metadata and derives the
@@ -92,9 +102,11 @@ model revision
 The shared catalog and Safetensors-backed binding are implemented for the pinned DeepSeek
 preview. Its 69,187 tensors produce 11,264 logical expert bundles and 22,528 coalesced immutable
 source ranges. The separate GGUF binding now populates the same contract for the official 0731
-`UD-IQ1_S` headers by slicing each packed tensor along its expert axis. Scalar IQ1_S and IQ3_XXS
-oracles now execute one complete real bundle through the shared governed loader. Direct immutable
-full-shard coupling, layer/token execution, optimized kernels and the Laguna adapter remain open.
+`UD-IQ1_S` headers by slicing each packed tensor along its expert axis. Its pinned checkpoint gate
+can couple fully hashed immutable shards to those ranges after capacity admission. Scalar IQ1_S
+and IQ3_XXS oracles execute one complete real extracted bundle through the shared governed loader.
+The official full-shard import, a layer/token consumer, optimized kernels and the Laguna adapter
+remain open.
 
 The shared runtime may then place a tensor or expert bundle in one of these explicit states:
 

@@ -320,9 +320,21 @@ bounded GGUF v3 split headers
 
 The reviewed `UD-IQ1_S` headers contain 1,328 physical tensors and become 34,223 logical
 descriptors. Header-prefix objects are always metadata-only unless a caller supplies separate
-immutable full-shard paths; the CLI never makes that promotion. Exact encoded byte accounting is
-available to planning, while complete full-shard verification and layer/token execution remain
-outside this slice.
+immutable full-shard paths. `deepseek-gguf-checkpoint` is the only CLI promotion boundary: it
+requires the pinned importer manifest, exact model/revision/path/size/SHA identities, full-file
+hash verification and live single-tier expert admission. Skipping hashes forces the resulting
+catalog back to metadata-only. Exact encoded byte accounting is available to planning, but the
+real full payload has not been imported and layer/token execution remains outside this slice.
+
+```text
+pinned importer manifest + exact object identities
+  -> bounded GGUF header/split validation
+  -> full SHA-256 (required for executable source ranges)
+  -> runtime state fits safe host RAM
+  -> one complete expert fits RAM OR VRAM, never their sum
+  -> immutable source binding
+  -> execution_supported=false until a layer/token consumer exists
+```
 
 The primary GGUF metadata shard also supplies the exact compression schedule through an explicit
 bounded-retention request; other metadata arrays remain skipped. For batch 1 and 4,096 context

@@ -14,7 +14,7 @@ or matching tensor dimensions is never enough to enable execution automatically.
 | OLMoE-1B-7B-0924-Instruct | Pinned shards, top-k routes, expert streaming and I/O telemetry | Validated CPU expert streaming |
 | `deepseek-ai/DeepSeek-V4-Flash` preview at `60d8d707...` | Header catalog, tokenizer, reduced main+MTP prefill and five incremental cache steps | Reduced FP32 reference execution only |
 | `deepseek-ai/DeepSeek-V4-Flash-0731` at `7872f01b...` | Public metadata/config reviewed on 2026-08-10 | Not imported, inspected or executed by Vastloom yet |
-| `unsloth/DeepSeek-V4-Flash-0731-GGUF` at `fbbb5b93...` | Pinned atomic importer, verified metadata binding, 43 bounded layer-trunk plans, all trunk storage types covered by scalar references, one router-first governed reduced Q8_0/IQ1_S/IQ3_XXS layer, plus canonical synchronous/asynchronous cache-to-kernel parity on one real expert | Reduced synthetic mixed-format layer and one separate extracted expert execute; complete shards, checkpoint-shaped official layer/token and generation remain unvalidated |
+| `unsloth/DeepSeek-V4-Flash-0731-GGUF` at `fbbb5b93...` | Pinned atomic importer, verified metadata binding, 43 bounded layer-trunk plans, exact layer-0 trunk+top-6 range planning, all trunk storage types covered by scalar references, one router-first governed reduced Q8_0/IQ1_S/IQ3_XXS layer, plus canonical synchronous/asynchronous cache-to-kernel parity on one real expert | Reduced synthetic mixed-format layer and one separate extracted expert execute; the checkpoint-shaped range plan is non-executing and its expert IDs are not yet authoritative; complete shards, official layer/token and generation remain unvalidated |
 | `unsloth/Laguna-S-2.1` at `1a646907...` | Public config, custom-code and shard metadata reviewed on 2026-08-10 | Adapter and execution not implemented |
 | Kimi K3-class profiles | Public-roadmap capacity/traffic study only | Not a reference-PC execution target unless one exact complete expert passes the single-tier gate |
 
@@ -65,6 +65,15 @@ All 43 layers also produce bounded non-routed plans: 1,193 tensors become 1,193 
 64 MiB ceiling, with 138,867,160–161,707,992 bytes of trunk per layer and a 35,651,584-byte
 largest tile. These are metadata-derived plans; the official tile sources remain unavailable and
 no executable official-payload DeepSeek layer exists.
+
+The layer probe planner now composes a complete trunk plan with exactly top-k unique complete
+expert bundles while preserving immutable full shard identities. For layer 0, six structurally
+valid bundles produce 21 trunk ranges plus 18 expert ranges: 177,795,544 logical bytes total,
+with a 35,651,584-byte maximum range and a 6,488,064-byte single-expert floor. The current IDs
+`0..5` are a representative layout selection, not a route for an official input. The first three
+layers use `tid2eid[input_ids]`; their real table payload must be acquired and decoded before the
+six expert offsets become authoritative. The planner reads no payload and always reports
+`execution_supported=false`.
 
 The layer catalog uses F32, Q8_0, Q5_K, Q6_K, I32 and BF16. Bounded scalar handling now covers all
 1,193 tensors and all 6,390,088,008 encoded layer-trunk bytes: floating matrix formats have exact
@@ -136,8 +145,8 @@ at its fixed numerical compute turn; a controlled fixture reports positive read-
 compute overlap while preserving the oracle. The real extracted 0731 expert uses the same async
 cache boundary after strict canonical catalog binding, but is not composed with official trunk
 payload or the reduced graph because its checkpoint dimensions differ. Official full-shard
-import, a checkpoint-shaped 0731 layer/token probe, useful physical-device overlap, optimized
-kernels and the Laguna adapter remain open.
+import, execution of the now-defined checkpoint-shaped 0731 range plan, authoritative hash
+routing, useful physical-device overlap, optimized kernels and the Laguna adapter remain open.
 
 The shared runtime may then place a tensor or expert bundle in one of these explicit states:
 

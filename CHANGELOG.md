@@ -42,6 +42,14 @@
   `--no-verify` remains metadata-only, the official 82.54 GB payload was not downloaded, and the
   CLI still reports `execution_supported=false` until a verified full-checkpoint layer/token
   consumer exists.
+- Added `deepseek-gguf-probe-plan` and a native non-executing range-plan API. It validates one
+  exact layer, exactly top-k unique caller-supplied expert IDs, complete W1/W2/W3 bundles,
+  immutable source identities, bounded range counts and overflow-safe totals. Real layer-0
+  metadata yields 21 trunk plus 18 expert ranges / 177,795,544 logical bytes; routing authority,
+  full-payload presence and execution remain explicitly false.
+- Corrected metadata-only logical sources to name the immutable complete GGUF shard objects rather
+  than local `.header` snapshots. Loaders still reject metadata-only catalogs, so this preserves
+  accurate future range identity without widening execution authority.
 - Preserved exact `blk.N.*` identity for all non-routed GGUF tensors and added deterministic
   per-layer trunk plans with a 64 MiB ceiling. The real 0731 metadata maps all 43 layers into
   1,193 tensor tiles; a new governed fixture loader covers immutable identity, Unicode paths,
@@ -92,6 +100,9 @@
   One active batch per cache, full-request queue capacity, drain-on-abandon and exact successful
   wasted-prefetch accounting keep this correctness slice bounded. This is not a physical-NVMe,
   complete-layer or throughput result.
+- Made the controlled overlap regression deterministic by explicitly coordinating the second
+  fixture read-service start before its bounded 50 ms service window. This changes test timing
+  only, not the production scheduler; the native suite then passed 50/50 repetitions and TSan.
 - Extended the complete reduced layer/token gate to the real 0731 expert format combination:
   Q8_0 trunk/shared tensors, I32 hash routing, IQ1_S W1/W3 and IQ3_XXS W2. The 8,180-byte
   file-backed fixture produces four 1,384-byte indivisible expert bundles; synchronous and

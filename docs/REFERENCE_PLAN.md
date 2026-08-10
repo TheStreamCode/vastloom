@@ -82,9 +82,13 @@ also passes the isolated expert-residency part under a 10 MiB aggregate host-mem
 The official 0731 `UD-IQ1_S` GGUF headers now produce a derived batch-1, 4,096-token plan: the
 runtime state is 116,123,672 bytes, the largest complete expert bundle is 8,781,824 bytes, the
 streamed-trunk CPU floor is 124,905,496 bytes, and the resident-trunk CPU floor is 7,110,994,292
-bytes. This proves metadata-level capacity accounting, not DeepSeek execution; full payload
-verification on the official local objects, official-payload trunk compute and a layer/token path
-remain absent. Scalar storage handling now covers every type in the 1,193 planned layer tensors,
+bytes. Layer 0 now also has an exact plan-only checkpoint-shaped range set: 138,867,160 trunk
+bytes in 21 ranges plus six 6,488,064-byte expert bundles in 18 ranges, or 177,795,544 logical
+bytes total. The selected IDs `0..5` validate layout/capacity only; they are not authoritative
+`tid2eid` output. This proves metadata-level capacity accounting, not DeepSeek execution; full
+payload verification on the official local objects, authoritative routing, official-payload trunk
+compute and a layer/token path remain absent. Scalar storage handling now covers every type in the
+1,193 planned layer tensors,
 and a reduced first layer now composes Q8_0/I32 trunk with IQ1_S/IQ3_XXS routed storage through
 the architecture graph. An 8,180-byte file-backed repetition retains the bounded trunk/expert
 loader buffers and their Governor leases directly through execution. A subsequent router-first

@@ -97,7 +97,9 @@ warm buffered forward time by 46.0% in three paired WSL runs. Three Windows
 1,610,743,808 whole-device bytes for 1,610,612,736 logical expert bytes per run. M5 is
 closed. The exact official DeepSeek checkpoint contract, reduced float main graph and one
 checkpoint-shaped MTP block and reduced incremental state are now validated; executable packed
-payload kernels and the speculative verification loop remain M7 work.
+payload kernels and the speculative verification loop remain M7 work. The real 0731 metadata now
+also defines a non-executing 177,795,544-byte layer-0 trunk+top-6 range plan; authoritative routing
+and official-payload execution remain open.
 
 ## M6 — Exact DeepSeek inspector and architecture-faithful fixture — complete
 
@@ -195,6 +197,8 @@ The bounded selected-miss batch and controlled read-service/CPU-compute overlap 
 the [M9 asynchronous overlap report](reports/M9_DEEPSEEK_ASYNC_COMPUTE_OVERLAP_VALIDATION.md).
 The complete reduced Q8_0/IQ1_S/IQ3_XXS layer composition is recorded in the
 [M9 mixed-format layer report](reports/M9_DEEPSEEK_MIXED_FORMAT_LAYER_VALIDATION.md).
+The exact non-executing checkpoint-shaped range boundary is recorded in the
+[M9 layer probe plan report](reports/M9_DEEPSEEK_LAYER_PROBE_PLAN_VALIDATION.md).
 The first real packed-matrix parity gate is recorded in the
 [M7 IQ1_S kernel report](reports/M7_DEEPSEEK_IQ1S_KERNEL_VALIDATION.md).
 The completed one-expert gate/up/SwiGLU/down path is recorded in the
@@ -240,8 +244,11 @@ unbounded allocation and clean recovery from injected CUDA failures.
   a later performance gate.
 - [x] Compose a complete reduced layer/token with Q8_0/I32 trunk, IQ1_S W1/W3 and IQ3_XXS W2
   selected bundles through governed file-backed synchronous/asynchronous cache paths.
-- [ ] Define and execute a checkpoint-shaped single-token probe from the smallest exact set of
-  verified official trunk and selected-expert ranges.
+- [x] Define a bounded checkpoint-shaped layer-0 range plan from verified official metadata:
+  21 trunk plus 18 selected-expert ranges, 177,795,544 logical bytes total. The six caller-supplied
+  IDs validate layout/capacity only and do not claim authoritative routing or payload execution.
+- [ ] Execute that probe by acquiring the bounded official trunk ranges, decoding the real
+  `tid2eid` route and loading only its six selected complete expert bundles.
 - [ ] Pinned host buffers.
 - [ ] Direct/overlapped NVMe reads where supported.
 - [ ] Resident-trunk and bounded streamed-trunk placement profiles.

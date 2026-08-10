@@ -249,6 +249,15 @@ The 0731 GGUF reader adds a metadata-only safety boundary:
   expert bundle fits wholly in safe RAM or wholly in safe VRAM. `--no-verify` forces metadata-only
   behavior, and the command still reports `execution_supported=false` because no verified
   full-checkpoint layer/token consumer exists;
+- `deepseek-gguf-probe-plan` is a fail-closed planning command, not a downloader or executor. It
+  requires exactly the declared top-k unique in-range expert IDs, caps the CLI list at 64 IDs,
+  uses a positive bounded tile size and caps the native plan at 4,096 total ranges by default;
+  malformed/missing layer, bundle, range and tensor-slice identities fail before output;
+- metadata-only probe plans retain immutable complete shard object names and exact offsets instead
+  of presenting local header-prefix paths as tensor payload. JSON always marks caller selections
+  unverified, routing authority false, plan-only true and execution unsupported. The current
+  layer-0 plan's 177,795,544 logical bytes are neither downloaded bytes nor physical-device
+  telemetry and do not relax the single-tier expert gate;
 - the scalar IQ1_S/IQ3_XXS expert and Q8_0/Q5_K/Q6_K/BF16/F32 trunk paths accept caller-supplied
   bounded spans only, prevalidate dimensions, encoded size, all applicable block scales, finite
   inputs and non-overlapping scratch, and have a 64-million-element default ceiling;

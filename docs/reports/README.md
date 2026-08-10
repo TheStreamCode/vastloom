@@ -13,6 +13,10 @@ hardware, commands, measurements and limitations.
 
 ## Current report
 
+- [`M9_DEEPSEEK_LAYER_PROBE_PLAN_VALIDATION.md`](M9_DEEPSEEK_LAYER_PROBE_PLAN_VALIDATION.md) —
+  exact non-executing layer-0 trunk+top-6 range planning from verified real metadata,
+  177,795,544 logical bytes across 39 immutable source ranges, strict caller-ID/routing-authority
+  disclosure and cross-platform malformed-input/sanitizer evidence without a payload read.
 - [`M9_DEEPSEEK_MIXED_FORMAT_LAYER_VALIDATION.md`](M9_DEEPSEEK_MIXED_FORMAT_LAYER_VALIDATION.md) —
   one complete reduced DeepSeek main-layer/token composition with Q8_0/I32 trunk data,
   IQ1_S W1/W3 and IQ3_XXS W2 expert bundles, governed synchronous/asynchronous file-backed

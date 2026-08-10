@@ -347,6 +347,31 @@ Unicode paths, cancellation, short reads and reservation cleanup. Metadata-only 
 but are forbidden to load. The official 82.54 GB payload is absent, so these real layer numbers
 remain metadata-derived placement evidence rather than an execution claim.
 
+### Checkpoint-shaped DeepSeek layer probe planning
+
+The non-executing `DeepseekV4LayerProbePlan` composes one layer trunk plan with exactly the
+adapter-declared top-k unique complete expert bundles. It retains every tensor slice and immutable
+full source-object identity while independently reporting imported header verification, full
+payload presence and executable binding. A metadata snapshot can therefore describe real source
+offsets, but its local `.header` prefix is never presented as an executable tensor source.
+
+The official first three layers use `tid2eid[input_ids]`, so the eventual token path must remain
+two-phase:
+
+```text
+verified trunk ranges
+  -> execute attention/shared/router state and decode authoritative tid2eid IDs
+  -> validate and deduplicate exactly six IDs
+  -> acquire only their complete W1/W2/W3 bundles
+  -> execute expert reduction in authoritative order
+```
+
+On the pinned real layer-0 metadata, the first phase is 138,867,160 bytes in 21 ranges. Six
+complete 6,488,064-byte bundles add 38,928,384 bytes in 18 ranges, producing a 177,795,544-byte,
+39-range plan with one 35,651,584-byte maximum range. The current command accepts caller-supplied
+IDs only to validate layout and capacity, always emits `routing_authority_verified=false`, and
+performs no payload read or execution.
+
 The scalar storage layer now recognizes every GGML type present in those 1,193 layer tensors.
 Q8_0, Q5_K and Q6_K follow the exact pinned ggml block layouts; BF16 and F32 are decoded from
 explicit little-endian bytes; and the three `ffn_gate_tid2eid` I32 routing tables use a separate

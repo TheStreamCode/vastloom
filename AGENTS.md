@@ -25,7 +25,10 @@ A bounded scalar IQ1_S dequantization/matvec oracle matches pinned ggml output o
 layer-0/expert-0 gate slice. Scalar IQ3_XXS parity and one complete real gate/up/SwiGLU/down
 expert now also match pinned ggml bit for bit after a governed asynchronous RAM load. Its exact
 three-object importer and full-hash/single-tier source-binding gate are implemented, but the real
-82.54 GB payload has not been imported or executed. All 43 layers now expose deterministic
+82.54 GB payload has not been imported or executed. A non-executing checkpoint-shaped layer
+planner now combines the exact layer-0 trunk and six caller-supplied complete bundles into
+39 immutable-source ranges / 177,795,544 logical bytes. Those IDs have no verified routing
+authority and none of the planned payload was fetched. All 43 layers now expose deterministic
 non-routed trunk plans (1,193 tensors/tiles at a 64 MiB ceiling), and a synthetic governed tile
 transaction validates payload reads and cleanup. Scalar Q8_0/Q5_K/Q6_K/BF16/F32 references plus
 typed I32 router decoding cover all 1,193 layer-trunk storage types in metadata, but no official

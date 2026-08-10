@@ -64,6 +64,11 @@ model conversion.
 > deterministic compute turn and preserves the same oracle while a controlled fixture records a
 > positive read-service/CPU-compute intersection. The real 6.49 MB expert passes that asynchronous
 > future/cache/kernel boundary too; a single real expert cannot by itself prove useful overlap.
+> A new plan-only checkpoint command now combines one exact 0731 layer trunk with exactly six
+> structurally validated complete expert bundles: layer 0 requires 177,795,544 logical bytes in
+> 39 immutable source ranges, with a 35,651,584-byte maximum range and a 6,488,064-byte
+> single-expert tier floor. The supplied expert IDs are not yet an authoritative `tid2eid` route,
+> and none of these payload bytes was downloaded or executed.
 > The complete 82.54 GB payload has not been downloaded or executed; storage-format coverage is not a
 > complete DeepSeek layer/token path, physical-NVMe performance, generation or CUDA implementation.
 
@@ -140,6 +145,9 @@ The bounded router-to-future-to-compute scheduler and controlled overlap result 
 the [`M9 asynchronous overlap report`](docs/reports/M9_DEEPSEEK_ASYNC_COMPUTE_OVERLAP_VALIDATION.md).
 The complete reduced Q8_0/IQ1_S/IQ3_XXS layer composition is documented in the
 [`M9 mixed-format layer report`](docs/reports/M9_DEEPSEEK_MIXED_FORMAT_LAYER_VALIDATION.md).
+The first exact checkpoint-shaped range plan and its explicit non-execution/routing boundary are
+documented in the
+[`M9 layer probe plan report`](docs/reports/M9_DEEPSEEK_LAYER_PROBE_PLAN_VALIDATION.md).
 The pinned importer and immutable full-source admission boundary are documented in the
 [`M7 checkpoint-binding report`](docs/reports/M7_DEEPSEEK_GGUF_CHECKPOINT_BINDING_VALIDATION.md).
 Current and candidate model support is kept explicit in the
@@ -326,6 +334,13 @@ portability target, not a validated platform claim.
   6,390,088,008 encoded bytes through Q8_0, Q5_K, Q6_K, BF16, F32 and I32 paths. The reduced
   packed layer validates their architecture boundary, but no complete official-payload layer was
   executed.
+- **Checkpoint-shaped layer range plan:** `deepseek-gguf-probe-plan` joins one complete trunk plan
+  to exactly top-k unique complete expert bundles without reading payload. On layer 0 the real
+  metadata yields 21 trunk plus 18 expert ranges, 177,795,544 logical bytes total, a maximum range
+  of 35,651,584 bytes and a 6,488,064-byte single-tier expert floor, all in the immutable second
+  shard identity. The current IDs are caller-supplied and explicitly unverified; the official
+  hash-route table must execute before these offsets can be treated as an authoritative token
+  route.
 
 ### Runtime foundation
 
@@ -579,6 +594,8 @@ python tools\import_hf_model.py `
 
 $model = 'C:\VastloomModels\models\original\deepseek-v4-flash-0731-iq1s-fbbb5b93--metadata'
 vastloom deepseek-gguf-checkpoint $model --context 4096 --batch-size 1 --json
+vastloom deepseek-gguf-probe-plan $model `
+  --layer 0 --experts 0,1,2,3,4,5 --context 4096 --batch-size 1 --json
 ```
 
 The command requires the exact model ID, 40-character revision, paths, sizes and SHA-256 values.
@@ -587,6 +604,11 @@ Raw GGUF paths are rejected. A future full import is 82,539,237,792 bytes and ad
 run that import merely to test the CLI: the real full payload has not yet passed a Vastloom
 layer/token execution gate. `--no-verify` is inspection-only and can never create an executable
 source binding.
+
+The probe command is also metadata-only. The example IDs `0..5` demonstrate exact layout and
+capacity accounting; they are not the route of a real token. Its JSON therefore reports
+`plan_only=true`, `execution_supported=false` and `routing_authority_verified=false`. No listed
+range is fetched by this command.
 
 ## TinyChat CLI options
 
@@ -660,6 +682,8 @@ vastloom deepseek-inspect MODEL_DIRECTORY [--no-verify] [--json]
 vastloom deepseek-gguf-inspect SHARD... [--declared-sizes CSV] [--revision ID] [--json]
 vastloom deepseek-gguf-checkpoint MODEL_DIRECTORY [--context N] [--batch-size N]
     [--no-verify] [--json]
+vastloom deepseek-gguf-probe-plan MODEL_DIRECTORY --layer N --experts CSV
+    [--tile-size SIZE] [--context N] [--batch-size N] [--no-verify] [--json]
 vastloom moe-logits MODEL_DIRECTORY --text TEXT [--chat] [--top N]
     [--cache no-cache|lru|lfu|static-hot] [--cache-bytes SIZE]
     [--io sync|async] [--io-cache buffered|bypass] [--expert-read whole|staged]
@@ -742,6 +766,10 @@ each one-token step, reports hits/misses/evictions/logical bytes and refuses an 
 multi-token union before I/O. Official-payload DeepSeek execution and generation are not
 implemented.
 
+The exact layer-0 range plan adds 138,867,160 trunk bytes and six 6,488,064-byte expert bundles:
+177,795,544 logical bytes in 39 ranges. It is a metadata result, not a download or device-traffic
+measurement, and its caller-supplied expert IDs are not authoritative routing output.
+
 ## Current limitations
 
 Alpha.4 proves one real dense path and one real CPU MoE streaming path with an
@@ -754,8 +782,9 @@ It currently has:
 - no CUDA, ROCm, Vulkan or Metal inference backend;
 - scalar IQ1_S/IQ3_XXS expert and Q8_0/Q5_K/Q6_K/BF16/F32 trunk reference kernels, plus bounded
   I32 router-table decoding, one deterministic reduced mixed-format layer composition and one
-  separately validated real selected-expert cache/kernel bridge, but no checkpoint-shaped
-  official-payload layer/token, SIMD/fused production kernel or CUDA path;
+  separately validated real selected-expert cache/kernel bridge; an exact checkpoint-shaped range
+  plan exists, but no authoritative official-payload route/layer/token execution, SIMD/fused
+  production kernel or CUDA path;
 - complete metadata-derived trunk plans and storage-type coverage plus a governed
   tile/expert-to-DeepSeek fixture consumer and reduced router-first bounded expert cache with an
   opt-in single-owner asynchronous batch, but no official trunk payload read or full-model loop;
@@ -787,18 +816,20 @@ merely SSD throughput. It is:
 
 The next technical sequence remains incremental:
 
-1. define a checkpoint-shaped single-token layer probe and derive the smallest exact official
-   trunk and selected-expert range set without downloading the full checkpoint;
-2. after explicit approval, execute that bounded range set with exact logit/route parity and
-   measure useful physical-device expert-read/compute overlap with declared
-   cache state and exact logical, process-visible and device bytes;
-3. only after explicit approval and a fresh capacity check, import and fully hash the real pinned
-   shards and run the same bounded layer probe on official source ranges;
-4. connect a target-verified MTP decoding loop, then add CUDA dense, attention, router and packed
+1. implement a bounded immutable range-artifact importer and, only after explicit approval,
+   acquire the exact 138,867,160-byte layer-0 trunk plan with temporary publication, range
+   validation, checksums and atomic rename;
+2. decode the official `tid2eid` route for a pinned input, then acquire only its six complete
+   selected expert bundles (38,928,384 bytes for layer 0) and match the official layer output;
+3. measure useful physical-device expert-read/compute overlap with declared cache state and exact
+   logical, process-visible and device bytes;
+4. only after explicit approval and a fresh capacity check, import and fully hash complete pinned
+   shards when a later gate actually requires them;
+5. connect a target-verified MTP decoding loop, then add CUDA dense, attention, router and packed
    expert kernels;
-5. explicit VRAM/RAM/NVMe placement with pinned buffers and direct/overlapped I/O;
-6. adaptive placement, predictive routing and speculative expert deduplication;
-7. OpenAI-compatible local server and coding-agent integration.
+6. explicit VRAM/RAM/NVMe placement with pinned buffers and direct/overlapped I/O;
+7. adaptive placement, predictive routing and speculative expert deduplication;
+8. OpenAI-compatible local server and coding-agent integration.
 
 Detailed acceptance gates are in [`docs/ROADMAP.md`](docs/ROADMAP.md).
 The reference-PC working-set rule is defined in

@@ -248,7 +248,24 @@ and the server binds to loopback unless remote access is explicitly configured.
 - [ ] Laguna S 2.1 architecture adapter and expert-streaming parity.
 - [ ] MiniMax-class MoE adapter.
 - [ ] Kimi K3 capacity and traffic benchmark.
-- [ ] Vulkan, ROCm and Metal backends according to measured demand.
+- [ ] Vulkan and ROCm backends according to measured demand.
 - [ ] Multi-NVMe and optional LAN tier experiments.
 
 Kimi K3 remains an extreme research target, not the first product milestone.
+
+### Public macOS and Metal track
+
+The primary maintainer does not currently have physical Mac hardware. This track therefore stays
+public and explicitly unvalidated until evidence is produced on Apple hardware:
+
+- [ ] Add a GitHub-hosted macOS build/test job for the CPU-only runtime.
+- [ ] Replace the conservative macOS available-memory estimate with a measured, fail-closed host
+  pressure probe.
+- [ ] Pass tokenizer, dense, MoE, GGUF, malformed-input and cancellation parity on Apple Silicon.
+- [ ] Add a Metal capability probe and Governor-backed allocation limits.
+- [ ] Implement Metal kernels incrementally against the same CPU token/logit/route fixtures.
+- [ ] Validate memory pressure, thermal behavior and clean cancellation on at least one physical
+  Apple Silicon Mac before describing Metal as supported.
+
+**Gate:** macOS may be listed as CPU-supported only after its CI matrix passes. Metal may be listed
+as supported only after real-device correctness, resource-safety and performance reports exist.

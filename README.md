@@ -122,7 +122,7 @@ allocation plan is derived from detected capacity and conservative headroom.
 |---|---|
 | Windows 11 x86-64 | Native CPU paths validated with MSVC; primary consumer target |
 | Linux x86-64 | Native CPU paths validated with GCC and Clang; ASan/UBSan and TSan gates pass |
-| macOS | Source includes a portable CPU/RAM probe, but no macOS build/CI validation or Metal backend exists yet |
+| macOS | Source includes a portable CPU/RAM probe; CPU CI and Metal are explicit unvalidated [M14 roadmap](docs/ROADMAP.md#public-macos-and-metal-track) work |
 
 Vastloom must therefore be described as working on Windows and Linux today. macOS is a planned
 portability target, not a validated platform claim.

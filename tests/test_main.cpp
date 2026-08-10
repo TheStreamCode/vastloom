@@ -220,7 +220,7 @@ void test_gguf(const std::filesystem::path& root) {
     append_u32_le(header, 0x46554747U);
     append_u32_le(header, 3U);
     append_u64_le(header, 3U);
-    append_u64_le(header, 6U);
+    append_u64_le(header, 22U);
 
     append_gguf_string(header, "general.architecture");
     append_u32_le(header, static_cast<std::uint32_t>(vastloom::model::GgufValueType::string));
@@ -250,6 +250,38 @@ void test_gguf(const std::filesystem::path& root) {
     append_u64_le(header, 2U);
     append_gguf_string(header, "a");
     append_gguf_string(header, "\xc3\xa8");
+
+    const std::array<std::pair<std::string_view, std::uint32_t>, 15U> deepseek_metadata{{
+        {"deepseek4.block_count", 1U},
+        {"deepseek4.hash_layer_count", 0U},
+        {"deepseek4.context_length", 128U},
+        {"deepseek4.embedding_length", 8U},
+        {"deepseek4.attention.head_count", 2U},
+        {"deepseek4.attention.key_length", 4U},
+        {"deepseek4.attention.value_length", 4U},
+        {"deepseek4.rope.dimension_count", 2U},
+        {"deepseek4.attention.sliding_window", 4U},
+        {"deepseek4.expert_count", 2U},
+        {"deepseek4.expert_used_count", 1U},
+        {"deepseek4.expert_feed_forward_length", 4U},
+        {"deepseek4.attention.indexer.head_count", 2U},
+        {"deepseek4.attention.indexer.key_length", 2U},
+        {"deepseek4.hyper_connection.count", 2U},
+    }};
+    std::optional<std::size_t> hidden_metadata_value_offset;
+    for (const auto& [key, value] : deepseek_metadata) {
+        append_gguf_string(header, key);
+        append_u32_le(header, static_cast<std::uint32_t>(vastloom::model::GgufValueType::uint32));
+        if (key == "deepseek4.embedding_length") {
+            hidden_metadata_value_offset = header.size();
+        }
+        append_u32_le(header, value);
+    }
+    append_gguf_string(header, "deepseek4.attention.compress_ratios");
+    append_u32_le(header, static_cast<std::uint32_t>(vastloom::model::GgufValueType::array));
+    append_u32_le(header, static_cast<std::uint32_t>(vastloom::model::GgufValueType::int32));
+    append_u64_le(header, 1U);
+    append_u32_le(header, 0U);
 
     append_gguf_string(header, "blk.0.ffn_down_exps.weight");
     append_u32_le(header, 3U);
@@ -283,10 +315,26 @@ void test_gguf(const std::filesystem::path& root) {
     const auto full_path = directory / "model.gguf";
     write_bytes(full_path, full);
 
-    auto gguf = vastloom::model::GgufFile::open(full_path);
+    vastloom::model::GgufReaderLimits deepseek_limits;
+    deepseek_limits.retained_integral_array_keys = {
+        "deepseek4.attention.compress_ratios"};
+    auto gguf = vastloom::model::GgufFile::open(full_path, deepseek_limits);
+    CHECK(hidden_metadata_value_offset.has_value());
+    auto oversized_architecture = full;
+    if (hidden_metadata_value_offset.has_value()) {
+        std::fill(oversized_architecture.begin() +
+                      static_cast<std::ptrdiff_t>(*hidden_metadata_value_offset),
+                  oversized_architecture.begin() +
+                      static_cast<std::ptrdiff_t>(*hidden_metadata_value_offset + 4U),
+                  static_cast<unsigned char>(0xffU));
+    }
+    const auto oversized_architecture_path = directory / "oversized-architecture.gguf";
+    write_bytes(oversized_architecture_path, oversized_architecture);
+    auto oversized_architecture_file = vastloom::model::GgufFile::open(
+        oversized_architecture_path, deepseek_limits);
     CHECK(gguf && gguf.value().version() == 3U && gguf.value().alignment() == 32U &&
           gguf.value().data_offset() == data_offset && !gguf.value().header_only() &&
-          gguf.value().metadata().size() == 6U && gguf.value().tensors().size() == 3U);
+          gguf.value().metadata().size() == 22U && gguf.value().tensors().size() == 3U);
     if (gguf) {
         auto architecture = gguf.value().architecture();
         CHECK(architecture && architecture.value() == "deepseek4");
@@ -294,6 +342,10 @@ void test_gguf(const std::filesystem::path& root) {
         CHECK(tokens != nullptr && tokens->type == vastloom::model::GgufValueType::array &&
               tokens->array_type == vastloom::model::GgufValueType::string &&
               tokens->array_elements == 2U);
+        const auto* ratios = gguf.value().find_metadata(
+            "deepseek4.attention.compress_ratios");
+        CHECK(ratios != nullptr && ratios->signed_array_values.size() == 1U &&
+              ratios->signed_array_values[0] == 0);
         const auto* down = gguf.value().find_tensor("blk.0.ffn_down_exps.weight");
         const auto* gate = gguf.value().find_tensor("blk.0.ffn_gate_exps.weight");
         const auto* up = gguf.value().find_tensor("blk.0.ffn_up_exps.weight");
@@ -308,7 +360,8 @@ void test_gguf(const std::filesystem::path& root) {
 
     const auto snapshot_path = directory / "model.gguf.header";
     write_bytes(snapshot_path, header);
-    auto snapshot = vastloom::model::GgufFile::open_header_prefix(snapshot_path, full.size());
+    auto snapshot = vastloom::model::GgufFile::open_header_prefix(
+        snapshot_path, full.size(), deepseek_limits);
     CHECK(snapshot && snapshot.value().header_only() && snapshot.value().file_bytes() == full.size() &&
           snapshot.value().data_offset() == data_offset && snapshot.value().tensors().size() == 3U);
 
@@ -343,6 +396,17 @@ void test_gguf(const std::filesystem::path& root) {
     vastloom::model::GgufReaderLimits array_limits;
     array_limits.max_array_elements = 1U;
     CHECK(!vastloom::model::GgufFile::open(full_path, array_limits));
+    vastloom::model::GgufReaderLimits non_integral_retention;
+    non_integral_retention.retained_integral_array_keys = {"tokenizer.ggml.tokens"};
+    CHECK(!vastloom::model::GgufFile::open(full_path, non_integral_retention));
+    vastloom::model::GgufReaderLimits scalar_retention;
+    scalar_retention.retained_integral_array_keys = {"general.alignment"};
+    CHECK(!vastloom::model::GgufFile::open(full_path, scalar_retention));
+    vastloom::model::GgufReaderLimits duplicate_retention;
+    duplicate_retention.retained_integral_array_keys = {
+        "deepseek4.attention.compress_ratios",
+        "deepseek4.attention.compress_ratios"};
+    CHECK(!vastloom::model::GgufFile::open(full_path, duplicate_retention));
 
     auto truncated_header = header;
     truncated_header.pop_back();
@@ -391,6 +455,7 @@ void test_gguf(const std::filesystem::path& root) {
             options.layers = 1U;
             options.experts_per_layer = 2U;
             options.top_k = 1U;
+            options.context_tokens = 128U;
             auto mapped = vastloom::inference::build_deepseek_v4_gguf_catalog(
                 catalog.value(), options);
             CHECK(mapped && mapped.value().catalog.tensors.size() == 7U &&
@@ -399,11 +464,34 @@ void test_gguf(const std::filesystem::path& root) {
                   mapped.value().catalog.always_active_bytes == 4U &&
                   mapped.value().minimum_expert_bundle_bytes == 102U &&
                   mapped.value().maximum_expert_bundle_bytes == 102U &&
-                  mapped.value().no_cache_expert_bytes_per_token == 102U);
+                  mapped.value().no_cache_expert_bytes_per_token == 102U &&
+                  mapped.value().persistent_kv_bytes == 32U &&
+                  mapped.value().compression_state_bytes == 0U &&
+                  mapped.value().rope_table_bytes == 1'024U &&
+                  mapped.value().runtime_state_bytes == 67'110'300U &&
+                  mapped.value().minimum_host_resident_bytes == 67'110'304U &&
+                  mapped.value().minimum_streamed_trunk_cpu_ram_bytes == 67'110'402U &&
+                  mapped.value().minimum_cpu_streaming_ram_bytes == 67'110'406U);
             if (mapped) {
                 CHECK(mapped.value().catalog.experts.front().read_ranges.size() == 3U &&
                       mapped.value().catalog.experts.front().tensor_slices.size() == 3U);
             }
+            options.safe_ram_cap_bytes = 67'110'360U;
+            options.safe_vram_cap_bytes = 60U;
+            auto cannot_split_expert = vastloom::inference::build_deepseek_v4_gguf_catalog(
+                catalog.value(), options);
+            CHECK(cannot_split_expert && cannot_split_expert.value().admission_evaluated &&
+                  !cannot_split_expert.value().expert_fits_ram_tier &&
+                  !cannot_split_expert.value().expert_fits_vram_tier &&
+                  !cannot_split_expert.value().capacity_plan_candidate);
+            options.safe_vram_cap_bytes = 102U;
+            auto vram_expert = vastloom::inference::build_deepseek_v4_gguf_catalog(
+                catalog.value(), options);
+            CHECK(vram_expert && vram_expert.value().expert_fits_vram_tier &&
+                  vram_expert.value().capacity_plan_candidate);
+            options.top_k = 2U;
+            CHECK(!vastloom::inference::build_deepseek_v4_gguf_catalog(
+                catalog.value(), options));
         }
     }
     if (snapshot && continuation_file) {
@@ -420,11 +508,31 @@ void test_gguf(const std::filesystem::path& root) {
             options.layers = 1U;
             options.experts_per_layer = 2U;
             options.top_k = 1U;
+            options.context_tokens = 128U;
             CHECK(!vastloom::inference::build_deepseek_v4_gguf_catalog(
                 header_catalog.value(), options));
             options.metadata_only = true;
             CHECK(vastloom::inference::build_deepseek_v4_gguf_catalog(
                 header_catalog.value(), options));
+        }
+    }
+    if (oversized_architecture_file && continuation_file) {
+        std::vector<vastloom::model::GgufFile> oversized_parts;
+        oversized_parts.push_back(oversized_architecture_file.take_value());
+        oversized_parts.push_back(continuation_file.value());
+        auto oversized_catalog = vastloom::model::finalize_gguf_split_catalog(
+            std::move(oversized_parts));
+        CHECK(oversized_catalog);
+        if (oversized_catalog) {
+            vastloom::inference::DeepseekV4GgufCatalogOptions options;
+            options.model_id = "test/deepseek4-oversized";
+            options.revision = "fixture";
+            options.layers = 1U;
+            options.experts_per_layer = 2U;
+            options.top_k = 1U;
+            options.context_tokens = 128U;
+            CHECK(!vastloom::inference::build_deepseek_v4_gguf_catalog(
+                oversized_catalog.value(), options));
         }
     }
 }

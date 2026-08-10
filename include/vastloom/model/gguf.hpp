@@ -39,6 +39,11 @@ struct GgufReaderLimits {
     std::uint32_t max_alignment{1U * MiB};
     std::uint32_t max_dimensions{8U};
     std::uint32_t max_array_depth{8U};
+    // Array payloads are skipped by default. Callers may retain only explicitly named integral
+    // arrays, within this separate aggregate bound, when architecture metadata is needed for a
+    // safe execution plan.
+    std::vector<std::string> retained_integral_array_keys;
+    std::uint64_t max_retained_array_elements{65'536U};
 };
 
 struct GgufMetadataEntry {
@@ -52,6 +57,8 @@ struct GgufMetadataEntry {
     std::optional<std::int64_t> signed_value;
     std::optional<double> floating_value;
     std::optional<bool> boolean_value;
+    std::vector<std::uint64_t> unsigned_array_values;
+    std::vector<std::int64_t> signed_array_values;
 };
 
 struct GgufTensorDescriptor {

@@ -1,7 +1,9 @@
 #include "vastloom/inference/deepseek_v4_gguf.hpp"
 
 #include <algorithm>
+#include <array>
 #include <charconv>
+#include <initializer_list>
 #include <limits>
 #include <new>
 #include <optional>
@@ -76,6 +78,303 @@ Result<ByteCount> add_bytes(ByteCount current, ByteCount added, std::string_view
     return current + added;
 }
 
+Result<ByteCount> multiply_bytes(std::initializer_list<ByteCount> factors,
+                                 std::string_view context) {
+    ByteCount result = 1U;
+    for (const ByteCount factor : factors) {
+        if (factor != 0U && result > std::numeric_limits<ByteCount>::max() / factor) {
+            return make_error(ErrorCode::invalid_format,
+                              "DeepSeek GGUF working-set product overflows",
+                              std::string(context));
+        }
+        result *= factor;
+    }
+    return result;
+}
+
+Result<std::uint32_t> required_u32(const model::GgufFile& metadata,
+                                   std::string_view key) {
+    const auto* entry = metadata.find_metadata(key);
+    if (entry == nullptr || !entry->unsigned_value.has_value() ||
+        *entry->unsigned_value > std::numeric_limits<std::uint32_t>::max()) {
+        return make_error(ErrorCode::invalid_format,
+                          "DeepSeek GGUF required unsigned metadata is missing or invalid",
+                          std::string(key));
+    }
+    return static_cast<std::uint32_t>(*entry->unsigned_value);
+}
+
+Result<std::vector<std::uint32_t>> required_compress_ratios(
+    const model::GgufFile& metadata,
+    std::uint32_t expected_count) {
+    constexpr std::string_view key = "deepseek4.attention.compress_ratios";
+    const auto* entry = metadata.find_metadata(key);
+    if (entry == nullptr || entry->type != model::GgufValueType::array ||
+        entry->array_elements != expected_count) {
+        return make_error(ErrorCode::invalid_format,
+                          "DeepSeek GGUF compression schedule is missing or has the wrong length",
+                          std::string(key));
+    }
+    std::vector<std::uint32_t> result;
+    result.reserve(expected_count);
+    if (!entry->unsigned_array_values.empty()) {
+        if (entry->unsigned_array_values.size() != expected_count) {
+            return make_error(ErrorCode::invalid_format,
+                              "DeepSeek GGUF compression schedule was not retained completely",
+                              std::string(key));
+        }
+        for (const auto value : entry->unsigned_array_values) {
+            if (value > std::numeric_limits<std::uint32_t>::max()) {
+                return make_error(ErrorCode::invalid_format,
+                                  "DeepSeek GGUF compression ratio is outside safe bounds",
+                                  std::string(key));
+            }
+            result.push_back(static_cast<std::uint32_t>(value));
+        }
+    } else {
+        if (entry->signed_array_values.size() != expected_count) {
+            return make_error(ErrorCode::invalid_format,
+                              "DeepSeek GGUF compression schedule was not retained completely",
+                              std::string(key));
+        }
+        for (const auto value : entry->signed_array_values) {
+            if (value < 0 || static_cast<std::uint64_t>(value) >
+                                 std::numeric_limits<std::uint32_t>::max()) {
+                return make_error(ErrorCode::invalid_format,
+                                  "DeepSeek GGUF compression ratio is outside safe bounds",
+                                  std::string(key));
+            }
+            result.push_back(static_cast<std::uint32_t>(value));
+        }
+    }
+    return result;
+}
+
+struct WorkingSetSummary {
+    std::uint32_t maximum_context_tokens{0U};
+    ByteCount persistent_kv_bytes{0U};
+    ByteCount compression_state_bytes{0U};
+    ByteCount rope_table_bytes{0U};
+    ByteCount activation_scratch_bytes{0U};
+    ByteCount runtime_state_bytes{0U};
+    ByteCount minimum_host_resident_bytes{0U};
+    ByteCount minimum_streamed_trunk_cpu_ram_bytes{0U};
+    ByteCount double_buffer_streamed_trunk_cpu_ram_bytes{0U};
+    ByteCount minimum_cpu_streaming_ram_bytes{0U};
+    ByteCount double_buffer_cpu_streaming_ram_bytes{0U};
+};
+
+Result<WorkingSetSummary> derive_working_set(
+    const model::GgufSplitCatalog& split,
+    const model::LogicalTensorCatalog& catalog,
+    const DeepseekV4GgufCatalogOptions& options,
+    ByteCount maximum_expert_bundle_bytes) {
+    if (split.shards.empty()) {
+        return make_error(ErrorCode::invalid_format,
+                          "DeepSeek GGUF split has no primary metadata shard");
+    }
+    const auto& metadata = split.shards.front();
+    auto layers = required_u32(metadata, "deepseek4.block_count");
+    auto hash_layers = required_u32(metadata, "deepseek4.hash_layer_count");
+    auto maximum_context = required_u32(metadata, "deepseek4.context_length");
+    auto hidden = required_u32(metadata, "deepseek4.embedding_length");
+    auto heads = required_u32(metadata, "deepseek4.attention.head_count");
+    auto head_dim = required_u32(metadata, "deepseek4.attention.key_length");
+    auto value_dim = required_u32(metadata, "deepseek4.attention.value_length");
+    auto rope_dim = required_u32(metadata, "deepseek4.rope.dimension_count");
+    auto window = required_u32(metadata, "deepseek4.attention.sliding_window");
+    auto experts = required_u32(metadata, "deepseek4.expert_count");
+    auto top_k = required_u32(metadata, "deepseek4.expert_used_count");
+    auto expert_ffn = required_u32(metadata, "deepseek4.expert_feed_forward_length");
+    auto index_heads = required_u32(metadata, "deepseek4.attention.indexer.head_count");
+    auto index_dim = required_u32(metadata, "deepseek4.attention.indexer.key_length");
+    auto hyper_connections = required_u32(metadata, "deepseek4.hyper_connection.count");
+    const std::array<Result<std::uint32_t>*, 14U> required{{
+        &layers, &hash_layers, &maximum_context, &hidden, &heads, &head_dim, &value_dim,
+        &rope_dim, &window, &experts, &top_k, &expert_ffn, &index_heads, &index_dim,
+    }};
+    for (const auto* value : required) {
+        if (!*value) return value->error();
+    }
+    if (!hyper_connections) return hyper_connections.error();
+    if (layers.value() != options.layers || experts.value() != options.experts_per_layer ||
+        top_k.value() != options.top_k || options.context_tokens == 0U ||
+        options.context_tokens > maximum_context.value() || options.batch_size == 0U ||
+        options.batch_size > 8U || maximum_context.value() == 0U ||
+        maximum_context.value() > 16'777'216U || hidden.value() == 0U ||
+        hidden.value() > 262'144U || heads.value() == 0U || heads.value() > 65'536U ||
+        head_dim.value() == 0U || head_dim.value() > 65'536U ||
+        value_dim.value() != head_dim.value() || rope_dim.value() == 0U ||
+        rope_dim.value() > head_dim.value() || window.value() == 0U ||
+        window.value() > maximum_context.value() || expert_ffn.value() == 0U ||
+        expert_ffn.value() > 16'777'216U || index_heads.value() == 0U ||
+        index_heads.value() > 65'536U || index_dim.value() == 0U ||
+        index_dim.value() > 65'536U || hyper_connections.value() == 0U ||
+        hyper_connections.value() > 1'024U ||
+        hash_layers.value() > 64U || layers.value() >
+            std::numeric_limits<std::uint32_t>::max() - hash_layers.value()) {
+        return make_error(ErrorCode::invalid_format,
+                          "DeepSeek GGUF architecture metadata disagrees with the requested plan",
+                          options.model_id);
+    }
+    const std::uint32_t schedule_count = layers.value() + hash_layers.value();
+    auto ratios = required_compress_ratios(metadata, schedule_count);
+    if (!ratios) return ratios.error();
+
+    constexpr ByteCount kv_scalar_bytes = 2U;       // Native baseline stores persistent KV in BF16.
+    constexpr ByteCount state_scalar_bytes = 4U;    // Official compressor decode state is FP32.
+    constexpr ByteCount activation_scalar_bytes = 4U;
+    constexpr ByteCount kernel_tile_bytes = 64U * MiB;
+    ByteCount persistent_kv = 0U;
+    ByteCount compression_state = 0U;
+    ByteCount maximum_attention_slots = 0U;
+    ByteCount maximum_index_slots = 0U;
+    for (std::uint32_t layer = 0U; layer < layers.value(); ++layer) {
+        const std::uint32_t ratio = ratios.value()[layer];
+        if (ratio != 0U && (ratio > options.context_tokens ||
+                            options.context_tokens % ratio != 0U)) {
+            return make_error(ErrorCode::invalid_argument,
+                              "DeepSeek GGUF context must be divisible by every compression ratio",
+                              std::to_string(ratio));
+        }
+        const ByteCount compressed_slots = ratio == 0U ? 0U : options.context_tokens / ratio;
+        auto attention_slots = add_bytes(window.value(), compressed_slots, "attention slots");
+        if (!attention_slots) return attention_slots.error();
+        maximum_attention_slots = std::max(maximum_attention_slots, attention_slots.value());
+        auto main_cache = multiply_bytes({options.batch_size,
+                                          attention_slots.value(),
+                                          head_dim.value(),
+                                          kv_scalar_bytes},
+                                         "main KV cache");
+        if (!main_cache) return main_cache.error();
+        auto main_total = add_bytes(persistent_kv, main_cache.value(), "main KV cache");
+        if (!main_total) return main_total.error();
+        persistent_kv = main_total.value();
+        if (ratio == 0U) continue;
+
+        const ByteCount coefficient = ratio == 4U ? 2U : 1U;
+        auto main_state = multiply_bytes({2U,
+                                          options.batch_size,
+                                          coefficient,
+                                          ratio,
+                                          coefficient,
+                                          head_dim.value(),
+                                          state_scalar_bytes},
+                                         "main compressor state");
+        if (!main_state) return main_state.error();
+        auto state_total = add_bytes(compression_state,
+                                     main_state.value(),
+                                     "main compressor state");
+        if (!state_total) return state_total.error();
+        compression_state = state_total.value();
+
+        if (ratio == 4U) {
+            const ByteCount index_slots = options.context_tokens / ratio;
+            maximum_index_slots = std::max(maximum_index_slots, index_slots);
+            auto index_cache = multiply_bytes({options.batch_size,
+                                               index_slots,
+                                               index_dim.value(),
+                                               kv_scalar_bytes},
+                                              "indexer KV cache");
+            if (!index_cache) return index_cache.error();
+            auto kv_total = add_bytes(persistent_kv, index_cache.value(), "indexer KV cache");
+            if (!kv_total) return kv_total.error();
+            persistent_kv = kv_total.value();
+            auto index_state = multiply_bytes({2U,
+                                               options.batch_size,
+                                               2U,
+                                               ratio,
+                                               2U,
+                                               index_dim.value(),
+                                               state_scalar_bytes},
+                                              "indexer compressor state");
+            if (!index_state) return index_state.error();
+            state_total = add_bytes(compression_state,
+                                    index_state.value(),
+                                    "indexer compressor state");
+            if (!state_total) return state_total.error();
+            compression_state = state_total.value();
+        }
+    }
+
+    auto rope_table = multiply_bytes(
+        {options.context_tokens, rope_dim.value(), activation_scalar_bytes}, "RoPE table");
+    if (!rope_table) return rope_table.error();
+
+    ByteCount vocabulary = hidden.value();
+    const auto output_location = split.tensors.find("output.weight");
+    if (output_location != split.tensors.end()) {
+        const auto& location = output_location->second;
+        if (location.shard_index < split.shards.size() &&
+            location.tensor_index < split.shards[location.shard_index].tensors().size()) {
+            const auto& shape = split.shards[location.shard_index].tensors()[location.tensor_index].shape;
+            if (shape.size() == 2U) vocabulary = std::max(shape[0], shape[1]);
+        }
+    }
+    ByteCount activation_elements = 0U;
+    const std::array<Result<ByteCount>, 9U> activation_parts{{
+        multiply_bytes({hidden.value(), hyper_connections.value() + 2U}, "hyper-connection activations"),
+        multiply_bytes({heads.value(), head_dim.value()}, "attention query"),
+        multiply_bytes({2U, heads.value(), maximum_attention_slots}, "attention scores"),
+        multiply_bytes({index_heads.value(), index_dim.value()}, "indexer query"),
+        multiply_bytes({2U, index_heads.value(), maximum_index_slots}, "indexer scores"),
+        multiply_bytes({2U, expert_ffn.value()}, "expert gate/up activations"),
+        multiply_bytes({2U, hidden.value()}, "expert reduction activations"),
+        multiply_bytes({experts.value() + top_k.value()}, "router activations"),
+        Result<ByteCount>(vocabulary),
+    }};
+    for (const auto& part : activation_parts) {
+        if (!part) return part.error();
+        auto total = add_bytes(activation_elements, part.value(), "activation scratch");
+        if (!total) return total.error();
+        activation_elements = total.value();
+    }
+    auto activation_bytes = multiply_bytes(
+        {activation_elements, activation_scalar_bytes}, "activation scratch");
+    if (!activation_bytes) return activation_bytes.error();
+    auto scratch = add_bytes(kernel_tile_bytes, activation_bytes.value(), "kernel tile scratch");
+    if (!scratch) return scratch.error();
+
+    ByteCount runtime_state = 0U;
+    for (const auto component : {persistent_kv,
+                                 compression_state,
+                                 rope_table.value(),
+                                 scratch.value()}) {
+        auto total = add_bytes(runtime_state, component, "minimum runtime state");
+        if (!total) return total.error();
+        runtime_state = total.value();
+    }
+    auto resident_total = add_bytes(runtime_state,
+                                    catalog.always_active_bytes,
+                                    "resident trunk host set");
+    if (!resident_total) return resident_total.error();
+    const ByteCount host_resident = resident_total.value();
+    auto streamed_minimum = add_bytes(runtime_state,
+                                      maximum_expert_bundle_bytes,
+                                      "minimum streamed-trunk CPU RAM");
+    if (!streamed_minimum) return streamed_minimum.error();
+    auto cpu_minimum = add_bytes(host_resident,
+                                 maximum_expert_bundle_bytes,
+                                 "minimum CPU streaming RAM");
+    if (!cpu_minimum) return cpu_minimum.error();
+    auto double_expert = multiply_bytes(
+        {2U, maximum_expert_bundle_bytes}, "double-buffer expert tier");
+    if (!double_expert) return double_expert.error();
+    auto streamed_double_minimum = add_bytes(runtime_state,
+                                             double_expert.value(),
+                                             "double-buffer streamed-trunk CPU RAM");
+    if (!streamed_double_minimum) return streamed_double_minimum.error();
+    auto double_minimum = add_bytes(host_resident,
+                                    double_expert.value(),
+                                    "double-buffer CPU streaming RAM");
+    if (!double_minimum) return double_minimum.error();
+
+    return WorkingSetSummary{
+        maximum_context.value(), persistent_kv, compression_state, rope_table.value(),
+        scratch.value(), runtime_state, host_resident, streamed_minimum.value(),
+        streamed_double_minimum.value(), cpu_minimum.value(), double_minimum.value()};
+}
+
 }  // namespace
 
 Result<DeepseekV4GgufCatalogReport> build_deepseek_v4_gguf_catalog(
@@ -86,7 +385,8 @@ Result<DeepseekV4GgufCatalogReport> build_deepseek_v4_gguf_catalog(
             split.unknown_tensor_sizes != 0U || options.model_id.empty() || options.revision.empty() ||
             options.layers == 0U || options.layers > 1'024U || options.experts_per_layer == 0U ||
             options.experts_per_layer > 65'536U || options.top_k == 0U ||
-            options.top_k > options.experts_per_layer ||
+            options.top_k > options.experts_per_layer || options.context_tokens == 0U ||
+            options.batch_size == 0U || options.batch_size > 8U ||
             (!options.source_shards.empty() && options.source_shards.size() != split.shards.size())) {
             return make_error(ErrorCode::invalid_argument,
                               "DeepSeek GGUF catalog identity, shape or source mapping is invalid",
@@ -253,6 +553,8 @@ Result<DeepseekV4GgufCatalogReport> build_deepseek_v4_gguf_catalog(
             if (!total) return total.error();
             no_cache_bytes = total.value();
         }
+        auto working_set = derive_working_set(split, logical, options, maximum);
+        if (!working_set) return working_set.error();
 
         DeepseekV4GgufCatalogReport report;
         report.catalog = std::move(logical);
@@ -262,6 +564,43 @@ Result<DeepseekV4GgufCatalogReport> build_deepseek_v4_gguf_catalog(
         report.no_cache_expert_bytes_per_token = no_cache_bytes;
         report.minimum_expert_bundle_bytes = minimum;
         report.maximum_expert_bundle_bytes = maximum;
+        report.context_tokens = options.context_tokens;
+        report.maximum_context_tokens = working_set.value().maximum_context_tokens;
+        report.batch_size = options.batch_size;
+        report.persistent_kv_bytes = working_set.value().persistent_kv_bytes;
+        report.compression_state_bytes = working_set.value().compression_state_bytes;
+        report.rope_table_bytes = working_set.value().rope_table_bytes;
+        report.activation_scratch_bytes = working_set.value().activation_scratch_bytes;
+        report.runtime_state_bytes = working_set.value().runtime_state_bytes;
+        report.minimum_host_resident_bytes = working_set.value().minimum_host_resident_bytes;
+        report.minimum_expert_tier_bytes = maximum;
+        report.minimum_streamed_trunk_cpu_ram_bytes =
+            working_set.value().minimum_streamed_trunk_cpu_ram_bytes;
+        report.double_buffer_streamed_trunk_cpu_ram_bytes =
+            working_set.value().double_buffer_streamed_trunk_cpu_ram_bytes;
+        report.minimum_cpu_streaming_ram_bytes =
+            working_set.value().minimum_cpu_streaming_ram_bytes;
+        report.double_buffer_cpu_streaming_ram_bytes =
+            working_set.value().double_buffer_cpu_streaming_ram_bytes;
+        report.safe_ram_cap_bytes = options.safe_ram_cap_bytes;
+        report.safe_vram_cap_bytes = options.safe_vram_cap_bytes;
+        report.admission_evaluated = options.safe_ram_cap_bytes != 0U;
+        if (report.admission_evaluated &&
+            report.runtime_state_bytes <= report.safe_ram_cap_bytes) {
+            const ByteCount ram_expert_capacity =
+                report.safe_ram_cap_bytes - report.runtime_state_bytes;
+            report.expert_fits_ram_tier = maximum <= ram_expert_capacity;
+            report.expert_fits_vram_tier = options.safe_vram_cap_bytes != 0U &&
+                                           maximum <= options.safe_vram_cap_bytes;
+            report.capacity_plan_candidate = report.expert_fits_ram_tier ||
+                                             report.expert_fits_vram_tier;
+            if (report.minimum_host_resident_bytes <= report.safe_ram_cap_bytes) {
+                const ByteCount resident_ram_expert_capacity =
+                    report.safe_ram_cap_bytes - report.minimum_host_resident_bytes;
+                report.resident_trunk_capacity_candidate =
+                    maximum <= resident_ram_expert_capacity || report.expert_fits_vram_tier;
+            }
+        }
         report.split_shards = split.shards.size();
         report.physical_tensors = split.tensors.size();
         report.total_file_bytes = split.total_file_bytes;
@@ -296,6 +635,37 @@ std::string to_json(const DeepseekV4GgufCatalogReport& report) {
            << ",\"routed_expert_bytes\":" << report.catalog.routed_expert_bytes
            << ",\"minimum_expert_bundle_bytes\":" << report.minimum_expert_bundle_bytes
            << ",\"maximum_expert_bundle_bytes\":" << report.maximum_expert_bundle_bytes
+           << ",\"working_set\":{\"context_tokens\":" << report.context_tokens
+           << ",\"maximum_context_tokens\":" << report.maximum_context_tokens
+           << ",\"batch_size\":" << report.batch_size
+           << ",\"persistent_kv_bytes\":" << report.persistent_kv_bytes
+           << ",\"compression_state_bytes\":" << report.compression_state_bytes
+           << ",\"rope_table_bytes\":" << report.rope_table_bytes
+           << ",\"activation_scratch_bytes\":" << report.activation_scratch_bytes
+           << ",\"runtime_state_bytes\":" << report.runtime_state_bytes
+           << ",\"minimum_host_resident_bytes\":" << report.minimum_host_resident_bytes
+           << ",\"minimum_expert_tier_bytes\":" << report.minimum_expert_tier_bytes
+           << ",\"minimum_streamed_trunk_cpu_ram_bytes\":"
+           << report.minimum_streamed_trunk_cpu_ram_bytes
+           << ",\"double_buffer_streamed_trunk_cpu_ram_bytes\":"
+           << report.double_buffer_streamed_trunk_cpu_ram_bytes
+           << ",\"minimum_cpu_streaming_ram_bytes\":"
+           << report.minimum_cpu_streaming_ram_bytes
+           << ",\"double_buffer_cpu_streaming_ram_bytes\":"
+           << report.double_buffer_cpu_streaming_ram_bytes
+           << ",\"mtp_enabled\":false}"
+           << ",\"admission\":{\"evaluated\":"
+           << (report.admission_evaluated ? "true" : "false")
+           << ",\"safe_ram_cap_bytes\":" << report.safe_ram_cap_bytes
+           << ",\"safe_vram_cap_bytes\":" << report.safe_vram_cap_bytes
+           << ",\"expert_fits_ram_tier\":"
+           << (report.expert_fits_ram_tier ? "true" : "false")
+           << ",\"expert_fits_vram_tier\":"
+           << (report.expert_fits_vram_tier ? "true" : "false")
+           << ",\"resident_trunk_capacity_candidate\":"
+           << (report.resident_trunk_capacity_candidate ? "true" : "false")
+           << ",\"capacity_plan_candidate\":"
+           << (report.capacity_plan_candidate ? "true" : "false") << '}'
            << ",\"no_cache_expert_bytes_per_token\":"
            << report.no_cache_expert_bytes_per_token << '}';
     return output.str();
@@ -316,6 +686,28 @@ std::string to_text(const DeepseekV4GgufCatalogReport& report) {
            << "Routed expert bytes: " << format_bytes(report.catalog.routed_expert_bytes) << '\n'
            << "Expert bundle range: " << format_bytes(report.minimum_expert_bundle_bytes)
            << " - " << format_bytes(report.maximum_expert_bundle_bytes) << '\n'
+           << "Context assumption:  " << report.context_tokens << " / "
+           << report.maximum_context_tokens << " tokens, batch " << report.batch_size << '\n'
+           << "Persistent KV:       " << format_bytes(report.persistent_kv_bytes) << '\n'
+           << "Compression state:   " << format_bytes(report.compression_state_bytes) << '\n'
+           << "RoPE table:          " << format_bytes(report.rope_table_bytes) << '\n'
+           << "Activation scratch:  " << format_bytes(report.activation_scratch_bytes) << '\n'
+           << "Runtime-state floor: " << format_bytes(report.runtime_state_bytes) << '\n'
+           << "Resident-trunk floor:" << ' ' << format_bytes(report.minimum_host_resident_bytes) << '\n'
+           << "Expert tier floor:   " << format_bytes(report.minimum_expert_tier_bytes) << '\n'
+           << "Streamed-trunk CPU:  "
+           << format_bytes(report.minimum_streamed_trunk_cpu_ram_bytes) << '\n'
+           << "Resident-trunk CPU:  " << format_bytes(report.minimum_cpu_streaming_ram_bytes) << '\n'
+           << "Resident double buf: "
+           << format_bytes(report.double_buffer_cpu_streaming_ram_bytes) << '\n'
+           << "Streamed admission:  "
+           << (report.admission_evaluated
+                   ? (report.capacity_plan_candidate ? "candidate" : "rejected")
+                   : "not evaluated") << '\n'
+           << "Resident admission:  "
+           << (report.admission_evaluated
+                   ? (report.resident_trunk_capacity_candidate ? "candidate" : "rejected")
+                   : "not evaluated") << '\n'
            << "No-cache bytes/token:" << ' '
            << format_bytes(report.no_cache_expert_bytes_per_token) << '\n'
            << "Execution:           unavailable (inspection/catalog only)";

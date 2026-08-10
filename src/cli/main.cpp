@@ -253,8 +253,9 @@ void print_help() {
         << "      Validate the pinned OLMoE metadata and estimate safe streaming budgets.\n\n"
         << "  deepseek-inspect MODEL_DIRECTORY [--no-verify] [--json]\n"
         << "      Validate pinned DeepSeek V4 Flash metadata and Safetensors header snapshots.\n\n"
-        << "  deepseek-gguf-inspect SHARD... [--declared-sizes CSV] [--revision ID] [--json]\n"
-        << "      Build a metadata-only DeepSeek V4 Flash catalog from bounded GGUF v3 headers.\n\n"
+        << "  deepseek-gguf-inspect SHARD... [--declared-sizes CSV] [--revision ID]"
+           " [--context N] [--batch-size N] [--json]\n"
+        << "      Build a metadata-only catalog and derived resident/streamed working-set plan.\n\n"
         << "  moe-logits MODEL_DIRECTORY --text TEXT [--chat] [--top N]\n"
         << "       [--cache no-cache|lru|lfu|static-hot] [--cache-bytes SIZE]\n"
         << "       [--io sync|async] [--io-cache buffered|bypass] [--expert-read whole|staged]\n"
@@ -579,7 +580,8 @@ int command_deepseek_gguf_inspect(const std::vector<std::string>& args) {
     }
     const bool json = has_flag(args, "--json");
     auto valid = validate_options(args, positional_count,
-                                  {"--declared-sizes", "--revision"}, {"--json"});
+                                  {"--declared-sizes", "--revision", "--context", "--batch-size"},
+                                  {"--json"});
     if (!valid) return print_error(valid.error(), json);
     if (positional_count == 0U || positional_count > 1'024U) {
         return print_error(vastloom::make_error(
@@ -594,14 +596,28 @@ int command_deepseek_gguf_inspect(const std::vector<std::string>& args) {
         if (!parsed) return print_error(parsed.error(), json);
         declared_sizes = parsed.take_value();
     }
+    auto context = optional_size(args, "--context", 4'096U);
+    auto batch_size = optional_size(args, "--batch-size", 1U);
+    if (!context) return print_error(context.error(), json);
+    if (!batch_size) return print_error(batch_size.error(), json);
+    if (context.value() == 0U || context.value() > 1'048'576U ||
+        batch_size.value() == 0U || batch_size.value() > 8U) {
+        return print_error(vastloom::make_error(
+                               vastloom::ErrorCode::invalid_argument,
+                               "DeepSeek context or batch size is outside safe bounds"),
+                           json);
+    }
 
     std::vector<vastloom::model::GgufFile> shards;
     shards.reserve(positional_count);
+    vastloom::model::GgufReaderLimits reader_limits;
+    reader_limits.retained_integral_array_keys = {
+        "deepseek4.attention.compress_ratios"};
     for (std::size_t index = 0U; index < positional_count; ++index) {
         Result<vastloom::model::GgufFile> opened = declared_sizes.empty()
-            ? vastloom::model::GgufFile::open(cli_path(args[index]))
+            ? vastloom::model::GgufFile::open(cli_path(args[index]), reader_limits)
             : vastloom::model::GgufFile::open_header_prefix(
-                  cli_path(args[index]), declared_sizes[index]);
+                  cli_path(args[index]), declared_sizes[index], reader_limits);
         if (!opened) return print_error(opened.error(), json);
         shards.push_back(opened.take_value());
     }
@@ -609,6 +625,16 @@ int command_deepseek_gguf_inspect(const std::vector<std::string>& args) {
     if (!split) return print_error(split.error(), json);
     vastloom::inference::DeepseekV4GgufCatalogOptions options;
     options.revision = option_value(args, "--revision").value_or("unverified-local-headers");
+    options.context_tokens = static_cast<std::uint32_t>(context.value());
+    options.batch_size = static_cast<std::uint32_t>(batch_size.value());
+    auto hardware = vastloom::hardware::HardwareProbe::collect(cli_path(args[0]));
+    if (hardware) {
+        auto policy = vastloom::safety::make_safe_runtime_policy(hardware.value());
+        if (policy) {
+            options.safe_ram_cap_bytes = policy.value().resources.host_memory_hard_limit;
+            options.safe_vram_cap_bytes = policy.value().resources.vram_hard_limit;
+        }
+    }
     options.metadata_only = true;
     auto report = vastloom::inference::build_deepseek_v4_gguf_catalog(split.value(), options);
     if (!report) return print_error(report.error(), json);

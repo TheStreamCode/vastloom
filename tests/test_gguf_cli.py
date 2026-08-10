@@ -25,12 +25,37 @@ def build_fixture(path: Path) -> int:
     ]
     tensor_names.append("output.weight")
 
-    header = bytearray(struct.pack("<IIQQ", 0x46554747, 3, len(tensor_names), 2))
+    header = bytearray(struct.pack("<IIQQ", 0x46554747, 3, len(tensor_names), 18))
     append_string(header, "general.architecture")
     header.extend(struct.pack("<I", 8))  # STRING
     append_string(header, "deepseek4")
     append_string(header, "general.alignment")
     header.extend(struct.pack("<II", 4, 32))  # UINT32
+
+    scalar_metadata = {
+        "deepseek4.block_count": 43,
+        "deepseek4.hash_layer_count": 0,
+        "deepseek4.context_length": 1_048_576,
+        "deepseek4.embedding_length": 4_096,
+        "deepseek4.attention.head_count": 64,
+        "deepseek4.attention.key_length": 512,
+        "deepseek4.attention.value_length": 512,
+        "deepseek4.rope.dimension_count": 64,
+        "deepseek4.attention.sliding_window": 128,
+        "deepseek4.expert_count": 256,
+        "deepseek4.expert_used_count": 6,
+        "deepseek4.expert_feed_forward_length": 2_048,
+        "deepseek4.attention.indexer.head_count": 64,
+        "deepseek4.attention.indexer.key_length": 128,
+        "deepseek4.hyper_connection.count": 4,
+    }
+    for key, value in scalar_metadata.items():
+        append_string(header, key)
+        header.extend(struct.pack("<II", 4, value))  # UINT32
+    append_string(header, "deepseek4.attention.compress_ratios")
+    ratios = [0, 0] + [4 if layer % 2 == 0 else 128 for layer in range(2, 43)]
+    header.extend(struct.pack("<IIQ", 9, 5, len(ratios)))  # ARRAY of INT32
+    header.extend(struct.pack(f"<{len(ratios)}i", *ratios))
 
     offset = 0
     for name in tensor_names:
@@ -102,6 +127,37 @@ def main() -> int:
         require(catalog["always_active_bytes"] == 4, "always-active bytes mismatch", catalogued)
         require(catalog["no_cache_expert_bytes_per_token"] == 26_316,
                 "no-cache bytes/token mismatch", catalogued)
+        working_set = catalog["working_set"]
+        require(working_set["context_tokens"] == 4_096, "context assumption mismatch", catalogued)
+        require(working_set["persistent_kv_bytes"] == 33_816_576,
+                "persistent KV accounting mismatch", catalogued)
+        require(working_set["compression_state_bytes"] == 12_206_080,
+                "compressor state accounting mismatch", catalogued)
+        require(working_set["minimum_expert_tier_bytes"] == 102,
+                "expert tier accounting mismatch", catalogued)
+        require(working_set["runtime_state_bytes"] == 115_622_936,
+                "streamed-trunk runtime state mismatch", catalogued)
+        require(working_set["minimum_streamed_trunk_cpu_ram_bytes"] == 115_623_038,
+                "streamed-trunk CPU floor mismatch", catalogued)
+        require(working_set["minimum_cpu_streaming_ram_bytes"] == 115_623_042,
+                "resident-trunk CPU floor mismatch", catalogued)
+        admission = catalog["admission"]
+        if admission["evaluated"]:
+            require(admission["capacity_plan_candidate"] is True,
+                    "small fixture should pass a live admission gate", catalogued)
+
+        bad_context = run(
+            args.vastloom,
+            "deepseek-gguf-inspect",
+            str(model),
+            "--declared-sizes",
+            str(declared_size),
+            "--context",
+            "130",
+            "--json",
+        )
+        require(bad_context.returncode != 0 and "divisible" in bad_context.stderr,
+                "incompatible compressed context was accepted", bad_context)
 
         rejected = run(
             args.vastloom,

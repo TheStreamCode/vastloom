@@ -190,8 +190,10 @@ Result<void> parse_value(BoundedReader& reader,
                          GgufValueType type,
                          const GgufReaderLimits& limits,
                          ArrayBudget& budget,
+                         ArrayBudget& retained_budget,
                          std::uint32_t depth,
-                         GgufMetadataEntry* summary) {
+                         GgufMetadataEntry* summary,
+                         bool retain_integral_array = false) {
     switch (type) {
         case GgufValueType::uint8: {
             auto value = reader.read_u8();
@@ -272,6 +274,65 @@ Result<void> parse_value(BoundedReader& reader,
                 summary->array_type = element_type.value();
                 summary->array_elements = length.value();
             }
+            if (retain_integral_array) {
+                if (summary == nullptr || depth != 0U ||
+                    length.value() > retained_budget.remaining_elements) {
+                    return make_error(ErrorCode::resource_exhausted,
+                                      "GGUF retained metadata arrays exceed the configured bound");
+                }
+                retained_budget.remaining_elements -= length.value();
+                switch (element_type.value()) {
+                    case GgufValueType::uint8:
+                    case GgufValueType::uint16:
+                    case GgufValueType::uint32:
+                    case GgufValueType::uint64:
+                        summary->unsigned_array_values.reserve(
+                            static_cast<std::size_t>(length.value()));
+                        for (std::uint64_t index = 0U; index < length.value(); ++index) {
+                            GgufMetadataEntry item;
+                            auto parsed = parse_value(reader,
+                                                      element_type.value(),
+                                                      limits,
+                                                      budget,
+                                                      retained_budget,
+                                                      depth + 1U,
+                                                      &item);
+                            if (!parsed) return parsed.error();
+                            if (!item.unsigned_value.has_value()) {
+                                return make_error(ErrorCode::invalid_format,
+                                                  "GGUF retained unsigned array value is invalid");
+                            }
+                            summary->unsigned_array_values.push_back(*item.unsigned_value);
+                        }
+                        return {};
+                    case GgufValueType::int8:
+                    case GgufValueType::int16:
+                    case GgufValueType::int32:
+                    case GgufValueType::int64:
+                        summary->signed_array_values.reserve(
+                            static_cast<std::size_t>(length.value()));
+                        for (std::uint64_t index = 0U; index < length.value(); ++index) {
+                            GgufMetadataEntry item;
+                            auto parsed = parse_value(reader,
+                                                      element_type.value(),
+                                                      limits,
+                                                      budget,
+                                                      retained_budget,
+                                                      depth + 1U,
+                                                      &item);
+                            if (!parsed) return parsed.error();
+                            if (!item.signed_value.has_value()) {
+                                return make_error(ErrorCode::invalid_format,
+                                                  "GGUF retained signed array value is invalid");
+                            }
+                            summary->signed_array_values.push_back(*item.signed_value);
+                        }
+                        return {};
+                    default:
+                        return make_error(ErrorCode::invalid_format,
+                                          "GGUF requested retained array is not integral");
+                }
+            }
             const auto width = fixed_value_bytes(element_type.value());
             if (width.has_value() && element_type.value() != GgufValueType::boolean) {
                 if (length.value() != 0U && *width > std::numeric_limits<ByteCount>::max() / length.value()) {
@@ -280,7 +341,13 @@ Result<void> parse_value(BoundedReader& reader,
                 return reader.skip(length.value() * *width);
             }
             for (std::uint64_t index = 0U; index < length.value(); ++index) {
-                auto parsed = parse_value(reader, element_type.value(), limits, budget, depth + 1U, nullptr);
+                auto parsed = parse_value(reader,
+                                          element_type.value(),
+                                          limits,
+                                          budget,
+                                          retained_budget,
+                                          depth + 1U,
+                                          nullptr);
                 if (!parsed) return parsed.error();
             }
             return {};
@@ -408,8 +475,23 @@ Result<GgufFile> GgufFile::open_with_declared_size(const std::filesystem::path& 
             limits.max_tensors == 0U || limits.max_array_elements == 0U ||
             limits.max_string_bytes == 0U || limits.max_string_bytes > limits.max_header_bytes ||
             limits.max_alignment < 8U || limits.max_dimensions == 0U || limits.max_dimensions > 64U ||
-            limits.max_array_depth == 0U || limits.max_array_depth > 32U) {
+            limits.max_array_depth == 0U || limits.max_array_depth > 32U ||
+            limits.max_retained_array_elements == 0U ||
+            limits.retained_integral_array_keys.size() > 64U) {
             return make_error(ErrorCode::invalid_argument, "Invalid GGUF reader limits", path.string());
+        }
+        for (std::size_t index = 0U; index < limits.retained_integral_array_keys.size(); ++index) {
+            const auto& key = limits.retained_integral_array_keys[index];
+            if (!valid_metadata_key(key) ||
+                std::find(limits.retained_integral_array_keys.begin(),
+                          limits.retained_integral_array_keys.begin() +
+                              static_cast<std::ptrdiff_t>(index),
+                          key) != limits.retained_integral_array_keys.begin() +
+                                      static_cast<std::ptrdiff_t>(index)) {
+                return make_error(ErrorCode::invalid_argument,
+                                  "GGUF retained metadata key is invalid or duplicated",
+                                  key);
+            }
         }
         std::error_code error;
         if (std::filesystem::is_symlink(path, error)) {
@@ -459,6 +541,7 @@ Result<GgufFile> GgufFile::open_with_declared_size(const std::filesystem::path& 
         result.metadata_.reserve(static_cast<std::size_t>(metadata_count.value()));
         result.tensors_.reserve(static_cast<std::size_t>(tensor_count.value()));
         ArrayBudget array_budget{limits.max_array_elements};
+        ArrayBudget retained_array_budget{limits.max_retained_array_elements};
 
         for (std::uint64_t index = 0U; index < metadata_count.value(); ++index) {
             auto key = reader.read_string(65'535U, true);
@@ -473,8 +556,24 @@ Result<GgufFile> GgufFile::open_with_declared_size(const std::filesystem::path& 
             GgufMetadataEntry entry;
             entry.key = key.take_value();
             entry.type = type.value();
+            const bool retain_integral_array =
+                std::find(limits.retained_integral_array_keys.begin(),
+                          limits.retained_integral_array_keys.end(),
+                          entry.key) != limits.retained_integral_array_keys.end();
+            if (retain_integral_array && entry.type != GgufValueType::array) {
+                return make_error(ErrorCode::invalid_format,
+                                  "GGUF requested retained metadata value is not an array",
+                                  entry.key);
+            }
             const ByteCount value_start = reader.position();
-            auto parsed = parse_value(reader, entry.type, limits, array_budget, 0U, &entry);
+            auto parsed = parse_value(reader,
+                                      entry.type,
+                                      limits,
+                                      array_budget,
+                                      retained_array_budget,
+                                      0U,
+                                      &entry,
+                                      retain_integral_array);
             if (!parsed) return parsed.error();
             entry.encoded_value_bytes = reader.position() - value_start;
             result.metadata_by_key_.emplace(entry.key, result.metadata_.size());

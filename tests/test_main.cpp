@@ -501,6 +501,130 @@ void test_iq1_s_reference_kernel() {
     CHECK(!vastloom::inference::matvec_iq1_s_f32(encoded, 3U, 512U, input, output));
 }
 
+void test_iq3_xxs_reference_kernel() {
+    constexpr std::array<std::uint16_t, 6U> scales{
+        0x3c00U, 0xb800U, 0x3555U, 0x4000U, 0x0400U, 0x0001U};
+    std::vector<std::byte> encoded(scales.size() * vastloom::inference::kIq3XxsBlockBytes);
+    for (std::size_t block = 0U; block < scales.size(); ++block) {
+        const std::size_t base = block * vastloom::inference::kIq3XxsBlockBytes;
+        encoded[base] = static_cast<std::byte>(scales[block] & 0xffU);
+        encoded[base + 1U] = static_cast<std::byte>(scales[block] >> 8U);
+        for (std::size_t index = 0U; index < 64U; ++index) {
+            encoded[base + 2U + index] = static_cast<std::byte>(
+                (block * 37U + index * 53U + 11U) & 0xffU);
+        }
+        for (std::size_t group = 0U; group < 8U; ++group) {
+            std::uint32_t auxiliary = static_cast<std::uint32_t>(
+                (block * 3U + group * 5U) & 15U) << 28U;
+            for (std::size_t subblock = 0U; subblock < 4U; ++subblock) {
+                const auto sign_index = static_cast<std::uint32_t>(
+                    (block * 19U + group * 13U + subblock * 23U + 7U) & 127U);
+                auxiliary |= sign_index << (7U * subblock);
+            }
+            for (std::size_t byte = 0U; byte < 4U; ++byte) {
+                encoded[base + 66U + group * 4U + byte] = static_cast<std::byte>(
+                    (auxiliary >> (8U * byte)) & 0xffU);
+            }
+        }
+    }
+
+    std::vector<float> decoded(scales.size() * vastloom::inference::kIq3XxsBlockElements);
+    auto status = vastloom::inference::dequantize_iq3_xxs(encoded, decoded);
+    CHECK(status);
+    std::uint64_t hash = UINT64_C(14695981039346656037);
+    for (const float value : decoded) {
+        const std::uint32_t bits = std::bit_cast<std::uint32_t>(value);
+        for (unsigned shift = 0U; shift < 32U; shift += 8U) {
+            hash ^= static_cast<std::uint8_t>((bits >> shift) & 0xffU);
+            hash *= UINT64_C(1099511628211);
+        }
+    }
+    CHECK(hash == UINT64_C(0xf36989dcc58b1664));
+    CHECK(decoded[0] == -11.0F && decoded[7] == -3.0F && decoded[8] == 5.0F &&
+          decoded[31] == -5.0F && decoded[32] == 170.5F && decoded[255] == 7.0F &&
+          decoded[256] == -54.25F && decoded[511] == -19.5F);
+
+    std::vector<float> input(512U);
+    for (std::size_t column = 0U; column < input.size(); ++column) {
+        const int centered = static_cast<int>(column % 29U) - 14;
+        input[column] = static_cast<float>(centered) * 0.03125F +
+                        static_cast<float>(column % 3U) * 0.0078125F;
+    }
+    std::array<float, 3U> output{};
+    auto multiplied = vastloom::inference::matvec_iq3_xxs_f32(
+        encoded, 3U, 512U, input, output);
+    CHECK(multiplied);
+    CHECK(output[0] == -347.998046875F);
+    CHECK(std::abs(output[1] - 2887.319580078125F) <= 1.0e-4F);
+    CHECK(std::abs(output[2] - 0.064146831631660461F) <= 1.0e-8F);
+
+    auto truncated = encoded;
+    truncated.pop_back();
+    CHECK(!vastloom::inference::dequantize_iq3_xxs(truncated, decoded));
+    CHECK(!vastloom::inference::dequantize_iq3_xxs(encoded, std::span<float>{}));
+    vastloom::inference::QuantizedKernelLimits small_limits;
+    small_limits.max_elements = 256U;
+    CHECK(!vastloom::inference::dequantize_iq3_xxs(encoded, decoded, small_limits));
+    CHECK(!vastloom::inference::matvec_iq3_xxs_f32(encoded, 3U, 255U, input, output));
+    CHECK(!vastloom::inference::matvec_iq3_xxs_f32(truncated, 3U, 512U, input, output));
+
+    auto invalid_scale = encoded;
+    invalid_scale[0] = std::byte{0x00U};
+    invalid_scale[1] = std::byte{0x7cU};
+    auto unchanged = decoded;
+    CHECK(!vastloom::inference::dequantize_iq3_xxs(invalid_scale, decoded));
+    CHECK(decoded == unchanged);
+    input[0] = std::numeric_limits<float>::quiet_NaN();
+    CHECK(!vastloom::inference::matvec_iq3_xxs_f32(encoded, 3U, 512U, input, output));
+}
+
+void test_quantized_routed_expert_contract() {
+    constexpr std::size_t dimension = vastloom::inference::kIq1SBlockElements;
+    std::vector<std::byte> gate(dimension * vastloom::inference::kIq1SBlockBytes);
+    std::vector<std::byte> up(dimension * vastloom::inference::kIq1SBlockBytes);
+    std::vector<std::byte> down(dimension * vastloom::inference::kIq3XxsBlockBytes);
+    std::vector<float> input(dimension, 0.25F);
+    std::vector<float> gate_scratch(dimension);
+    std::vector<float> up_scratch(dimension);
+    std::vector<float> down_scratch(dimension);
+    std::vector<float> output(dimension, 17.0F);
+
+    auto executed = vastloom::inference::routed_expert_iq1_s_iq3_xxs_f32(
+        gate, up, down, input, {gate_scratch, up_scratch, down_scratch}, output);
+    CHECK(executed);
+    CHECK(std::all_of(output.begin(), output.end(), [](float value) { return value == 0.0F; }));
+
+    std::fill(output.begin(), output.end(), 17.0F);
+    auto truncated_gate = gate;
+    truncated_gate.pop_back();
+    CHECK(!vastloom::inference::routed_expert_iq1_s_iq3_xxs_f32(
+        truncated_gate, up, down, input, {gate_scratch, up_scratch, down_scratch}, output));
+    CHECK(std::all_of(output.begin(), output.end(), [](float value) { return value == 17.0F; }));
+
+    auto invalid_down = down;
+    invalid_down[0] = std::byte{0x00U};
+    invalid_down[1] = std::byte{0x7cU};
+    CHECK(!vastloom::inference::routed_expert_iq1_s_iq3_xxs_f32(
+        gate, up, invalid_down, input, {gate_scratch, up_scratch, down_scratch}, output));
+    CHECK(std::all_of(output.begin(), output.end(), [](float value) { return value == 17.0F; }));
+
+    CHECK(!vastloom::inference::routed_expert_iq1_s_iq3_xxs_f32(
+        gate, up, down, input, {output, up_scratch, down_scratch}, output));
+    CHECK(!vastloom::inference::routed_expert_iq1_s_iq3_xxs_f32(
+        gate, up, down, input, {gate_scratch, gate_scratch, down_scratch}, output));
+
+    vastloom::inference::QuantizedKernelLimits small_limits;
+    small_limits.max_elements = dimension * dimension - 1U;
+    CHECK(!vastloom::inference::routed_expert_iq1_s_iq3_xxs_f32(
+        gate, up, down, input, {gate_scratch, up_scratch, down_scratch}, output, small_limits));
+    CHECK(std::all_of(output.begin(), output.end(), [](float value) { return value == 17.0F; }));
+
+    input[0] = std::numeric_limits<float>::quiet_NaN();
+    CHECK(!vastloom::inference::routed_expert_iq1_s_iq3_xxs_f32(
+        gate, up, down, input, {gate_scratch, up_scratch, down_scratch}, output));
+    CHECK(std::all_of(output.begin(), output.end(), [](float value) { return value == 17.0F; }));
+}
+
 void test_logical_tensor_catalog() {
     using vastloom::model::LogicalTensorDescriptor;
     using vastloom::model::TensorDType;
@@ -2381,6 +2505,8 @@ int main() {
     test_safetensors(root);
     test_gguf(root);
     test_iq1_s_reference_kernel();
+    test_iq3_xxs_reference_kernel();
+    test_quantized_routed_expert_contract();
     test_logical_tensor_catalog();
     test_residency_state_machine();
     test_packed_expert_loader(root);

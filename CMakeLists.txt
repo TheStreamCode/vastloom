@@ -45,6 +45,10 @@ set(VASTLOOM_DEEPSEEK_V4_GGUF_HEADER "" CACHE FILEPATH
     "Optional pinned DeepSeek V4 Flash 0731 GGUF split-zero metadata shard")
 set(VASTLOOM_DEEPSEEK_V4_IQ1S_SLICE "" CACHE FILEPATH
     "Optional pinned DeepSeek V4 Flash 0731 layer-0 expert-0 IQ1_S gate slice")
+set(VASTLOOM_DEEPSEEK_V4_IQ1S_UP_SLICE "" CACHE FILEPATH
+    "Optional pinned DeepSeek V4 Flash 0731 layer-0 expert-0 IQ1_S up slice")
+set(VASTLOOM_DEEPSEEK_V4_IQ3XXS_SLICE "" CACHE FILEPATH
+    "Optional pinned DeepSeek V4 Flash 0731 layer-0 expert-0 IQ3_XXS down slice")
 
 option(VASTLOOM_BUILD_TESTS "Build Vastloom tests" ON)
 option(VASTLOOM_ENABLE_SANITIZERS "Enable AddressSanitizer and UndefinedBehaviorSanitizer" OFF)
@@ -153,6 +157,41 @@ if(BUILD_TESTING AND VASTLOOM_BUILD_TESTS)
         )
         set_tests_properties(vastloom_deepseek_v4_iq1s_slice PROPERTIES
             TIMEOUT 30
+            RUN_SERIAL TRUE
+        )
+    endif()
+    if(VASTLOOM_DEEPSEEK_V4_IQ3XXS_SLICE)
+        add_executable(vastloom_iq3xxs_slice_test tests/test_iq3xxs_slice.cpp)
+        target_link_libraries(vastloom_iq3xxs_slice_test PRIVATE Vastloom::Core)
+        target_compile_features(vastloom_iq3xxs_slice_test PRIVATE cxx_std_20)
+        vastloom_set_project_warnings(vastloom_iq3xxs_slice_test)
+        vastloom_enable_sanitizers(vastloom_iq3xxs_slice_test)
+        add_test(
+            NAME vastloom_deepseek_v4_iq3xxs_slice
+            COMMAND vastloom_iq3xxs_slice_test ${VASTLOOM_DEEPSEEK_V4_IQ3XXS_SLICE}
+        )
+        set_tests_properties(vastloom_deepseek_v4_iq3xxs_slice PROPERTIES
+            TIMEOUT 30
+            RUN_SERIAL TRUE
+        )
+    endif()
+    if(VASTLOOM_DEEPSEEK_V4_IQ1S_SLICE AND
+       VASTLOOM_DEEPSEEK_V4_IQ1S_UP_SLICE AND
+       VASTLOOM_DEEPSEEK_V4_IQ3XXS_SLICE)
+        add_executable(vastloom_deepseek_expert_test tests/test_deepseek_expert.cpp)
+        target_link_libraries(vastloom_deepseek_expert_test PRIVATE Vastloom::Core)
+        target_compile_features(vastloom_deepseek_expert_test PRIVATE cxx_std_20)
+        vastloom_set_project_warnings(vastloom_deepseek_expert_test)
+        vastloom_enable_sanitizers(vastloom_deepseek_expert_test)
+        add_test(
+            NAME vastloom_deepseek_v4_real_expert
+            COMMAND vastloom_deepseek_expert_test
+                ${VASTLOOM_DEEPSEEK_V4_IQ1S_SLICE}
+                ${VASTLOOM_DEEPSEEK_V4_IQ1S_UP_SLICE}
+                ${VASTLOOM_DEEPSEEK_V4_IQ3XXS_SLICE}
+        )
+        set_tests_properties(vastloom_deepseek_v4_real_expert PROPERTIES
+            TIMEOUT 60
             RUN_SERIAL TRUE
         )
     endif()

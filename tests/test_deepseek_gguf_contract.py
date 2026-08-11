@@ -58,6 +58,30 @@ PROBE_PLAN_CONTRACT = {
     "unique_source_objects": 1,
 }
 
+# The imported layer-0 trunk, reread and rehashed into one governed RAM buffer, then mapped onto the
+# graph's declared consumers: 11 matrices, 9 vectors and the routing table.
+TRUNK_LOAD_CONTRACT = {
+    "layer": 0,
+    "resident_bytes": 138_867_160,
+    "tensors": 21,
+    "graph_matrices": 11,
+    "graph_float_tensors": 9,
+    "graph_integer_tensors": 1,
+    "ranges_read": 21,
+    "execution_supported": False,
+}
+
+ROUTE_CONTRACT = {
+    "layer": 0,
+    "expected_top_k": 6,
+    "selection_source": "official-tid2eid-verified",
+    "routing_authority_verified": True,
+    "routing_token": 0,
+    "selected_experts": [35, 53, 200, 222, 245, 254],
+    "trunk_bytes": 138_867_160,
+    "selected_expert_bytes": 38_928_384,
+}
+
 COMMANDS = {
     "checkpoint": (
         "0731 GGUF checkpoint catalog contract",
@@ -68,6 +92,18 @@ COMMANDS = {
         "0731 GGUF layer-0 probe-plan contract",
         ("deepseek-gguf-probe-plan", "{model}", "--layer", "0", "--experts", "0,1,2,3,4,5", "--json"),
         PROBE_PLAN_CONTRACT,
+    ),
+    "route": (
+        "0731 authoritative tid2eid route contract",
+        ("deepseek-gguf-probe-plan", "{model}", "--layer", "0",
+         "--route-artifact", "{artifact}", "--token", "0", "--json"),
+        ROUTE_CONTRACT,
+    ),
+    "trunk-load": (
+        "0731 layer-0 trunk payload consumer contract",
+        ("deepseek-gguf-range-bind", "{model}", "{artifact}", "--layer", "0",
+         "--experts", "35,53,200,222,245,254", "--load-tensor-set", "--json"),
+        TRUNK_LOAD_CONTRACT,
     ),
 }
 
@@ -89,12 +125,25 @@ def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--vastloom", type=Path, required=True)
     parser.add_argument("--model", type=Path, required=True)
+    parser.add_argument(
+        "--artifact",
+        type=Path,
+        help="imported trunk range artifact; required by the route and trunk-load contracts",
+    )
     parser.add_argument("--command", choices=sorted(COMMANDS), required=True)
     args = parser.parse_args()
 
     contract, template, expected = COMMANDS[args.command]
     model = str(args.model.resolve(strict=True))
-    arguments = [str(args.vastloom), *(part.format(model=model) for part in template)]
+    artifact = ""
+    if any("{artifact}" in part for part in template):
+        if args.artifact is None:
+            raise SystemExit(f"{contract} requires --artifact")
+        artifact = str(args.artifact.resolve(strict=True))
+    arguments = [
+        str(args.vastloom),
+        *(part.format(model=model, artifact=artifact) for part in template),
+    ]
     process = subprocess.run(
         arguments, check=False, capture_output=True, text=True, encoding="utf-8", timeout=3_600
     )

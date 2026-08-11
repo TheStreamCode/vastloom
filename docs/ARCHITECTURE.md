@@ -401,9 +401,11 @@ This prevents a small derived artifact from masquerading as the complete shard.
 Crash recovery is target-scoped under the same exclusive import lock. Process-unique partial
 responses are discarded instead of resumed across servers, stale unpublished trees are removed,
 and already complete cached ranges are rehashed before reuse. A native artifact reader/catalog
-binder closes the identity boundary. One selected complete bound range can now reach the shared
-governed RAM loader and a scalar storage consumer, but the package still cannot drive a layer or
-model.
+binder closes the identity boundary. One selected complete bound range can reach the shared
+governed RAM loader and a scalar storage consumer. A second closed-set path now requires complete
+coverage of every non-routed tensor in the bound layer catalog, packs all independently hashed
+ranges into one aggregate-governed buffer and exposes typed retained views to the reference graph.
+The successful graph path is still a reduced synthetic catalog, not an official checkpoint layer.
 
 ```text
 vastloom.range-artifact.v1 directory
@@ -412,9 +414,11 @@ vastloom.range-artifact.v1 directory
   -> reproduce trunk plan from hash-verified pinned GGUF metadata
   -> exact model/revision/layer/label/source span/full-object identity match
   -> offset-zero immutable local tile views
-  -> governed exact single-range load + second in-memory SHA-256
-  -> retained RAM use lease + scalar storage consumer
-  -> execution unsupported (complete typed tensor set and graph not connected)
+  -> complete-tensor preflight before residency
+  -> aggregate RAM + maximum-range staging reservation
+  -> direct packed reads + second in-memory SHA-256 per range
+  -> one retained RAM use lease + typed matrix/I32 graph views
+  -> reduced fixture execution only; official execution remains unsupported
 ```
 
 The generic verifier accepts at most 4,096 ranges, 1 GiB per range and 16 GiB total; callers may
@@ -433,7 +437,21 @@ host-memory ceiling before the byte vector exists. After the exact read, SHA-256
 the destination bytes before `RAM_READY` publication. The returned immutable buffer owns a
 `ResidencyUse`, so eviction remains illegal until the last consumer releases it. The current
 fixture consumes one complete four-byte F32 normalization range in a transactional `1 x 1` matvec;
-it does not assemble the other ranges into a DeepSeek graph.
+it remains the smallest single-range oracle.
+
+The companion range-set loader accepts at most 4,096 ranges, defaults to 512 MiB total and 64 MiB
+per range, and has absolute 4 GiB/1 GiB ceilings. It preflights all paths, bounds, hashes, unique
+logical IDs and the exact aggregate total before changing residency. `begin_read` reserves the
+entire packed RAM destination plus only the largest single-range staging allowance. Every source
+is then read directly into its final subspan and rehashed; no partial set becomes `RAM_READY`.
+Missing, corrupt, cancelled or allocation-failed transactions release all reservations and become
+`FAILED` only if loading had begun.
+
+The DeepSeek set adapter reproduces the complete non-routed tensor set for the bound layer from
+the separately verified catalog. Each range must be one complete final tensor at offset zero and
+must preserve exact role, GGML type and original source identity. Matrix and I32 graph binders
+retain the one shared buffer, infer physical shape from the catalog and reject unsupported storage
+or logical-width mismatches without copying encoded data.
 
 The scalar storage layer now recognizes every GGML type present in those 1,193 layer tensors.
 Q8_0, Q5_K and Q6_K follow the exact pinned ggml block layouts; BF16 and F32 are decoded from
@@ -461,6 +479,14 @@ and four indivisible IQ1_S/IQ3_XXS three-matrix expert bundles, then destroys ev
 before inference. Its 16 residency objects retain exactly 8,180 bytes and remain non-evictable
 until the graph releases its final reference. This eliminates payload copies at the loader/graph
 boundary.
+
+A newer artifact-backed repetition places all 12 non-routed Q8_0/I32 entries of that reduced
+packed catalog in separate hashed range files, then loads their 2,644 bytes through one aggregate
+residency and one use lease. The four routed bundles retain the other 5,536 bytes independently.
+After every loader wrapper is destroyed, the complete reduced prefill and incremental decode still
+match the independently dequantized oracle. This proves the closed tensor-set/graph ownership
+boundary, not official 0731 payload execution; other deterministic fixture tensors remain owned
+by the existing graph.
 
 The router-first reduced slice stops after authoritative routing, deduplicates expert IDs and
 calls a block-scoped provider before expert compute. The reusable synchronous baseline owns a
@@ -677,7 +703,8 @@ router decisions or accepted output tokens.
   unique-expert reuse distance.
 - `inference/`: TinyTransformer, pinned SmolLM2 generation, pinned OLMoE routed CPU
   reference/streaming, DeepSeek Safetensors/GGUF inspection and the reduced router-first
-  selected-expert reference path, plus exact non-executing DeepSeek trunk-artifact binding.
+  selected-expert reference path, plus exact non-executing DeepSeek trunk-artifact binding and
+  complete reduced packed-catalog tensor-set consumption.
 - `cli/`: interactive and one-shot model client commands.
 - `tools/`: pinned full/metadata import plus bounded non-executable range-artifact publication.
 

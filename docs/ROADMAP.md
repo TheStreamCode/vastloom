@@ -204,6 +204,8 @@ recorded in the
 [M9 range artifact import report](reports/M9_DEEPSEEK_RANGE_ARTIFACT_IMPORT_VALIDATION.md).
 The native closed-world verification and exact pinned-catalog trunk binding are recorded in the
 [M9 range artifact binding report](reports/M9_DEEPSEEK_RANGE_ARTIFACT_BINDING_VALIDATION.md).
+The aggregate governed tensor-set loader and reduced artifact-to-graph parity gate are recorded in
+the [M9 trunk tensor-set report](reports/M9_DEEPSEEK_TRUNK_TENSOR_SET_VALIDATION.md).
 The first real packed-matrix parity gate is recorded in the
 [M7 IQ1_S kernel report](reports/M7_DEEPSEEK_IQ1S_KERNEL_VALIDATION.md).
 The completed one-expert gate/up/SwiGLU/down path is recorded in the
@@ -261,9 +263,11 @@ unbounded allocation and clean recovery from injected CUDA failures.
 - [x] Feed one complete bound F32 fixture range through an aggregate-budgeted trunk load and
   transactional scalar matvec. Post-read hash verification, short-read, corruption, callback,
   cancellation, reservation and retained-lease cleanup cases pass across tested toolchains.
-- [ ] Assemble every required bound range into a retained typed tensor set and execute the complete
-  reduced graph from the artifact boundary, rejecting missing, duplicate, split or wrong-type
-  inputs transactionally.
+- [x] Assemble every required non-routed range in the reduced packed catalog into one retained
+  typed tensor set and execute the complete reduced graph from the artifact boundary. Missing,
+  duplicate, split, wrong-role/type/source, corrupt and cancelled inputs fail transactionally.
+- [ ] Add retained typed F32/BF16 vector and scalar graph consumers so every tensor in the real
+  21-range layer-0 trunk plan can bind without payload copies.
 - [ ] Execute that probe by acquiring the bounded official trunk ranges, decoding the real
   `tid2eid` route and loading only its six selected complete expert bundles.
 - [ ] Pinned host buffers.

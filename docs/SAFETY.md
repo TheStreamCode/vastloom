@@ -267,7 +267,7 @@ The 0731 GGUF reader adds a metadata-only safety boundary:
   mandatory. A response partial is removed on failure and never resumed across responses;
 - range artifacts record the pinned complete-source SHA-256 as identity but explicitly state that
   the complete checkpoint is unverified. They retain `execution_supported=false`, are revalidated
-  before read-only atomic rename and cannot be executed by the current native runtime;
+  before read-only atomic rename and cannot authorize official checkpoint execution;
 - the native range verifier treats a published artifact as a closed directory, caps it at 4,096
   rows, 1 GiB per range and 16 GiB total, rejects symlinks/traversal/unexpected files/overlap and
   rehashes every local payload by default. Quick inspection may skip hashes, but such a result is
@@ -283,6 +283,16 @@ The 0731 GGUF reader adds a metadata-only safety boundary:
   read and hashes the in-memory bytes again before `RAM_READY`. Early cancellation leaves `NVME`;
   later read/hash/callback/cancellation failures publish `FAILED` only after transfer release and
   free all reservations. A shared use lease prevents eviction while a consumer retains the bytes;
+- the closed range-set loader extends the same rule to at most 4,096 independently hashed ranges.
+  It defaults to 512 MiB total/64 MiB per range, has 4 GiB/1 GiB absolute ceilings, preflights the
+  entire file set and exact aggregate total, then reserves all destination RAM plus only the
+  maximum-range staging allowance before allocation. Reads land directly in final packed
+  subspans; `RAM_READY` is atomic for the whole set and one shared lease protects every view;
+- the DeepSeek tensor-set adapter additionally requires one complete final offset-zero range for
+  every non-routed tensor in the bound layer catalog. Missing, duplicate, split, wrong-role/type/
+  source or corrupt inputs cannot publish a partial graph. The current graph consumer proves this
+  only with a 2,644-byte reduced packed catalog; it does not promote the official artifact or
+  checkpoint to executable status;
 - selected-expert/all range scopes fail before network while routing authority is caller-supplied.
   A future authoritative source must be named explicitly; a forged flag/source combination is
   rejected. Target-scoped locks clean only their own stale partial/incoming artifacts after a

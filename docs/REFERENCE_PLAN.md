@@ -110,9 +110,12 @@ scope in dry-run mode. It created no target and made no payload request. A real 
 explicit authorization, remains capped and publishes a non-executable derived artifact; the
 native closed-world reader and exact trunk binder now pass synthetic corruption and source-identity
 tests. One complete four-byte F32 range also passes an aggregate-budgeted load, second in-memory
-hash, retained residency and scalar matvec. The next gate is to assemble every required bound
-tensor and execute the complete reduced graph from that artifact boundary; only after it passes
-should the user be asked to authorize the real transfer.
+hash, retained residency and scalar matvec. The closed-set path now assembles all 12 non-routed
+Q8_0/I32 entries in the reduced packed catalog into one 2,644-byte Governor-owned artifact buffer;
+with four separately governed expert bundles, the complete reduced prefill/decode graph matches
+its oracle and releases the aggregate lease cleanly. The next gate is retained F32/BF16
+vector/scalar binding for every tensor in the real 21-range trunk plan. Only after that synthetic
+full-set consumer passes should the user be asked to authorize the real transfer.
 
 Kimi K3 is not a reference-PC execution target. The project treats it as metadata/capacity-only
 because no exact profile has proved that its complete expert bundle fits one real tier on the

@@ -76,10 +76,14 @@ model conversion.
 > The native verifier now treats that artifact as a closed file set, rehashes every range and binds
 > it back to the exact regenerated catalog. A synthetic complete four-byte F32 trunk range then
 > passes an aggregate-budgeted RAM/staging transaction, a second post-read SHA-256 check, retained
-> residency and a scalar matvec. This proves one range-to-consumer boundary, not a complete tensor
-> set or layer. The complete 82.54 GB payload has not been downloaded or executed; storage-format
-> coverage is not a complete DeepSeek layer/token path, physical-NVMe performance, generation or
-> CUDA implementation.
+> residency and a scalar matvec. The same boundary now accepts only complete closed tensor sets:
+> all ranges are preflighted, aggregate RAM plus maximum-range staging is reserved once, each
+> packed subspan is rehashed, and `RAM_READY` is published only after the whole set passes. The
+> reduced mixed-format graph now consumes its 12 Q8_0/I32 trunk entries from one 2,644-byte
+> aggregate artifact buffer while four indivisible IQ1_S/IQ3_XXS expert bundles remain separately
+> governed; prefill and decode still match the independent oracle. The complete 82.54 GB payload
+> has not been downloaded or executed; this synthetic gate is not a complete official DeepSeek
+> layer/token path, physical-NVMe performance, generation or CUDA implementation.
 
 ## Why Vastloom exists
 
@@ -163,6 +167,8 @@ The closed-world native verifier and exact pinned-catalog trunk binding are docu
 [`M9 range artifact binding report`](docs/reports/M9_DEEPSEEK_RANGE_ARTIFACT_BINDING_VALIDATION.md).
 The first governed bound-range-to-scalar transaction is documented in the
 [`M9 bound trunk-load report`](docs/reports/M9_DEEPSEEK_BOUND_TRUNK_LOAD_VALIDATION.md).
+The complete reduced artifact tensor-set transaction and graph parity gate are documented in the
+[`M9 trunk tensor-set report`](docs/reports/M9_DEEPSEEK_TRUNK_TENSOR_SET_VALIDATION.md).
 The pinned importer and immutable full-source admission boundary are documented in the
 [`M7 checkpoint-binding report`](docs/reports/M7_DEEPSEEK_GGUF_CHECKPOINT_BINDING_VALIDATION.md).
 Current and candidate model support is kept explicit in the
@@ -186,7 +192,7 @@ allocation plan is derived from detected capacity and conservative headroom.
 | Platform | Current status |
 |---|---|
 | Windows 11 x86-64 | Native CPU paths validated with MSVC; primary consumer target |
-| Linux x86-64 | Native CPU paths validated with GCC and Clang; ASan/UBSan and TSan gates pass |
+| Linux x86-64 | Native CPU paths validated with GCC and Clang; ASan/UBSan pass, while TSan builds but its current WSL startup is nondeterministic |
 | macOS | Source includes a portable CPU/RAM probe; CPU CI and Metal are explicit unvalidated [M14 roadmap](docs/ROADMAP.md#public-macos-and-metal-track) work |
 
 Vastloom must therefore be described as working on Windows and Linux today. macOS is a planned
@@ -374,7 +380,14 @@ portability target, not a validated platform claim.
   bytes again, publishes `RAM_READY` and remains protected by a retained use lease while the scalar
   matvec consumes it. Allocation refusal, early/late cancellation, callback failure, same-size
   corruption, truncation and eviction cleanup fail safely. The absolute per-load ceiling is 1 GiB
-  and callers can lower it. No complete artifact tensor set or official payload reaches the graph.
+  and callers can lower it.
+- **Governed trunk tensor set:** a closed set of up to 4,096 independently hashed ranges is
+  preflighted before one aggregate residency transaction. Defaults cap the set at 512 MiB total
+  and 64 MiB per range; absolute ceilings are 4 GiB and 1 GiB. Missing, duplicate, split,
+  wrong-role/type/source or corrupt tensors fail without partial publication. The reduced packed
+  catalog binds 12 Q8_0/I32 trunk entries from one 2,644-byte buffer and one retained lease, then
+  matches the existing mixed-format prefill/decode oracle. This remains synthetic; no official
+  trunk payload reaches the graph.
 
 ### Runtime foundation
 
@@ -853,8 +866,9 @@ It currently has:
 - complete metadata-derived trunk plans and storage-type coverage plus a governed
   tile/expert-to-DeepSeek fixture consumer and reduced router-first bounded expert cache with an
   opt-in single-owner asynchronous batch; partial immutable range publication and a native
-  closed-world verifier/exact trunk binder exist, but no bound-range-to-governed-tensor consumer,
-  official trunk payload read or full-model loop;
+  closed-world verifier/exact trunk binder now feed a complete reduced packed trunk catalog into
+  one aggregate governed tensor set, but retained F32/BF16 vector bindings, any official trunk
+  payload read and the full-model loop remain absent;
 - no VRAM expert tier or pinned host buffers; direct/unbuffered I/O is currently an
   opt-in OLMoE measurement protocol, not the production path for every adapter;
 - OLMoE currently exposes final-logit probes and route telemetry, not decoding/chat;
@@ -883,10 +897,10 @@ merely SSD throughput. It is:
 
 The next technical sequence remains incremental:
 
-1. connect the exact bound local trunk views to the governed tensor loader and reduced scalar
-   DeepSeek consumer, with synthetic short-read/cancellation/reservation tests;
-2. only after that synthetic consumer passes and the user explicitly approves, use the completed
-   importer to acquire the exact 138,867,160-byte layer-0 trunk plan;
+1. add retained F32/BF16 vector/scalar consumers so every entry in the official 21-range layer-0
+   trunk can bind to the checkpoint-shaped graph under the new aggregate tensor-set transaction;
+2. only after that synthetic full-set consumer passes and the user explicitly approves, use the
+   completed importer to acquire the exact 138,867,160-byte layer-0 trunk plan;
 3. decode the official `tid2eid` route for a pinned input, then acquire only its six complete
    selected expert bundles (38,928,384 bytes for layer 0) and match the official layer output;
 4. measure useful physical-device expert-read/compute overlap with declared cache state and exact

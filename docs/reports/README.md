@@ -13,6 +13,11 @@ hardware, commands, measurements and limitations.
 
 ## Current report
 
+- [`M9_DEEPSEEK_TRUNK_TENSOR_SET_VALIDATION.md`](M9_DEEPSEEK_TRUNK_TENSOR_SET_VALIDATION.md) —
+  transactional aggregate multi-range loading, complete non-routed catalog coverage, one retained
+  2,644-byte artifact buffer and full reduced mixed-format prefill/decode parity, with missing,
+  duplicate, split, wrong-type, corruption, cancellation, budget and lease-cleanup faults. No
+  official trunk byte was acquired or executed.
 - [`M9_DEEPSEEK_BOUND_TRUNK_LOAD_VALIDATION.md`](M9_DEEPSEEK_BOUND_TRUNK_LOAD_VALIDATION.md) —
   one exact artifact-bound F32 fixture range loaded through aggregate-budgeted RAM/staging,
   rehashed in memory and retained through a scalar matvec, with allocation, cancellation,

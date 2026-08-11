@@ -329,9 +329,15 @@ recorded in the [M8 CUDA RMSNorm report](reports/M8_CUDA_RMSNORM_VALIDATION.md).
   [official layer execution validation](reports/M9_DEEPSEEK_OFFICIAL_LAYER_EXECUTION_VALIDATION.md).
   This is one layer of 43, not the model's output, and it is not yet matched against an independent
   oracle.
-- [ ] Acquire the remaining 42 layer trunks (6,390,088,008 bytes total) and execute a complete
-  forward pass. From layer 3 the router is learned, so expert selection is only knowable during
-  execution — the streaming case this project exists for.
+- [x] Execute a complete forward pass. The 82.54 GB checkpoint is local, and all 43 layers run from
+  it: 258 expert bundles resolved by the model's own routers, 1,770,651,648 expert bytes — exactly
+  the predicted no-cache figure — 129,280 logits in 29.4 s with 7.17 GB resident and the host's
+  8 GiB floor untouched. See the
+  [complete forward validation](reports/M9_DEEPSEEK_COMPLETE_FORWARD_VALIDATION.md).
+- [ ] Generate more than one token: KV cache reuse across steps, a tokenizer that reads the GGUF
+  vocabulary instead of `tokenizer.json`, and the chat template wired to the full-depth path.
+- [ ] Release each layer after executing it instead of holding all 43 trunks resident, so a host
+  with less free RAM is served rather than refused.
 - [ ] Pinned host buffers.
 - [ ] Direct/overlapped NVMe reads where supported.
 - [ ] Resident-trunk and bounded streamed-trunk placement profiles.

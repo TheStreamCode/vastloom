@@ -13,6 +13,10 @@ hardware, commands, measurements and limitations.
 
 ## Current report
 
+- [`M9_DEEPSEEK_COMPLETE_FORWARD_VALIDATION.md`](M9_DEEPSEEK_COMPLETE_FORWARD_VALIDATION.md) —
+  the complete 43-layer model executed on the reference PC: 258 expert bundles, 1,770,651,648 expert
+  bytes matching the metadata prediction exactly, 129,280 logits, and host memory that never
+  approached its floor. One forward pass, not generation.
 - [`M9_DEEPSEEK_OFFICIAL_LAYER_EXECUTION_VALIDATION.md`](M9_DEEPSEEK_OFFICIAL_LAYER_EXECUTION_VALIDATION.md) —
   first real DeepSeek layer executed from official payload: catalog relocation onto imported
   artifacts, eight quantizations running together, the checkpoint's own router choosing six experts,

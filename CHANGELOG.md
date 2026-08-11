@@ -2,6 +2,18 @@
 
 ## Unreleased
 
+- The complete DeepSeek V4 Flash 0731 model executed a forward pass on the reference PC: all 43
+  layers, the checkpoint's own routers, 258 expert bundles and 1,770,651,648 bytes of expert payload
+  — exactly the `no_cache_expert_bytes_per_token` figure derived from metadata at an earlier
+  milestone. Token 0 produced 129,280 logits and next token 20; weights loaded in 3.97 s and the
+  forward took 29.4 s with scalar CPU kernels. The process peaked at 7.17 GB while free host RAM
+  never fell below 11.7 GB against the Governor's 8 GiB floor, and everything was released at the
+  end. Raising depth in steps exposed two defects: the indexer's head-weight projection was bound
+  outside the indexer namespace, which only surfaces at layer 2 where the first 4:1 compressor
+  appears, and the reference layer ceiling was still sized for reduced fixtures at 16. See the
+  [complete forward validation](docs/reports/M9_DEEPSEEK_COMPLETE_FORWARD_VALIDATION.md). This is one
+  forward pass, not generation, and 29.4 s per token is correct rather than usable.
+
 - Added `deepseek-forward`, which runs the real graph to a chosen depth straight from a complete
   checkpoint, and refuses in advance what will not fit. Its preflight sums the exact resident cost
   from the catalog — layer trunks, globals and the expert-cache ceiling — and compares it against the

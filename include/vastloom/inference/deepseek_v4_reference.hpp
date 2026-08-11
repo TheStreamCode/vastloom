@@ -6,6 +6,7 @@
 #include <functional>
 #include <map>
 #include <memory>
+#include <optional>
 #include <span>
 #include <string>
 #include <string_view>
@@ -19,6 +20,10 @@ class LoadedExpert;
 class LoadedTensorTile;
 class ResidentByteBuffer;
 }  // namespace vastloom::model
+
+namespace vastloom::safety {
+class ProcessSafetyGuard;
+}  // namespace vastloom::safety
 
 namespace vastloom::inference {
 
@@ -364,6 +369,62 @@ struct DeepseekV4ReferenceForwardResult {
     std::uint32_t mtp_greedy_token_id{0};
 };
 
+inline constexpr std::size_t kDeepseekV4ReferenceMaxTokens = 4'096U;
+
+// Optional transaction checkpoint invoked before expensive graph phases and each main/MTP
+// block. A failed checkpoint aborts without publishing the caller's incremental state.
+struct DeepseekV4ReferenceExecutionControl {
+    std::function<Result<void>()> checkpoint;
+};
+
+enum class DeepseekV4ReferenceFinishReason {
+    stop_token,
+    context_limit,
+    max_tokens,
+    cancelled,
+    timeout,
+};
+
+struct DeepseekV4ReferenceGenerationOptions {
+    std::size_t max_new_tokens{64U};
+    std::size_t context_limit_tokens{kDeepseekV4ReferenceMaxTokens};
+    float temperature{0.0F};
+    std::size_t top_k{40U};
+    std::uint64_t seed{1U};
+    std::chrono::milliseconds timeout{std::chrono::minutes(5)};
+    std::vector<std::uint32_t> stop_token_ids;
+    std::function<bool()> cancelled;
+    std::function<void(std::uint32_t)> on_token;
+};
+
+struct DeepseekV4ReferenceGenerationStats {
+    std::size_t prompt_tokens{0U};
+    std::size_t generated_tokens{0U};
+    std::size_t requested_max_tokens{0U};
+    std::size_t effective_max_tokens{0U};
+    std::size_t forward_passes{0U};
+    std::size_t expert_requests{0U};
+    std::size_t expert_cache_hits{0U};
+    std::size_t expert_cache_misses{0U};
+    std::uint64_t resident_expert_bytes{0U};
+    std::uint64_t logical_expert_bytes_read{0U};
+    double prompt_eval_ms{0.0};
+    double generation_ms{0.0};
+    double tokens_per_second{0.0};
+    double expert_load_service_ms{0.0};
+    double expert_compute_ms{0.0};
+    double io_compute_overlap_ms{0.0};
+};
+
+struct DeepseekV4ReferenceGenerationResult {
+    std::vector<std::uint32_t> prompt_ids;
+    std::vector<std::uint32_t> generated_ids;
+    DeepseekV4ReferenceFinishReason finish_reason{
+        DeepseekV4ReferenceFinishReason::max_tokens};
+    std::optional<std::uint32_t> stop_token_id;
+    DeepseekV4ReferenceGenerationStats stats;
+};
+
 [[nodiscard]] Result<std::vector<float>> deepseek_v4_rms_norm(
     std::span<const float> input,
     std::span<const float> weight,
@@ -478,11 +539,26 @@ struct DeepseekV4ReferenceForwardResult {
 [[nodiscard]] Result<DeepseekV4ReferenceForwardResult> deepseek_v4_reference_prefill(
     const DeepseekV4ReferenceGraph& graph,
     std::span<const std::uint32_t> token_ids,
-    DeepseekV4ReferenceState* state = nullptr);
+    DeepseekV4ReferenceState* state = nullptr,
+    const DeepseekV4ReferenceExecutionControl* control = nullptr);
 
 [[nodiscard]] Result<DeepseekV4ReferenceForwardResult> deepseek_v4_reference_decode(
     const DeepseekV4ReferenceGraph& graph,
     std::uint32_t token_id,
-    DeepseekV4ReferenceState& state);
+    DeepseekV4ReferenceState& state,
+    const DeepseekV4ReferenceExecutionControl* control = nullptr);
+
+// Bounded token-level autoregressive driver for the native reference graph. It uses main-model
+// logits for generation; MTP is evaluated only because it remains part of the pinned graph oracle.
+// The optional ProcessSafetyGuard is sampled at every execution checkpoint.
+[[nodiscard]] Result<DeepseekV4ReferenceGenerationResult>
+deepseek_v4_reference_generate(
+    const DeepseekV4ReferenceGraph& graph,
+    std::span<const std::uint32_t> prompt_ids,
+    const DeepseekV4ReferenceGenerationOptions& options,
+    const safety::ProcessSafetyGuard* process_guard = nullptr);
+
+[[nodiscard]] std::string_view to_string(
+    DeepseekV4ReferenceFinishReason reason) noexcept;
 
 }  // namespace vastloom::inference

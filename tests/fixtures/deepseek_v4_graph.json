@@ -123,6 +123,16 @@
         "layer": 1
       }
     ],
+    "greedy_generation": [
+      4,
+      11,
+      14,
+      4,
+      11,
+      14,
+      4,
+      11
+    ],
     "greedy_token_id": 4,
     "incremental": [
       {
@@ -861,7 +871,7 @@
       }
     ]
   },
-  "format": "vastloom.deepseek_v4.graph_fixture.v2",
+  "format": "vastloom.deepseek_v4.graph_fixture.v3",
   "official_model_sha256": "ce962f1face79d4f633d36436576214057a7e11443c9789935e1deb5c6cd1d71",
   "official_revision": "60d8d70770c6776ff598c94bb586a859a38244f1",
   "reference_mode": "official-model.py-fp32-with-equivalent-cpu-kernel-stubs",

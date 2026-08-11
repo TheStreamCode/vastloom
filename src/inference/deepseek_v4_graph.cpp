@@ -5,6 +5,7 @@
 #include "vastloom/inference/ggml_quantization.hpp"
 #include "vastloom/model/expert_loader.hpp"
 #include "vastloom/model/layer_streaming.hpp"
+#include "vastloom/safety/runtime_policy.hpp"
 
 #include <algorithm>
 #include <array>
@@ -17,6 +18,7 @@
 #include <numbers>
 #include <numeric>
 #include <optional>
+#include <random>
 #include <span>
 #include <string>
 #include <utility>
@@ -29,8 +31,144 @@ constexpr std::size_t kMaximumGraphElements = 64U * 1024U * 1024U;
 // 129,280 x 4,096 Q4_K embedding/head while still rejecting unbounded descriptors.
 constexpr std::size_t kMaximumPackedMatrixElements = 1U * 1024U * 1024U * 1024U;
 constexpr std::size_t kMaximumPackedFloatElements = 1U * 1024U * 1024U;
-constexpr std::size_t kMaximumReferenceTokens = 4096U;
+constexpr std::size_t kMaximumReferenceTokens = kDeepseekV4ReferenceMaxTokens;
 constexpr std::size_t kMaximumReferenceLayers = 16U;
+
+Result<void> execution_checkpoint(
+    const DeepseekV4ReferenceExecutionControl* control) {
+    if (control == nullptr || !control->checkpoint) return {};
+    try {
+        return control->checkpoint();
+    } catch (const std::bad_alloc&) {
+        return make_error(
+            ErrorCode::resource_exhausted,
+            "Unable to run the bounded DeepSeek execution checkpoint");
+    } catch (const std::exception& error) {
+        return make_error(
+            ErrorCode::internal_error,
+            "DeepSeek execution checkpoint raised an exception", error.what());
+    } catch (...) {
+        return make_error(
+            ErrorCode::internal_error,
+            "DeepSeek execution checkpoint raised an unknown exception");
+    }
+}
+
+Result<std::uint32_t> sample_reference_token(
+    std::span<const float> logits,
+    const DeepseekV4ReferenceGenerationOptions& options,
+    std::mt19937_64& random) {
+    if (logits.empty()) {
+        return make_error(ErrorCode::invalid_format,
+                          "DeepSeek generation logits are empty");
+    }
+    for (const auto value : logits) {
+        if (!std::isfinite(value)) {
+            return make_error(ErrorCode::invalid_format,
+                              "DeepSeek generation logits contain a non-finite value");
+        }
+    }
+    if (options.temperature == 0.0F || options.top_k == 1U) {
+        return static_cast<std::uint32_t>(std::distance(
+            logits.begin(), std::max_element(logits.begin(), logits.end())));
+    }
+
+    const std::size_t count = std::min(options.top_k, logits.size());
+    std::vector<std::size_t> indices(logits.size());
+    std::iota(indices.begin(), indices.end(), 0U);
+    std::partial_sort(
+        indices.begin(),
+        indices.begin() + static_cast<std::ptrdiff_t>(count),
+        indices.end(),
+        [logits](std::size_t left, std::size_t right) {
+            return logits[left] == logits[right] ? left < right
+                                                 : logits[left] > logits[right];
+        });
+    indices.resize(count);
+
+    double maximum = -std::numeric_limits<double>::infinity();
+    for (const auto index : indices) {
+        maximum = std::max(maximum, static_cast<double>(logits[index]));
+    }
+    std::vector<double> weights(count);
+    double total = 0.0;
+    for (std::size_t index = 0U; index < count; ++index) {
+        weights[index] = std::exp(
+            (static_cast<double>(logits[indices[index]]) - maximum) /
+            static_cast<double>(options.temperature));
+        total += weights[index];
+    }
+    if (!std::isfinite(total) || total <= 0.0) {
+        return make_error(ErrorCode::invalid_format,
+                          "DeepSeek generation sampling weights are invalid");
+    }
+
+    // Use mt19937_64 bits directly so seeded sampling is identical across standard libraries.
+    constexpr double kInverseTwoTo53 = 1.0 / 9007199254740992.0;
+    const double threshold =
+        static_cast<double>(random() >> 11U) * kInverseTwoTo53 * total;
+    double cumulative = 0.0;
+    for (std::size_t index = 0U; index < count; ++index) {
+        cumulative += weights[index];
+        if (threshold < cumulative) {
+            return static_cast<std::uint32_t>(indices[index]);
+        }
+    }
+    return static_cast<std::uint32_t>(indices.back());
+}
+
+Result<void> accumulate_generation_telemetry(
+    const DeepseekV4ReferenceForwardResult& forward,
+    DeepseekV4ReferenceGenerationStats& stats) {
+    const auto record_layers = [&](std::span<const DeepseekV4LayerTrace> layers)
+        -> Result<void> {
+        const auto add_duration = [](double& total, double value) {
+            if (!std::isfinite(value) || value < 0.0 ||
+                total > std::numeric_limits<double>::max() - value) {
+                return false;
+            }
+            total += value;
+            return std::isfinite(total);
+        };
+        for (const auto& layer : layers) {
+            for (const auto& access : layer.expert_accesses) {
+                if (stats.expert_requests == std::numeric_limits<std::size_t>::max() ||
+                    (access.cache_hit && stats.expert_cache_hits ==
+                                             std::numeric_limits<std::size_t>::max()) ||
+                    (!access.cache_hit && stats.expert_cache_misses ==
+                                              std::numeric_limits<std::size_t>::max()) ||
+                    access.resident_bytes >
+                        std::numeric_limits<std::uint64_t>::max() -
+                            stats.resident_expert_bytes ||
+                    access.logical_bytes_read >
+                        std::numeric_limits<std::uint64_t>::max() -
+                            stats.logical_expert_bytes_read) {
+                    return make_error(
+                        ErrorCode::integrity_error,
+                        "DeepSeek generation expert telemetry is invalid or overflows");
+                }
+                ++stats.expert_requests;
+                if (access.cache_hit) ++stats.expert_cache_hits;
+                else ++stats.expert_cache_misses;
+                stats.resident_expert_bytes += access.resident_bytes;
+                stats.logical_expert_bytes_read += access.logical_bytes_read;
+                if (!add_duration(stats.expert_load_service_ms,
+                                  access.load_service_ms) ||
+                    !add_duration(stats.expert_compute_ms, access.compute_ms) ||
+                    !add_duration(stats.io_compute_overlap_ms,
+                                  access.io_compute_overlap_ms)) {
+                    return make_error(
+                        ErrorCode::integrity_error,
+                        "DeepSeek generation expert telemetry is invalid or overflows");
+                }
+            }
+        }
+        return {};
+    };
+    auto recorded = record_layers(forward.layers);
+    if (!recorded) return recorded.error();
+    return record_layers(forward.mtp_layers);
+}
 
 Result<std::span<const std::byte>> packed_payload(
     const std::vector<std::byte>& encoded,
@@ -3718,8 +3856,11 @@ Result<DeepseekV4ReferenceGlobals> deepseek_v4_bind_0731_gguf_globals(
 Result<DeepseekV4ReferenceForwardResult> deepseek_v4_reference_prefill(
     const DeepseekV4ReferenceGraph& graph,
     std::span<const std::uint32_t> token_ids,
-    DeepseekV4ReferenceState* state) {
+    DeepseekV4ReferenceState* state,
+    const DeepseekV4ReferenceExecutionControl* control) {
     auto valid = validate_graph(graph, token_ids);
+    if (!valid) return valid.error();
+    valid = execution_checkpoint(control);
     if (!valid) return valid.error();
     const auto& config = graph.config;
     const std::size_t token_count = token_ids.size();
@@ -3750,6 +3891,8 @@ Result<DeepseekV4ReferenceForwardResult> deepseek_v4_reference_prefill(
     DeepseekV4ReferenceForwardResult result;
     result.layers.reserve(config.layer_count);
     for (std::size_t layer = 0U; layer < config.layer_count; ++layer) {
+        valid = execution_checkpoint(control);
+        if (!valid) return valid.error();
         const std::string layer_base = "layers." + std::to_string(layer);
         auto block = block_prefill(graph, layer_base, layer,
                                    config.compression_ratios[layer],
@@ -3759,6 +3902,8 @@ Result<DeepseekV4ReferenceForwardResult> deepseek_v4_reference_prefill(
         hidden = std::move(block.value().hidden);
         result.layers.push_back(std::move(block.value().trace));
     }
+    valid = execution_checkpoint(control);
+    if (!valid) return valid.error();
     auto logits = final_logits(graph, hidden, token_count, "");
     if (!logits) return logits.error();
     result.logits = logits.take_value();
@@ -3767,6 +3912,8 @@ Result<DeepseekV4ReferenceForwardResult> deepseek_v4_reference_prefill(
         std::distance(result.logits.begin(), maximum));
 
     if (config.mtp_layer_count != 0U) {
+        valid = execution_checkpoint(control);
+        if (!valid) return valid.error();
         const std::string mtp_base = "mtp.0";
         auto embedding_norm_weight = float_tensor(graph, mtp_base + ".enorm.weight",
                                                   {config.width});
@@ -3819,6 +3966,8 @@ Result<DeepseekV4ReferenceForwardResult> deepseek_v4_reference_prefill(
         working_state.next_position = token_count;
         auto state_valid = validate_reference_state(graph, working_state);
         if (!state_valid) return state_valid.error();
+        state_valid = execution_checkpoint(control);
+        if (!state_valid) return state_valid.error();
         *state = std::move(working_state);
     }
     return result;
@@ -3827,11 +3976,14 @@ Result<DeepseekV4ReferenceForwardResult> deepseek_v4_reference_prefill(
 Result<DeepseekV4ReferenceForwardResult> deepseek_v4_reference_decode(
     const DeepseekV4ReferenceGraph& graph,
     std::uint32_t token_id,
-    DeepseekV4ReferenceState& state) {
+    DeepseekV4ReferenceState& state,
+    const DeepseekV4ReferenceExecutionControl* control) {
     const std::array<std::uint32_t, 1U> token_ids{token_id};
     auto graph_valid = validate_graph(graph, token_ids);
     if (!graph_valid) return graph_valid.error();
     auto state_valid = validate_reference_state(graph, state);
+    if (!state_valid) return state_valid.error();
+    state_valid = execution_checkpoint(control);
     if (!state_valid) return state_valid.error();
     if (state.next_position >= kMaximumReferenceTokens) {
         return make_error(ErrorCode::resource_exhausted,
@@ -3858,6 +4010,8 @@ Result<DeepseekV4ReferenceForwardResult> deepseek_v4_reference_decode(
     DeepseekV4ReferenceForwardResult result;
     result.layers.reserve(config.layer_count);
     for (std::size_t layer = 0U; layer < config.layer_count; ++layer) {
+        state_valid = execution_checkpoint(control);
+        if (!state_valid) return state_valid.error();
         const std::string layer_base = "layers." + std::to_string(layer);
         auto block = block_incremental(
             graph, layer_base, layer, config.compression_ratios[layer],
@@ -3867,6 +4021,8 @@ Result<DeepseekV4ReferenceForwardResult> deepseek_v4_reference_decode(
         hidden = std::move(block.value().hidden);
         result.layers.push_back(std::move(block.value().trace));
     }
+    state_valid = execution_checkpoint(control);
+    if (!state_valid) return state_valid.error();
     auto logits = final_logits(graph, hidden, 1U, "");
     if (!logits) return logits.error();
     result.logits = logits.take_value();
@@ -3875,6 +4031,8 @@ Result<DeepseekV4ReferenceForwardResult> deepseek_v4_reference_decode(
         std::distance(result.logits.begin(), maximum));
 
     if (config.mtp_layer_count != 0U) {
+        state_valid = execution_checkpoint(control);
+        if (!state_valid) return state_valid.error();
         const std::string mtp_base = "mtp.0";
         auto embedding_norm_weight = float_tensor(graph, mtp_base + ".enorm.weight",
                                                   {config.width});
@@ -3922,8 +4080,202 @@ Result<DeepseekV4ReferenceForwardResult> deepseek_v4_reference_decode(
     working_state.next_position = start_position + 1U;
     state_valid = validate_reference_state(graph, working_state);
     if (!state_valid) return state_valid.error();
+    state_valid = execution_checkpoint(control);
+    if (!state_valid) return state_valid.error();
     state = std::move(working_state);
     return result;
+}
+
+Result<DeepseekV4ReferenceGenerationResult> deepseek_v4_reference_generate(
+    const DeepseekV4ReferenceGraph& graph,
+    std::span<const std::uint32_t> prompt_ids,
+    const DeepseekV4ReferenceGenerationOptions& options,
+    const safety::ProcessSafetyGuard* process_guard) {
+    if (options.max_new_tokens == 0U ||
+        options.max_new_tokens > kDeepseekV4ReferenceMaxTokens ||
+        options.context_limit_tokens == 0U ||
+        options.context_limit_tokens > kDeepseekV4ReferenceMaxTokens ||
+        prompt_ids.empty() || prompt_ids.size() >= options.context_limit_tokens ||
+        !std::isfinite(options.temperature) || options.temperature < 0.0F ||
+        options.temperature > 10.0F || options.top_k == 0U ||
+        options.top_k > graph.config.vocabulary_size ||
+        options.timeout < std::chrono::milliseconds(1) ||
+        options.timeout > std::chrono::hours(1)) {
+        return make_error(ErrorCode::invalid_argument,
+                          "DeepSeek reference generation options are invalid");
+    }
+    if (options.stop_token_ids.size() > 64U) {
+        return make_error(ErrorCode::invalid_argument,
+                          "DeepSeek generation has too many stop tokens");
+    }
+    for (std::size_t index = 0U; index < options.stop_token_ids.size(); ++index) {
+        if (options.stop_token_ids[index] >= graph.config.vocabulary_size ||
+            std::find(options.stop_token_ids.begin(),
+                      options.stop_token_ids.begin() +
+                          static_cast<std::ptrdiff_t>(index),
+                      options.stop_token_ids[index]) !=
+                options.stop_token_ids.begin() +
+                    static_cast<std::ptrdiff_t>(index)) {
+            return make_error(
+                ErrorCode::invalid_argument,
+                "DeepSeek generation stop-token list is invalid or duplicated");
+        }
+    }
+
+    enum class RequestedStop { none, cancelled, timeout };
+    RequestedStop requested_stop = RequestedStop::none;
+    const auto started = std::chrono::steady_clock::now();
+    const auto deadline = started + options.timeout;
+    DeepseekV4ReferenceExecutionControl control;
+    control.checkpoint = [&]() -> Result<void> {
+        if (std::chrono::steady_clock::now() >= deadline) {
+            requested_stop = RequestedStop::timeout;
+            return make_error(ErrorCode::resource_exhausted,
+                              "DeepSeek reference generation timed out safely");
+        }
+        if (options.cancelled && options.cancelled()) {
+            requested_stop = RequestedStop::cancelled;
+            return make_error(ErrorCode::resource_exhausted,
+                              "DeepSeek reference generation was cancelled safely");
+        }
+        if (process_guard != nullptr) {
+            auto safe = process_guard->sample_and_check();
+            if (!safe) return safe.error();
+        }
+        return {};
+    };
+
+    DeepseekV4ReferenceGenerationResult result;
+    result.stats.prompt_tokens = prompt_ids.size();
+    result.stats.requested_max_tokens = options.max_new_tokens;
+    result.stats.effective_max_tokens = std::min(
+        options.max_new_tokens, options.context_limit_tokens - prompt_ids.size());
+    const auto finish_requested_stop = [&]() {
+        if (requested_stop == RequestedStop::cancelled) {
+            result.finish_reason = DeepseekV4ReferenceFinishReason::cancelled;
+        } else if (requested_stop == RequestedStop::timeout) {
+            result.finish_reason = DeepseekV4ReferenceFinishReason::timeout;
+        }
+    };
+
+    try {
+        result.prompt_ids.assign(prompt_ids.begin(), prompt_ids.end());
+        result.generated_ids.reserve(result.stats.effective_max_tokens);
+        DeepseekV4ReferenceState state;
+        auto prefill = deepseek_v4_reference_prefill(
+            graph, prompt_ids, &state, &control);
+        const auto prompt_finished = std::chrono::steady_clock::now();
+        result.stats.prompt_eval_ms = std::chrono::duration<double, std::milli>(
+            prompt_finished - started).count();
+        if (!prefill) {
+            if (requested_stop != RequestedStop::none) {
+                finish_requested_stop();
+                return result;
+            }
+            return prefill.error();
+        }
+        result.stats.forward_passes = 1U;
+        auto telemetry = accumulate_generation_telemetry(
+            prefill.value(), result.stats);
+        if (!telemetry) return telemetry.error();
+
+        std::mt19937_64 random(options.seed);
+        DeepseekV4ReferenceForwardResult current = prefill.take_value();
+        for (std::size_t generated = 0U;
+             generated < result.stats.effective_max_tokens; ++generated) {
+            auto safe = execution_checkpoint(&control);
+            if (!safe) {
+                if (requested_stop != RequestedStop::none) {
+                    finish_requested_stop();
+                    break;
+                }
+                return safe.error();
+            }
+            auto sampled = sample_reference_token(current.logits, options, random);
+            if (!sampled) return sampled.error();
+            const std::uint32_t token = sampled.value();
+            if (std::find(options.stop_token_ids.begin(),
+                          options.stop_token_ids.end(), token) !=
+                options.stop_token_ids.end()) {
+                result.finish_reason = DeepseekV4ReferenceFinishReason::stop_token;
+                result.stop_token_id = token;
+                break;
+            }
+
+            result.generated_ids.push_back(token);
+            if (options.on_token) {
+                try {
+                    options.on_token(token);
+                } catch (const std::bad_alloc&) {
+                    return make_error(
+                        ErrorCode::resource_exhausted,
+                        "DeepSeek generation token callback exhausted memory");
+                } catch (const std::exception& error) {
+                    return make_error(
+                        ErrorCode::internal_error,
+                        "DeepSeek generation token callback raised an exception",
+                        error.what());
+                } catch (...) {
+                    return make_error(
+                        ErrorCode::internal_error,
+                        "DeepSeek generation token callback raised an unknown exception");
+                }
+            }
+
+            if (generated + 1U == result.stats.effective_max_tokens) break;
+            auto decoded = deepseek_v4_reference_decode(
+                graph, token, state, &control);
+            if (!decoded) {
+                if (requested_stop != RequestedStop::none) {
+                    finish_requested_stop();
+                    break;
+                }
+                return decoded.error();
+            }
+            if (result.stats.forward_passes ==
+                std::numeric_limits<std::size_t>::max()) {
+                return make_error(ErrorCode::resource_exhausted,
+                                  "DeepSeek generation forward count overflows");
+            }
+            ++result.stats.forward_passes;
+            telemetry = accumulate_generation_telemetry(
+                decoded.value(), result.stats);
+            if (!telemetry) return telemetry.error();
+            current = decoded.take_value();
+        }
+
+        result.stats.generated_tokens = result.generated_ids.size();
+        if (requested_stop == RequestedStop::none &&
+            result.finish_reason != DeepseekV4ReferenceFinishReason::stop_token) {
+            result.finish_reason =
+                result.stats.effective_max_tokens < options.max_new_tokens
+                    ? DeepseekV4ReferenceFinishReason::context_limit
+                    : DeepseekV4ReferenceFinishReason::max_tokens;
+        }
+        result.stats.generation_ms = std::chrono::duration<double, std::milli>(
+            std::chrono::steady_clock::now() - prompt_finished).count();
+        if (result.stats.generation_ms > 0.0) {
+            result.stats.tokens_per_second =
+                static_cast<double>(result.stats.generated_tokens) * 1000.0 /
+                result.stats.generation_ms;
+        }
+        return result;
+    } catch (const std::bad_alloc&) {
+        return make_error(
+            ErrorCode::resource_exhausted,
+            "Unable to allocate the bounded DeepSeek reference generation state");
+    }
+}
+
+std::string_view to_string(DeepseekV4ReferenceFinishReason reason) noexcept {
+    switch (reason) {
+        case DeepseekV4ReferenceFinishReason::stop_token: return "stop_token";
+        case DeepseekV4ReferenceFinishReason::context_limit: return "context_limit";
+        case DeepseekV4ReferenceFinishReason::max_tokens: return "max_tokens";
+        case DeepseekV4ReferenceFinishReason::cancelled: return "cancelled";
+        case DeepseekV4ReferenceFinishReason::timeout: return "timeout";
+    }
+    return "unknown";
 }
 
 }  // namespace vastloom::inference

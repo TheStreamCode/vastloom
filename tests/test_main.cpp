@@ -3095,6 +3095,206 @@ void test_deepseek_v4_reference_graph(const std::filesystem::path& root) {
                                    "mtp_attention_indices");
     }
 
+    const auto* greedy_generation_value = expected_value.find("greedy_generation");
+    CHECK(greedy_generation_value != nullptr);
+    if (greedy_generation_value == nullptr) return;
+    const auto expected_generation = unsigneds(*greedy_generation_value);
+    CHECK(expected_generation.size() == 8U);
+    vastloom::inference::DeepseekV4ReferenceGenerationOptions generation_options;
+    generation_options.max_new_tokens = expected_generation.size();
+    generation_options.top_k = 1U;
+    generation_options.temperature = 0.0F;
+    std::vector<std::uint32_t> streamed_tokens;
+    generation_options.on_token = [&](std::uint32_t token) {
+        streamed_tokens.push_back(token);
+    };
+    auto generated = vastloom::inference::deepseek_v4_reference_generate(
+        graph, token_ids, generation_options);
+    CHECK(generated);
+    if (generated) {
+        CHECK(generated.value().prompt_ids == token_ids);
+        CHECK(generated.value().generated_ids == expected_generation);
+        CHECK(streamed_tokens == expected_generation);
+        CHECK(generated.value().finish_reason ==
+              vastloom::inference::DeepseekV4ReferenceFinishReason::max_tokens);
+        CHECK(vastloom::inference::to_string(generated.value().finish_reason) ==
+              "max_tokens");
+        CHECK(!generated.value().stop_token_id.has_value());
+        CHECK(generated.value().stats.prompt_tokens == token_ids.size());
+        CHECK(generated.value().stats.generated_tokens == expected_generation.size());
+        CHECK(generated.value().stats.requested_max_tokens ==
+              expected_generation.size());
+        CHECK(generated.value().stats.effective_max_tokens ==
+              expected_generation.size());
+        CHECK(generated.value().stats.forward_passes == expected_generation.size());
+        CHECK(generated.value().stats.expert_requests == 0U);
+        CHECK(generated.value().stats.expert_cache_hits == 0U);
+        CHECK(generated.value().stats.expert_cache_misses == 0U);
+        CHECK(generated.value().stats.logical_expert_bytes_read == 0U);
+        CHECK(generated.value().stats.prompt_eval_ms >= 0.0);
+        CHECK(generated.value().stats.generation_ms >= 0.0);
+        CHECK(generated.value().stats.tokens_per_second >= 0.0);
+    }
+
+    auto stop_options = generation_options;
+    stop_options.on_token = {};
+    stop_options.stop_token_ids = {expected_generation.front()};
+    auto stopped = vastloom::inference::deepseek_v4_reference_generate(
+        graph, token_ids, stop_options);
+    CHECK(stopped && stopped.value().generated_ids.empty() &&
+          stopped.value().finish_reason ==
+              vastloom::inference::DeepseekV4ReferenceFinishReason::stop_token &&
+          stopped.value().stop_token_id == expected_generation.front() &&
+          stopped.value().stats.forward_passes == 1U);
+
+    auto context_options = generation_options;
+    context_options.on_token = {};
+    context_options.max_new_tokens = 8U;
+    context_options.context_limit_tokens = token_ids.size() + 2U;
+    auto context_limited = vastloom::inference::deepseek_v4_reference_generate(
+        graph, token_ids, context_options);
+    CHECK(context_limited &&
+          context_limited.value().generated_ids ==
+              std::vector<std::uint32_t>(expected_generation.begin(),
+                                         expected_generation.begin() + 2) &&
+          context_limited.value().finish_reason ==
+              vastloom::inference::DeepseekV4ReferenceFinishReason::context_limit &&
+          context_limited.value().stats.effective_max_tokens == 2U &&
+          context_limited.value().stats.forward_passes == 2U);
+
+    auto sampled_options = generation_options;
+    sampled_options.on_token = {};
+    sampled_options.max_new_tokens = 6U;
+    sampled_options.temperature = 0.7F;
+    sampled_options.top_k = 5U;
+    sampled_options.seed = 0x564153544c4f4f4dULL;
+    auto sampled_first = vastloom::inference::deepseek_v4_reference_generate(
+        graph, token_ids, sampled_options);
+    auto sampled_second = vastloom::inference::deepseek_v4_reference_generate(
+        graph, token_ids, sampled_options);
+    const std::vector<std::uint32_t> expected_sampled_generation{
+        4U, 11U, 13U, 2U, 13U, 11U};
+    CHECK(sampled_first && sampled_second &&
+          sampled_first.value().generated_ids == sampled_second.value().generated_ids &&
+          sampled_first.value().generated_ids == expected_sampled_generation);
+    auto tiny_temperature_options = sampled_options;
+    tiny_temperature_options.max_new_tokens = 2U;
+    tiny_temperature_options.temperature =
+        std::numeric_limits<float>::denorm_min();
+    auto tiny_temperature =
+        vastloom::inference::deepseek_v4_reference_generate(
+            graph, token_ids, tiny_temperature_options);
+    CHECK(tiny_temperature &&
+          tiny_temperature.value().generated_ids ==
+              std::vector<std::uint32_t>(expected_generation.begin(),
+                                         expected_generation.begin() + 2));
+
+    bool cancel_after_first = false;
+    auto generation_cancel_options = generation_options;
+    generation_cancel_options.max_new_tokens = 4U;
+    generation_cancel_options.on_token = [&](std::uint32_t) {
+        cancel_after_first = true;
+    };
+    generation_cancel_options.cancelled = [&] { return cancel_after_first; };
+    auto cancelled = vastloom::inference::deepseek_v4_reference_generate(
+        graph, token_ids, generation_cancel_options);
+    CHECK(cancelled && cancelled.value().generated_ids.size() == 1U &&
+          cancelled.value().generated_ids.front() == expected_generation.front() &&
+          cancelled.value().finish_reason ==
+              vastloom::inference::DeepseekV4ReferenceFinishReason::cancelled &&
+          cancelled.value().stats.forward_passes == 1U);
+
+    auto timeout_options = generation_options;
+    timeout_options.on_token = {};
+    timeout_options.timeout = std::chrono::milliseconds(1);
+    timeout_options.cancelled = [] {
+        std::this_thread::sleep_for(std::chrono::milliseconds(2));
+        return false;
+    };
+    auto timed_out = vastloom::inference::deepseek_v4_reference_generate(
+        graph, token_ids, timeout_options);
+    CHECK(timed_out && timed_out.value().generated_ids.empty() &&
+          timed_out.value().finish_reason ==
+              vastloom::inference::DeepseekV4ReferenceFinishReason::timeout);
+
+    auto invalid_generation = generation_options;
+    invalid_generation.max_new_tokens = 0U;
+    CHECK(!vastloom::inference::deepseek_v4_reference_generate(
+        graph, token_ids, invalid_generation));
+    invalid_generation = generation_options;
+    invalid_generation.temperature = std::numeric_limits<float>::quiet_NaN();
+    CHECK(!vastloom::inference::deepseek_v4_reference_generate(
+        graph, token_ids, invalid_generation));
+    invalid_generation = generation_options;
+    invalid_generation.top_k = config.vocabulary_size + 1U;
+    CHECK(!vastloom::inference::deepseek_v4_reference_generate(
+        graph, token_ids, invalid_generation));
+    invalid_generation = generation_options;
+    invalid_generation.context_limit_tokens = token_ids.size();
+    CHECK(!vastloom::inference::deepseek_v4_reference_generate(
+        graph, token_ids, invalid_generation));
+    invalid_generation = generation_options;
+    invalid_generation.stop_token_ids = {1U, 1U};
+    CHECK(!vastloom::inference::deepseek_v4_reference_generate(
+        graph, token_ids, invalid_generation));
+    invalid_generation = generation_options;
+    invalid_generation.stop_token_ids = {
+        static_cast<std::uint32_t>(config.vocabulary_size)};
+    CHECK(!vastloom::inference::deepseek_v4_reference_generate(
+        graph, token_ids, invalid_generation));
+    invalid_generation = generation_options;
+    invalid_generation.stop_token_ids.assign(65U, 1U);
+    CHECK(!vastloom::inference::deepseek_v4_reference_generate(
+        graph, token_ids, invalid_generation));
+    invalid_generation = generation_options;
+    invalid_generation.timeout = std::chrono::milliseconds::zero();
+    CHECK(!vastloom::inference::deepseek_v4_reference_generate(
+        graph, token_ids, invalid_generation));
+    invalid_generation = generation_options;
+    invalid_generation.cancelled = []() -> bool {
+        throw std::runtime_error("injected cancellation failure");
+    };
+    CHECK(!vastloom::inference::deepseek_v4_reference_generate(
+        graph, token_ids, invalid_generation));
+    invalid_generation = generation_options;
+    invalid_generation.on_token = [](std::uint32_t) {
+        throw std::runtime_error("injected callback failure");
+    };
+    CHECK(!vastloom::inference::deepseek_v4_reference_generate(
+        graph, token_ids, invalid_generation));
+
+    vastloom::inference::DeepseekV4ReferenceState checkpoint_state;
+    CHECK(vastloom::inference::deepseek_v4_reference_prefill(
+        graph, token_ids, &checkpoint_state));
+    const auto checkpoint_state_before = checkpoint_state;
+    std::size_t checkpoint_calls = 0U;
+    vastloom::inference::DeepseekV4ReferenceExecutionControl failing_control;
+    failing_control.checkpoint = [&]() -> vastloom::Result<void> {
+        if (++checkpoint_calls == 3U) {
+            return vastloom::make_error(
+                vastloom::ErrorCode::resource_exhausted,
+                "injected layer checkpoint failure");
+        }
+        return {};
+    };
+    CHECK(!vastloom::inference::deepseek_v4_reference_decode(
+        graph, expected_generation.front(), checkpoint_state, &failing_control));
+    CHECK(checkpoint_state.next_position == checkpoint_state_before.next_position);
+    CHECK(checkpoint_state.layers[0].window_key_values ==
+          checkpoint_state_before.layers[0].window_key_values);
+    CHECK(checkpoint_state.layers[1].compressor.compressed ==
+          checkpoint_state_before.layers[1].compressor.compressed);
+    auto unpublished_prefill_state = checkpoint_state_before;
+    checkpoint_calls = 0U;
+    CHECK(!vastloom::inference::deepseek_v4_reference_prefill(
+        graph, token_ids, &unpublished_prefill_state, &failing_control));
+    CHECK(unpublished_prefill_state.next_position ==
+          checkpoint_state_before.next_position);
+    CHECK(unpublished_prefill_state.layers[0].window_key_values ==
+          checkpoint_state_before.layers[0].window_key_values);
+    CHECK(unpublished_prefill_state.layers[1].compressor.compressed ==
+          checkpoint_state_before.layers[1].compressor.compressed);
+
     // Exercise embedding lookup and the output head from bounded Q4_K storage. The scalar
     // Q4_K test above is pinned independently to ggml; this graph oracle contains its decoded
     // logical columns and therefore verifies both prefill and incremental integration.
@@ -5852,6 +6052,54 @@ void test_deepseek_v4_reference_graph(const std::filesystem::path& root) {
             dynamic_graph.expert_providers.clear();
             CHECK(expert_cache != nullptr && expert_cache->clear());
             expert_cache.reset();
+
+            // The token-level driver must aggregate the exact cache telemetry exposed by every
+            // routed expert access rather than inferring traffic from model dimensions.
+            auto generation_cache_result =
+                vastloom::inference::DeepseekV4BoundedExpertCache::create(
+                    expert_bindings, governor, cache_options);
+            CHECK(generation_cache_result);
+            if (generation_cache_result) {
+                auto generation_cache = generation_cache_result.take_value();
+                auto generation_graph = dynamic_graph;
+                generation_graph.expert_providers.emplace(
+                    "layers.0.ffn", generation_cache->provider_binding());
+                vastloom::inference::DeepseekV4ReferenceGenerationOptions
+                    cache_generation_options;
+                cache_generation_options.max_new_tokens = 3U;
+                cache_generation_options.top_k = 1U;
+                auto oracle_generation =
+                    vastloom::inference::deepseek_v4_reference_generate(
+                        quantized_oracle, dynamic_prompt,
+                        cache_generation_options);
+                auto cached_generation =
+                    vastloom::inference::deepseek_v4_reference_generate(
+                        generation_graph, dynamic_prompt,
+                        cache_generation_options);
+                CHECK(oracle_generation && cached_generation &&
+                      cached_generation.value().generated_ids ==
+                          oracle_generation.value().generated_ids);
+                if (cached_generation) {
+                    const auto cache_snapshot = generation_cache->snapshot();
+                    const auto& stats = cached_generation.value().stats;
+                    CHECK(stats.forward_passes == 3U &&
+                          stats.expert_requests == 6U &&
+                          stats.expert_cache_hits == cache_snapshot.hits &&
+                          stats.expert_cache_misses == cache_snapshot.misses &&
+                          stats.expert_cache_hits + stats.expert_cache_misses ==
+                              stats.expert_requests &&
+                          stats.logical_expert_bytes_read ==
+                              cache_snapshot.logical_bytes_read &&
+                          stats.resident_expert_bytes ==
+                              stats.expert_requests *
+                                  expert_bindings.front().bundle.bytes &&
+                          stats.expert_load_service_ms >= 0.0 &&
+                          stats.expert_compute_ms >= 0.0 &&
+                          stats.io_compute_overlap_ms >= 0.0);
+                }
+                generation_graph.expert_providers.clear();
+                CHECK(generation_cache->clear());
+            }
 
             // The asynchronous provider submits the complete selected miss set, but the graph
             // acquires one expert only when its authoritative numeric compute turn begins. An

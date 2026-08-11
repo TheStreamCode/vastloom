@@ -285,6 +285,52 @@ def build_fixture(official_model: Path) -> dict:
                 }
             )
 
+        # Generate a separate autoregressive greedy reference from a fresh model so the
+        # arbitrary incremental probes above cannot contaminate its KV/compressor state.
+        generation_model = official.Transformer(args).float().eval()
+        initialize_model(torch, generation_model)
+        for layer in generation_model.layers:
+            if layer.ffn.gate.hash:
+                layer.ffn.gate.tid2eid = torch.nn.Parameter(
+                    layer.ffn.gate.tid2eid.long(), requires_grad=False
+                )
+        generation_hidden = generation_model.embed(token_ids)
+        generation_hidden = generation_hidden.unsqueeze(2).repeat(
+            1, 1, generation_model.hc_mult, 1
+        )
+        for layer in generation_model.layers:
+            generation_hidden = layer(generation_hidden, 0, token_ids)
+        generation_logits = generation_model.head(
+            generation_hidden,
+            generation_model.hc_head_fn,
+            generation_model.hc_head_scale,
+            generation_model.hc_head_base,
+            generation_model.norm,
+        )
+        greedy_generation = []
+        greedy_generation_steps = 8
+        for offset in range(greedy_generation_steps):
+            generated_token = int(generation_logits.argmax(dim=-1).item())
+            greedy_generation.append(generated_token)
+            if offset + 1 == greedy_generation_steps:
+                break
+            generated_ids = torch.tensor([[generated_token]], dtype=torch.long)
+            generation_hidden = generation_model.embed(generated_ids)
+            generation_hidden = generation_hidden.unsqueeze(2).repeat(
+                1, 1, generation_model.hc_mult, 1
+            )
+            for layer in generation_model.layers:
+                generation_hidden = layer(
+                    generation_hidden, token_ids.numel() + offset, generated_ids
+                )
+            generation_logits = generation_model.head(
+                generation_hidden,
+                generation_model.hc_head_fn,
+                generation_model.hc_head_scale,
+                generation_model.hc_head_base,
+                generation_model.norm,
+            )
+
     tensors: dict[str, list[float] | list[int]] = {}
     tensor_dtypes: dict[str, str] = {}
     for name, parameter in model.named_parameters():
@@ -332,7 +378,7 @@ def build_fixture(official_model: Path) -> dict:
         "swiglu_limit": args.swiglu_limit,
     }
     return {
-        "format": "vastloom.deepseek_v4.graph_fixture.v2",
+        "format": "vastloom.deepseek_v4.graph_fixture.v3",
         "official_revision": OFFICIAL_REVISION,
         "official_model_sha256": OFFICIAL_MODEL_SHA256,
         "reference_mode": "official-model.py-fp32-with-equivalent-cpu-kernel-stubs",
@@ -364,6 +410,7 @@ def build_fixture(official_model: Path) -> dict:
                 )
             ],
             "incremental": incremental,
+            "greedy_generation": greedy_generation,
         },
     }
 
@@ -374,7 +421,7 @@ def render(official_model: Path) -> str:
 
 def validate_committed_fixture(output: Path) -> None:
     payload = json.loads(output.read_text(encoding="utf-8"))
-    if payload.get("format") != "vastloom.deepseek_v4.graph_fixture.v2":
+    if payload.get("format") != "vastloom.deepseek_v4.graph_fixture.v3":
         raise RuntimeError("unexpected DeepSeek graph fixture format")
     if payload.get("official_revision") != OFFICIAL_REVISION:
         raise RuntimeError("DeepSeek graph fixture revision is not pinned")
@@ -408,6 +455,14 @@ def validate_committed_fixture(output: Path) -> None:
         raise RuntimeError("DeepSeek graph fixture decode tokens are incomplete")
     if not isinstance(incremental, list) or len(incremental) != len(decode_token_ids):
         raise RuntimeError("DeepSeek graph fixture incremental references are incomplete")
+    greedy_generation = expected.get("greedy_generation")
+    if not isinstance(greedy_generation, list) or len(greedy_generation) != 8:
+        raise RuntimeError("DeepSeek graph fixture greedy generation is incomplete")
+    if any(
+        not isinstance(token, int) or token < 0 or token >= config.get("vocabulary_size", 0)
+        for token in greedy_generation
+    ):
+        raise RuntimeError("DeepSeek graph fixture greedy generation token is invalid")
     for step in incremental:
         if len(step.get("routes", [])) != config.get("layers"):
             raise RuntimeError("DeepSeek graph fixture incremental routes are incomplete")

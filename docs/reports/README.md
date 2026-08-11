@@ -13,6 +13,10 @@ hardware, commands, measurements and limitations.
 
 ## Current report
 
+- [`M9_DEEPSEEK_Q4K_GLOBAL_KERNEL_VALIDATION.md`](M9_DEEPSEEK_Q4K_GLOBAL_KERNEL_VALIDATION.md) —
+  pinned-ggml Q4_K scalar dequantization/matvec parity, bounded complete-matrix single-row lookup
+  and reduced packed embedding/output prefill plus incremental graph parity, with no official
+  payload acquisition.
 - [`M9_DEEPSEEK_CHECKPOINT_CATALOG_VALIDATION.md`](M9_DEEPSEEK_CHECKPOINT_CATALOG_VALIDATION.md) —
   zero-payload closure of all six global consumers, 11,008 expert bundles, 33,024 routed slices,
   1,328 physical tensors, 34,223 logical descriptors and 82,533,892,444 known tensor bytes, with

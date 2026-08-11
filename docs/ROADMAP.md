@@ -281,10 +281,14 @@ unbounded allocation and clean recovery from injected CUDA failures.
 - [x] Close the complete pinned GGUF catalog without payload access. Six global consumers,
   11,008 routed bundles and 33,024 logical expert slices now reconcile with the 1,193 layer
   tensors: 1,328 physical objects, 34,223 logical descriptors and 82,533,892,444 known tensor
-  bytes partition exactly. Q4_K/IQ2_XXS/MXFP4 remain layout-only; see the
+  bytes partition exactly. At that zero-payload gate Q4_K/IQ2_XXS/MXFP4 remained layout-only; see the
   [checkpoint catalog validation](reports/M9_DEEPSEEK_CHECKPOINT_CATALOG_VALIDATION.md).
-- [ ] Add pinned-ggml parity kernels for Q4_K, IQ2_XXS and MXFP4 plus a bounded packed embedding
-  lookup, then bind the six global consumers without weakening the execution gate.
+- [x] Add pinned-ggml Q4_K parity, transactional matvec and bounded packed-row lookup; consume
+  reduced packed embedding/output matrices in prefill and incremental decode without allocating
+  the full FP32 table. See the
+  [Q4_K global-kernel validation](reports/M9_DEEPSEEK_Q4K_GLOBAL_KERNEL_VALIDATION.md).
+- [ ] Add pinned-ggml parity kernels for IQ2_XXS and MXFP4, then bind all six retained global
+  consumers without weakening the execution gate.
 - [ ] Execute that probe by acquiring the bounded official trunk ranges, decoding the real
   `tid2eid` route and loading only its six selected complete expert bundles.
 - [ ] Pinned host buffers.

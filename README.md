@@ -91,8 +91,10 @@ model conversion.
 > uncompressed/hash, 4:1 compressor/indexer and 128:1 compressor consumers. A second zero-payload
 > closure now validates the six global consumers and all 11,008 expert bundles / 33,024 logical
 > expert slices. The complete partition is exact: 1,328 physical tensors become 34,223 logical
-> descriptors accounting for 82,533,892,444 known tensor bytes. Q4_K embedding/output and the
-> mixed IQ2_XXS/MXFP4 expert variants are layout-validated only and still lack native kernels.
+> descriptors accounting for 82,533,892,444 known tensor bytes. Q4_K now has a scalar
+> pinned-ggml oracle, transactional matvec and bounded row lookup; reduced packed embedding and
+> output-head prefill/decode match their dequantized graph oracle. The mixed IQ2_XXS/MXFP4 expert
+> variants remain layout-validated only and still lack native kernels.
 > The complete 82.54 GB payload
 > has not been downloaded or executed; this synthetic gate is not a complete official DeepSeek
 > layer/token path,
@@ -189,6 +191,8 @@ The complete 43-layer/1,193-descriptor metadata-to-consumer contract is document
 [`M9 all-layer catalog report`](docs/reports/M9_DEEPSEEK_ALL_LAYER_CATALOG_VALIDATION.md).
 The full global/trunk/expert physical and logical closure is documented in the
 [`M9 checkpoint catalog report`](docs/reports/M9_DEEPSEEK_CHECKPOINT_CATALOG_VALIDATION.md).
+The first packed global-weight execution slice is documented in the
+[`M9 Q4_K global-kernel report`](docs/reports/M9_DEEPSEEK_Q4K_GLOBAL_KERNEL_VALIDATION.md).
 The pinned importer and immutable full-source admission boundary are documented in the
 [`M7 checkpoint-binding report`](docs/reports/M7_DEEPSEEK_GGUF_CHECKPOINT_BINDING_VALIDATION.md).
 Current and candidate model support is kept explicit in the
@@ -362,9 +366,10 @@ portability target, not a validated platform claim.
   layouts. The 1,328 physical entries partition into 1,193 non-routed layer tensors, six globals
   and 129 packed expert containers. The logical view contains 34,223 descriptors: 1,193 layer
   tensors, six globals and 33,024 slices across 11,008 bundles. Always-active 6,986,088,796 bytes
-  plus routed 75,547,803,648 bytes equals 82,533,892,444 known tensor bytes. Q4_K, IQ2_XXS and
-  MXFP4 receive bounded layout arithmetic only; `supports_reference_matvec_ggml_type` remains
-  false for them, so this gate does not authorize execution.
+  plus routed 75,547,803,648 bytes equals 82,533,892,444 known tensor bytes. This catalog gate
+  itself performs layout arithmetic only. A later parity gate now enables scalar Q4_K and a
+  bounded packed embedding/output path; IQ2_XXS and MXFP4 remain rejected by
+  `supports_reference_matvec_ggml_type`.
 - **Header-derived traffic floor:** the encoded routed experts total 75,547,803,648 bytes;
   a top-6 no-cache decode would request 1,770,651,648 logical expert bytes per token before
   caching/prefetch gains. This is not measured physical SSD traffic or a speed claim.
@@ -895,16 +900,17 @@ It currently has:
   FP32 prefill oracle, file-backed governed Q8_0 layer, official 0731 GGUF metadata catalog and
   verified source-binding boundary; no full-checkpoint DeepSeek, MiniMax or Kimi execution adapter;
 - no CUDA, ROCm, Vulkan or Metal inference backend;
-- scalar IQ1_S/IQ3_XXS expert and Q8_0/Q5_K/Q6_K/BF16/F32 trunk reference kernels, plus bounded
-  I32 router-table decoding, one deterministic reduced mixed-format layer composition and one
+- scalar IQ1_S/IQ3_XXS expert, Q4_K global and Q8_0/Q5_K/Q6_K/BF16/F32 trunk reference kernels,
+  plus bounded Q4_K row lookup and I32 router-table decoding, one deterministic reduced
+  mixed-format layer composition and one
   separately validated real selected-expert cache/kernel bridge; an exact checkpoint-shaped range
   plan exists, but no authoritative official-payload route/layer/token execution, SIMD/fused
   production kernel or CUDA path;
 - complete metadata-derived trunk plans and storage-type coverage plus a governed
   tile/expert-to-DeepSeek fixture consumer and reduced router-first bounded expert cache with an
   opt-in single-owner asynchronous batch; partial immutable range publication and a native
-  closed-world verifier/exact trunk binder now feed a complete reduced packed trunk catalog into
-  one aggregate governed tensor set, but retained F32/BF16 vector bindings, any official trunk
+  closed-world verifier/exact trunk binder now feed a complete reduced packed trunk catalog,
+  including retained F32/BF16 vectors, into one aggregate governed tensor set; any official trunk
   payload read and the full-model loop remain absent;
 - no VRAM expert tier or pinned host buffers; direct/unbuffered I/O is currently an
   opt-in OLMoE measurement protocol, not the production path for every adapter;
@@ -934,21 +940,22 @@ merely SSD throughput. It is:
 
 The next technical sequence remains incremental:
 
-1. after explicit user authorization, use the completed bounded importer to acquire only the exact
+1. complete the remaining IQ2_XXS/MXFP4 scalar parity gates and the retained six-global binder;
+2. after explicit user authorization, use the completed bounded importer to acquire only the exact
    138,867,160-byte layer-0 trunk ranges while preserving the model-store free-space reserve;
-2. bind and execute those 21 official objects through the now-verified metadata-derived reference
+3. bind and execute those 21 official objects through the now-verified metadata-derived reference
    configuration, then decode the official `tid2eid` route for a pinned input;
-3. acquire only that route's six complete
+4. acquire only that route's six complete
    selected expert bundles (38,928,384 bytes for layer 0) and match the official layer output;
-4. measure useful physical-device expert-read/compute overlap with declared cache state and exact
+5. measure useful physical-device expert-read/compute overlap with declared cache state and exact
    logical, process-visible and device bytes;
-5. only after explicit approval and a fresh capacity check, import and fully hash complete pinned
+6. only after explicit approval and a fresh capacity check, import and fully hash complete pinned
    shards when a later gate actually requires them;
-6. connect a target-verified MTP decoding loop, then add CUDA dense, attention, router and packed
+7. connect a target-verified MTP decoding loop, then add CUDA dense, attention, router and packed
    expert kernels;
-7. explicit VRAM/RAM/NVMe placement with pinned buffers and direct/overlapped I/O;
-8. adaptive placement, predictive routing and speculative expert deduplication;
-9. OpenAI-compatible local server and coding-agent integration.
+8. explicit VRAM/RAM/NVMe placement with pinned buffers and direct/overlapped I/O;
+9. adaptive placement, predictive routing and speculative expert deduplication;
+10. OpenAI-compatible local server and coding-agent integration.
 
 Detailed acceptance gates are in [`docs/ROADMAP.md`](docs/ROADMAP.md).
 The reference-PC working-set rule is defined in

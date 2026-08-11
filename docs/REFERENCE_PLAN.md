@@ -128,11 +128,12 @@ It maps the six global embedding/output/normalization/Hyper-Connection objects t
 consumers, checks all 11,008 deterministic expert bundles and their 33,024 one-to-one logical
 slices, and reconciles physical, logical and byte partitions. The real pinned result is 1,328
 physical tensors, 34,223 logical descriptors and 82,533,892,444 known tensor bytes. This also
-surfaces the remaining execution formats explicitly: global Q4_K, routed IQ2_XXS and routed
-MXFP4 have bounded byte-layout validation but no native kernel claim.
+surfaces the remaining execution formats explicitly. Global Q4_K now has a separately validated
+scalar kernel and bounded packed-row path; routed IQ2_XXS and MXFP4 retain bounded byte-layout
+validation but no native kernel claim.
 
-After their parity kernels and packed global binding exist, the payload gate requires explicit
-user authorization to acquire the exact 138,867,160-byte trunk ranges, execute the real
+After the IQ2_XXS/MXFP4 parity kernels and retained packed-global binding exist, the payload gate
+requires explicit user authorization to acquire the exact 138,867,160-byte trunk ranges, execute the real
 `tid2eid` route for a pinned input and fetch only its six selected complete experts.
 
 Kimi K3 is not a reference-PC execution target. The project treats it as metadata/capacity-only

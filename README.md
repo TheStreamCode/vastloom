@@ -583,6 +583,16 @@ so accented prompts are not dependent on the legacy ANSI code page.
 A CMake install also copies the validation fixture to `share/vastloom/models` beneath
 the selected install prefix.
 
+### What a green run does and does not prove
+
+The default build registers the tests whose inputs live in the repository. The real-model and real
+GPU checks are opt-in: they only run where their checkpoints, slices or NVIDIA driver are present,
+and none of them runs in CI. [`docs/VALIDATION_MATRIX.md`](docs/VALIDATION_MATRIX.md) lists every
+test, the CMake variable that enables it and the artifact it needs, including
+`tools/fetch_deepseek_test_slices.py` for the 6,488,064 bytes of pinned expert slices. Governed
+commands report `SKIPPED` with the reason when the host is too short on memory or disk to run them
+safely, so read the run output rather than the exit code alone.
+
 ## Chat with the bundled model
 
 Run the deterministic model self-test first:

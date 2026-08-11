@@ -2,6 +2,26 @@
 
 ## Unreleased
 
+- Separated environment refusals from defects across the governed test suite. A Safety Governor
+  refusal caused by host memory pressure was reported as a test failure, so an unrelated process
+  holding 20 GiB made four tests fail on one run and five different tests fail on the next. Every
+  registered test now carries `SKIP_RETURN_CODE 75`, the CLI's own `resource_exhausted` code, and
+  CTest reports those contracts as skipped. `tests/host_pressure.py` gives the Python drivers the
+  same outcome and recognises only the three refusals raised by `make_safe_runtime_policy` before
+  any work starts; VRAM budget, allocation, parity and malformed-output failures still fail. The
+  two zero-payload GGUF contracts moved from one positional `PASS_REGULAR_EXPRESSION` each to
+  explicit per-key JSON comparison of the same 24 and 7 pinned values, so field reordering can no
+  longer weaken them.
+
+- Added `docs/VALIDATION_MATRIX.md`, which maps every documented claim to the test that defends it,
+  the CMake variable that enables that test and the artifact it requires. It records what the
+  13 always-on tests cover, which 11 tests are opt-in, and that neither real-model parity nor real
+  GPU execution is re-checked by CI. `tools/fetch_deepseek_test_slices.py` restores the three
+  pinned expert slices (6,488,064 bytes) behind an explicit `--allow-download` flag with per-range
+  length and SHA-256 verification, so the M7 real-expert evidence is reproducible on a clean
+  machine. The eight earlier alpha-era reports are now listed in `docs/reports/README.md` instead
+  of remaining unreferenced.
+
 - Added the first real CUDA math path without a toolkit dependency: one Governor-owned packed
   FP32 buffer, synchronous host/device copies and an embedded scalar PTX RMSNorm. The explicit
   `cuda-info --rmsnorm-smoke` gate matches the DeepSeek CPU reference within `3e-5` on the RTX

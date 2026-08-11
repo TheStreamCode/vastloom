@@ -158,6 +158,14 @@ External model tests are opt-in through the `VASTLOOM_*_MODEL` CMake paths. Run 
 serially. Distinguish simulated traces, warm-cache measurements, process-visible I/O and physical
 device traffic in every report.
 
+[`docs/VALIDATION_MATRIX.md`](docs/VALIDATION_MATRIX.md) maps every claim to the test that defends
+it, the CMake variable that enables that test and the artifact it needs. Consult it before writing
+a present-tense claim: a green `ctest` only covers what the current machine has configured, and
+neither the real-model tests nor the live CUDA kernel run in CI. Contracts the Safety Governor
+refuses because the host is short on memory or disk exit with code 75 and are reported by CTest as
+skipped, not passed; report the skip count alongside the pass count and never convert a skip into a
+passing claim.
+
 ## Claims and commits
 
 Never say a model, backend, optimization, package or platform works unless it was built and tested.

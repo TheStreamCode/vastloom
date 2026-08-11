@@ -177,3 +177,28 @@ The latest release-level report remains
 [`ALPHA4_OPEN_SOURCE_REBRAND_VALIDATION.md`](ALPHA4_OPEN_SOURCE_REBRAND_VALIDATION.md),
 covering the Vastloom rebrand, compatibility, governance, release packaging, visual
 assets and cross-platform validation.
+
+## Earlier milestone reports
+
+These records predate the milestone numbering and several predate the Vastloom name. They remain
+the evidence for the paths that later work builds on, so they are listed here rather than left
+unreferenced:
+
+- [`ALPHA4_IO_OBSERVABILITY_VALIDATION.md`](ALPHA4_IO_OBSERVABILITY_VALIDATION.md) — process-visible
+  I/O deltas separated from physical device traffic, plus exact unique-expert reuse distance in the
+  real OLMoE pipeline.
+- [`ALPHA4_ASYNC_IO_VALIDATION.md`](ALPHA4_ASYNC_IO_VALIDATION.md) — the OLMoE CPU oracle connected
+  to the bounded one-worker asynchronous expert-I/O path with measured read-service/CPU overlap.
+- [`ALPHA4_OLMOE_VALIDATION.md`](ALPHA4_OLMOE_VALIDATION.md) — the pinned OLMoE adapter, top-8
+  routing parity and NVMe-to-RAM expert streaming under a RAM cap below checkpoint size (M4/M5).
+- [`ALPHA3_SMOLLM2_VALIDATION.md`](ALPHA3_SMOLLM2_VALIDATION.md) — the pinned SmolLM2-135M-Instruct
+  dense CPU path with tokenizer, logit and greedy-output parity against Transformers (M3).
+- [`REAL_MODEL_INFRASTRUCTURE_VALIDATION.md`](REAL_MODEL_INFRASTRUCTURE_VALIDATION.md) — bounded
+  JSON/Safetensors parsing, immutable import and model-store foundations shared by every later
+  real-model adapter.
+- [`ALPHA2_WINDOWS_VALIDATION.md`](ALPHA2_WINDOWS_VALIDATION.md) — the alpha.2 source revalidated on
+  the Windows 11 reference PC, including the wide-character and UTF-8 console paths.
+- [`ALPHA2_VALIDATION.md`](ALPHA2_VALIDATION.md) — the first complete native CPU inference path:
+  verified manifest, TinyTransformer loader, KV cache, decoding and CLI (M2).
+- [`ALPHA1_VALIDATION.md`](ALPHA1_VALIDATION.md) — the research harness, safety state machine and
+  reservation core (M0/M1).

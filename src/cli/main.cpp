@@ -1669,8 +1669,11 @@ int command_deepseek_forward(const std::vector<std::string>& args) {
     auto process_guard = vastloom::safety::ProcessSafetyGuard::apply(policy.value());
     if (!process_guard) return print_error(process_guard.error(), json);
 
+    // Executable source ranges require the full-hash gate: a checkpoint is only readable here after
+    // every complete file has been verified against its pinned SHA-256. That costs one pass over the
+    // payload and is the difference between planning and running.
     vastloom::inference::DeepseekV4GgufCheckpointInspectOptions inspect_options;
-    inspect_options.verify_hashes = false;
+    inspect_options.verify_hashes = true;
     inspect_options.context_tokens = static_cast<std::uint32_t>(context.value());
     inspect_options.batch_size = static_cast<std::uint32_t>(batch_size.value());
     inspect_options.safe_ram_cap_bytes = policy.value().resources.host_memory_hard_limit;

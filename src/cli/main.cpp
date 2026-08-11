@@ -1633,7 +1633,7 @@ int command_deepseek_forward(const std::vector<std::string>& args) {
     auto valid = validate_options(
         args, 1U,
         {"--token", "--layers", "--context", "--batch-size", "--expert-cache", "--prompt",
-         "--tokenizer"},
+         "--tokenizer", "--max-tokens"},
         {"--json", "--dry-run", "--chat"});
     if (!valid) return print_error(valid.error(), json);
     if (args.empty() || vastloom::util::starts_with(args.front(), "--")) {
@@ -1647,15 +1647,18 @@ int command_deepseek_forward(const std::vector<std::string>& args) {
     auto context = optional_size(args, "--context", 4'096U);
     auto batch_size = optional_size(args, "--batch-size", 1U);
     auto expert_cache = optional_size(args, "--expert-cache", 8U);
+    auto max_tokens = optional_size(args, "--max-tokens", 1U);
     if (!token) return print_error(token.error(), json);
     if (!requested_layers) return print_error(requested_layers.error(), json);
     if (!context) return print_error(context.error(), json);
     if (!batch_size) return print_error(batch_size.error(), json);
     if (!expert_cache) return print_error(expert_cache.error(), json);
+    if (!max_tokens) return print_error(max_tokens.error(), json);
     if (token.value() > std::numeric_limits<std::uint32_t>::max() ||
         requested_layers.value() == 0U || requested_layers.value() > 128U ||
         context.value() == 0U || context.value() > 1'048'576U ||
         batch_size.value() == 0U || batch_size.value() > 8U ||
+        max_tokens.value() == 0U || max_tokens.value() > 512U ||
         expert_cache.value() == 0U || expert_cache.value() > 64U) {
         return print_error(
             vastloom::make_error(vastloom::ErrorCode::invalid_argument,
@@ -1881,6 +1884,68 @@ int command_deepseek_forward(const std::vector<std::string>& args) {
         std::chrono::steady_clock::now() - load_started).count();
 
     const auto started = std::chrono::steady_clock::now();
+    const bool complete = depth == config.value().layer_count;
+
+    // More than one new token means the decode loop, which reuses the KV state instead of
+    // re-running the prompt. Each step routes a single token, so its expert working set is the
+    // smallest the model ever needs.
+    if (max_tokens.value() > 1U) {
+        vastloom::inference::DeepseekV4ReferenceGenerationOptions options;
+        options.max_new_tokens = max_tokens.value();
+        options.temperature = 0.0F;
+        options.timeout = std::chrono::hours(2);
+        if (tokenizer.has_value()) {
+            options.stop_token_ids.push_back(1U);  // <|end of sentence|>
+        }
+        auto generated = vastloom::inference::deepseek_v4_reference_generate(
+            graph, token_ids, options, &process_guard.value());
+        if (!generated) return print_error(generated.error(), json);
+        const auto generate_elapsed = std::chrono::duration<double, std::milli>(
+            std::chrono::steady_clock::now() - started).count();
+        std::string text;
+        if (tokenizer.has_value()) {
+            auto decoded = tokenizer->decode(generated.value().generated_ids, false);
+            if (decoded) text = decoded.take_value();
+        }
+        const auto& stats = generated.value().stats;
+        if (json) {
+            std::cout << "{\"ok\":true,\"complete_model\":" << (complete ? "true" : "false")
+                      << ",\"executed_layers\":" << depth
+                      << ",\"model_layers\":" << config.value().layer_count
+                      << ",\"prompt_tokens\":" << stats.prompt_tokens
+                      << ",\"generated_tokens\":" << stats.generated_tokens
+                      << ",\"finish_reason\":\""
+                      << vastloom::inference::to_string(generated.value().finish_reason)
+                      << "\",\"text\":\"" << vastloom::util::json_escape(text)
+                      << "\",\"expert_bytes_read\":" << stats.logical_expert_bytes_read
+                      << ",\"forward_passes\":" << stats.forward_passes
+                      << ",\"resident_bytes\":" << required
+                      << ",\"load_ms\":" << load_elapsed
+                      << ",\"generate_ms\":" << generate_elapsed
+                      << ",\"ms_per_token\":"
+                      << (stats.generated_tokens == 0U
+                              ? 0.0
+                              : generate_elapsed / static_cast<double>(stats.generated_tokens))
+                      << '}' << '\n';
+        } else {
+            std::cout << "Executed layers:      " << depth << " of "
+                      << config.value().layer_count << '\n'
+                      << "Prompt / generated:   " << stats.prompt_tokens << " / "
+                      << stats.generated_tokens << " tokens ("
+                      << vastloom::inference::to_string(generated.value().finish_reason) << ")\n"
+                      << "Output:               " << text << '\n'
+                      << "Expert bytes read:    " << stats.logical_expert_bytes_read << '\n'
+                      << "Weight load:          " << load_elapsed << " ms\n"
+                      << "Generation:           " << generate_elapsed << " ms";
+            if (stats.generated_tokens != 0U) {
+                std::cout << " (" << generate_elapsed / static_cast<double>(stats.generated_tokens)
+                          << " ms/token)";
+            }
+            std::cout << '\n';
+        }
+        return 0;
+    }
+
     auto forward = vastloom::inference::deepseek_v4_reference_prefill(graph, token_ids);
     if (!forward) return print_error(forward.error(), json);
     const auto elapsed = std::chrono::duration<double, std::milli>(
@@ -1898,7 +1963,6 @@ int command_deepseek_forward(const std::vector<std::string>& args) {
         expert_bytes_read += snapshot.logical_bytes_read;
         expert_misses += snapshot.misses;
     }
-    const bool complete = depth == config.value().layer_count;
 
     if (json) {
         std::cout << "{\"ok\":true,\"complete_model\":" << (complete ? "true" : "false")

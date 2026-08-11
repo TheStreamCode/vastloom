@@ -353,6 +353,17 @@ type and recomputed byte count is checked. Unexpected non-routed tensors fail th
 The real headers validate 43 layers, 1,193 descriptors and 6,390,088,008 encoded bytes, matching
 the independently built layer planner totals without payload allocation or reads.
 
+The checkpoint catalog validator then closes the objects outside that layer-only view. Six
+global descriptors are matched to token embedding, LM head, output normalization and the three
+Hyper-Connection head consumers. Every `(layer, expert)` bundle must contain exactly one canonical
+down, gate and up slice, every slice must be claimed once, its packed range must remain in bounds,
+and coalesced read bytes must equal the bundle total. The physical partition must be exactly
+`1,193 layer + 6 global + 129 packed expert = 1,328`; the logical partition must be
+`1,193 + 6 + 33,024 = 34,223`. Checked byte accumulation must close at 82,533,892,444 bytes.
+Q4_K, IQ2_XXS and MXFP4 are recognized here only as GGML block layouts. They remain outside
+`supports_reference_matvec_ggml_type`, preserving the distinction between inspection and native
+execution.
+
 Every non-routed `blk.N.*` descriptor now retains its checked layer identity. The shared layer
 planner walks catalog order, excludes routed-expert bundles and splits each immutable tensor range
 at a 64 MiB ceiling. On the real 0731 metadata this produces complete plans for 43/43 layers:

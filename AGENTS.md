@@ -66,8 +66,14 @@ the real 4,096/2,048 expert is not yet composed with official trunk payload. The
 buffer-free validator maps all 1,193 official non-routed layer descriptors across 43 layers to
 exact graph-consumer dimensions and encoded storage sizes: 21-object uncompressed/hash layouts,
 31-object 4:1 compressor/indexer layouts and 25-object 128:1 compressor layouts total
-6,390,088,008 bytes. No official trunk tensor was loaded. A complete 0731
-quantized layer/token path, physical NVMe overlap, generation and CUDA remain unvalidated.
+6,390,088,008 bytes. No official trunk tensor was loaded. A complete zero-payload checkpoint
+catalog pass now closes the six global consumers, all 11,008 expert bundles and all 33,024
+logical expert slices as well: 1,328 physical tensors partition into 1,193 layer tensors, six
+globals and 129 packed expert containers, while 34,223 logical tensors account for exactly
+82,533,892,444 encoded bytes. Q4_K global weights plus IQ2_XXS/MXFP4 expert variants have bounded
+layout-only byte validation; they do not yet have native execution kernels. No official payload
+was read by this pass. A complete 0731 quantized layer/token path, physical NVMe overlap,
+generation and CUDA remain unvalidated.
 Windows and Linux CPU paths are tested; macOS/Metal remain unvalidated. Laguna S 2.1 remains a
 reviewed compatibility target, not a validated execution path.
 

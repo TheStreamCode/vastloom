@@ -254,6 +254,12 @@ The 0731 GGUF reader adds a metadata-only safety boundary:
   or reading tensor payload. Missing, unexpected, wrong-layer, wrong-role, wrong-shape,
   unsupported-storage and byte-count mismatches fail closed. These booleans do not authorize
   execution;
+- the complete checkpoint-catalog pass remains buffer-free and reads only the verified header
+  artifact. Its only aggregate allocation is one bounded claim bit per 34,223 logical descriptor.
+  It publishes success only after six globals, 11,008 bundles, 33,024 expert slices, the
+  1,328-object physical partition and all 82,533,892,444 known tensor bytes close exactly;
+- recognizing Q4_K, IQ2_XXS and MXFP4 block sizes never exposes execution. All three remain
+  rejected by the native matvec capability query until parity-tested kernels are implemented;
 - a header-prefix path cannot be used as an executable tensor source. Full source paths are
   exposed only for a complete immutable import after every full-file SHA-256 succeeds and one
   expert bundle fits wholly in safe RAM or wholly in safe VRAM. `--no-verify` forces metadata-only

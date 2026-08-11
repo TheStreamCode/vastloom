@@ -278,6 +278,13 @@ unbounded allocation and clean recovery from injected CUDA failures.
   uncompressed/hash, 4:1 compressor/indexer and 128:1 compressor layouts validate all 1,193
   non-routed descriptors and 6,390,088,008 encoded bytes against native consumers; see the
   [all-layer catalog validation](reports/M9_DEEPSEEK_ALL_LAYER_CATALOG_VALIDATION.md).
+- [x] Close the complete pinned GGUF catalog without payload access. Six global consumers,
+  11,008 routed bundles and 33,024 logical expert slices now reconcile with the 1,193 layer
+  tensors: 1,328 physical objects, 34,223 logical descriptors and 82,533,892,444 known tensor
+  bytes partition exactly. Q4_K/IQ2_XXS/MXFP4 remain layout-only; see the
+  [checkpoint catalog validation](reports/M9_DEEPSEEK_CHECKPOINT_CATALOG_VALIDATION.md).
+- [ ] Add pinned-ggml parity kernels for Q4_K, IQ2_XXS and MXFP4 plus a bounded packed embedding
+  lookup, then bind the six global consumers without weakening the execution gate.
 - [ ] Execute that probe by acquiring the bounded official trunk ranges, decoding the real
   `tid2eid` route and loading only its six selected complete expert bundles.
 - [ ] Pinned host buffers.

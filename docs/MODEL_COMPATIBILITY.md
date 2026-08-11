@@ -14,7 +14,7 @@ or matching tensor dimensions is never enough to enable execution automatically.
 | OLMoE-1B-7B-0924-Instruct | Pinned shards, top-k routes, expert streaming and I/O telemetry | Validated CPU expert streaming |
 | `deepseek-ai/DeepSeek-V4-Flash` preview at `60d8d707...` | Header catalog, tokenizer, reduced main+MTP prefill and five incremental cache steps | Reduced FP32 reference execution only |
 | `deepseek-ai/DeepSeek-V4-Flash-0731` at `7872f01b...` | Public metadata/config reviewed on 2026-08-10 | Not imported, inspected or executed by Vastloom yet |
-| `unsloth/DeepSeek-V4-Flash-0731-GGUF` at `fbbb5b93...` | Pinned atomic importer, verified metadata binding, exact metadata-derived native config and all-layer 1,193-descriptor consumer contract, 43 bounded layer-trunk plans, exact layer-0 trunk+top-6 range planning, bounded immutable partial-artifact import with a real trunk dry-run, native closed-world range verification/exact trunk binding, aggregate governed tensor-set loading, all trunk storage types covered by scalar references, one router-first governed reduced Q8_0/IQ1_S/IQ3_XXS layer, and canonical synchronous/asynchronous cache-to-kernel parity on one real expert | The complete reduced packed trunk catalog reaches the synthetic graph through one artifact buffer; one separate extracted official expert also executes. The checkpoint-shaped official-payload path remains non-executing, its expert IDs are not yet authoritative and no official range payload was downloaded; complete shards, official layer/token and generation remain unvalidated |
+| `unsloth/DeepSeek-V4-Flash-0731-GGUF` at `fbbb5b93...` | Pinned atomic importer, verified metadata binding, exact metadata-derived native config, all-layer 1,193-descriptor consumer contract and full 1,328-physical/34,223-logical checkpoint-catalog closure; 43 bounded layer-trunk plans, exact layer-0 trunk+top-6 range planning, bounded immutable partial-artifact import with a real trunk dry-run, native closed-world range verification/exact trunk binding, aggregate governed tensor-set loading, all trunk storage types covered by scalar references, one router-first governed reduced Q8_0/IQ1_S/IQ3_XXS layer, and canonical synchronous/asynchronous cache-to-kernel parity on one real expert | The complete reduced packed trunk catalog reaches the synthetic graph through one artifact buffer; one separate extracted official expert also executes. Q4_K globals and IQ2_XXS/MXFP4 expert variants are layout-validated but lack native kernels. The checkpoint-shaped official-payload path remains non-executing, its expert IDs are not yet authoritative and no official range payload was downloaded; complete shards, official layer/token and generation remain unvalidated |
 | `unsloth/Laguna-S-2.1` at `1a646907...` | Public config, custom-code and shard metadata reviewed on 2026-08-10 | Adapter and execution not implemented |
 | Kimi K3-class profiles | Public-roadmap capacity/traffic study only | Not a reference-PC execution target unless one exact complete expert passes the single-tier gate |
 
@@ -96,6 +96,16 @@ separate 43-entry routed/shared SwiGLU clamp schedules. A buffer-free gate valid
 main-layer trunk layout: 1,193 descriptors and 6,390,088,008 encoded bytes across 43 layers match
 their native uncompressed/hash, 4:1 compressor/indexer or 128:1 compressor consumers. No official
 range was downloaded, and the profile's execution status is unchanged.
+
+A complete checkpoint-catalog validator now adds the six global consumers and all routed experts
+to that contract. It verifies canonical global shapes/roles, every deterministic layer/expert
+bundle identity, three one-to-one packed slices and exact coalesced read-byte closure. The final
+partition is 1,193 layer tensors + 6 globals + 129 physical packed expert containers = 1,328
+physical tensors; its logical expansion is 1,193 + 6 + 33,024 = 34,223 descriptors across 11,008
+expert bundles. The byte totals close as 6,986,088,796 always-active + 75,547,803,648 routed =
+82,533,892,444 known tensor bytes. Q4_K global matrices, IQ2_XXS gate/up variants and MXFP4 down
+variants have checked GGML block layouts only. They are deliberately excluded from native-kernel
+support until pinned parity tests exist.
 
 The layer catalog uses F32, Q8_0, Q5_K, Q6_K, I32 and BF16. Bounded scalar handling now covers all
 1,193 tensors and all 6,390,088,008 encoded layer-trunk bytes: floating matrix formats have exact

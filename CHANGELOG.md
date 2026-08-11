@@ -2,6 +2,12 @@
 
 ## Unreleased
 
+- Added a zero-payload complete-catalog contract for the pinned 0731 GGUF checkpoint. It validates
+  six global consumers, all 11,008 routed bundles and 33,024 expert slices, then reconciles 1,328
+  physical tensors, 34,223 logical descriptors, 6,986,088,796 always-active bytes,
+  75,547,803,648 routed bytes and 82,533,892,444 known tensor bytes. Q4_K, IQ2_XXS and MXFP4
+  receive layout-only accounting and remain explicitly non-executable without parity kernels.
+
 - Pinned the official `deepseek-ai/DeepSeek-V4-Flash` checkpoint at immutable revision
   `60d8d70770c6776ff598c94bb586a859a38244f1`; removed the unsupported provisional
   “0731” identity from the active planning manifest.

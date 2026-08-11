@@ -88,7 +88,12 @@ model conversion.
 > separate 43-value routed/shared SwiGLU schedules, and validates every official layer-0 trunk
 > descriptor against its graph consumer without reading payload. That contract now extends over
 > all 43 main layers: 1,193 non-routed descriptors and 6,390,088,008 encoded bytes match the native
-> uncompressed/hash, 4:1 compressor/indexer and 128:1 compressor consumers. The complete 82.54 GB payload
+> uncompressed/hash, 4:1 compressor/indexer and 128:1 compressor consumers. A second zero-payload
+> closure now validates the six global consumers and all 11,008 expert bundles / 33,024 logical
+> expert slices. The complete partition is exact: 1,328 physical tensors become 34,223 logical
+> descriptors accounting for 82,533,892,444 known tensor bytes. Q4_K embedding/output and the
+> mixed IQ2_XXS/MXFP4 expert variants are layout-validated only and still lack native kernels.
+> The complete 82.54 GB payload
 > has not been downloaded or executed; this synthetic gate is not a complete official DeepSeek
 > layer/token path,
 > physical-NVMe performance, generation or CUDA implementation.
@@ -182,6 +187,8 @@ in the
 [`M9 metadata-to-graph report`](docs/reports/M9_DEEPSEEK_METADATA_TO_GRAPH_VALIDATION.md).
 The complete 43-layer/1,193-descriptor metadata-to-consumer contract is documented in the
 [`M9 all-layer catalog report`](docs/reports/M9_DEEPSEEK_ALL_LAYER_CATALOG_VALIDATION.md).
+The full global/trunk/expert physical and logical closure is documented in the
+[`M9 checkpoint catalog report`](docs/reports/M9_DEEPSEEK_CHECKPOINT_CATALOG_VALIDATION.md).
 The pinned importer and immutable full-source admission boundary are documented in the
 [`M7 checkpoint-binding report`](docs/reports/M7_DEEPSEEK_GGUF_CHECKPOINT_BINDING_VALIDATION.md).
 Current and candidate model support is kept explicit in the
@@ -350,6 +357,14 @@ portability target, not a validated platform claim.
   6,390,088,008 encoded bytes. The exact layouts are 21 objects for uncompressed/hash layers,
   31 for 4:1 compressor/indexer layers and 25 for 128:1 compressor layers. This validator performs
   no tensor allocation or payload read.
+- **Complete checkpoint catalog closure:** the same verified headers now bind all six global
+  consumers and every routed bundle/slice to exact native identities, shapes, roles and encoded
+  layouts. The 1,328 physical entries partition into 1,193 non-routed layer tensors, six globals
+  and 129 packed expert containers. The logical view contains 34,223 descriptors: 1,193 layer
+  tensors, six globals and 33,024 slices across 11,008 bundles. Always-active 6,986,088,796 bytes
+  plus routed 75,547,803,648 bytes equals 82,533,892,444 known tensor bytes. Q4_K, IQ2_XXS and
+  MXFP4 receive bounded layout arithmetic only; `supports_reference_matvec_ggml_type` remains
+  false for them, so this gate does not authorize execution.
 - **Header-derived traffic floor:** the encoded routed experts total 75,547,803,648 bytes;
   a top-6 no-cache decode would request 1,770,651,648 logical expert bytes per token before
   caching/prefetch gains. This is not measured physical SSD traffic or a speed claim.

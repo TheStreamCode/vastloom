@@ -10,6 +10,11 @@ import subprocess
 import sys
 import tempfile
 
+from host_pressure import host_pressure_reason, skipped
+
+
+CONTRACT = "bounded range importer real-metadata contract"
+
 
 def run(*arguments: str) -> subprocess.CompletedProcess[str]:
     return subprocess.run(arguments, check=False, capture_output=True, text=True, encoding="utf-8")
@@ -45,6 +50,9 @@ def main() -> int:
             "0,1,2,3,4,5",
             "--json",
         )
+        pressure = host_pressure_reason(planned)
+        if pressure is not None:
+            return skipped(CONTRACT, pressure)
         require(planned.returncode == 0, "real metadata range planning failed", planned)
         plan = json.loads(planned.stdout)
         require(

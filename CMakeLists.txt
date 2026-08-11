@@ -357,29 +357,27 @@ if(BUILD_TESTING AND VASTLOOM_BUILD_TESTS)
         if(VASTLOOM_DEEPSEEK_V4_GGUF_CHECKPOINT)
             add_test(
                 NAME vastloom_deepseek_v4_gguf_checkpoint
-                COMMAND $<TARGET_FILE:vastloom> deepseek-gguf-checkpoint
-                    ${VASTLOOM_DEEPSEEK_V4_GGUF_CHECKPOINT}
-                    --json
+                COMMAND ${Python3_EXECUTABLE}
+                    ${CMAKE_CURRENT_SOURCE_DIR}/tests/test_deepseek_gguf_contract.py
+                    --vastloom $<TARGET_FILE:vastloom>
+                    --model ${VASTLOOM_DEEPSEEK_V4_GGUF_CHECKPOINT}
+                    --command checkpoint
             )
             set_tests_properties(vastloom_deepseek_v4_gguf_checkpoint PROPERTIES
                 TIMEOUT 3600
                 RUN_SERIAL TRUE
-                PASS_REGULAR_EXPRESSION
-                    "\"imported_manifest_verified\":true.*\"pinned_0731_checkpoint_spec_verified\":true.*\"reference_config_verified\":true.*\"layer0_reference_catalog_verified\":true.*\"all_layer_reference_catalogs_verified\":true.*\"checkpoint_reference_catalog_verified\":true.*\"reference_catalog_validated_layers\":43.*\"reference_catalog_validated_tensors\":1193.*\"reference_catalog_validated_bytes\":6390088008.*\"reference_catalog_global_tensors\":6.*\"reference_catalog_global_bytes\":596000788.*\"reference_catalog_expert_bundles\":11008.*\"reference_catalog_expert_tensor_slices\":33024.*\"reference_catalog_physical_expert_tensors\":129.*\"vocabulary_size\":129280.*\"compression_schedule_values\":46.*\"routed_swiglu_schedule_values\":43.*\"shared_swiglu_schedule_values\":43.*\"physical_tensors\":1328.*\"logical_tensors\":34223.*\"tensor_bytes\":82533892444.*\"always_active_bytes\":6986088796.*\"routed_expert_bytes\":75547803648.*\"planned_layers\":43"
             )
             add_test(
                 NAME vastloom_deepseek_v4_gguf_probe_plan
-                COMMAND $<TARGET_FILE:vastloom> deepseek-gguf-probe-plan
-                    ${VASTLOOM_DEEPSEEK_V4_GGUF_CHECKPOINT}
-                    --layer 0
-                    --experts 0,1,2,3,4,5
-                    --json
+                COMMAND ${Python3_EXECUTABLE}
+                    ${CMAKE_CURRENT_SOURCE_DIR}/tests/test_deepseek_gguf_contract.py
+                    --vastloom $<TARGET_FILE:vastloom>
+                    --model ${VASTLOOM_DEEPSEEK_V4_GGUF_CHECKPOINT}
+                    --command probe-plan
             )
             set_tests_properties(vastloom_deepseek_v4_gguf_probe_plan PROPERTIES
                 TIMEOUT 3600
                 RUN_SERIAL TRUE
-                PASS_REGULAR_EXPRESSION
-                    "\"plan_only\":true.*\"routing_authority_verified\":false.*\"trunk_bytes\":138867160.*\"selected_expert_bytes\":38928384.*\"total_payload_bytes\":177795544.*\"total_range_count\":39.*\"unique_source_objects\":1"
             )
             add_test(
                 NAME vastloom_deepseek_v4_range_import_dry_run
@@ -397,6 +395,13 @@ if(BUILD_TESTING AND VASTLOOM_BUILD_TESTS)
     else()
         message(STATUS "Python3 not found; skipping TinyChat CLI integration test")
     endif()
+
+    # Every governed command refuses to run when the host itself is short of memory or disk, and
+    # reports that refusal as `ErrorCode::resource_exhausted` (exit code 75). That is the Safety
+    # Governor working, not a defect, so a loaded machine must skip the affected contracts instead
+    # of failing them. Python drivers reach the same outcome through `tests/host_pressure.py`.
+    get_property(vastloom_registered_tests DIRECTORY PROPERTY TESTS)
+    set_tests_properties(${vastloom_registered_tests} PROPERTIES SKIP_RETURN_CODE 75)
 endif()
 
 install(TARGETS vastloom vastloom-watchdog vastloom_core

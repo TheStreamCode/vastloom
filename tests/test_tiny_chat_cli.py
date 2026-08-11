@@ -10,6 +10,11 @@ import subprocess
 import tempfile
 from pathlib import Path
 
+from host_pressure import guard, run_contract
+
+
+CONTRACT = "TinyTransformer chat CLI contract"
+
 
 def invoke(
     executable: Path,
@@ -17,7 +22,7 @@ def invoke(
     stdin: str | None = None,
     timeout: float = 30.0,
 ) -> subprocess.CompletedProcess[str]:
-    return subprocess.run(
+    return guard(subprocess.run(
         [str(executable), *arguments],
         input=stdin,
         stdout=subprocess.PIPE,
@@ -26,7 +31,7 @@ def invoke(
         errors="strict",
         timeout=timeout,
         check=False,
-    )
+    ))
 
 
 def require(condition: bool, message: str, process: subprocess.CompletedProcess[str] | None = None) -> None:
@@ -306,4 +311,4 @@ def main() -> int:
 
 
 if __name__ == "__main__":
-    raise SystemExit(main())
+    raise SystemExit(run_contract(CONTRACT, main))

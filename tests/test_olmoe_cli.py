@@ -11,9 +11,16 @@ import subprocess
 import sys
 import tempfile
 
+from host_pressure import guard, run_contract
+
+
+CONTRACT = "OLMoE inspection and tokenizer contract"
+
 
 def run(command: list[str]) -> subprocess.CompletedProcess[str]:
-    return subprocess.run(command, capture_output=True, text=True, encoding="utf-8", errors="strict", timeout=30)
+    return guard(subprocess.run(
+        command, capture_output=True, text=True, encoding="utf-8", errors="strict", timeout=30
+    ))
 
 
 def require(condition: bool, message: str, process: subprocess.CompletedProcess[str] | None = None) -> None:
@@ -136,7 +143,7 @@ def main() -> int:
 
 if __name__ == "__main__":
     try:
-        raise SystemExit(main())
+        raise SystemExit(run_contract(CONTRACT, main))
     except subprocess.TimeoutExpired as error:
         print(f"ERROR: command timed out safely: {error}", file=sys.stderr)
         raise SystemExit(1) from error

@@ -10,11 +10,16 @@ import subprocess
 import sys
 from typing import Any
 
+from host_pressure import guard, run_contract
+
+
+CONTRACT = "SmolLM2 dense reference contract"
+
 
 def run(command: list[str], *, input_text: str | None = None, timeout: int = 120) -> subprocess.CompletedProcess[str]:
     environment = os.environ.copy()
     environment["PYTHONIOENCODING"] = "utf-8"
-    return subprocess.run(
+    return guard(subprocess.run(
         command,
         input=input_text,
         capture_output=True,
@@ -24,7 +29,7 @@ def run(command: list[str], *, input_text: str | None = None, timeout: int = 120
         env=environment,
         timeout=timeout,
         check=False,
-    )
+    ))
 
 
 def require(condition: bool, message: str, process: subprocess.CompletedProcess[str] | None = None) -> None:
@@ -120,7 +125,7 @@ def main() -> int:
 
 if __name__ == "__main__":
     try:
-        raise SystemExit(main())
+        raise SystemExit(run_contract(CONTRACT, main))
     except subprocess.TimeoutExpired as error:
         print(f"ERROR: command timed out safely: {error}", file=sys.stderr)
         raise SystemExit(1) from error

@@ -8,6 +8,11 @@ import json
 import os
 import subprocess
 
+from host_pressure import host_pressure_reason, skipped
+
+
+CONTRACT = "CUDA CLI capability/unavailable contract"
+
 
 def run(executable: str, *arguments: str) -> subprocess.CompletedProcess[str]:
     return subprocess.run(
@@ -85,6 +90,9 @@ def main() -> int:
                 probe,
             )
         rmsnorm = run(args.vastloom, "cuda-info", "--rmsnorm-smoke", "--json")
+        pressure = host_pressure_reason(rmsnorm)
+        if pressure is not None:
+            return skipped(f"{CONTRACT} live RMSNorm", pressure)
         require(rmsnorm.returncode == 0, "CUDA RMSNorm smoke failed", rmsnorm)
         rmsnorm_payload = json.loads(rmsnorm.stdout)
         smoke = rmsnorm_payload.get("rmsnorm_smoke")

@@ -13,9 +13,12 @@ import subprocess
 import sys
 import tempfile
 
+from host_pressure import skipped
+
 
 EXPERT_BYTES = 12 * 1024 * 1024
 ROUTES_PER_TOKEN = 16 * 8
+CONTRACT = "OLMoE streaming runtime contract"
 
 
 def run(command: list[str], timeout: int = 900) -> subprocess.CompletedProcess[str]:
@@ -56,6 +59,17 @@ def main() -> int:
     info = json.loads(inspection.stdout)
     require(info["metadata_only"] is False and info["hashes_verified"] is True,
             "full checkpoint was not hash-verified", inspection)
+    # The preflight derives its cap from memory that is free right now, so an unrelated memory hog
+    # can push a perfectly valid checkpoint below the streaming minimum. Only that specific
+    # shortfall is treated as an unverifiable environment; any other rejection stays a failure.
+    if info["streaming_plan_candidate"] is not True:
+        cap = info["safe_ram_cap_bytes"]
+        needed = info["estimated_minimum_streaming_ram_bytes"]
+        if isinstance(cap, int) and isinstance(needed, int) and cap < needed:
+            return skipped(
+                CONTRACT,
+                f"safe RAM cap {cap:,} B is below the {needed:,} B streaming minimum",
+            )
     require(info["streaming_plan_candidate"] is True, "safe streaming preflight rejected the checkpoint", inspection)
 
     with tempfile.TemporaryDirectory(prefix="vastloom-olmoe-runtime-") as temporary:

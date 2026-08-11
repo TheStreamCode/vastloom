@@ -87,17 +87,20 @@ bundle per token per slot — six for a single token, twelve for two — and the
 layer, all live simultaneously. The first version of this preflight charged a single cache and
 understated a full-depth pass by gigabytes; it now multiplies by depth.
 
-| Prompt | Distinct experts per layer | Expert cache total | Required | Forward |
-|---|---:|---:|---:|---:|
-| one token id | 6 | 2.26 GB | 7,056,343,388 | 29.4 s |
-| `"Roma"` (2 tokens) | 12 | 4.53 GB | 11,517,509,980 | 59.5 s |
+| Prompt | Experts per layer | Expert cache | Required | Forward | Prediction |
+|---|---:|---:|---:|---:|---|
+| one token id | 6 | 2.26 GB | 7,056,343,388 | 29.4 s | token 20 |
+| `"Roma"` (2 tokens) | 12 | 4.53 GB | 11,517,509,980 | 59.5 s | `" "` |
+| `"La capitale d'Italia e"` (6 tokens) | 36 | 0.63 GB | 7,618,380,124 | 167.7 s | `" una"` |
 
-The two-token run reached `next_token 223`, which decodes to a space. Free host RAM fell to 10.1 GB
-at its lowest, against the 8 GiB floor, and the process peaked at 8.62 GB.
+The first two rows held every layer's experts to the end of the pass, so the cost grew with prompt
+length and would have needed 13.6 GB of experts alone for the third. The third row does not, because
+a layer's experts are dead once the next layer asks for its own: each resolve now releases the
+earlier caches first, and peak expert residency is two layers' worth rather than 43. Prompt length
+no longer multiplies it — 36 experts per layer cost less resident memory than 12 did before.
 
-That table is also the limit: prompt length multiplies the expert working set, so a longer prompt is
-refused by the preflight rather than run. Releasing each layer's experts once that layer has
-executed — the streaming design this project exists for — is what removes the multiplier.
+The six-token run resolved 1,069 bundles and read 7.34 GB of expert payload while staying at 7.62 GB
+resident, with free host RAM steady at 12 GB.
 
 ## Bounds
 
@@ -110,7 +113,8 @@ executed — the streaming design this project exists for — is what removes th
 - The result is not compared against an independent implementation of the full model. It is
   internally consistent and deterministic, and its expert traffic matches the metadata prediction,
   but no external oracle has confirmed token 20 for this input.
-- Prompts work but do not scale: the expert working set grows with prompt length, so anything beyond
-  a couple of tokens is refused by the preflight until layers release their experts after executing.
 - The chat template is applied on request, but there is no conversation: one prompt in, one predicted
-  token out.
+  token out. Generation needs the decode loop and KV-cache reuse that the reference driver already
+  implements for the reduced graph.
+- 167.7 s for a six-token prefill. Every layer is read from NVMe on every invocation, and the full
+  82.54 GB hash verification adds 338 s before any of it. Neither is optimised.

@@ -14,6 +14,15 @@
   [complete forward validation](docs/reports/M9_DEEPSEEK_COMPLETE_FORWARD_VALIDATION.md). This is one
   forward pass, not generation, and 29.4 s per token is correct rather than usable.
 
+- The model now answers a text prompt. The checkpoint's vocabulary proved identical to the pinned
+  tokenizer — 129,280 tokens index for index, all 127,741 merges — so `--prompt` encodes through the
+  implementation already validated against Hugging Face, with `--chat` applying the checkpoint's own
+  template. `"La capitale d'Italia e"` ran all 43 layers, resolved 1,069 expert bundles across
+  7.34 GB of payload and predicted `" una"`. Each layer now releases its experts when the next layer
+  asks for its own, so peak expert residency is two layers' worth instead of 43: the same prompt
+  would otherwise have needed 13.6 GB of experts alone, and now the whole pass fits in 7.62 GB with
+  free host RAM steady at 12 GB.
+
 - Added `deepseek-forward`, which runs the real graph to a chosen depth straight from a complete
   checkpoint, and refuses in advance what will not fit. Its preflight sums the exact resident cost
   from the catalog — layer trunks, globals and the expert-cache ceiling — and compares it against the

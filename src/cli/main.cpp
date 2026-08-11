@@ -1631,8 +1631,10 @@ int command_deepseek_layer_probe(const std::vector<std::string>& args) {
 int command_deepseek_forward(const std::vector<std::string>& args) {
     const bool json = has_flag(args, "--json");
     auto valid = validate_options(
-        args, 1U, {"--token", "--layers", "--context", "--batch-size", "--expert-cache"},
-        {"--json", "--dry-run"});
+        args, 1U,
+        {"--token", "--layers", "--context", "--batch-size", "--expert-cache", "--prompt",
+         "--tokenizer"},
+        {"--json", "--dry-run", "--chat"});
     if (!valid) return print_error(valid.error(), json);
     if (args.empty() || vastloom::util::starts_with(args.front(), "--")) {
         return print_error(
@@ -1687,6 +1689,48 @@ int command_deepseek_forward(const std::vector<std::string>& args) {
     const std::size_t depth = std::min<std::size_t>(requested_layers.value(),
                                                     config.value().layer_count);
 
+    // The prompt has to be encoded before the preflight, because how many experts a layer must hold
+    // at once depends on how many tokens are routed through it.
+    const auto prompt = option_value(args, "--prompt");
+    const auto tokenizer_path = option_value(args, "--tokenizer");
+    std::vector<std::uint32_t> token_ids;
+    std::optional<vastloom::inference::Gpt2Tokenizer> tokenizer;
+    if (prompt.has_value()) {
+        if (!tokenizer_path.has_value()) {
+            return print_error(
+                vastloom::make_error(vastloom::ErrorCode::invalid_argument,
+                                     "--prompt requires --tokenizer naming a store with the pinned "
+                                     "DeepSeek tokenizer"),
+                json);
+        }
+        auto loaded = vastloom::inference::Gpt2Tokenizer::load(cli_path(*tokenizer_path));
+        if (!loaded) return print_error(loaded.error(), json);
+        if (!loaded.value().is_deepseek_v4()) {
+            return print_error(
+                vastloom::make_error(vastloom::ErrorCode::invalid_argument,
+                                     "--tokenizer must name the DeepSeek V4 tokenizer"),
+                json);
+        }
+        tokenizer = loaded.take_value();
+        std::string text = *prompt;
+        if (has_flag(args, "--chat")) {
+            auto framed = tokenizer->apply_deepseek_v4_chat_template({{"user", *prompt}}, true);
+            if (!framed) return print_error(framed.error(), json);
+            text = framed.take_value();
+        }
+        auto encoded = tokenizer->encode(text);
+        if (!encoded) return print_error(encoded.error(), json);
+        if (encoded.value().empty()) {
+            return print_error(
+                vastloom::make_error(vastloom::ErrorCode::invalid_argument,
+                                     "The prompt encoded to no tokens"),
+                json);
+        }
+        token_ids = encoded.take_value();
+    } else {
+        token_ids.push_back(static_cast<std::uint32_t>(token.value()));
+    }
+
     // Exact resident cost of what is about to be loaded, from the catalog rather than an estimate.
     vastloom::ByteCount trunk_bytes = 0U;
     vastloom::ByteCount global_bytes = 0U;
@@ -1702,7 +1746,14 @@ int command_deepseek_forward(const std::vector<std::string>& args) {
     for (const auto& bundle : report.value().catalog.experts) {
         largest_expert = std::max(largest_expert, bundle.bytes);
     }
-    const auto expert_bytes = largest_expert * expert_cache.value();
+    // A synchronous resolve hands the graph every expert the layer selected at once, so the cache
+    // must hold all of them simultaneously: up to one distinct bundle per token per slot. And the
+    // caches are per layer and all stay live, so this multiplies by depth - the earlier accounting
+    // charged a single cache and understated a full-depth pass by gigabytes.
+    const auto per_layer_experts = std::min<std::size_t>(
+        token_ids.size() * config.value().experts_per_token, config.value().expert_count);
+    const auto cache_size = std::max<std::size_t>(expert_cache.value(), per_layer_experts);
+    const auto expert_bytes = largest_expert * cache_size * depth;
     const auto required = trunk_bytes + global_bytes + expert_bytes;
     const auto budget = policy.value().resources.ram_hard_limit;
 
@@ -1800,8 +1851,8 @@ int command_deepseek_forward(const std::vector<std::string>& args) {
         if (!bindings) return print_error(bindings.error(), json);
         vastloom::inference::DeepseekV4ExpertCacheOptions cache_options;
         cache_options.block_prefix = "layers." + std::to_string(layer) + ".ffn";
-        cache_options.max_cached_experts = expert_cache.value();
-        cache_options.max_experts_per_request = graph.config.experts_per_token;
+        cache_options.max_cached_experts = cache_size;
+        cache_options.max_experts_per_request = per_layer_experts;
         auto cache = vastloom::inference::DeepseekV4BoundedExpertCache::create(
             bindings.take_value(), governor, cache_options);
         if (!cache) return print_error(cache.error(), json);
@@ -1812,12 +1863,16 @@ int command_deepseek_forward(const std::vector<std::string>& args) {
     const auto load_elapsed = std::chrono::duration<double, std::milli>(
         std::chrono::steady_clock::now() - load_started).count();
 
-    const std::array<std::uint32_t, 1U> token_ids{static_cast<std::uint32_t>(token.value())};
     const auto started = std::chrono::steady_clock::now();
     auto forward = vastloom::inference::deepseek_v4_reference_prefill(graph, token_ids);
     if (!forward) return print_error(forward.error(), json);
     const auto elapsed = std::chrono::duration<double, std::milli>(
         std::chrono::steady_clock::now() - started).count();
+    std::string next_text;
+    if (tokenizer.has_value()) {
+        auto decoded = tokenizer->decode({forward.value().greedy_token_id}, false);
+        if (decoded) next_text = decoded.take_value();
+    }
 
     vastloom::ByteCount expert_bytes_read = 0U;
     std::size_t expert_misses = 0U;
@@ -1832,9 +1887,10 @@ int command_deepseek_forward(const std::vector<std::string>& args) {
         std::cout << "{\"ok\":true,\"complete_model\":" << (complete ? "true" : "false")
                   << ",\"executed_layers\":" << depth
                   << ",\"model_layers\":" << config.value().layer_count
-                  << ",\"token\":" << token.value()
+                  << ",\"prompt_tokens\":" << token_ids.size()
                   << ",\"next_token\":" << forward.value().greedy_token_id
-                  << ",\"logits\":" << forward.value().logits.size()
+                  << ",\"next_text\":\"" << vastloom::util::json_escape(next_text)
+                  << "\",\"logits\":" << forward.value().logits.size()
                   << ",\"expert_bytes_read\":" << expert_bytes_read
                   << ",\"expert_misses\":" << expert_misses
                   << ",\"resident_bytes\":" << required
@@ -1843,7 +1899,10 @@ int command_deepseek_forward(const std::vector<std::string>& args) {
     } else {
         std::cout << "Executed layers:      " << depth << " of " << config.value().layer_count
                   << (complete ? " (complete model)" : " (partial: not the model's output)") << '\n'
-                  << "Next token:           " << forward.value().greedy_token_id << '\n'
+                  << "Prompt tokens:        " << token_ids.size() << '\n'
+                  << "Next token:           " << forward.value().greedy_token_id;
+        if (!next_text.empty()) std::cout << "  " << next_text;
+        std::cout << '\n'
                   << "Expert bytes read:    " << expert_bytes_read << " in " << expert_misses
                   << " misses\n"
                   << "Weight load:          " << load_elapsed << " ms\n"

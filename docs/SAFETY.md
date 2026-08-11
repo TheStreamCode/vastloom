@@ -291,8 +291,9 @@ The 0731 GGUF reader adds a metadata-only safety boundary:
 - the DeepSeek tensor-set adapter additionally requires one complete final offset-zero range for
   every non-routed tensor in the bound layer catalog. Missing, duplicate, split, wrong-role/type/
   source or corrupt inputs cannot publish a partial graph. The current graph consumer proves this
-  only with a 2,644-byte reduced packed catalog; it does not promote the official artifact or
-  checkpoint to executable status;
+  now covers a 2,844-byte/21-object reduced layer-0 catalog, including retained F32 vectors and
+  the I32 table. Packed-vector decode has a 1,048,576-element/4 MiB FP32 scratch ceiling. This
+  does not promote the official artifact or checkpoint to executable status;
 - selected-expert/all range scopes fail before network while routing authority is caller-supplied.
   A future authoritative source must be named explicitly; a forged flag/source combination is
   rejected. Target-scoped locks clean only their own stale partial/incoming artifacts after a

@@ -266,8 +266,11 @@ unbounded allocation and clean recovery from injected CUDA failures.
 - [x] Assemble every required non-routed range in the reduced packed catalog into one retained
   typed tensor set and execute the complete reduced graph from the artifact boundary. Missing,
   duplicate, split, wrong-role/type/source, corrupt and cancelled inputs fail transactionally.
-- [ ] Add retained typed F32/BF16 vector and scalar graph consumers so every tensor in the real
-  21-range layer-0 trunk plan can bind without payload copies.
+- [x] Add retained typed F32/BF16 vector and scalar graph consumers plus an explicit canonical
+  0731 layer-0 name adapter. The 21-object reduced artifact retains one lease and matches the
+  prefill/decode oracle; the official payload remains unexecuted.
+- [ ] Derive the exact reference configuration from verified 0731 GGUF metadata and validate all
+  21 official layer-0 catalog descriptors against their graph consumers without reading payload.
 - [ ] Execute that probe by acquiring the bounded official trunk ranges, decoding the real
   `tid2eid` route and loading only its six selected complete expert bundles.
 - [ ] Pinned host buffers.

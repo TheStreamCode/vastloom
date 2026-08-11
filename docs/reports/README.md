@@ -13,6 +13,10 @@ hardware, commands, measurements and limitations.
 
 ## Current report
 
+- [`M9_DEEPSEEK_LAYER0_TRUNK_BINDING_VALIDATION.md`](M9_DEEPSEEK_LAYER0_TRUNK_BINDING_VALIDATION.md) —
+  retained F32/BF16 vector consumers, an explicit 21-name canonical 0731 layer-0 adapter, one
+  2,844-byte aggregate trunk lease and unchanged reduced mixed-format prefill/decode parity.
+  Official metadata was revalidated, but no official trunk payload was acquired or executed.
 - [`M9_DEEPSEEK_TRUNK_TENSOR_SET_VALIDATION.md`](M9_DEEPSEEK_TRUNK_TENSOR_SET_VALIDATION.md) —
   transactional aggregate multi-range loading, complete non-routed catalog coverage, one retained
   2,644-byte artifact buffer and full reduced mixed-format prefill/decode parity, with missing,

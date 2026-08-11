@@ -79,11 +79,13 @@ model conversion.
 > residency and a scalar matvec. The same boundary now accepts only complete closed tensor sets:
 > all ranges are preflighted, aggregate RAM plus maximum-range staging is reserved once, each
 > packed subspan is rehashed, and `RAM_READY` is published only after the whole set passes. The
-> reduced mixed-format graph now consumes its 12 Q8_0/I32 trunk entries from one 2,644-byte
-> aggregate artifact buffer while four indivisible IQ1_S/IQ3_XXS expert bundles remain separately
-> governed; prefill and decode still match the independent oracle. The complete 82.54 GB payload
-> has not been downloaded or executed; this synthetic gate is not a complete official DeepSeek
-> layer/token path, physical-NVMe performance, generation or CUDA implementation.
+> reduced mixed-format graph now consumes all 21 layer-0 trunk objects from one 2,844-byte
+> aggregate artifact buffer: 11 matrices, nine retained F32 vectors and one I32 route table are
+> published under canonical `blk.0.*` GGUF identities and mapped explicitly to their graph
+> consumers. Four indivisible IQ1_S/IQ3_XXS expert bundles remain separately governed; prefill and
+> decode still match the independent oracle. The complete 82.54 GB payload has not been downloaded
+> or executed; this synthetic gate is not a complete official DeepSeek layer/token path,
+> physical-NVMe performance, generation or CUDA implementation.
 
 ## Why Vastloom exists
 
@@ -385,9 +387,11 @@ portability target, not a validated platform claim.
   preflighted before one aggregate residency transaction. Defaults cap the set at 512 MiB total
   and 64 MiB per range; absolute ceilings are 4 GiB and 1 GiB. Missing, duplicate, split,
   wrong-role/type/source or corrupt tensors fail without partial publication. The reduced packed
-  catalog binds 12 Q8_0/I32 trunk entries from one 2,644-byte buffer and one retained lease, then
-  matches the existing mixed-format prefill/decode oracle. This remains synthetic; no official
-  trunk payload reaches the graph.
+  catalog now binds all 21 canonical layer-0 identities from one 2,844-byte buffer and one retained
+  lease: 11 matrices, nine F32 vectors and one I32 table. A fail-closed 0731 name adapter validates
+  their consumer shapes, F32/BF16 vector decoding is capped at 4 MiB of transient FP32 scratch,
+  and the mixed-format prefill/decode oracle remains unchanged. This remains synthetic; no
+  official trunk payload reaches the graph.
 
 ### Runtime foundation
 
@@ -897,9 +901,9 @@ merely SSD throughput. It is:
 
 The next technical sequence remains incremental:
 
-1. add retained F32/BF16 vector/scalar consumers so every entry in the official 21-range layer-0
-   trunk can bind to the checkpoint-shaped graph under the new aggregate tensor-set transaction;
-2. only after that synthetic full-set consumer passes and the user explicitly approves, use the
+1. derive the exact reference configuration and all layer-0 consumer dimensions directly from the
+   verified 0731 GGUF metadata, then validate the 21 real descriptors without payload access;
+2. only after that metadata-to-graph contract passes and the user explicitly approves, use the
    completed importer to acquire the exact 138,867,160-byte layer-0 trunk plan;
 3. decode the official `tid2eid` route for a pinned input, then acquire only its six complete
    selected expert bundles (38,928,384 bytes for layer 0) and match the official layer output;

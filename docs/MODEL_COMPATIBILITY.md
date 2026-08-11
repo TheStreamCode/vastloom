@@ -86,10 +86,13 @@ identities. One complete synthetic F32 range now additionally passes an aggregat
 RAM/staging read, a second in-memory SHA-256, retained residency and scalar matvec. A closed-set
 loader now goes further: it rejects incomplete catalog coverage before residency, reserves all
 packed RAM plus maximum-range staging once, rehashes every subspan and publishes only the whole
-set. The reduced fixture consumes 12 Q8_0/I32 trunk entries from one 2,644-byte artifact buffer
-and matches its mixed-format prefill/decode oracle. No official range was downloaded, remaining
-official F32/BF16 vector consumers are not connected and the profile's execution status is
-unchanged.
+set. The reduced fixture consumes all 21 canonical layer-0 trunk identities from one 2,844-byte
+artifact buffer: 11 matrices, nine retained F32 vectors and one I32 table. An explicit 0731
+adapter maps the official `blk.0.*` names to exact graph consumers and validates their dimensions;
+F32/BF16 vector decode is bounded to 4 MiB of transient FP32 scratch. The complete reduced
+mixed-format prefill/decode graph still matches its oracle. No official range was downloaded, the
+exact runtime configuration is not yet derived from verified GGUF metadata, and the profile's
+execution status is unchanged.
 
 The layer catalog uses F32, Q8_0, Q5_K, Q6_K, I32 and BF16. Bounded scalar handling now covers all
 1,193 tensors and all 6,390,088,008 encoded layer-trunk bytes: floating matrix formats have exact

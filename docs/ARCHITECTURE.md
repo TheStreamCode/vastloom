@@ -480,13 +480,20 @@ before inference. Its 16 residency objects retain exactly 8,180 bytes and remain
 until the graph releases its final reference. This eliminates payload copies at the loader/graph
 boundary.
 
-A newer artifact-backed repetition places all 12 non-routed Q8_0/I32 entries of that reduced
-packed catalog in separate hashed range files, then loads their 2,644 bytes through one aggregate
-residency and one use lease. The four routed bundles retain the other 5,536 bytes independently.
-After every loader wrapper is destroyed, the complete reduced prefill and incremental decode still
-match the independently dequantized oracle. This proves the closed tensor-set/graph ownership
-boundary, not official 0731 payload execution; other deterministic fixture tensors remain owned
-by the existing graph.
+The artifact-backed repetition now covers the complete reduced layer-0 trunk shape: 11 matrices,
+nine F32 vectors and one I32 table are stored in 21 separately hashed ranges totaling 2,844 bytes.
+Those ranges use the canonical official `blk.0.*` names. An explicit 0731 adapter maps them to the
+21 exact `layers.0.*` consumers, validates matrix rows, logical input widths, vector lengths and
+the hash-table element count, and returns a detached binding set. There is no heuristic suffix
+matching and no partial graph publication on failure.
+
+Packed F32/BF16 vectors retain exact subranges of the same shared immutable buffer. The scalar
+reference path decodes explicit little-endian storage into transient FP32 only at consumption,
+rejects non-finite values and caps that scratch at 1,048,576 elements (4 MiB). Matrix payloads
+remain encoded and block-decoded by their existing kernels. The four routed bundles retain the
+other 5,536 bytes independently. After every loader wrapper is destroyed, complete reduced
+prefill and incremental decode still match the independently dequantized oracle. This proves the
+closed tensor-set/name-adapter/graph ownership boundary, not official 0731 payload execution.
 
 The router-first reduced slice stops after authoritative routing, deduplicates expert IDs and
 calls a block-scoped provider before expert compute. The reusable synchronous baseline owns a

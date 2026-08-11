@@ -4009,6 +4009,7 @@ load_catalog_tensor_tile(const model::LogicalTensorCatalog& catalog,
     tile.tensor_offset = 0U;
     tile.source = found->source;
     tile.final_tile = true;
+    tile.checkpoint_global = !found->layer.has_value();
     auto residency = model::ResidencyObject::create(
         catalog.model_id + "/tensor/" + found->name, found->source.bytes);
     if (!residency) return residency.error();

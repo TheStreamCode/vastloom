@@ -40,8 +40,12 @@ Result<void> validate_tile_identity(const LogicalTensorCatalog& catalog,
                           catalog.model_id);
     }
     const auto& tensor = catalog.tensors[tile.tensor_index];
-    if (tensor.role == TensorRole::routed_expert || !tensor.layer.has_value() ||
-        *tensor.layer != tile.layer || tensor.role != tile.role ||
+    const bool layer_identity_matches =
+        tile.checkpoint_global
+            ? (!tensor.layer.has_value() && tile.layer == 0U)
+            : (tensor.layer.has_value() && *tensor.layer == tile.layer);
+    if (tensor.role == TensorRole::routed_expert || !layer_identity_matches ||
+        tensor.role != tile.role ||
         tensor.source.shard != tile.source.shard || tensor.source.bytes == 0U ||
         tensor.source.offset > std::numeric_limits<ByteCount>::max() - tensor.source.bytes ||
         tile.tensor_offset >= tensor.source.bytes ||

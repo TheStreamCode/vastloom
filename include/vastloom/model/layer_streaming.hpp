@@ -27,6 +27,10 @@ struct LayerTensorTile {
     ByteCount tensor_offset{0U};
     TensorSourceRange source;
     bool final_tile{false};
+    // Checkpoint-global tensors - embedding, output head, final normalization - belong to no layer.
+    // They are read through the same bounded path, so the tile states which kind it is rather than
+    // letting layer 0 stand in for "no layer".
+    bool checkpoint_global{false};
 };
 
 struct LayerStreamingPlan {

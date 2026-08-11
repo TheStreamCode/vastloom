@@ -1,5 +1,6 @@
 #include "vastloom/inference/deepseek_v4_reference.hpp"
 
+#include "vastloom/inference/deepseek_v4_range_artifact.hpp"
 #include "vastloom/inference/ggml_quantization.hpp"
 #include "vastloom/model/expert_loader.hpp"
 #include "vastloom/model/layer_streaming.hpp"
@@ -137,6 +138,48 @@ Result<std::size_t> bounded_product(std::initializer_list<std::size_t> factors,
                           std::move(context));
     }
     return result;
+}
+
+Result<std::size_t> bounded_catalog_product(
+    std::span<const std::uint64_t> factors,
+    std::string context) {
+    if (factors.empty()) {
+        return make_error(ErrorCode::invalid_format,
+                          "DeepSeek catalog tensor shape is empty",
+                          std::move(context));
+    }
+    std::size_t result = 1U;
+    for (const auto factor : factors) {
+        if (factor == 0U || factor > std::numeric_limits<std::size_t>::max() ||
+            result > std::numeric_limits<std::size_t>::max() /
+                         static_cast<std::size_t>(factor)) {
+            return make_error(ErrorCode::resource_exhausted,
+                              "DeepSeek catalog tensor shape overflows",
+                              std::move(context));
+        }
+        result *= static_cast<std::size_t>(factor);
+    }
+    if (result > kMaximumGraphElements) {
+        return make_error(ErrorCode::resource_exhausted,
+                          "DeepSeek catalog tensor exceeds the reference graph limit",
+                          std::move(context));
+    }
+    return result;
+}
+
+bool storage_type_matches_dtype(std::uint32_t ggml_type,
+                                model::TensorDType dtype) noexcept {
+    switch (ggml_type) {
+        case kGgmlTypeF32: return dtype == model::TensorDType::f32;
+        case kGgmlTypeBf16: return dtype == model::TensorDType::bf16;
+        case kGgmlTypeI32: return dtype == model::TensorDType::i32;
+        case kGgmlTypeQ8_0:
+        case kGgmlTypeQ5K:
+        case kGgmlTypeQ6K:
+        case kGgmlTypeIq3Xxs:
+        case kGgmlTypeIq1S: return dtype == model::TensorDType::quantized;
+        default: return false;
+    }
 }
 
 Result<void> finite_values(std::span<const float> values, std::string_view context) {
@@ -2121,6 +2164,58 @@ Result<DeepseekV4PackedIntegerTensor> deepseek_v4_bind_packed_i32(
     return bind_resident_i32(
         expert.retain_buffer(), static_cast<std::size_t>(found->packed_offset),
         static_cast<std::size_t>(found->bytes), elements);
+}
+
+Result<DeepseekV4PackedMatrix> deepseek_v4_bind_packed_matrix(
+    const DeepseekV4LoadedTrunkTensorSet& tensors,
+    std::string_view name,
+    std::size_t logical_columns) {
+    const auto* tensor = tensors.find(name);
+    if (tensor == nullptr) {
+        return make_error(ErrorCode::not_found,
+                          "DeepSeek trunk matrix tensor is unavailable",
+                          std::string(name));
+    }
+    if (!tensor->ggml_type.has_value() || tensor->shape.size() != 2U ||
+        *tensor->ggml_type == kGgmlTypeI32 ||
+        !storage_type_matches_dtype(*tensor->ggml_type, tensor->dtype) ||
+        tensor->shape[0] > std::numeric_limits<std::size_t>::max() ||
+        tensor->shape[1] > std::numeric_limits<std::size_t>::max() ||
+        tensor->packed_offset > std::numeric_limits<std::size_t>::max() ||
+        tensor->bytes > std::numeric_limits<std::size_t>::max()) {
+        return make_error(ErrorCode::invalid_format,
+                          "DeepSeek trunk matrix catalog descriptor is unsupported or malformed",
+                          tensor->name);
+    }
+    return bind_resident_matrix(
+        tensors.retain_buffer(), static_cast<std::size_t>(tensor->packed_offset),
+        static_cast<std::size_t>(tensor->bytes), *tensor->ggml_type,
+        static_cast<std::size_t>(tensor->shape[1]), logical_columns,
+        static_cast<std::size_t>(tensor->shape[0]));
+}
+
+Result<DeepseekV4PackedIntegerTensor> deepseek_v4_bind_packed_i32(
+    const DeepseekV4LoadedTrunkTensorSet& tensors,
+    std::string_view name) {
+    const auto* tensor = tensors.find(name);
+    if (tensor == nullptr) {
+        return make_error(ErrorCode::not_found,
+                          "DeepSeek trunk I32 tensor is unavailable",
+                          std::string(name));
+    }
+    if (tensor->dtype != model::TensorDType::i32 ||
+        tensor->ggml_type != kGgmlTypeI32 ||
+        tensor->packed_offset > std::numeric_limits<std::size_t>::max() ||
+        tensor->bytes > std::numeric_limits<std::size_t>::max()) {
+        return make_error(ErrorCode::invalid_format,
+                          "DeepSeek trunk I32 catalog descriptor is unsupported or malformed",
+                          tensor->name);
+    }
+    auto elements = bounded_catalog_product(tensor->shape, tensor->name);
+    if (!elements) return elements.error();
+    return bind_resident_i32(
+        tensors.retain_buffer(), static_cast<std::size_t>(tensor->packed_offset),
+        static_cast<std::size_t>(tensor->bytes), elements.value());
 }
 
 Result<DeepseekV4ReferenceForwardResult> deepseek_v4_reference_prefill(

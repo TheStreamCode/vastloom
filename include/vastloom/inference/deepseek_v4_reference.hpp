@@ -22,6 +22,8 @@ class ResidentByteBuffer;
 
 namespace vastloom::inference {
 
+class DeepseekV4LoadedTrunkTensorSet;
+
 struct DeepseekV4RouteResult {
     std::vector<float> weights;
     std::vector<std::uint32_t> indices;
@@ -193,6 +195,17 @@ struct DeepseekV4ExpertProviderBinding {
     const model::LoadedExpert& expert,
     std::size_t catalog_tensor_index,
     std::size_t elements);
+
+// Infers the physical matrix shape/type from a verified complete trunk tensor set while the
+// caller supplies the unpadded logical input width required by the architecture graph.
+[[nodiscard]] Result<DeepseekV4PackedMatrix> deepseek_v4_bind_packed_matrix(
+    const DeepseekV4LoadedTrunkTensorSet& tensors,
+    std::string_view name,
+    std::size_t logical_columns);
+
+[[nodiscard]] Result<DeepseekV4PackedIntegerTensor> deepseek_v4_bind_packed_i32(
+    const DeepseekV4LoadedTrunkTensorSet& tensors,
+    std::string_view name);
 
 struct DeepseekV4ReferenceGraph {
     DeepseekV4ReferenceConfig config;

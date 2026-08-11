@@ -4,6 +4,7 @@
 #include <limits>
 #include <map>
 #include <new>
+#include <set>
 #include <sstream>
 #include <string_view>
 
@@ -31,6 +32,42 @@ std::string expected_label(std::size_t index, std::string_view tensor_name) {
 }
 
 }  // namespace
+
+DeepseekV4LoadedTrunkTensorSet::DeepseekV4LoadedTrunkTensorSet(
+    std::string logical_id,
+    ByteCount payload_bytes,
+    std::vector<DeepseekV4BoundTrunkTensor> tensors,
+    std::shared_ptr<const model::ResidentByteBuffer> buffer,
+    model::BoundRangeSetLoadTelemetry telemetry)
+    : logical_id_(std::move(logical_id)),
+      payload_bytes_(payload_bytes),
+      tensors_(std::move(tensors)),
+      buffer_(std::move(buffer)),
+      telemetry_(std::move(telemetry)) {}
+
+const DeepseekV4BoundTrunkTensor* DeepseekV4LoadedTrunkTensorSet::find(
+    std::string_view name) const noexcept {
+    const auto found = std::find_if(
+        tensors_.begin(), tensors_.end(),
+        [name](const DeepseekV4BoundTrunkTensor& tensor) {
+            return tensor.name == name;
+        });
+    return found == tensors_.end() ? nullptr : &*found;
+}
+
+Result<std::span<const std::byte>> DeepseekV4LoadedTrunkTensorSet::tensor(
+    std::string_view name) const {
+    const auto* found = find(name);
+    const auto payload = buffer_ == nullptr ? std::span<const std::byte>{} : buffer_->bytes();
+    if (found == nullptr || found->packed_offset > payload.size() ||
+        found->bytes > payload.size() - found->packed_offset) {
+        return make_error(ErrorCode::not_found,
+                          "DeepSeek bound trunk tensor is unavailable",
+                          std::string(name));
+    }
+    return payload.subspan(static_cast<std::size_t>(found->packed_offset),
+                           static_cast<std::size_t>(found->bytes));
+}
 
 Result<DeepseekV4TrunkArtifactBinding> bind_deepseek_v4_trunk_range_artifact(
     const model::RangeArtifact& artifact,
@@ -201,6 +238,27 @@ Result<std::string> deepseek_v4_bound_trunk_range_logical_id(
            std::to_string(range_index) + "/" + range.tensor_name;
 }
 
+Result<std::string> deepseek_v4_bound_trunk_tensor_set_logical_id(
+    const DeepseekV4TrunkArtifactBinding& binding) {
+    if (!binding.metadata_catalog_hashes_verified ||
+        !binding.local_range_hashes_verified ||
+        !binding.exact_source_binding_verified ||
+        binding.complete_checkpoint_verified || binding.execution_supported ||
+        binding.model_id.empty() || binding.revision.empty() ||
+        binding.artifact_root.empty() ||
+        !util::is_sha256_hex(binding.source_plan_sha256) ||
+        binding.payload_bytes == 0U || binding.ranges.empty() ||
+        binding.ranges.size() > model::kMaximumBoundRangeSetRanges ||
+        binding.maximum_local_range_bytes == 0U ||
+        binding.maximum_local_range_bytes > binding.payload_bytes) {
+        return make_error(ErrorCode::integrity_error,
+                          "DeepSeek bound trunk tensor-set load requires an exact non-executing binding",
+                          binding.artifact_root.string());
+    }
+    return "deepseek/" + binding.model_id + "/layer/" +
+           std::to_string(binding.layer) + "/trunk-tensor-set";
+}
+
 Result<model::LoadedBoundRange> load_deepseek_v4_bound_trunk_range(
     const DeepseekV4TrunkArtifactBinding& binding,
     std::size_t range_index,
@@ -215,6 +273,149 @@ Result<model::LoadedBoundRange> load_deepseek_v4_bound_trunk_range(
         residency,
         governor,
         options);
+}
+
+Result<DeepseekV4LoadedTrunkTensorSet>
+load_deepseek_v4_bound_trunk_tensor_set(
+    const DeepseekV4TrunkArtifactBinding& binding,
+    const DeepseekV4GgufCatalogReport& report,
+    model::ResidencyObject& residency,
+    safety::ResourceGovernor& governor,
+    const model::BoundRangeSetLoadOptions& options) {
+    auto logical_id = deepseek_v4_bound_trunk_tensor_set_logical_id(binding);
+    if (!logical_id) return logical_id.error();
+    bool published_residency = false;
+    try {
+        if (!report.imported_manifest_verified ||
+            !report.imported_file_hashes_verified ||
+            report.catalog.model_id != binding.model_id ||
+            report.catalog.revision != binding.revision ||
+            binding.layer >= report.layers) {
+            return make_error(
+                ErrorCode::integrity_error,
+                "DeepSeek trunk tensor set differs from its verified catalog identity",
+                binding.model_id);
+        }
+
+        std::map<std::string_view, std::size_t, std::less<>> catalog_by_name;
+        std::size_t expected_tensor_count = 0U;
+        ByteCount expected_bytes = 0U;
+        for (std::size_t index = 0U; index < report.catalog.tensors.size(); ++index) {
+            const auto& descriptor = report.catalog.tensors[index];
+            if (descriptor.name.empty() ||
+                !catalog_by_name.emplace(descriptor.name, index).second) {
+                return make_error(ErrorCode::integrity_error,
+                                  "DeepSeek catalog contains duplicate tensor identities",
+                                  descriptor.name);
+            }
+            if (descriptor.role == model::TensorRole::routed_expert ||
+                !descriptor.layer.has_value() ||
+                *descriptor.layer != binding.layer) {
+                continue;
+            }
+            if (descriptor.source.bytes == 0U ||
+                descriptor.source.bytes > std::numeric_limits<ByteCount>::max() - expected_bytes) {
+                return make_error(ErrorCode::invalid_format,
+                                  "DeepSeek catalog trunk byte identity is invalid",
+                                  descriptor.name);
+            }
+            ++expected_tensor_count;
+            expected_bytes += descriptor.source.bytes;
+        }
+        if (expected_tensor_count == 0U ||
+            binding.ranges.size() != expected_tensor_count ||
+            binding.payload_bytes != expected_bytes) {
+            return make_error(ErrorCode::integrity_error,
+                              "DeepSeek trunk binding does not cover the complete layer tensor set",
+                              std::to_string(binding.layer));
+        }
+
+        model::BoundRangeSetIdentity set_identity;
+        set_identity.logical_id = logical_id.value();
+        set_identity.total_bytes = binding.payload_bytes;
+        set_identity.ranges.reserve(binding.ranges.size());
+        std::vector<DeepseekV4BoundTrunkTensor> tensors;
+        tensors.reserve(binding.ranges.size());
+        std::set<std::string, std::less<>> represented;
+        ByteCount packed_offset = 0U;
+        ByteCount maximum_range = 0U;
+        for (std::size_t index = 0U; index < binding.ranges.size(); ++index) {
+            const auto& range = binding.ranges[index];
+            const auto catalog_entry = catalog_by_name.find(range.tensor_name);
+            if (catalog_entry == catalog_by_name.end() ||
+                range.artifact_index != index || range.tensor_offset != 0U ||
+                !range.final_tile || range.local_source.offset != 0U ||
+                range.local_source.bytes == 0U ||
+                range.local_source.bytes != range.original_source.bytes ||
+                !util::is_sha256_hex(range.local_sha256) ||
+                !represented.emplace(range.tensor_name).second) {
+                return make_error(ErrorCode::integrity_error,
+                                  "DeepSeek trunk binding contains an incomplete or duplicate tensor",
+                                  range.tensor_name);
+            }
+            const auto& descriptor = report.catalog.tensors[catalog_entry->second];
+            if (descriptor.role == model::TensorRole::routed_expert ||
+                !descriptor.layer.has_value() ||
+                *descriptor.layer != binding.layer ||
+                descriptor.role != range.role ||
+                descriptor.ggml_type != range.ggml_type ||
+                !same_source(descriptor.source, range.original_source) ||
+                descriptor.source.bytes != range.local_source.bytes) {
+                return make_error(ErrorCode::integrity_error,
+                                  "DeepSeek bound trunk tensor differs from its catalog type or source",
+                                  range.tensor_name);
+            }
+            if (range.local_source.bytes >
+                std::numeric_limits<ByteCount>::max() - packed_offset) {
+                return make_error(ErrorCode::invalid_format,
+                                  "DeepSeek packed trunk tensor offsets overflow",
+                                  range.tensor_name);
+            }
+            const auto range_logical_id =
+                set_identity.logical_id + "/range/" + std::to_string(index) + "/" +
+                range.tensor_name;
+            set_identity.ranges.push_back(model::BoundRangeIdentity{
+                range_logical_id, range.local_source, range.local_sha256});
+            tensors.push_back(DeepseekV4BoundTrunkTensor{
+                catalog_entry->second,
+                descriptor.name,
+                descriptor.dtype,
+                descriptor.shape,
+                descriptor.role,
+                descriptor.ggml_type,
+                packed_offset,
+                descriptor.source.bytes,
+            });
+            packed_offset += range.local_source.bytes;
+            maximum_range = std::max(maximum_range, range.local_source.bytes);
+        }
+        if (represented.size() != expected_tensor_count ||
+            packed_offset != binding.payload_bytes ||
+            maximum_range != binding.maximum_local_range_bytes) {
+            return make_error(ErrorCode::integrity_error,
+                              "DeepSeek bound trunk tensor-set totals are inconsistent",
+                              binding.model_id);
+        }
+
+        auto loaded = model::load_bound_range_set(
+            set_identity, residency, governor, options);
+        if (!loaded) return loaded.error();
+        published_residency = true;
+        return DeepseekV4LoadedTrunkTensorSet(
+            std::move(set_identity.logical_id), binding.payload_bytes,
+            std::move(tensors), loaded.value().retain_buffer(),
+            loaded.value().telemetry());
+    } catch (const std::bad_alloc&) {
+        const auto error = make_error(
+            ErrorCode::resource_exhausted,
+            "Unable to allocate bounded DeepSeek trunk tensor-set metadata",
+            binding.model_id);
+        if (published_residency) {
+            auto failed = residency.fail(error.message);
+            if (!failed) return failed.error();
+        }
+        return error;
+    }
 }
 
 std::string to_json(const DeepseekV4TrunkArtifactBinding& binding) {

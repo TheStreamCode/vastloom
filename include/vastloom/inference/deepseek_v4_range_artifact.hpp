@@ -2,8 +2,11 @@
 
 #include <cstddef>
 #include <filesystem>
+#include <memory>
 #include <optional>
+#include <span>
 #include <string>
+#include <string_view>
 #include <vector>
 
 #include "vastloom/core/bytes.hpp"
@@ -45,6 +48,63 @@ struct DeepseekV4TrunkArtifactBinding {
     bool execution_supported{false};
 };
 
+struct DeepseekV4BoundTrunkTensor {
+    std::size_t catalog_tensor_index{0U};
+    std::string name;
+    model::TensorDType dtype{model::TensorDType::f32};
+    std::vector<std::uint64_t> shape;
+    model::TensorRole role{model::TensorRole::other};
+    std::optional<std::uint32_t> ggml_type;
+    ByteCount packed_offset{0U};
+    ByteCount bytes{0U};
+};
+
+// A closed, complete non-routed layer tensor set backed by one Governor-accounted immutable RAM
+// buffer. It remains non-executing by itself; graph consumers must bind and validate each storage
+// type and logical shape they understand.
+class DeepseekV4LoadedTrunkTensorSet {
+public:
+    DeepseekV4LoadedTrunkTensorSet(const DeepseekV4LoadedTrunkTensorSet&) = delete;
+    DeepseekV4LoadedTrunkTensorSet& operator=(const DeepseekV4LoadedTrunkTensorSet&) = delete;
+    DeepseekV4LoadedTrunkTensorSet(DeepseekV4LoadedTrunkTensorSet&&) noexcept = default;
+    DeepseekV4LoadedTrunkTensorSet& operator=(DeepseekV4LoadedTrunkTensorSet&&) = delete;
+
+    [[nodiscard]] const std::string& logical_id() const noexcept { return logical_id_; }
+    [[nodiscard]] ByteCount payload_bytes() const noexcept { return payload_bytes_; }
+    [[nodiscard]] const std::vector<DeepseekV4BoundTrunkTensor>& tensors() const noexcept {
+        return tensors_;
+    }
+    [[nodiscard]] const DeepseekV4BoundTrunkTensor* find(std::string_view name) const noexcept;
+    [[nodiscard]] Result<std::span<const std::byte>> tensor(std::string_view name) const;
+    [[nodiscard]] std::shared_ptr<const model::ResidentByteBuffer> retain_buffer() const noexcept {
+        return buffer_;
+    }
+    [[nodiscard]] const model::BoundRangeSetLoadTelemetry& telemetry() const noexcept {
+        return telemetry_;
+    }
+
+private:
+    friend Result<DeepseekV4LoadedTrunkTensorSet>
+    load_deepseek_v4_bound_trunk_tensor_set(
+        const DeepseekV4TrunkArtifactBinding&,
+        const DeepseekV4GgufCatalogReport&,
+        model::ResidencyObject&,
+        safety::ResourceGovernor&,
+        const model::BoundRangeSetLoadOptions&);
+    DeepseekV4LoadedTrunkTensorSet(
+        std::string logical_id,
+        ByteCount payload_bytes,
+        std::vector<DeepseekV4BoundTrunkTensor> tensors,
+        std::shared_ptr<const model::ResidentByteBuffer> buffer,
+        model::BoundRangeSetLoadTelemetry telemetry);
+
+    std::string logical_id_;
+    ByteCount payload_bytes_{0U};
+    std::vector<DeepseekV4BoundTrunkTensor> tensors_;
+    std::shared_ptr<const model::ResidentByteBuffer> buffer_;
+    model::BoundRangeSetLoadTelemetry telemetry_;
+};
+
 [[nodiscard]] Result<DeepseekV4TrunkArtifactBinding>
 bind_deepseek_v4_trunk_range_artifact(
     const model::RangeArtifact& artifact,
@@ -56,6 +116,9 @@ bind_deepseek_v4_trunk_range_artifact(
     const DeepseekV4TrunkArtifactBinding& binding,
     std::size_t range_index);
 
+[[nodiscard]] Result<std::string> deepseek_v4_bound_trunk_tensor_set_logical_id(
+    const DeepseekV4TrunkArtifactBinding& binding);
+
 // Revalidates the selected binding identity and loads exactly one local range through a governed
 // RAM transaction. The in-memory bytes are hashed again before RAM_READY is published.
 [[nodiscard]] Result<model::LoadedBoundRange> load_deepseek_v4_bound_trunk_range(
@@ -64,6 +127,17 @@ bind_deepseek_v4_trunk_range_artifact(
     model::ResidencyObject& residency,
     safety::ResourceGovernor& governor,
     const model::BoundRangeLoadOptions& options = {});
+
+// Requires exactly one complete local range for every non-routed tensor in the bound layer.
+// Missing, duplicate, split or catalog/type/source mismatched sets fail before any residency
+// change.
+[[nodiscard]] Result<DeepseekV4LoadedTrunkTensorSet>
+load_deepseek_v4_bound_trunk_tensor_set(
+    const DeepseekV4TrunkArtifactBinding& binding,
+    const DeepseekV4GgufCatalogReport& report,
+    model::ResidencyObject& residency,
+    safety::ResourceGovernor& governor,
+    const model::BoundRangeSetLoadOptions& options = {});
 
 [[nodiscard]] std::string to_json(const DeepseekV4TrunkArtifactBinding& binding);
 [[nodiscard]] std::string to_text(const DeepseekV4TrunkArtifactBinding& binding);

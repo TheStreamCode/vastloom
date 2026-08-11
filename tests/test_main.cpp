@@ -24,6 +24,7 @@
 #include "vastloom/inference/deepseek_v4_gguf.hpp"
 #include "vastloom/inference/deepseek_v4_expert_provider.hpp"
 #include "vastloom/inference/deepseek_v4_model.hpp"
+#include "vastloom/inference/deepseek_v4_range_artifact.hpp"
 #include "vastloom/inference/deepseek_v4_reference.hpp"
 #include "vastloom/inference/llama_model.hpp"
 #include "vastloom/inference/olmoe_model.hpp"
@@ -145,6 +146,12 @@ void append_gguf_string(std::vector<unsigned char>& output, std::string_view val
 
 void write_bytes(const std::filesystem::path& path, std::span<const unsigned char> bytes) {
     std::ofstream output(path, std::ios::binary);
+    output.write(reinterpret_cast<const char*>(bytes.data()),
+                 static_cast<std::streamsize>(bytes.size()));
+}
+
+void write_bytes(const std::filesystem::path& path, std::span<const std::byte> bytes) {
+    std::ofstream output(path, std::ios::binary | std::ios::trunc);
     output.write(reinterpret_cast<const char*>(bytes.data()),
                  static_cast<std::streamsize>(bytes.size()));
 }
@@ -3463,6 +3470,209 @@ void test_deepseek_v4_reference_graph(const std::filesystem::path& root) {
                             ambiguous, token_ids));
                     }
                 }
+            }
+
+            // Repackage the complete non-routed layer tensors as independently hashed artifact
+            // ranges, load them into one aggregate-governed buffer and bind the reduced graph
+            // directly from that retained tensor set. Routed experts remain indivisible bundles.
+            const auto trunk_artifact_root = root / "deepseek-packed-trunk-artifact";
+            std::filesystem::create_directories(trunk_artifact_root / "ranges");
+            vastloom::inference::DeepseekV4TrunkArtifactBinding trunk_binding;
+            trunk_binding.artifact_root = trunk_artifact_root;
+            trunk_binding.model_id = packed_catalog.model_id;
+            trunk_binding.revision = packed_catalog.revision;
+            trunk_binding.source_plan_sha256 = std::string(64U, 'a');
+            trunk_binding.layer = 0U;
+            trunk_binding.metadata_catalog_hashes_verified = true;
+            trunk_binding.local_range_hashes_verified = true;
+            trunk_binding.exact_source_binding_verified = true;
+            bool trunk_artifact_ok = true;
+            for (std::size_t tensor_index = 0U;
+                 tensor_index < packed_catalog.tensors.size(); ++tensor_index) {
+                const auto& descriptor = packed_catalog.tensors[tensor_index];
+                if (descriptor.role == vastloom::model::TensorRole::routed_expert ||
+                    !descriptor.layer.has_value() || *descriptor.layer != 0U) {
+                    continue;
+                }
+                const std::vector<std::byte>* encoded = nullptr;
+                if (descriptor.ggml_type == vastloom::inference::kGgmlTypeI32) {
+                    const auto found =
+                        packed_graph.packed_integer_tensors.find(descriptor.name);
+                    if (found != packed_graph.packed_integer_tensors.end()) {
+                        encoded = &found->second.encoded;
+                    }
+                } else {
+                    const auto found = packed_graph.packed_matrices.find(descriptor.name);
+                    if (found != packed_graph.packed_matrices.end()) {
+                        encoded = &found->second.encoded;
+                    }
+                }
+                CHECK(encoded != nullptr && !encoded->empty() &&
+                      encoded->size() == descriptor.source.bytes);
+                if (encoded == nullptr || encoded->empty() ||
+                    encoded->size() != descriptor.source.bytes) {
+                    trunk_artifact_ok = false;
+                    break;
+                }
+                const auto range_index = trunk_binding.ranges.size();
+                const auto local_path = trunk_artifact_root / "ranges" /
+                                        (std::to_string(range_index) + ".bin");
+                write_bytes(local_path, *encoded);
+                auto local_hash = vastloom::util::sha256_file(local_path);
+                CHECK(local_hash);
+                if (!local_hash) {
+                    trunk_artifact_ok = false;
+                    break;
+                }
+                trunk_binding.ranges.push_back(
+                    vastloom::inference::DeepseekV4BoundTrunkRange{
+                        range_index,
+                        descriptor.name,
+                        descriptor.role,
+                        0U,
+                        true,
+                        descriptor.ggml_type,
+                        descriptor.source,
+                        vastloom::model::TensorSourceRange{
+                            local_path, 0U, descriptor.source.bytes},
+                        local_hash.take_value(),
+                    });
+                trunk_binding.payload_bytes += descriptor.source.bytes;
+                trunk_binding.maximum_local_range_bytes = std::max(
+                    trunk_binding.maximum_local_range_bytes,
+                    descriptor.source.bytes);
+            }
+            vastloom::inference::DeepseekV4GgufCatalogReport trunk_report;
+            trunk_report.catalog = packed_catalog;
+            trunk_report.layers = 1U;
+            trunk_report.experts_per_layer =
+                static_cast<std::uint32_t>(config.expert_count);
+            trunk_report.top_k = static_cast<std::uint32_t>(config.experts_per_token);
+            trunk_report.imported_manifest_verified = true;
+            trunk_report.imported_file_hashes_verified = true;
+            CHECK(trunk_artifact_ok && trunk_binding.ranges.size() == 12U &&
+                  trunk_binding.payload_bytes == packed_catalog.always_active_bytes &&
+                  trunk_binding.payload_bytes == 2'644U);
+
+            vastloom::safety::ResourceLimits trunk_limits;
+            trunk_limits.host_memory_hard_limit =
+                trunk_binding.payload_bytes + trunk_binding.maximum_local_range_bytes;
+            trunk_limits.ram_hard_limit = trunk_binding.payload_bytes;
+            trunk_limits.vram_hard_limit = 1U;
+            trunk_limits.staging_hard_limit = trunk_binding.maximum_local_range_bytes;
+            trunk_limits.scratch_hard_limit = 1U;
+            vastloom::safety::ResourceGovernor trunk_governor(trunk_limits);
+            auto trunk_logical_id =
+                vastloom::inference::deepseek_v4_bound_trunk_tensor_set_logical_id(
+                    trunk_binding);
+            auto trunk_residency = trunk_logical_id
+                ? vastloom::model::ResidencyObject::create(
+                      trunk_logical_id.value(), trunk_binding.payload_bytes)
+                : vastloom::Result<vastloom::model::ResidencyObject>(
+                      vastloom::make_error(vastloom::ErrorCode::internal_error,
+                                           "missing packed trunk identity"));
+            vastloom::model::BoundRangeSetLoadOptions trunk_options;
+            trunk_options.max_total_bytes = trunk_binding.payload_bytes;
+            trunk_options.max_range_bytes = trunk_binding.maximum_local_range_bytes;
+            trunk_options.max_ranges = trunk_binding.ranges.size();
+            trunk_options.measure_process_io = false;
+            auto artifact_graph = graph;
+            bool artifact_graph_ok = trunk_artifact_ok && bound_ok && trunk_residency;
+            if (artifact_graph_ok) {
+                {
+                    auto loaded =
+                        vastloom::inference::load_deepseek_v4_bound_trunk_tensor_set(
+                            trunk_binding, trunk_report, trunk_residency.value(),
+                            trunk_governor, trunk_options);
+                    CHECK(loaded && loaded.value().tensors().size() == 12U &&
+                          loaded.value().telemetry().range_count == 12U &&
+                          loaded.value().telemetry().logical_bytes == 2'644U);
+                    if (!loaded) {
+                        artifact_graph_ok = false;
+                    } else {
+                        for (const auto& spec : layer_matrices) {
+                            if (spec.expert.has_value()) {
+                                const auto found =
+                                    governed_graph.packed_matrices.find(spec.name);
+                                CHECK(found != governed_graph.packed_matrices.end());
+                                if (found == governed_graph.packed_matrices.end()) {
+                                    artifact_graph_ok = false;
+                                    break;
+                                }
+                                artifact_graph.packed_matrices.emplace(
+                                    spec.name, found->second);
+                            } else {
+                                auto bound =
+                                    vastloom::inference::deepseek_v4_bind_packed_matrix(
+                                        loaded.value(), spec.name, spec.columns);
+                                CHECK(bound);
+                                if (!bound) {
+                                    artifact_graph_ok = false;
+                                    break;
+                                }
+                                artifact_graph.packed_matrices.emplace(
+                                    spec.name, bound.take_value());
+                            }
+                            artifact_graph.float_tensors.erase(spec.name);
+                        }
+                        if (artifact_graph_ok) {
+                            auto route =
+                                vastloom::inference::deepseek_v4_bind_packed_i32(
+                                    loaded.value(), hash_table_name);
+                            CHECK(route);
+                            if (!route) {
+                                artifact_graph_ok = false;
+                            } else {
+                                artifact_graph.packed_integer_tensors.emplace(
+                                    hash_table_name, route.take_value());
+                                artifact_graph.integer_tensors.erase(hash_table_name);
+                            }
+                        }
+                    }
+                }
+                auto retained = trunk_residency.value().snapshot();
+                CHECK(retained && retained.value().state ==
+                                      vastloom::model::ResidencyState::ram_ready &&
+                      retained.value().active_uses == 1U &&
+                      retained.value().ram_reserved_bytes == 2'644U &&
+                      retained.value().staging_reserved_bytes == 0U &&
+                      !trunk_residency.value().evict_ram());
+            }
+            CHECK(artifact_graph_ok && artifact_graph.packed_matrices.size() == 23U &&
+                  artifact_graph.packed_integer_tensors.size() == 1U);
+            if (artifact_graph_ok) {
+                vastloom::inference::DeepseekV4ReferenceState oracle_artifact_state;
+                vastloom::inference::DeepseekV4ReferenceState artifact_state;
+                auto oracle_artifact =
+                    vastloom::inference::deepseek_v4_reference_prefill(
+                        quantized_oracle, token_ids, &oracle_artifact_state);
+                auto artifact = vastloom::inference::deepseek_v4_reference_prefill(
+                    artifact_graph, token_ids, &artifact_state);
+                CHECK(oracle_artifact && artifact);
+                if (oracle_artifact && artifact) {
+                    compare_packed_forward(artifact.value(), oracle_artifact.value());
+                    auto oracle_decode =
+                        vastloom::inference::deepseek_v4_reference_decode(
+                            quantized_oracle, 10U, oracle_artifact_state);
+                    auto artifact_decode =
+                        vastloom::inference::deepseek_v4_reference_decode(
+                            artifact_graph, 10U, artifact_state);
+                    CHECK(oracle_decode && artifact_decode);
+                    if (oracle_decode && artifact_decode) {
+                        compare_packed_forward(artifact_decode.value(),
+                                               oracle_decode.value());
+                    }
+                }
+            }
+            artifact_graph.packed_matrices.clear();
+            artifact_graph.packed_integer_tensors.clear();
+            if (trunk_residency) {
+                auto released = trunk_residency.value().snapshot();
+                CHECK(released && released.value().active_uses == 0U &&
+                      released.value().evictable &&
+                      trunk_residency.value().evict_ram() &&
+                      trunk_governor.snapshot().reserved[0] == 0U &&
+                      trunk_governor.snapshot().reserved[2] == 0U);
             }
 
             // Keep only the trunk buffers and replace static expert tensors with a router-first,

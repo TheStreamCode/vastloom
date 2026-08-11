@@ -72,6 +72,33 @@ This is why depth was raised in steps.
 than a real checkpoint. It is now 64 — still bounded, with depth separately gated by the preflight
 and the Governor.
 
+## Text prompts
+
+The GGUF distribution carries its vocabulary as metadata, not as `tokenizer.json`, so text had no
+route into this path. It turned out not to need a second tokenizer: the checkpoint's
+`tokenizer.ggml.tokens` matches the pinned DeepSeek tokenizer index for index — 128,000 base tokens
+plus 1,283 added tokens, 129,280 in total — and all 127,741 merges are identical. `--prompt`
+therefore encodes through the tokenizer already validated against Hugging Face tokenizers 0.22.1,
+and `--chat` applies the checkpoint's own template.
+
+Encoding happens before the preflight, because the resident cost depends on it. A synchronous
+resolve hands the graph every expert a layer selected at once, so the cache must hold one distinct
+bundle per token per slot — six for a single token, twelve for two — and there is one cache per
+layer, all live simultaneously. The first version of this preflight charged a single cache and
+understated a full-depth pass by gigabytes; it now multiplies by depth.
+
+| Prompt | Distinct experts per layer | Expert cache total | Required | Forward |
+|---|---:|---:|---:|---:|
+| one token id | 6 | 2.26 GB | 7,056,343,388 | 29.4 s |
+| `"Roma"` (2 tokens) | 12 | 4.53 GB | 11,517,509,980 | 59.5 s |
+
+The two-token run reached `next_token 223`, which decodes to a space. Free host RAM fell to 10.1 GB
+at its lowest, against the 8 GiB floor, and the process peaked at 8.62 GB.
+
+That table is also the limit: prompt length multiplies the expert working set, so a longer prompt is
+refused by the preflight rather than run. Releasing each layer's experts once that layer has
+executed — the streaming design this project exists for — is what removes the multiplier.
+
 ## Bounds
 
 - One token, no generation loop: this is a single forward pass, not multi-token decoding.
@@ -83,5 +110,7 @@ and the Governor.
 - The result is not compared against an independent implementation of the full model. It is
   internally consistent and deterministic, and its expert traffic matches the metadata prediction,
   but no external oracle has confirmed token 20 for this input.
-- Prompt handling is absent: the tokenizer reads `tokenizer.json`, which the GGUF distribution does
-  not carry, so input is a raw token id rather than text.
+- Prompts work but do not scale: the expert working set grows with prompt length, so anything beyond
+  a couple of tokens is refused by the preflight until layers release their experts after executing.
+- The chat template is applied on request, but there is no conversation: one prompt in, one predicted
+  token out.

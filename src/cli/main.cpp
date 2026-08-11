@@ -1893,7 +1893,9 @@ int command_deepseek_forward(const std::vector<std::string>& args) {
         vastloom::inference::DeepseekV4ReferenceGenerationOptions options;
         options.max_new_tokens = max_tokens.value();
         options.temperature = 0.0F;
-        options.timeout = std::chrono::hours(2);
+        // The driver caps a run at one hour, which at CPU speed is the real ceiling on how many
+        // tokens a request can produce.
+        options.timeout = std::chrono::hours(1);
         if (tokenizer.has_value()) {
             options.stop_token_ids.push_back(1U);  // <|end of sentence|>
         }

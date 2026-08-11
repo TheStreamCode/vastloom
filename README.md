@@ -109,10 +109,15 @@ model conversion.
 > sampling is portable across the tested standard libraries. Per-layer checkpoints enforce
 > timeout, cancellation and `ProcessSafetyGuard` sampling without publishing partial cache state,
 > while observed cache hit/miss and logical expert bytes are aggregated across generation.
+> The first CUDA control-plane slice is also native: `cuda-info` loads the Windows/Linux driver
+> dynamically without requiring the CUDA toolkit, reports exact device capability without creating
+> a context, and can perform an explicitly requested Governor-backed smoke allocation capped at
+> 64 MiB. On the reference RTX 4070 Super, Windows and WSL both reported compute capability 8.9
+> and completed/released a 4 MiB allocation while preserving 1 GiB of live VRAM headroom.
 > The complete 82.54 GB payload
 > has not been downloaded or executed; this synthetic gate is not a complete official DeepSeek
 > layer/token path,
-> physical-NVMe performance, official-payload generation or CUDA implementation.
+> physical-NVMe performance, official-payload generation or CUDA inference implementation.
 
 ## Why Vastloom exists
 
@@ -215,6 +220,8 @@ The complete governed six-global plan, artifact and consumer boundary is documen
 [`M9 global tensor-set report`](docs/reports/M9_DEEPSEEK_GLOBAL_TENSOR_SET_VALIDATION.md).
 The bounded token-level prefill/decode loop and trusted greedy/seeded vectors are documented in
 the [`M9 reference-generation report`](docs/reports/M9_DEEPSEEK_REFERENCE_GENERATION_VALIDATION.md).
+The native driver capability and governed VRAM allocation boundary are documented in the
+[`M8 CUDA driver report`](docs/reports/M8_CUDA_DRIVER_VALIDATION.md).
 The pinned importer and immutable full-source admission boundary are documented in the
 [`M7 checkpoint-binding report`](docs/reports/M7_DEEPSEEK_GGUF_CHECKPOINT_BINDING_VALIDATION.md).
 Current and candidate model support is kept explicit in the
@@ -237,8 +244,8 @@ allocation plan is derived from detected capacity and conservative headroom.
 
 | Platform | Current status |
 |---|---|
-| Windows 11 x86-64 | Native CPU paths validated with MSVC; primary consumer target |
-| Linux x86-64 | Native CPU paths validated with GCC and Clang; ASan/UBSan pass, while TSan builds but its current WSL startup is nondeterministic |
+| Windows 11 x86-64 | Native CPU paths plus CUDA driver capability/governed allocation validated with MSVC; primary consumer target |
+| Linux x86-64 | Native CPU paths plus CUDA driver capability/governed allocation validated with GCC and Clang; ASan/UBSan and focused TSan binaries pass |
 | macOS | Source includes a portable CPU/RAM probe; CPU CI and Metal are explicit unvalidated [M14 roadmap](docs/ROADMAP.md#public-macos-and-metal-track) work |
 
 Vastloom must therefore be described as working on Windows and Linux today. macOS is a planned
@@ -303,6 +310,26 @@ portability target, not a validated platform claim.
   timeout/Ctrl+C/headroom checks stop safely between layers.
 - **Fault injection:** worker failure, short read, allocation failure, cancellation and
   I/O timeout are exercised through the real OLMoE path and release reservations cleanly.
+
+### Native CUDA control boundary
+
+- **Toolkit-free capability probe:** `cuda-info` resolves the Windows/Linux CUDA Driver API at
+  runtime and reports driver API version, device name, total VRAM, compute capability, SM count,
+  maximum threads per block and unified-addressing support. A capability-only probe does not
+  retain a CUDA context or allocate model memory.
+- **Governor-first allocation:** the VRAM reservation succeeds before the CUDA backend may retain
+  the primary context or call `cuMemAlloc`; live device memory is then rechecked against a
+  caller-supplied reserve.
+- **Transactional ownership:** move-only allocation handles retain the CUDA driver, device context
+  and Governor reservation until `cuMemFree`. Backend allocation faults roll back the reservation;
+  an unrecoverable cleanup failure deliberately leaves its bytes charged instead of advertising
+  leaked VRAM as free.
+- **Bounded real smoke:** the CLI requires an explicit `--allocation-smoke`, caps it at 64 MiB,
+  applies the normal process/runtime policy and preserves at least 1 GiB of live VRAM by default.
+  The reference RTX 4070 Super passed a 4 MiB allocate/release cycle through both `nvcuda.dll` and
+  WSL `libcuda.so.1`.
+- **Honest boundary:** no CUDA kernels, host/device transfers, streams, pinned buffers or GPU model
+  inference exist yet. This closes the first two M8 control gates only.
 
 ### Synthetic validation path retained
 
@@ -376,8 +403,8 @@ portability target, not a validated platform claim.
   compute intersection without changing the oracle, and the real expert passes the same async
   boundary. This is scheduling correctness, not a physical-device speed result.
   A verified complete official-payload layer/token consumer, official-payload generation,
-  target-verified speculative generation, useful official-payload overlap and CUDA remain future
-  gates.
+  target-verified speculative generation, useful official-payload overlap and CUDA inference
+  kernels remain future gates.
 - **Official 0731 GGUF catalog:** the separate Unsloth revision
   `fbbb5b93fb787c21338159b0af3318bb3f4d9768` now has a bounded GGUF v3 header reader and
   DeepSeek-specific packed-expert mapper. The reviewed `UD-IQ1_S` split exposes 1,328 physical
@@ -835,6 +862,7 @@ vastloom chat MODEL_OR_MANIFEST
 vastloom model-info MODEL_OR_MANIFEST
 vastloom self-test MODEL_OR_MANIFEST
 vastloom doctor
+vastloom cuda-info [--allocation-smoke SIZE] [--minimum-free-vram SIZE] [--json]
 vastloom inspect MANIFEST_OR_MODEL_HEADERS [--declared-size SIZE] [--tensor-limit N]
 vastloom verify MANIFEST [--full]
 vastloom plan MANIFEST
@@ -873,6 +901,12 @@ Examples:
 ```bash
 # Non-invasive hardware report
 ./build/vastloom doctor --storage /path/to/model-drive
+
+# Native CUDA capability only; does not retain a context or allocate model memory
+./build/vastloom cuda-info --json
+
+# Explicitly reserve, allocate and release a bounded 4 MiB VRAM smoke buffer
+./build/vastloom cuda-info --allocation-smoke 4MiB --minimum-free-vram 1GiB --json
 
 # Inspect and fully verify a model manifest
 ./build/vastloom inspect examples/models/vastloom-tinychat-v1.sgm
@@ -958,14 +992,15 @@ It currently has:
 - two executable pinned Hugging Face adapters plus a DeepSeek metadata/tokenizer, reduced
   FP32 prefill oracle, file-backed governed Q8_0 layer, official 0731 GGUF metadata catalog and
   verified source-binding boundary; no full-checkpoint DeepSeek, MiniMax or Kimi execution adapter;
-- no CUDA, ROCm, Vulkan or Metal inference backend;
+- native CUDA driver discovery and governed allocation but no CUDA inference kernels, transfers or
+  streams; no ROCm, Vulkan or Metal inference backend;
 - scalar IQ1_S/IQ2_XXS/IQ3_XXS/MXFP4 expert, Q4_K global and Q8_0/Q5_K/Q6_K/BF16/F32 trunk
   reference kernels, plus bounded Q4_K/IQ2_XXS/MXFP4 row lookup and I32 router-table decoding, one
   deterministic reduced
   mixed-format layer composition and one
   separately validated real selected-expert cache/kernel bridge; an exact checkpoint-shaped range
   plan exists, but no authoritative official-payload route/layer/token execution, SIMD/fused
-  production kernel or CUDA path;
+  production kernel or CUDA inference path;
 - complete metadata-derived trunk plans and storage-type coverage plus a governed
   tile/expert-to-DeepSeek fixture consumer and reduced router-first bounded expert cache with an
   opt-in single-owner asynchronous batch; partial immutable range publication and a native

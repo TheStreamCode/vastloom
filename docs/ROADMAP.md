@@ -221,8 +221,11 @@ The capacity-only resident/streamed trunk derivation is recorded in the
 
 ## M8 — CUDA path for the RTX 4070 Super
 
-- [ ] Native CUDA device capability probe.
-- [ ] Bounded CUDA allocator integrated with Resource Governor.
+- [x] Native Windows/Linux CUDA Driver API capability probe without a build-time CUDA toolkit or
+  context allocation; the reference RTX 4070 Super reports compute capability 8.9 on both hosts.
+- [x] Move-only bounded CUDA allocation integrated with the Resource Governor, live VRAM reserve
+  recheck, transactional rollback and fail-closed cleanup accounting; a 4 MiB reference-PC smoke
+  passed with 1 GiB headroom.
 - [ ] Dense and attention/state kernels.
 - [ ] Optimized packed expert kernels for the selected quantization (scalar IQ1_S/IQ3_XXS
   complete-expert oracle exists).
@@ -231,6 +234,10 @@ The capacity-only resident/streamed trunk derivation is recorded in the
 
 **Gate:** CUDA output passes the same token/logit/route fixtures as CPU, with no
 unbounded allocation and clean recovery from injected CUDA failures.
+
+The completed control-plane portion is recorded in the
+[M8 CUDA driver validation report](reports/M8_CUDA_DRIVER_VALIDATION.md). The milestone gate stays
+open until actual CUDA kernels match the CPU fixtures.
 
 ## M9 — Explicit multitier execution
 

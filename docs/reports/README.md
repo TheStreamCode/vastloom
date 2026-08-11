@@ -13,6 +13,10 @@ hardware, commands, measurements and limitations.
 
 ## Current report
 
+- [`M8_CUDA_DRIVER_VALIDATION.md`](M8_CUDA_DRIVER_VALIDATION.md) — native toolkit-free Windows/Linux
+  CUDA capability discovery, Governor-first move-only VRAM ownership, deterministic allocation/
+  cleanup faults and real 4 MiB RTX 4070 Super smoke allocations on Windows and WSL; no kernels or
+  GPU inference.
 - [`M9_DEEPSEEK_REFERENCE_GENERATION_VALIDATION.md`](M9_DEEPSEEK_REFERENCE_GENERATION_VALIDATION.md) —
   exact eight-token greedy parity with a freshly regenerated pinned preview graph, portable seeded
   top-k sampling, transactional per-layer safety checkpoints and exact generation-level
@@ -152,8 +156,9 @@ hardware, commands, measurements and limitations.
 
 M6 is complete for its reduced float correctness gate. M7/M9 now include MTP, reduced incremental
 state, a bounded exact-sequence reference-generation lifecycle and one complete real quantized
-expert, while full-shard/layer/token official-payload DeepSeek execution and generation,
-optimized packed kernels, speculative verification and CUDA remain future work. The preceding
+expert. M8 now has native CUDA capability and governed allocation control, while full-shard/layer/
+token official-payload DeepSeek execution and generation, optimized CUDA kernels, speculative
+verification and GPU inference remain future work. The preceding
 completed storage milestone is M5:
 
 - [`M5_DEVICE_IO_CACHE_BYPASS_VALIDATION.md`](M5_DEVICE_IO_CACHE_BYPASS_VALIDATION.md) —

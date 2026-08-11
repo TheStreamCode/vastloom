@@ -61,6 +61,38 @@ those immutable weights on SSD and reports the recurrent traffic. RAM, staging a
 an aggregate Governor ceiling; VRAM is enforced separately and is never summed with RAM to fit one
 expert.
 
+## Native CUDA driver boundary
+
+The first M8 slice uses the CUDA Driver API through a runtime-loaded platform library. Windows
+loads only the system `nvcuda.dll`; Linux loads `libcuda.so.1`. The project therefore still builds
+without CUDA headers, a CUDA toolkit or `nvcc`. Capability probing calls `cuInit` and device-query
+entry points only: it does not retain a primary context or allocate VRAM.
+
+An allocation is a two-authority transaction:
+
+```text
+caller requests bytes + live VRAM reserve
+  -> Resource Governor reserves VRAM bytes
+  -> backend retains device primary context
+  -> backend makes context current and samples live free VRAM
+  -> reject if requested bytes + reserve do not fit
+  -> cuMemAlloc
+  -> move-only allocation owns pointer + context + reservation
+  -> cuMemFree -> context release -> Governor release
+```
+
+The CLI exposes this only as an explicit smoke allocation capped at 64 MiB and applies the normal
+runtime/process policy first. The reusable API remains bounded by the caller's Governor hard cap.
+Backend allocation failure rolls the reservation back. Explicit release failure preserves the
+handle for retry; if destruction cannot free the external allocation, Vastloom detaches the RAII
+handle while deliberately leaving its Governor bytes charged and keeps the driver module alive
+until process teardown. That fail-closed state prevents a second worker from treating uncertain
+VRAM as available.
+
+This boundary has no kernels, streams, pinned host memory, asynchronous copies or model tensors.
+It proves native device identity and allocation ownership only; CUDA inference starts with the
+next M8 correctness fixture.
+
 ## Current inference paths
 
 Alpha.2 retains the complete synthetic CPU-only reference slice:
@@ -800,6 +832,8 @@ router decisions or accepted output tokens.
 ## Current modules
 
 - `hardware/`: non-invasive machine probe.
+- `cuda/`: dynamically loaded Windows/Linux CUDA capability probe and Governor-backed move-only
+  VRAM allocation boundary; no kernels yet.
 - `planner/`: conservative capacity and placement plan.
 - `safety/`: reservations, state machine and heartbeat.
 - `model/`: manifest/Safetensors/GGUF parsing, imported-checkpoint and closed-world partial-range

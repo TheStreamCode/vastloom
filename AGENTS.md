@@ -21,7 +21,10 @@ with exact tensor slices and exclusive transfer leases. The router-first reduced
 submits all selected misses through a bounded batch, acquires each expert at its deterministic
 compute turn and records positive controlled read-service/CPU-compute overlap without changing
 the oracle result. Only one batch may own a cache and abandoned loads are drained and counted as
-wasted prefetch. Speculative decoding and CUDA do not exist yet. The newer
+wasted prefetch. Speculative decoding and CUDA inference kernels do not exist yet. A native
+Windows/Linux CUDA Driver API boundary now probes device capability without retaining a context
+and performs only explicit Governor-backed allocations with a live VRAM reserve; the reference
+RTX 4070 Super passed a 4 MiB allocate/release smoke on Windows and WSL. The newer
 official 0731 Unsloth `UD-IQ1_S` GGUF profile now has a bounded v3/split-header reader and a
 metadata-only packed-expert catalog: 1,328 physical tensors map to 11,008 logical expert bundles.
 A bounded scalar IQ1_S dequantization/matvec oracle matches pinned ggml output on one exact real
@@ -87,7 +90,7 @@ prefill/decode parity. The official set passed importer dry-run only. No officia
 or global payload was read. A complete
 0731 quantized layer/token
 path, physical NVMe overlap,
-official-payload generation and CUDA remain unvalidated.
+official-payload generation and CUDA inference remain unvalidated.
 Windows and Linux CPU paths are tested; macOS/Metal remain unvalidated. Laguna S 2.1 remains a
 reviewed compatibility target, not a validated execution path.
 

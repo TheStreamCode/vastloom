@@ -438,6 +438,11 @@ integration remains required before long-running large-model inference.
   prefill/decode state publication and callback-exception containment;
 - clean partial DeepSeek reference results on cancellation/timeout plus exact aggregation of only
   observed cache requests, misses and logical bytes;
+- CUDA capability probing without context retention or allocation, strict missing-library/symbol/
+  device rejection and structured CLI errors;
+- Governor-before-driver VRAM reservation, live post-context free-memory reserve checks, bounded
+  CLI smoke size, allocation rollback, explicit release retry and fail-closed residual accounting
+  when injected external cleanup fails;
 - valid-Unicode JSON serialization for arbitrary sampled byte sequences;
 - end-to-end CLI validation, direct/manifest loading modes and JSON error behavior.
 - exact OLMoE tokenizer, top-logit, greedy-token, expert-route and routing-weight parity
@@ -479,7 +484,8 @@ integration remains required before long-running large-model inference.
 - process kill during model conversion/publication;
 - queue saturation under real multi-GB reads;
 - stale heartbeat and wrong-PID enforcement on all supported operating systems;
-- CUDA allocation failure, device loss and reset recovery;
+- live CUDA device loss/reset recovery and failures during future transfers/kernels (driver
+  allocation and cleanup faults are now covered through the deterministic backend seam);
 - cancellation while transfers and kernels are in flight;
 - NVMe thermal/power policy transitions on real hardware;
 - fuzzing of Safetensors, tokenizer and model-adapter metadata.

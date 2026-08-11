@@ -65,7 +65,9 @@ resident-trunk profile only:
 
 Cache, extra resident experts and prefetch depth are optional and must shrink first. The complete
 selected expert is not delegated to uncontrolled OS swap and is loaded only after its destination
-and staging reservations succeed. A future CUDA path may tile compute in VRAM, but its complete
+and staging reservations succeed. The native CUDA control boundary now proves that a VRAM
+reservation precedes the device allocation and that live device headroom is rechecked with the
+context current. Future CUDA tensor transfers/kernels may tile compute in VRAM, but their complete
 expert backing and transfer buffers must still fit the governed RAM plan.
 
 On the reference PC, the nominal 32 GiB RAM and 12 GiB VRAM are upper physical capacities, not

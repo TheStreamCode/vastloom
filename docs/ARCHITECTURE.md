@@ -89,9 +89,29 @@ handle while deliberately leaving its Governor bytes charged and keeps the drive
 until process teardown. That fail-closed state prevents a second worker from treating uncertain
 VRAM as available.
 
-This boundary has no kernels, streams, pinned host memory, asynchronous copies or model tensors.
-It proves native device identity and allocation ownership only; CUDA inference starts with the
-next M8 correctness fixture.
+The next M8 slice adds one bounded synchronous data-plane transaction:
+
+```text
+accounted caller input + weight
+  -> reserve host output scratch
+  -> reserve one packed input/weight/output VRAM buffer
+  -> synchronous H2D input + weight
+  -> JIT-load scalar PTX RMSNorm and synchronize
+  -> synchronous D2H output
+  -> finite check + CPU-reference comparison at the CLI gate
+  -> free device buffer, then release Governor reservations
+```
+
+The PTX is embedded and loaded through the Driver API, so the build still needs neither CUDA
+headers nor `nvcc`. The kernel deliberately assigns one thread to each row: it is a correctness
+oracle, not an optimized reduction. Every byte range is overflow-checked, FP32-aligned and
+non-overlapping. The public operation caps itself at 4,194,304 elements; its returned host vector
+retains its scratch reservation until destruction. H2D, kernel, D2H and exception faults roll back
+the allocation. If the external device release itself remains uncertain, VRAM accounting stays
+charged fail-closed.
+
+No CUDA streams, pinned host memory, asynchronous copies, attention, quantized expert kernel or
+model graph exists yet. This proves the first real GPU math/copy boundary only.
 
 ## Current inference paths
 
@@ -832,8 +852,8 @@ router decisions or accepted output tokens.
 ## Current modules
 
 - `hardware/`: non-invasive machine probe.
-- `cuda/`: dynamically loaded Windows/Linux CUDA capability probe and Governor-backed move-only
-  VRAM allocation boundary; no kernels yet.
+- `cuda/`: dynamically loaded Windows/Linux CUDA capability probe, Governor-backed move-only VRAM
+  allocation, synchronous copies and a bounded scalar FP32 RMSNorm parity kernel.
 - `planner/`: conservative capacity and placement plan.
 - `safety/`: reservations, state machine and heartbeat.
 - `model/`: manifest/Safetensors/GGUF parsing, imported-checkpoint and closed-world partial-range
@@ -851,4 +871,4 @@ router decisions or accepted output tokens.
 
 The data plane now has device-level I/O plus a repeatable operating-system cache-bypass
 protocol. DeepSeek inspection must reuse these safety and identity boundaries rather
-than bypass them. Pinned host memory and GPU transfers remain later layers.
+than bypass them. Pinned host memory and asynchronous GPU transfers remain later layers.

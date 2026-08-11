@@ -114,10 +114,14 @@ model conversion.
 > a context, and can perform an explicitly requested Governor-backed smoke allocation capped at
 > 64 MiB. On the reference RTX 4070 Super, Windows and WSL both reported compute capability 8.9
 > and completed/released a 4 MiB allocation while preserving 1 GiB of live VRAM headroom.
+> A second explicit smoke now reserves one packed 81,920-byte device buffer, synchronously copies
+> two 4,096-wide FP32 rows plus their weights to the GPU, launches a toolkit-free scalar PTX
+> RMSNorm, copies the result back and compares it with the existing DeepSeek CPU reference.
+> Windows and WSL both passed at `0.000025` maximum absolute error and released all VRAM.
 > The complete 82.54 GB payload
 > has not been downloaded or executed; this synthetic gate is not a complete official DeepSeek
 > layer/token path,
-> physical-NVMe performance, official-payload generation or CUDA inference implementation.
+> physical-NVMe performance, official-payload generation or complete CUDA inference implementation.
 
 ## Why Vastloom exists
 
@@ -328,8 +332,13 @@ portability target, not a validated platform claim.
   applies the normal process/runtime policy and preserves at least 1 GiB of live VRAM by default.
   The reference RTX 4070 Super passed a 4 MiB allocate/release cycle through both `nvcuda.dll` and
   WSL `libcuda.so.1`.
-- **Honest boundary:** no CUDA kernels, host/device transfers, streams, pinned buffers or GPU model
-  inference exist yet. This closes the first two M8 control gates only.
+- **First real operation:** `cuda-info --rmsnorm-smoke` reserves caller scratch and one packed
+  81,920-byte VRAM buffer, performs synchronous H2D/D2H copies and runs a scalar PTX RMSNorm over
+  two 4,096-wide rows. Both native Windows and WSL match the CPU reference within `3e-5` and
+  release the device allocation.
+- **Honest boundary:** this is a deliberately scalar correctness kernel. CUDA attention, dense and
+  quantized MoE kernels, streams, pinned buffers, asynchronous overlap and GPU model inference do
+  not exist yet.
 
 ### Synthetic validation path retained
 
@@ -862,7 +871,8 @@ vastloom chat MODEL_OR_MANIFEST
 vastloom model-info MODEL_OR_MANIFEST
 vastloom self-test MODEL_OR_MANIFEST
 vastloom doctor
-vastloom cuda-info [--allocation-smoke SIZE] [--minimum-free-vram SIZE] [--json]
+vastloom cuda-info [--allocation-smoke SIZE|--rmsnorm-smoke]
+    [--minimum-free-vram SIZE] [--json]
 vastloom inspect MANIFEST_OR_MODEL_HEADERS [--declared-size SIZE] [--tensor-limit N]
 vastloom verify MANIFEST [--full]
 vastloom plan MANIFEST
@@ -907,6 +917,9 @@ Examples:
 
 # Explicitly reserve, allocate and release a bounded 4 MiB VRAM smoke buffer
 ./build/vastloom cuda-info --allocation-smoke 4MiB --minimum-free-vram 1GiB --json
+
+# Real synchronous H2D -> scalar PTX RMSNorm -> D2H CPU-parity smoke
+./build/vastloom cuda-info --rmsnorm-smoke --minimum-free-vram 1GiB --json
 
 # Inspect and fully verify a model manifest
 ./build/vastloom inspect examples/models/vastloom-tinychat-v1.sgm
@@ -992,8 +1005,9 @@ It currently has:
 - two executable pinned Hugging Face adapters plus a DeepSeek metadata/tokenizer, reduced
   FP32 prefill oracle, file-backed governed Q8_0 layer, official 0731 GGUF metadata catalog and
   verified source-binding boundary; no full-checkpoint DeepSeek, MiniMax or Kimi execution adapter;
-- native CUDA driver discovery and governed allocation but no CUDA inference kernels, transfers or
-  streams; no ROCm, Vulkan or Metal inference backend;
+- native CUDA driver discovery, governed allocation, synchronous copies and one scalar FP32
+  RMSNorm parity kernel, but no attention/dense/quantized-MoE CUDA path, streams or complete GPU
+  inference; no ROCm, Vulkan or Metal inference backend;
 - scalar IQ1_S/IQ2_XXS/IQ3_XXS/MXFP4 expert, Q4_K global and Q8_0/Q5_K/Q6_K/BF16/F32 trunk
   reference kernels, plus bounded Q4_K/IQ2_XXS/MXFP4 row lookup and I32 router-table decoding, one
   deterministic reduced

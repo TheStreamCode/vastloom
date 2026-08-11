@@ -226,6 +226,9 @@ The capacity-only resident/streamed trunk derivation is recorded in the
 - [x] Move-only bounded CUDA allocation integrated with the Resource Governor, live VRAM reserve
   recheck, transactional rollback and fail-closed cleanup accounting; a 4 MiB reference-PC smoke
   passed with 1 GiB headroom.
+- [x] Toolkit-free scalar FP32 RMSNorm with bounded synchronous H2D/D2H copies, one packed
+  Governor-owned device buffer and CPU-reference parity on Windows and WSL. This is a correctness
+  kernel, not the dense/attention gate.
 - [ ] Dense and attention/state kernels.
 - [ ] Optimized packed expert kernels for the selected quantization (scalar IQ1_S/IQ3_XXS
   complete-expert oracle exists).
@@ -237,7 +240,8 @@ unbounded allocation and clean recovery from injected CUDA failures.
 
 The completed control-plane portion is recorded in the
 [M8 CUDA driver validation report](reports/M8_CUDA_DRIVER_VALIDATION.md). The milestone gate stays
-open until actual CUDA kernels match the CPU fixtures.
+open until the remaining CUDA kernels match the CPU graph fixtures. The first real operation is
+recorded in the [M8 CUDA RMSNorm report](reports/M8_CUDA_RMSNORM_VALIDATION.md).
 
 ## M9 — Explicit multitier execution
 

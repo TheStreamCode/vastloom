@@ -13,6 +13,10 @@ hardware, commands, measurements and limitations.
 
 ## Current report
 
+- [`M8_CUDA_RMSNORM_VALIDATION.md`](M8_CUDA_RMSNORM_VALIDATION.md) — first real toolkit-free CUDA
+  data operation: governed packed VRAM, synchronous H2D/D2H, scalar PTX RMSNorm, CPU parity and
+  transactional failure coverage on the RTX 4070 Super through Windows and WSL; still no CUDA
+  model graph.
 - [`M8_CUDA_DRIVER_VALIDATION.md`](M8_CUDA_DRIVER_VALIDATION.md) — native toolkit-free Windows/Linux
   CUDA capability discovery, Governor-first move-only VRAM ownership, deterministic allocation/
   cleanup faults and real 4 MiB RTX 4070 Super smoke allocations on Windows and WSL; no kernels or
@@ -156,9 +160,9 @@ hardware, commands, measurements and limitations.
 
 M6 is complete for its reduced float correctness gate. M7/M9 now include MTP, reduced incremental
 state, a bounded exact-sequence reference-generation lifecycle and one complete real quantized
-expert. M8 now has native CUDA capability and governed allocation control, while full-shard/layer/
-token official-payload DeepSeek execution and generation, optimized CUDA kernels, speculative
-verification and GPU inference remain future work. The preceding
+expert. M8 now has native CUDA capability, governed allocation and one scalar RMSNorm copy/kernel
+gate, while full-shard/layer/token official-payload DeepSeek execution and generation, optimized
+CUDA kernels, speculative verification and GPU inference remain future work. The preceding
 completed storage milestone is M5:
 
 - [`M5_DEVICE_IO_CACHE_BYPASS_VALIDATION.md`](M5_DEVICE_IO_CACHE_BYPASS_VALIDATION.md) —

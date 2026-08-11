@@ -2,6 +2,12 @@
 
 ## Unreleased
 
+- Added the first real CUDA math path without a toolkit dependency: one Governor-owned packed
+  FP32 buffer, synchronous host/device copies and an embedded scalar PTX RMSNorm. The explicit
+  `cuda-info --rmsnorm-smoke` gate matches the DeepSeek CPU reference within `3e-5` on the RTX
+  4070 Super through native Windows and WSL, while deterministic faults cover copies, launch,
+  release and reservation cleanup. This is not yet a CUDA model backend.
+
 - Added a zero-payload complete-catalog contract for the pinned 0731 GGUF checkpoint. It validates
   six global consumers, all 11,008 routed bundles and 33,024 expert slices, then reconciles 1,328
   physical tensors, 34,223 logical descriptors, 6,986,088,796 always-active bytes,

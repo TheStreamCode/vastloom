@@ -443,6 +443,9 @@ integration remains required before long-running large-model inference.
 - Governor-before-driver VRAM reservation, live post-context free-memory reserve checks, bounded
   CLI smoke size, allocation rollback, explicit release retry and fail-closed residual accounting
   when injected external cleanup fails;
+- bounded FP32 CUDA shapes and packed byte arithmetic, non-overlapping aligned ranges, accounted
+  output lifetime, synchronous H2D/kernel/D2H failure and exception rollback, finite output and
+  CPU-parity validation, plus fail-closed accounting when post-kernel device release fails;
 - valid-Unicode JSON serialization for arbitrary sampled byte sequences;
 - end-to-end CLI validation, direct/manifest loading modes and JSON error behavior.
 - exact OLMoE tokenizer, top-logit, greedy-token, expert-route and routing-weight parity
@@ -484,8 +487,8 @@ integration remains required before long-running large-model inference.
 - process kill during model conversion/publication;
 - queue saturation under real multi-GB reads;
 - stale heartbeat and wrong-PID enforcement on all supported operating systems;
-- live CUDA device loss/reset recovery and failures during future transfers/kernels (driver
-  allocation and cleanup faults are now covered through the deterministic backend seam);
+- live CUDA device loss/reset recovery (allocation, synchronous copy/kernel and cleanup faults are
+  covered through the deterministic backend seam);
 - cancellation while transfers and kernels are in flight;
 - NVMe thermal/power policy transitions on real hardware;
 - fuzzing of Safetensors, tokenizer and model-adapter metadata.

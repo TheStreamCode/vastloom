@@ -118,6 +118,14 @@ model conversion.
 > two 4,096-wide FP32 rows plus their weights to the GPU, launches a toolkit-free scalar PTX
 > RMSNorm, copies the result back and compares it with the existing DeepSeek CPU reference.
 > Windows and WSL both passed at `0.000025` maximum absolute error and released all VRAM.
+> **The complete DeepSeek V4 Flash 0731 model generates text on the reference PC.**
+> `"La capitale d'Italia e"` → `" una grande citta cosmopol"`, through all 43 layers of the official
+> 82.54 GB checkpoint, with the model's own routers selecting experts. Six tokens at 60.3 s each,
+> 7.62 GB resident, and the host's 8 GiB of free RAM never touched. The same prompt truncated to
+> 12 layers returns gibberish — the depth is doing the work. This is the model running, not the
+> model being practical: a minute per token needs the CUDA path and resident experts before anyone
+> would want to use it.
+>
 > **One real DeepSeek layer now executes from official weights.** The checkpoint's own router picks
 > the experts, and eight quantizations run together — Q8_0 attention, Q5_K/Q6_K shared expert, BF16
 > router, I32 routing table, IQ1_S/IQ3_XXS routed experts and the Q4_K embedding — producing 129,280

@@ -1,11 +1,26 @@
-# M9 complete DeepSeek forward pass
+# M9 complete DeepSeek forward pass and generation
 
 Validation date: 2026-08-11
 
-## Scope and result
+## Result
 
-The complete DeepSeek V4 Flash 0731 model executed a forward pass on the reference PC. All 43
-layers, the checkpoint's own routers, the official quantized weights:
+The complete DeepSeek V4 Flash 0731 model generated coherent Italian text on the reference PC:
+
+```text
+prompt: "La capitale d'Italia e"
+output: " una grande citta cosmopol"
+```
+
+All 43 layers, the checkpoint's own routers, the official IQ1_S quantized weights, six generated
+tokens through the decode loop at 60.3 s per token. 16,015,622,144 bytes of expert payload were read
+from NVMe during the run while 7.62 GB stayed resident and free host RAM never fell below 10.3 GB.
+
+This is the model working: prompt in, sensible continuation out. It is not the model being
+practical — a minute per token is three orders of magnitude away from usable.
+
+## Scope
+
+All 43 layers, the checkpoint's own routers, the official quantized weights:
 
 ```text
 82.54 GB checkpoint on local NVMe
@@ -102,19 +117,39 @@ no longer multiplies it — 36 experts per layer cost less resident memory than 
 The six-token run resolved 1,069 bundles and read 7.34 GB of expert payload while staying at 7.62 GB
 resident, with free host RAM steady at 12 GB.
 
+## Generation
+
+`--max-tokens` routes through the reference decode loop, which reuses KV state instead of re-running
+the prompt. Each decode step routes a single token, so its expert working set is six bundles per
+layer regardless of prompt length.
+
+| Depth | Prompt | Generated | Output | Per token |
+|---:|---|---:|---|---:|
+| 12 | `"Ciao"` | 4 | `" komonосновнимMonochromaticte"` | 10.5 s |
+| 43 | `"La capitale d'Italia e"` | 6 | `" una grande citta cosmopol"` | 60.3 s |
+
+The twelve-layer output is incoherent because a truncated model is not the model; the full-depth
+output is a grammatical Italian continuation. Together they are the clearest evidence that depth is
+what carries the meaning, and that the full-depth path is executing the real thing.
+
+Generation read 16,015,622,144 bytes of expert payload for six tokens — about 2.7 GB per token,
+close to the 1.77 GB per-token no-cache figure plus the prefill's wider working set. Every byte
+comes from NVMe on every token because no expert survives between steps.
+
 ## Bounds
 
-- One token, no generation loop: this is a single forward pass, not multi-token decoding.
-- 29.4 s per token with scalar CPU kernels. Correct, not usable. No CUDA kernel participates in this
-  path, and no throughput claim is made.
+- 60.3 s per generated token with scalar CPU kernels, and 2.7 GB of NVMe reads per token because no
+  expert survives between decode steps. Correct, not usable. No CUDA kernel participates in this
+  path.
 - All 43 trunks are resident simultaneously. The project's own design — load a layer, execute it,
   release it — is not yet implemented here, so a host with less free RAM would be refused rather
   than served.
 - The result is not compared against an independent implementation of the full model. It is
   internally consistent and deterministic, and its expert traffic matches the metadata prediction,
   but no external oracle has confirmed token 20 for this input.
-- The chat template is applied on request, but there is no conversation: one prompt in, one predicted
-  token out. Generation needs the decode loop and KV-cache reuse that the reference driver already
-  implements for the reduced graph.
-- 167.7 s for a six-token prefill. Every layer is read from NVMe on every invocation, and the full
-  82.54 GB hash verification adds 338 s before any of it. Neither is optimised.
+- The chat template is applied on request, but there is no interactive session: one prompt, one
+  response, one process.
+- Every layer is read from NVMe on every invocation, and the full 82.54 GB hash verification adds
+  338 s before any of it. Neither is optimised or cached between runs.
+- All 43 trunks stay resident, so the pass needs 6.39 GB before it starts and a host with less free
+  RAM is refused rather than served. Experts are released as the graph advances; trunks are not.

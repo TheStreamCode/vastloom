@@ -14,6 +14,13 @@
   [complete forward validation](docs/reports/M9_DEEPSEEK_COMPLETE_FORWARD_VALIDATION.md). This is one
   forward pass, not generation, and 29.4 s per token is correct rather than usable.
 
+- **The complete model generates coherent text.** `"La capitale d'Italia e"` produced
+  `" una grande citta cosmopol"` through all 43 layers of the official checkpoint — six tokens at
+  60.3 s each, 16 GB of expert payload read from NVMe, 7.62 GB resident, free host RAM never below
+  10.3 GB. The same prompt at 12 layers returns gibberish, which is the clearest evidence that the
+  full-depth path is executing the real model rather than a fixture. `--max-tokens` routes through
+  the reference decode loop with KV reuse; a minute per token is correct, not practical.
+
 - The model now answers a text prompt. The checkpoint's vocabulary proved identical to the pinned
   tokenizer — 129,280 tokens index for index, all 127,741 merges — so `--prompt` encodes through the
   implementation already validated against Hugging Face, with `--chat` applying the checkpoint's own

@@ -113,6 +113,58 @@ def main() -> int:
             unauthorized,
         )
 
+        global_plan_path = Path(temporary) / "global-plan.json"
+        global_planned = run(
+            str(args.vastloom),
+            "deepseek-gguf-global-plan",
+            str(model),
+            "--json",
+        )
+        require(global_planned.returncode == 0, "real metadata global planning failed", global_planned)
+        global_plan = json.loads(global_planned.stdout)
+        require(
+            global_plan["format"] == "vastloom.deepseek_v4.global_tensor_plan.v1"
+            and global_plan["tensor_count"] == 6
+            and global_plan["payload_bytes"] == 596_000_788
+            and global_plan["routing_authority_verified"] is False,
+            "real metadata global plan contract changed",
+            global_planned,
+        )
+        global_plan_path.write_text(global_planned.stdout, encoding="utf-8", newline="\n")
+        global_dry_run = run(
+            sys.executable,
+            str(args.importer),
+            "--model",
+            "deepseek-v4-flash-0731-gguf-iq1s",
+            "--plan",
+            str(global_plan_path),
+            "--store",
+            str(store),
+            "--scope",
+            "globals",
+            "--reserve-gib",
+            "20",
+            "--max-total-mib",
+            "569",
+            "--dry-run",
+            "--json",
+        )
+        require(
+            global_dry_run.returncode == 0,
+            "real metadata global range-import dry-run failed",
+            global_dry_run,
+        )
+        global_result = json.loads(global_dry_run.stdout)
+        require(
+            global_result["dry_run"] is True
+            and global_result["execution_supported"] is False
+            and global_result["payload_bytes"] == 596_000_788
+            and global_result["range_count"] == 6
+            and not Path(global_result["target"]).exists(),
+            "real metadata global dry-run mutated storage or changed accounting",
+            global_dry_run,
+        )
+
     print("DeepSeek range importer CLI tests passed")
     return 0
 

@@ -23,6 +23,7 @@ class ResidentByteBuffer;
 namespace vastloom::inference {
 
 class DeepseekV4LoadedTrunkTensorSet;
+class DeepseekV4LoadedGlobalTensorSet;
 struct DeepseekV4GgufCatalogReport;
 
 struct DeepseekV4RouteResult {
@@ -225,6 +226,15 @@ struct DeepseekV4ExpertProviderBinding {
     const DeepseekV4LoadedTrunkTensorSet& tensors,
     std::string_view name);
 
+[[nodiscard]] Result<DeepseekV4PackedMatrix> deepseek_v4_bind_packed_matrix(
+    const DeepseekV4LoadedGlobalTensorSet& tensors,
+    std::string_view name,
+    std::size_t logical_columns);
+
+[[nodiscard]] Result<DeepseekV4PackedFloatTensor> deepseek_v4_bind_packed_float(
+    const DeepseekV4LoadedGlobalTensorSet& tensors,
+    std::string_view name);
+
 // Explicit canonical-name adapter for the 21 always-active tensors in layer 0 of the pinned
 // DeepSeek V4 Flash 0731 GGUF graph. It validates every logical consumer shape and returns a
 // detached binding set; callers decide when to publish it into a reference graph.
@@ -238,6 +248,18 @@ struct DeepseekV4ReferenceLayerTrunk {
 [[nodiscard]] Result<DeepseekV4ReferenceLayerTrunk>
 deepseek_v4_bind_0731_gguf_layer0_trunk(
     const DeepseekV4LoadedTrunkTensorSet& tensors,
+    const DeepseekV4ReferenceConfig& config);
+
+struct DeepseekV4ReferenceGlobals {
+    std::map<std::string, DeepseekV4PackedMatrix, std::less<>> matrices;
+    std::map<std::string, DeepseekV4PackedFloatTensor, std::less<>> float_tensors;
+};
+
+// Maps the six canonical 0731 global tensors to embed/head/norm/Hyper-Connection consumers only
+// after their complete closed set has reached RAM_READY under one governed reservation.
+[[nodiscard]] Result<DeepseekV4ReferenceGlobals>
+deepseek_v4_bind_0731_gguf_globals(
+    const DeepseekV4LoadedGlobalTensorSet& tensors,
     const DeepseekV4ReferenceConfig& config);
 
 // Converts only a complete verified 0731 architecture snapshot. No tensor payload is read.

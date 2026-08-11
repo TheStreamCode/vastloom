@@ -109,6 +109,46 @@ def range_plan_document(
     }
 
 
+def global_plan_document(model_id: str, revision: str) -> dict[str, object]:
+    names = (
+        "token_embd.weight",
+        "output.weight",
+        "output_norm.weight",
+        "output_hc_base.weight",
+        "output_hc_scale.weight",
+        "output_hc_fn.weight",
+    )
+    return {
+        "ok": True,
+        "format": RANGE_MODULE.GLOBAL_PLAN_FORMAT,
+        "model_id": model_id,
+        "revision": revision,
+        "plan_only": True,
+        "execution_supported": False,
+        "routing_authority_verified": False,
+        "payload_access": {
+            "metadata_only": True,
+            "imported_file_hashes_verified": True,
+            "full_payload_present": False,
+            "executable_source_binding_verified": False,
+        },
+        "tensor_count": 6,
+        "payload_bytes": 6,
+        "maximum_read_range_bytes": 1,
+        "unique_source_objects": 1,
+        "tensors": [
+            {
+                "tensor": name,
+                "role": "global",
+                "shape": [1],
+                "ggml_type": 0,
+                "source": {"object": "test.gguf", "offset": 100 + index, "bytes": 1},
+            }
+            for index, name in enumerate(names)
+        ],
+    }
+
+
 def main() -> int:
     with tempfile.TemporaryDirectory(prefix="vastloom-import-test-") as temporary:
         root = Path(temporary)
@@ -405,6 +445,55 @@ def main() -> int:
         )
         plan = RANGE_MODULE.load_plan(plan_path, range_spec)
         require(len(plan.trunk_ranges) == 2, "range plan trunk was not parsed")
+        global_plan_path = root / "global-plan.json"
+        global_plan_path.write_text(
+            json.dumps(global_plan_document(range_spec.model_id, range_spec.revision)),
+            encoding="utf-8",
+        )
+        global_plan = RANGE_MODULE.load_plan(global_plan_path, range_spec)
+        require(
+            global_plan.plan_format == RANGE_MODULE.GLOBAL_PLAN_FORMAT
+            and len(global_plan.selected("globals")) == 6
+            and not global_plan.trunk_ranges
+            and not global_plan.expert_ranges,
+            "global tensor plan was not parsed as a closed six-range set",
+        )
+        try:
+            global_plan.selected("trunk")
+        except RuntimeError as error:
+            require("layer probe" in str(error), "global-plan scope refusal is not actionable")
+        else:
+            raise AssertionError("global tensor plan was accepted for trunk import")
+        with mock.patch.object(
+            MODULE.shutil,
+            "disk_usage",
+            return_value=SimpleNamespace(free=64 * MODULE.GIB),
+        ):
+            global_target = RANGE_MODULE.import_range_artifact(
+                root,
+                range_spec,
+                global_plan,
+                scope="globals",
+                reserve_bytes=20 * MODULE.GIB,
+                timeout=1.0,
+                dry_run=True,
+                allow_range_download=False,
+                max_total_bytes=6,
+            )
+        require(
+            "range-globals" in global_target.name and not global_target.exists(),
+            "global range dry-run changed storage or artifact identity",
+        )
+        malformed_global = global_plan_document(range_spec.model_id, range_spec.revision)
+        malformed_global["tensors"][0]["tensor"] = "output.weight"  # type: ignore[index]
+        malformed_global_path = root / "malformed-global-plan.json"
+        malformed_global_path.write_text(json.dumps(malformed_global), encoding="utf-8")
+        try:
+            RANGE_MODULE.load_plan(malformed_global_path, range_spec)
+        except RuntimeError:
+            pass
+        else:
+            raise AssertionError("misordered global tensor plan was accepted")
         bom_plan_path = root / "range-plan-bom.json"
         bom_plan_path.write_bytes(b"\xef\xbb\xbf" + plan_path.read_bytes())
         require(

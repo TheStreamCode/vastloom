@@ -286,14 +286,21 @@ Result<RangeArtifact> verify_range_artifact(
                               root.string());
         }
         if (scope.value() != "trunk" && scope.value() != "selected-experts" &&
-            scope.value() != "all") {
+            scope.value() != "all" && scope.value() != "globals") {
             return make_error(ErrorCode::invalid_format,
                               "Range artifact scope is unsupported",
                               scope.value());
         }
-        if (scope.value() != "trunk" && !routing_authority.value()) {
+        if (scope.value() != "trunk" && scope.value() != "globals" &&
+            !routing_authority.value()) {
             return make_error(ErrorCode::integrity_error,
                               "Expert range artifact lacks verified routing authority",
+                              scope.value());
+        }
+        if ((scope.value() == "trunk" || scope.value() == "globals") &&
+            routing_authority.value()) {
+            return make_error(ErrorCode::integrity_error,
+                              "Non-routed range artifact must not claim routing authority",
                               scope.value());
         }
 
@@ -379,9 +386,12 @@ Result<RangeArtifact> verify_range_artifact(
                 source_bytes.value() > source_object_bytes.value() - source_offset.value() ||
                 !util::is_sha256_hex(sha256.value()) ||
                 !util::is_sha256_hex(source_object_sha256.value()) ||
-                (role.value() != "trunk" && role.value() != "selected-expert") ||
+                (role.value() != "trunk" && role.value() != "selected-expert" &&
+                 role.value() != "global") ||
                 (result.scope == "trunk" && role.value() != "trunk") ||
-                (result.scope == "selected-experts" && role.value() != "selected-expert")) {
+                (result.scope == "selected-experts" && role.value() != "selected-expert") ||
+                (result.scope == "globals" && role.value() != "global") ||
+                (result.scope == "all" && role.value() == "global")) {
                 return make_error(ErrorCode::invalid_format,
                                   "Range artifact entry identity or source span is invalid",
                                   label.value());

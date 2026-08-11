@@ -1,6 +1,9 @@
 #include "vastloom/inference/deepseek_v4_gguf.hpp"
 
+#include "vastloom/inference/deepseek_v4_reference.hpp"
+
 #include <algorithm>
+#include <array>
 #include <limits>
 #include <new>
 #include <set>
@@ -205,6 +208,92 @@ Result<DeepseekV4LayerProbePlan> build_deepseek_v4_layer_probe_plan(
     }
 }
 
+Result<DeepseekV4GlobalTensorPlan> build_deepseek_v4_global_tensor_plan(
+    const DeepseekV4GgufCatalogReport& report) {
+    try {
+        if (report.catalog.model_id.empty() || report.catalog.revision.empty() ||
+            !report.reference_architecture.has_value()) {
+            return make_error(
+                ErrorCode::invalid_argument,
+                "DeepSeek global tensor plan requires complete reference architecture metadata",
+                report.catalog.model_id);
+        }
+        auto config = deepseek_v4_reference_config_from_0731_gguf(report);
+        if (!config) return config.error();
+        auto closed = deepseek_v4_validate_0731_gguf_checkpoint_catalog(
+            report, config.value());
+        if (!closed) return closed.error();
+        if (closed.value().global_tensors != 6U || closed.value().global_bytes == 0U) {
+            return make_error(
+                ErrorCode::integrity_error,
+                "DeepSeek global tensor catalog closure is incomplete",
+                report.catalog.model_id);
+        }
+
+        constexpr std::array<std::string_view, 6U> names{
+            "token_embd.weight",
+            "output.weight",
+            "output_norm.weight",
+            "output_hc_base.weight",
+            "output_hc_scale.weight",
+            "output_hc_fn.weight",
+        };
+        DeepseekV4GlobalTensorPlan plan;
+        plan.model_id = report.catalog.model_id;
+        plan.revision = report.catalog.revision;
+        plan.metadata_only = report.catalog.metadata_only;
+        plan.imported_file_hashes_verified = report.imported_file_hashes_verified;
+        plan.full_payload_present = report.full_payload_present;
+        plan.executable_source_binding_verified =
+            report.executable_source_binding_verified;
+        plan.tensors.reserve(names.size());
+        std::set<std::filesystem::path> sources;
+        for (const auto name : names) {
+            const auto found = std::find_if(
+                report.catalog.tensors.begin(), report.catalog.tensors.end(),
+                [name](const model::LogicalTensorDescriptor& tensor) {
+                    return tensor.name == name;
+                });
+            if (found == report.catalog.tensors.end() || found->layer.has_value() ||
+                found->expert.has_value() || found->source.shard.empty() ||
+                found->source.bytes == 0U || !found->ggml_type.has_value() ||
+                found->source.offset >
+                    std::numeric_limits<ByteCount>::max() - found->source.bytes) {
+                return make_error(
+                    ErrorCode::integrity_error,
+                    "DeepSeek global tensor source identity is invalid",
+                    std::string(name));
+            }
+            auto total = add_probe_bytes(
+                plan.payload_bytes, found->source.bytes, "global tensors");
+            if (!total) return total.error();
+            plan.payload_bytes = total.value();
+            plan.maximum_read_range_bytes =
+                std::max(plan.maximum_read_range_bytes, found->source.bytes);
+            sources.insert(found->source.shard);
+            plan.tensors.push_back(DeepseekV4GlobalTensorRange{
+                found->name, found->role, found->shape, found->source,
+                found->ggml_type});
+        }
+        plan.tensor_count = plan.tensors.size();
+        plan.unique_source_objects = sources.size();
+        if (plan.tensor_count != names.size() ||
+            plan.payload_bytes != closed.value().global_bytes ||
+            plan.maximum_read_range_bytes == 0U || plan.unique_source_objects == 0U) {
+            return make_error(
+                ErrorCode::integrity_error,
+                "DeepSeek global tensor plan totals do not close",
+                report.catalog.model_id);
+        }
+        return plan;
+    } catch (const std::bad_alloc&) {
+        return make_error(
+            ErrorCode::resource_exhausted,
+            "Unable to allocate the bounded DeepSeek global tensor plan",
+            report.catalog.model_id);
+    }
+}
+
 std::string to_json(const DeepseekV4LayerProbePlan& plan) {
     std::ostringstream output;
     output << "{\"ok\":true,\"format\":\"vastloom.deepseek_v4.layer_probe_plan.v1\""
@@ -303,6 +392,59 @@ std::string to_text(const DeepseekV4LayerProbePlan& plan) {
            << "Executable binding:   "
            << (plan.executable_source_binding_verified ? "verified" : "unavailable") << '\n'
            << "Routing contract:     caller must supply authoritative output; planner cannot prove it";
+    return output.str();
+}
+
+std::string to_json(const DeepseekV4GlobalTensorPlan& plan) {
+    std::ostringstream output;
+    output << "{\"ok\":true,\"format\":\"vastloom.deepseek_v4.global_tensor_plan.v1\""
+           << ",\"model_id\":\"" << util::json_escape(plan.model_id)
+           << "\",\"revision\":\"" << util::json_escape(plan.revision)
+           << "\",\"plan_only\":true,\"execution_supported\":false"
+           << ",\"routing_authority_verified\":false"
+           << ",\"payload_access\":{\"metadata_only\":"
+           << (plan.metadata_only ? "true" : "false")
+           << ",\"imported_file_hashes_verified\":"
+           << (plan.imported_file_hashes_verified ? "true" : "false")
+           << ",\"full_payload_present\":"
+           << (plan.full_payload_present ? "true" : "false")
+           << ",\"executable_source_binding_verified\":"
+           << (plan.executable_source_binding_verified ? "true" : "false") << '}'
+           << ",\"tensor_count\":" << plan.tensor_count
+           << ",\"payload_bytes\":" << plan.payload_bytes
+           << ",\"maximum_read_range_bytes\":" << plan.maximum_read_range_bytes
+           << ",\"unique_source_objects\":" << plan.unique_source_objects
+           << ",\"tensors\":[";
+    for (std::size_t index = 0U; index < plan.tensors.size(); ++index) {
+        if (index != 0U) output << ',';
+        const auto& tensor = plan.tensors[index];
+        output << "{\"tensor\":\"" << util::json_escape(tensor.tensor_name)
+               << "\",\"role\":\"" << model::to_string(tensor.role)
+               << "\",\"shape\":";
+        append_shape_json(output, tensor.shape);
+        output << ",\"ggml_type\":";
+        if (tensor.ggml_type.has_value()) output << *tensor.ggml_type;
+        else output << "null";
+        output << ",\"source\":";
+        append_source_json(output, tensor.source);
+        output << '}';
+    }
+    output << "]}";
+    return output.str();
+}
+
+std::string to_text(const DeepseekV4GlobalTensorPlan& plan) {
+    std::ostringstream output;
+    output << "DeepSeek global plan: " << plan.model_id << '\n'
+           << "Revision:             " << plan.revision << '\n'
+           << "Mode:                 plan only; no payload execution" << '\n'
+           << "Global tensors:       " << plan.tensor_count << " ("
+           << plan.payload_bytes << " bytes)" << '\n'
+           << "Largest range:        " << plan.maximum_read_range_bytes << " bytes" << '\n'
+           << "Source objects:       " << plan.unique_source_objects << '\n'
+           << "Metadata hashes:      "
+           << (plan.imported_file_hashes_verified ? "verified" : "unverified") << '\n'
+           << "Aggregate admission:  explicit caller bound and Governor reservation required";
     return output.str();
 }
 

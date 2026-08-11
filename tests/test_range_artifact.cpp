@@ -745,11 +745,86 @@ void test_range_artifact(const std::filesystem::path& root) {
     }
 }
 
+void test_global_scope_artifact(const std::filesystem::path& root) {
+    const auto artifact = root / "global-scope";
+    std::filesystem::create_directories(artifact / "ranges");
+    const std::array<std::string_view, 6U> names{
+        "token_embd.weight", "output.weight", "output_norm.weight",
+        "output_hc_base.weight", "output_hc_scale.weight", "output_hc_fn.weight"};
+    const std::array<std::byte, 6U> source{
+        std::byte{1U}, std::byte{2U}, std::byte{3U},
+        std::byte{4U}, std::byte{5U}, std::byte{6U}};
+    const auto source_path = root / "global.gguf";
+    write_bytes(source_path, source);
+    auto source_hash = vastloom::util::sha256_file(source_path);
+    CHECK(source_hash);
+    for (std::size_t index = 0U; index < names.size(); ++index) {
+        write_bytes(artifact / range_name(index),
+                    std::span<const std::byte>(source).subspan(index, 1U));
+    }
+    const auto manifest = [&](std::string_view first_role,
+                              bool routing_authority) {
+        std::ostringstream output;
+        output << "{\"complete_checkpoint_verified\":false,"
+                  "\"execution_supported\":false,"
+                  "\"format\":\"vastloom.range-artifact.v1\",\"layer\":0,"
+                  "\"model_id\":\"test/deepseek-globals\",\"payload_bytes\":6,"
+                  "\"range_count\":6,\"ranges\":[";
+        for (std::size_t index = 0U; index < names.size(); ++index) {
+            if (index != 0U) output << ',';
+            auto local_hash = vastloom::util::sha256_file(artifact / range_name(index));
+            CHECK(local_hash);
+            output << "{\"artifact\":\"" << range_name(index)
+                   << "\",\"bytes\":1,\"label\":\"global[" << index << "] "
+                   << names[index] << "\",\"role\":\""
+                   << (index == 0U ? first_role : "global")
+                   << "\",\"sha256\":\""
+                   << (local_hash ? local_hash.value() : std::string(64U, '0'))
+                   << "\",\"source_bytes\":1,\"source_object\":\"global.gguf\","
+                      "\"source_object_bytes\":6,\"source_object_sha256\":\""
+                   << (source_hash ? source_hash.value() : std::string(64U, '0'))
+                   << "\",\"source_offset\":" << index
+                   << ",\"source_path\":\"weights/global.gguf\"}";
+        }
+        output << "],\"revision\":\"fixture-revision\","
+                  "\"routing_authority_verified\":"
+               << (routing_authority ? "true" : "false")
+               << ",\"scope\":\"globals\","
+                  "\"source_plan_format\":\"vastloom.deepseek_v4.global_tensor_plan.v1\","
+                  "\"source_plan_sha256\":\""
+               << std::string(64U, 'b')
+               << "\",\"verification\":"
+                  "\"pinned-revision-content-range-plus-local-sha256\"}";
+        return output.str();
+    };
+    const auto manifest_path = artifact / vastloom::model::kRangeArtifactManifestName;
+    {
+        std::ofstream output(manifest_path, std::ios::binary | std::ios::trunc);
+        output << manifest("global", false);
+    }
+    auto verified = vastloom::model::verify_range_artifact(artifact);
+    CHECK(verified && verified.value().scope == "globals" &&
+          verified.value().ranges.size() == 6U &&
+          !verified.value().routing_authority_verified &&
+          verified.value().full_hash_verified);
+    {
+        std::ofstream output(manifest_path, std::ios::binary | std::ios::trunc);
+        output << manifest("trunk", false);
+    }
+    CHECK(!vastloom::model::verify_range_artifact(artifact));
+    {
+        std::ofstream output(manifest_path, std::ios::binary | std::ios::trunc);
+        output << manifest("global", true);
+    }
+    CHECK(!vastloom::model::verify_range_artifact(artifact));
+}
+
 }  // namespace
 
 int main() {
     const auto root = make_temp_dir();
     test_range_artifact(root);
+    test_global_scope_artifact(root);
     std::error_code error;
     std::filesystem::remove_all(root, error);
     if (failures != 0) {

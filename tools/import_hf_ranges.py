@@ -20,7 +20,10 @@ import import_hf_model as base
 
 
 MIB = 1024**2
-PLAN_FORMAT = "vastloom.deepseek_v4.layer_probe_plan.v1"
+LAYER_PLAN_FORMAT = "vastloom.deepseek_v4.layer_probe_plan.v1"
+GLOBAL_PLAN_FORMAT = "vastloom.deepseek_v4.global_tensor_plan.v1"
+# Backward-compatible test/tool constant for the original layer plan.
+PLAN_FORMAT = LAYER_PLAN_FORMAT
 ARTIFACT_FORMAT = "vastloom.range-artifact.v1"
 ARTIFACT_MANIFEST_NAME = "vastloom-range-artifact.json"
 MAX_PLAN_BYTES = 16 * MIB
@@ -44,14 +47,22 @@ class SourceRange:
 @dataclass(frozen=True)
 class ValidatedPlan:
     raw_sha256: str
+    plan_format: str
     model_id: str
     revision: str
     layer: int
     routing_authority_verified: bool
     trunk_ranges: tuple[SourceRange, ...]
     expert_ranges: tuple[SourceRange, ...]
+    global_ranges: tuple[SourceRange, ...]
 
     def selected(self, scope: str) -> tuple[SourceRange, ...]:
+        if scope == "globals":
+            if self.plan_format != GLOBAL_PLAN_FORMAT or not self.global_ranges:
+                raise RuntimeError("globals import requires a verified global tensor plan")
+            return self.global_ranges
+        if self.plan_format != LAYER_PLAN_FORMAT:
+            raise RuntimeError(f"scope {scope} requires a verified layer probe plan")
         if scope == "trunk":
             return self.trunk_ranges
         if not self.routing_authority_verified:
@@ -165,7 +176,7 @@ def load_plan(path: Path, spec: base.ModelSpec) -> ValidatedPlan:
     if not isinstance(document, dict):
         raise RuntimeError("range plan root must be an object")
     if (
-        document.get("format") != PLAN_FORMAT
+        document.get("format") not in (LAYER_PLAN_FORMAT, GLOBAL_PLAN_FORMAT)
         or document.get("ok") is not True
         or document.get("plan_only") is not True
         or document.get("execution_supported") is not False
@@ -176,6 +187,60 @@ def load_plan(path: Path, spec: base.ModelSpec) -> ValidatedPlan:
     payload_access = document.get("payload_access")
     if not isinstance(payload_access, dict) or payload_access.get("imported_file_hashes_verified") is not True:
         raise RuntimeError("range plan was not derived from a hash-verified metadata import")
+
+    plan_format = str(document["format"])
+    sources = _source_specs(spec)
+    if plan_format == GLOBAL_PLAN_FORMAT:
+        if document.get("routing_authority_verified") is not False:
+            raise RuntimeError("global tensor plan must not claim routing authority")
+        tensor_values = document.get("tensors")
+        canonical = (
+            "token_embd.weight",
+            "output.weight",
+            "output_norm.weight",
+            "output_hc_base.weight",
+            "output_hc_scale.weight",
+            "output_hc_fn.weight",
+        )
+        if not isinstance(tensor_values, list) or len(tensor_values) != len(canonical):
+            raise RuntimeError("global tensor plan must contain exactly six tensors")
+        globals_: list[SourceRange] = []
+        for index, (item, expected_name) in enumerate(
+            zip(tensor_values, canonical, strict=True)
+        ):
+            if not isinstance(item, dict) or _string(item, "tensor") != expected_name:
+                raise RuntimeError("global tensor plan order or identity is invalid")
+            globals_.append(
+                _parse_source_range(
+                    item.get("source"),
+                    role="global",
+                    label=f"global[{index}] {expected_name}",
+                    sources=sources,
+                )
+            )
+        global_ranges = tuple(globals_)
+        _validate_nonoverlap(global_ranges)
+        total = sum(item.size for item in global_ranges)
+        if (
+            _integer(document, "tensor_count") != len(global_ranges)
+            or _integer(document, "payload_bytes") != total
+            or _integer(document, "maximum_read_range_bytes")
+            != max(item.size for item in global_ranges)
+            or _integer(document, "unique_source_objects")
+            != len({item.source_object for item in global_ranges})
+        ):
+            raise RuntimeError("global tensor plan counts or byte totals are inconsistent")
+        return ValidatedPlan(
+            raw_sha256=hashlib.sha256(raw).hexdigest(),
+            plan_format=plan_format,
+            model_id=spec.model_id,
+            revision=spec.revision,
+            layer=0,
+            routing_authority_verified=False,
+            trunk_ranges=(),
+            expert_ranges=(),
+            global_ranges=global_ranges,
+        )
 
     layer = _integer(document, "layer")
     expected_top_k = _integer(document, "expected_top_k", minimum=1)
@@ -197,7 +262,6 @@ def load_plan(path: Path, spec: base.ModelSpec) -> ValidatedPlan:
     ):
         raise RuntimeError("range plan selected expert IDs are invalid")
 
-    sources = _source_specs(spec)
     trunk_values = document.get("trunk_ranges")
     if not isinstance(trunk_values, list) or not trunk_values:
         raise RuntimeError("range plan has no trunk ranges")
@@ -265,18 +329,22 @@ def load_plan(path: Path, spec: base.ModelSpec) -> ValidatedPlan:
 
     return ValidatedPlan(
         raw_sha256=hashlib.sha256(raw).hexdigest(),
+        plan_format=plan_format,
         model_id=spec.model_id,
         revision=spec.revision,
         layer=layer,
         routing_authority_verified=routing_authority,
         trunk_ranges=tuple(trunk),
         expert_ranges=tuple(experts),
+        global_ranges=(),
     )
 
 
 def _artifact_name(spec: base.ModelSpec, plan: ValidatedPlan, scope: str) -> str:
     model = spec.artifact_name or spec.model_id.replace("/", "-")
     safe_scope = scope.replace("selected-experts", "experts")
+    if scope == "globals":
+        return f"{model}--range-globals-{plan.raw_sha256[:12]}"
     return f"{model}--range-l{plan.layer}-{safe_scope}-{plan.raw_sha256[:12]}"
 
 
@@ -385,6 +453,7 @@ def _validate_artifact(target: Path, plan: ValidatedPlan, scope: str) -> None:
         manifest.get("format") != ARTIFACT_FORMAT
         or manifest.get("model_id") != plan.model_id
         or manifest.get("revision") != plan.revision
+        or manifest.get("source_plan_format") != plan.plan_format
         or manifest.get("source_plan_sha256") != plan.raw_sha256
         or manifest.get("scope") != scope
         or manifest.get("layer") != plan.layer
@@ -592,7 +661,7 @@ def import_range_artifact(
                 "revision": plan.revision,
                 "routing_authority_verified": plan.routing_authority_verified,
                 "scope": scope,
-                "source_plan_format": PLAN_FORMAT,
+                "source_plan_format": plan.plan_format,
                 "source_plan_sha256": plan.raw_sha256,
                 "verification": "pinned-revision-content-range-plus-local-sha256",
             }
@@ -625,7 +694,9 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--model", choices=(base.DEEPSEEK_V4_FLASH_0731_GGUF_IQ1S.alias,), required=True)
     parser.add_argument("--plan", type=Path, required=True)
     parser.add_argument("--store", type=Path, required=True)
-    parser.add_argument("--scope", choices=("trunk", "selected-experts", "all"), required=True)
+    parser.add_argument(
+        "--scope", choices=("trunk", "selected-experts", "all", "globals"), required=True
+    )
     parser.add_argument("--reserve-gib", type=int, default=300)
     parser.add_argument("--max-total-mib", type=int, default=256)
     parser.add_argument("--timeout", type=float, default=60.0)

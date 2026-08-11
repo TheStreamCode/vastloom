@@ -4577,6 +4577,542 @@ void test_deepseek_v4_reference_graph(const std::filesystem::path& root) {
                               checkpoint.value().tensor_bytes ==
                                   checkpoint_report.catalog.tensor_bytes);
 
+                        auto global_plan = vastloom::inference::
+                            build_deepseek_v4_global_tensor_plan(checkpoint_report);
+                        CHECK(global_plan && global_plan.value().tensor_count == 6U &&
+                              global_plan.value().payload_bytes == global_offset &&
+                              global_plan.value().tensors.front().tensor_name ==
+                                  "token_embd.weight" &&
+                              global_plan.value().tensors.back().tensor_name ==
+                                  "output_hc_fn.weight" &&
+                              vastloom::inference::to_json(global_plan.value()).find(
+                                  "vastloom.deepseek_v4.global_tensor_plan.v1") !=
+                                  std::string::npos);
+                        if (checkpoint && global_plan) {
+                            const std::map<std::string, std::string, std::less<>>
+                                global_consumers{
+                                    {"token_embd.weight", "embed.weight"},
+                                    {"output.weight", "head.weight"},
+                                    {"output_norm.weight", "norm.weight"},
+                                    {"output_hc_base.weight", "hc_head_base"},
+                                    {"output_hc_scale.weight", "hc_head_scale"},
+                                    {"output_hc_fn.weight", "hc_head_fn"},
+                                };
+                            std::map<std::string, std::vector<std::byte>, std::less<>>
+                                global_encoded;
+                            bool global_payload_ok = true;
+                            for (const auto& planned : global_plan.value().tensors) {
+                                const auto consumer = global_consumers.find(
+                                    planned.tensor_name);
+                                const auto values = consumer == global_consumers.end()
+                                    ? graph.float_tensors.end()
+                                    : graph.float_tensors.find(consumer->second);
+                                CHECK(consumer != global_consumers.end() &&
+                                      values != graph.float_tensors.end());
+                                if (consumer == global_consumers.end() ||
+                                    values == graph.float_tensors.end()) {
+                                    global_payload_ok = false;
+                                    break;
+                                }
+                                if (planned.tensor_name == "token_embd.weight" ||
+                                    planned.tensor_name == "output.weight") {
+                                    auto encoded = vastloom::inference::
+                                        quantize_q8_0_reference(
+                                            values->second,
+                                            config.vocabulary_size,
+                                            config.width,
+                                            embedding_columns);
+                                    CHECK(encoded &&
+                                          encoded.value().size() ==
+                                              planned.source.bytes);
+                                    if (!encoded || encoded.value().size() !=
+                                                        planned.source.bytes) {
+                                        global_payload_ok = false;
+                                        break;
+                                    }
+                                    global_encoded.emplace(
+                                        planned.tensor_name,
+                                        encoded.take_value());
+                                    continue;
+                                }
+                                std::vector<std::byte> encoded(
+                                    values->second.size() *
+                                    vastloom::inference::kF32ElementBytes);
+                                for (std::size_t index = 0U;
+                                     index < values->second.size(); ++index) {
+                                    const auto bits = std::bit_cast<std::uint32_t>(
+                                        values->second[index]);
+                                    for (unsigned byte = 0U; byte < 4U; ++byte) {
+                                        encoded[index * 4U + byte] =
+                                            static_cast<std::byte>(
+                                                (bits >> (byte * 8U)) & 0xffU);
+                                    }
+                                }
+                                CHECK(encoded.size() == planned.source.bytes);
+                                if (encoded.size() != planned.source.bytes) {
+                                    global_payload_ok = false;
+                                    break;
+                                }
+                                global_encoded.emplace(
+                                    planned.tensor_name, std::move(encoded));
+                            }
+
+                            std::vector<std::byte> global_payload(
+                                static_cast<std::size_t>(global_offset));
+                            for (const auto& descriptor :
+                                 checkpoint_report.catalog.tensors) {
+                                if (descriptor.layer.has_value()) continue;
+                                const auto encoded = global_encoded.find(
+                                    descriptor.name);
+                                CHECK(encoded != global_encoded.end() &&
+                                      encoded->second.size() ==
+                                          descriptor.source.bytes &&
+                                      descriptor.source.offset <=
+                                          global_payload.size() &&
+                                      descriptor.source.bytes <=
+                                          global_payload.size() -
+                                              descriptor.source.offset);
+                                if (encoded == global_encoded.end() ||
+                                    encoded->second.size() !=
+                                        descriptor.source.bytes ||
+                                    descriptor.source.offset >
+                                        global_payload.size() ||
+                                    descriptor.source.bytes >
+                                        global_payload.size() -
+                                            descriptor.source.offset) {
+                                    global_payload_ok = false;
+                                    break;
+                                }
+                                std::copy(
+                                    encoded->second.begin(), encoded->second.end(),
+                                    global_payload.begin() +
+                                        static_cast<std::ptrdiff_t>(
+                                            descriptor.source.offset));
+                            }
+                            if (global_payload_ok) {
+                                write_bytes(global_path, global_payload);
+                            }
+                            auto global_source_hash = global_payload_ok
+                                ? vastloom::util::sha256_file(global_path)
+                                : vastloom::Result<std::string>(
+                                      vastloom::make_error(
+                                          vastloom::ErrorCode::internal_error,
+                                          "missing global fixture payload"));
+                            CHECK(global_payload_ok && global_source_hash);
+
+                            vastloom::inference::DeepseekV4GgufCheckpointSpec
+                                global_spec;
+                            global_spec.model_id = checkpoint_report.catalog.model_id;
+                            global_spec.revision = checkpoint_report.catalog.revision;
+                            global_spec.layers = 1U;
+                            global_spec.experts_per_layer =
+                                static_cast<std::uint32_t>(config.expert_count);
+                            global_spec.top_k = static_cast<std::uint32_t>(
+                                config.experts_per_token);
+                            global_spec.shards = {{
+                                "weights/checkpoint-globals.bin",
+                                global_offset,
+                                global_source_hash
+                                    ? global_source_hash.value()
+                                    : std::string(64U, '0'),
+                                "headers/checkpoint-globals.header",
+                                1U,
+                                std::string(64U, 'd'),
+                            }};
+                            const auto global_artifact_root =
+                                root / "deepseek-global-artifact";
+                            std::filesystem::create_directories(
+                                global_artifact_root / "ranges");
+                            vastloom::model::RangeArtifact global_artifact;
+                            global_artifact.root = global_artifact_root;
+                            global_artifact.model_id = global_spec.model_id;
+                            global_artifact.revision = global_spec.revision;
+                            global_artifact.scope = "globals";
+                            global_artifact.layer = 0U;
+                            global_artifact.source_plan_format =
+                                "vastloom.deepseek_v4.global_tensor_plan.v1";
+                            global_artifact.source_plan_sha256 =
+                                std::string(64U, 'c');
+                            global_artifact.payload_bytes = global_offset;
+                            global_artifact.full_hash_verified = true;
+                            for (std::size_t index = 0U;
+                                 index < global_plan.value().tensors.size();
+                                 ++index) {
+                                const auto& planned =
+                                    global_plan.value().tensors[index];
+                                const auto local_path =
+                                    global_artifact_root / "ranges" /
+                                    (std::to_string(index) + ".bin");
+                                const auto encoded = global_encoded.find(
+                                    planned.tensor_name);
+                                CHECK(encoded != global_encoded.end());
+                                if (encoded == global_encoded.end()) {
+                                    global_payload_ok = false;
+                                    break;
+                                }
+                                write_bytes(local_path, encoded->second);
+                                auto local_hash =
+                                    vastloom::util::sha256_file(local_path);
+                                CHECK(local_hash);
+                                if (!local_hash) {
+                                    global_payload_ok = false;
+                                    break;
+                                }
+                                global_artifact.ranges.push_back(
+                                    vastloom::model::RangeArtifactEntry{
+                                        "global",
+                                        "global[" + std::to_string(index) +
+                                            "] " + planned.tensor_name,
+                                        std::filesystem::path("ranges") /
+                                            (std::to_string(index) + ".bin"),
+                                        local_path,
+                                        planned.source.bytes,
+                                        local_hash.take_value(),
+                                        "checkpoint-globals.bin",
+                                        "weights/checkpoint-globals.bin",
+                                        global_offset,
+                                        global_source_hash
+                                            ? global_source_hash.value()
+                                            : std::string(64U, '0'),
+                                        planned.source.offset,
+                                        planned.source.bytes,
+                                    });
+                            }
+                            auto global_binding = global_payload_ok
+                                ? vastloom::inference::
+                                      bind_deepseek_v4_global_range_artifact(
+                                          global_artifact,
+                                          checkpoint_report,
+                                          global_plan.value(),
+                                          global_spec)
+                                : vastloom::Result<vastloom::inference::
+                                      DeepseekV4GlobalArtifactBinding>(
+                                      vastloom::make_error(
+                                          vastloom::ErrorCode::internal_error,
+                                          "unable to construct global fixture"));
+                            CHECK(global_binding &&
+                                  global_binding.value().ranges.size() == 6U &&
+                                  global_binding.value().payload_bytes ==
+                                      global_offset &&
+                                  global_binding.value().
+                                      exact_source_binding_verified &&
+                                  !global_binding.value().execution_supported &&
+                                  vastloom::inference::to_json(
+                                      global_binding.value()).find(
+                                      "global_artifact_binding.v1") !=
+                                      std::string::npos);
+                            if (global_binding) {
+                                auto set_id = vastloom::inference::
+                                    deepseek_v4_bound_global_tensor_set_logical_id(
+                                        global_binding.value());
+                                CHECK(set_id);
+                                const std::string global_set_id = set_id
+                                    ? set_id.value()
+                                    : "deepseek/invalid/globals/tensor-set";
+                                vastloom::safety::ResourceLimits global_limits;
+                                global_limits.host_memory_hard_limit =
+                                    global_offset +
+                                    global_binding.value().
+                                        maximum_local_range_bytes;
+                                global_limits.ram_hard_limit = global_offset;
+                                global_limits.vram_hard_limit = 1U;
+                                global_limits.staging_hard_limit =
+                                    global_binding.value().
+                                        maximum_local_range_bytes;
+                                global_limits.scratch_hard_limit = 1U;
+                                vastloom::safety::ResourceGovernor
+                                    global_governor(global_limits);
+                                auto global_residency = set_id
+                                    ? vastloom::model::ResidencyObject::create(
+                                          global_set_id, global_offset)
+                                    : vastloom::Result<vastloom::model::
+                                          ResidencyObject>(
+                                          vastloom::make_error(
+                                              vastloom::ErrorCode::internal_error,
+                                              "missing global set identity"));
+                                vastloom::model::BoundRangeSetLoadOptions
+                                    global_options;
+                                global_options.max_total_bytes = global_offset;
+                                global_options.max_range_bytes =
+                                    global_binding.value().
+                                        maximum_local_range_bytes;
+                                global_options.max_ranges = 6U;
+                                global_options.measure_process_io = false;
+                                auto loaded_graph = graph;
+                                bool loaded_globals_ok = false;
+                                CHECK(global_residency);
+                                if (global_residency) {
+                                    {
+                                        auto loaded = vastloom::inference::
+                                            load_deepseek_v4_bound_global_tensor_set(
+                                                global_binding.value(),
+                                                checkpoint_report,
+                                                global_residency.value(),
+                                                global_governor,
+                                                global_options);
+                                        CHECK(loaded &&
+                                              loaded.value().tensors().size() == 6U &&
+                                              loaded.value().telemetry().range_count ==
+                                                  6U &&
+                                              loaded.value().telemetry().
+                                                      logical_bytes ==
+                                                  global_offset &&
+                                              loaded.value().find(
+                                                  "token_embd.weight") != nullptr &&
+                                              !loaded.value().tensor(
+                                                  "missing.weight"));
+                                        auto globals = loaded
+                                            ? vastloom::inference::
+                                                  deepseek_v4_bind_0731_gguf_globals(
+                                                      loaded.value(),
+                                                      one_layer_config.value())
+                                            : vastloom::Result<vastloom::inference::
+                                                  DeepseekV4ReferenceGlobals>(
+                                                  vastloom::make_error(
+                                                      vastloom::ErrorCode::
+                                                          internal_error,
+                                                      "missing loaded globals"));
+                                        CHECK(globals &&
+                                              globals.value().matrices.size() == 3U &&
+                                              globals.value().float_tensors.size() ==
+                                                  3U);
+                                        auto wrong_global_config =
+                                            one_layer_config.value();
+                                        ++wrong_global_config.vocabulary_size;
+                                        CHECK(!vastloom::inference::
+                                                  deepseek_v4_bind_0731_gguf_globals(
+                                                      loaded.value(),
+                                                      wrong_global_config));
+                                        if (globals) {
+                                            for (auto& [name, matrix] :
+                                                 globals.value().matrices) {
+                                                loaded_graph.float_tensors.erase(name);
+                                                loaded_graph.packed_matrices.insert_or_assign(
+                                                    name, std::move(matrix));
+                                            }
+                                            for (auto& [name, tensor] :
+                                                 globals.value().float_tensors) {
+                                                loaded_graph.float_tensors.erase(name);
+                                                loaded_graph.packed_float_tensors.
+                                                    insert_or_assign(
+                                                        name, std::move(tensor));
+                                            }
+                                            loaded_globals_ok = true;
+                                        }
+                                    }
+                                    auto ready =
+                                        global_residency.value().snapshot();
+                                    CHECK(loaded_globals_ok && ready &&
+                                          ready.value().state ==
+                                              vastloom::model::ResidencyState::
+                                                  ram_ready &&
+                                          ready.value().active_uses == 1U &&
+                                          ready.value().ram_reserved_bytes ==
+                                              global_offset &&
+                                          ready.value().staging_reserved_bytes ==
+                                              0U &&
+                                          !global_residency.value().evict_ram());
+                                }
+
+                                auto direct_graph = graph;
+                                for (const auto& planned :
+                                     global_plan.value().tensors) {
+                                    const auto& consumer =
+                                        global_consumers.at(planned.tensor_name);
+                                    const auto& encoded =
+                                        global_encoded.at(planned.tensor_name);
+                                    direct_graph.float_tensors.erase(consumer);
+                                    if (planned.tensor_name ==
+                                            "token_embd.weight" ||
+                                        planned.tensor_name == "output.weight" ||
+                                        planned.tensor_name ==
+                                            "output_hc_fn.weight") {
+                                        const auto logical_columns =
+                                            planned.tensor_name ==
+                                                    "output_hc_fn.weight"
+                                                ? config.hyper_multiplier *
+                                                      config.width
+                                                : config.width;
+                                        direct_graph.packed_matrices.insert_or_assign(
+                                            consumer,
+                                            vastloom::inference::
+                                                DeepseekV4PackedMatrix{
+                                                    *planned.ggml_type,
+                                                    static_cast<std::size_t>(
+                                                        planned.shape[1]),
+                                                    logical_columns,
+                                                    static_cast<std::size_t>(
+                                                        planned.shape[0]),
+                                                    encoded});
+                                    } else {
+                                        std::size_t elements = 1U;
+                                        for (const auto dimension : planned.shape) {
+                                            elements *= static_cast<std::size_t>(
+                                                dimension);
+                                        }
+                                        direct_graph.packed_float_tensors.
+                                            insert_or_assign(
+                                                consumer,
+                                                [&] {
+                                                    vastloom::inference::
+                                                        DeepseekV4PackedFloatTensor
+                                                            tensor;
+                                                    tensor.ggml_type =
+                                                        *planned.ggml_type;
+                                                    tensor.elements = elements;
+                                                    tensor.encoded = encoded;
+                                                    return tensor;
+                                                }());
+                                    }
+                                }
+                                if (loaded_globals_ok) {
+                                    vastloom::inference::
+                                        DeepseekV4ReferenceState direct_state;
+                                    vastloom::inference::
+                                        DeepseekV4ReferenceState loaded_state;
+                                    auto direct_prefill = vastloom::inference::
+                                        deepseek_v4_reference_prefill(
+                                            direct_graph, token_ids,
+                                            &direct_state);
+                                    auto loaded_prefill = vastloom::inference::
+                                        deepseek_v4_reference_prefill(
+                                            loaded_graph, token_ids,
+                                            &loaded_state);
+                                    CHECK(direct_prefill && loaded_prefill);
+                                    if (direct_prefill && loaded_prefill) {
+                                        compare_packed_forward(
+                                            loaded_prefill.value(),
+                                            direct_prefill.value());
+                                        auto direct_decode = vastloom::inference::
+                                            deepseek_v4_reference_decode(
+                                                direct_graph,
+                                                decode_tokens.front(),
+                                                direct_state);
+                                        auto loaded_decode = vastloom::inference::
+                                            deepseek_v4_reference_decode(
+                                                loaded_graph,
+                                                decode_tokens.front(),
+                                                loaded_state);
+                                        CHECK(direct_decode && loaded_decode);
+                                        if (direct_decode && loaded_decode) {
+                                            compare_packed_forward(
+                                                loaded_decode.value(),
+                                                direct_decode.value());
+                                        }
+                                    }
+                                }
+                                for (const auto& name : {
+                                         std::string("embed.weight"),
+                                         std::string("head.weight"),
+                                         std::string("hc_head_fn")}) {
+                                    loaded_graph.packed_matrices.erase(name);
+                                }
+                                for (const auto& name : {
+                                         std::string("norm.weight"),
+                                         std::string("hc_head_base"),
+                                         std::string("hc_head_scale")}) {
+                                    loaded_graph.packed_float_tensors.erase(name);
+                                }
+                                CHECK(global_residency &&
+                                      global_residency.value().evict_ram() &&
+                                      global_governor.snapshot().reserved[0] == 0U &&
+                                      global_governor.snapshot().reserved[2] == 0U);
+
+                                auto insufficient_limits = global_limits;
+                                --insufficient_limits.host_memory_hard_limit;
+                                vastloom::safety::ResourceGovernor
+                                    insufficient_governor(insufficient_limits);
+                                auto insufficient_residency =
+                                    vastloom::model::ResidencyObject::create(
+                                        global_set_id, global_offset);
+                                CHECK(insufficient_residency &&
+                                      !vastloom::inference::
+                                          load_deepseek_v4_bound_global_tensor_set(
+                                              global_binding.value(),
+                                              checkpoint_report,
+                                              insufficient_residency.value(),
+                                              insufficient_governor,
+                                              global_options) &&
+                                      insufficient_governor.snapshot().reserved[0] ==
+                                          0U &&
+                                      insufficient_governor.snapshot().reserved[2] ==
+                                          0U);
+
+                                auto cancel_options = global_options;
+                                cancel_options.cancelled = [] { return true; };
+                                auto global_cancelled_residency =
+                                    vastloom::model::ResidencyObject::create(
+                                        global_set_id, global_offset);
+                                CHECK(global_cancelled_residency &&
+                                      !vastloom::inference::
+                                          load_deepseek_v4_bound_global_tensor_set(
+                                              global_binding.value(),
+                                              checkpoint_report,
+                                              global_cancelled_residency.value(),
+                                              global_governor,
+                                              cancel_options) &&
+                                      global_cancelled_residency.value().snapshot() &&
+                                      global_cancelled_residency.value().snapshot().value().
+                                              state ==
+                                          vastloom::model::ResidencyState::nvme &&
+                                      global_governor.snapshot().reserved[0] == 0U &&
+                                      global_governor.snapshot().reserved[2] == 0U);
+
+                                const auto corrupt_path =
+                                    global_binding.value().ranges.back().
+                                        local_source.shard;
+                                auto corrupt_payload = global_encoded.at(
+                                    global_binding.value().ranges.back().tensor_name);
+                                corrupt_payload.back() ^= std::byte{1U};
+                                write_bytes(corrupt_path, corrupt_payload);
+                                auto corrupt_residency =
+                                    vastloom::model::ResidencyObject::create(
+                                        global_set_id, global_offset);
+                                CHECK(corrupt_residency &&
+                                      !vastloom::inference::
+                                          load_deepseek_v4_bound_global_tensor_set(
+                                              global_binding.value(),
+                                              checkpoint_report,
+                                              corrupt_residency.value(),
+                                              global_governor,
+                                              global_options) &&
+                                      corrupt_residency.value().snapshot() &&
+                                      corrupt_residency.value().snapshot().value().state ==
+                                          vastloom::model::ResidencyState::failed &&
+                                      global_governor.snapshot().reserved[0] == 0U &&
+                                      global_governor.snapshot().reserved[2] == 0U);
+                                write_bytes(
+                                    corrupt_path,
+                                    global_encoded.at(
+                                        global_binding.value().ranges.back().tensor_name));
+
+                                auto incomplete_binding =
+                                    global_binding.value();
+                                incomplete_binding.ranges.pop_back();
+                                auto incomplete_residency =
+                                    vastloom::model::ResidencyObject::create(
+                                        global_set_id, global_offset);
+                                CHECK(incomplete_residency &&
+                                      !vastloom::inference::
+                                          load_deepseek_v4_bound_global_tensor_set(
+                                              incomplete_binding,
+                                              checkpoint_report,
+                                              incomplete_residency.value(),
+                                              global_governor,
+                                              global_options));
+
+                                auto tampered_plan = global_plan.value();
+                                tampered_plan.tensors.front().tensor_name =
+                                    "output.weight";
+                                CHECK(!vastloom::inference::
+                                          bind_deepseek_v4_global_range_artifact(
+                                              global_artifact,
+                                              checkpoint_report,
+                                              tampered_plan,
+                                              global_spec));
+                            }
+                        }
+
                         auto wrong_global_role = checkpoint_report;
                         const auto embedding_tensor = std::find_if(
                             wrong_global_role.catalog.tensors.begin(),

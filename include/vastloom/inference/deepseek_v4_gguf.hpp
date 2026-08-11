@@ -220,6 +220,31 @@ struct DeepseekV4LayerProbePlan {
     std::vector<DeepseekV4ProbeExpert> experts;
 };
 
+struct DeepseekV4GlobalTensorRange {
+    std::string tensor_name;
+    model::TensorRole role{model::TensorRole::other};
+    std::vector<std::uint64_t> shape;
+    model::TensorSourceRange source;
+    std::optional<std::uint32_t> ggml_type;
+};
+
+// Exact, non-executing plan for the six checkpoint-global tensors consumed by the pinned 0731
+// graph. Each tensor remains one indivisible range so an imported artifact can be rebound to the
+// verified catalog before one aggregate governed RAM reservation is attempted.
+struct DeepseekV4GlobalTensorPlan {
+    std::string model_id;
+    std::string revision;
+    bool metadata_only{true};
+    bool imported_file_hashes_verified{false};
+    bool full_payload_present{false};
+    bool executable_source_binding_verified{false};
+    ByteCount payload_bytes{0U};
+    ByteCount maximum_read_range_bytes{0U};
+    std::size_t tensor_count{0U};
+    std::size_t unique_source_objects{0U};
+    std::vector<DeepseekV4GlobalTensorRange> tensors;
+};
+
 [[nodiscard]] Result<DeepseekV4GgufCatalogReport> build_deepseek_v4_gguf_catalog(
     const model::GgufSplitCatalog& split,
     const DeepseekV4GgufCatalogOptions& options);
@@ -243,9 +268,14 @@ pinned_deepseek_v4_flash_0731_iq1s_checkpoint();
     ByteCount tile_limit_bytes = model::kDefaultLayerStreamingTileBytes,
     std::size_t max_ranges = 4'096U);
 
+[[nodiscard]] Result<DeepseekV4GlobalTensorPlan> build_deepseek_v4_global_tensor_plan(
+    const DeepseekV4GgufCatalogReport& report);
+
 [[nodiscard]] std::string to_json(const DeepseekV4GgufCatalogReport& report);
 [[nodiscard]] std::string to_text(const DeepseekV4GgufCatalogReport& report);
 [[nodiscard]] std::string to_json(const DeepseekV4LayerProbePlan& plan);
 [[nodiscard]] std::string to_text(const DeepseekV4LayerProbePlan& plan);
+[[nodiscard]] std::string to_json(const DeepseekV4GlobalTensorPlan& plan);
+[[nodiscard]] std::string to_text(const DeepseekV4GlobalTensorPlan& plan);
 
 }  // namespace vastloom::inference

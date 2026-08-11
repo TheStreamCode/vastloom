@@ -105,6 +105,89 @@ private:
     model::BoundRangeSetLoadTelemetry telemetry_;
 };
 
+struct DeepseekV4BoundGlobalRange {
+    std::size_t artifact_index{0U};
+    std::string tensor_name;
+    model::TensorRole role{model::TensorRole::other};
+    std::optional<std::uint32_t> ggml_type;
+    model::TensorSourceRange original_source;
+    model::TensorSourceRange local_source;
+    std::string local_sha256;
+};
+
+// Exact projection of a hash-verified six-range artifact onto the pinned checkpoint catalog.
+// The binding remains non-executing until every global consumer validates its logical shape.
+struct DeepseekV4GlobalArtifactBinding {
+    std::filesystem::path artifact_root;
+    std::string model_id;
+    std::string revision;
+    std::string source_plan_sha256;
+    ByteCount payload_bytes{0U};
+    ByteCount maximum_local_range_bytes{0U};
+    std::vector<DeepseekV4BoundGlobalRange> ranges;
+    bool metadata_catalog_hashes_verified{false};
+    bool local_range_hashes_verified{false};
+    bool exact_source_binding_verified{false};
+    bool complete_checkpoint_verified{false};
+    bool execution_supported{false};
+};
+
+struct DeepseekV4BoundGlobalTensor {
+    std::size_t catalog_tensor_index{0U};
+    std::string name;
+    model::TensorDType dtype{model::TensorDType::f32};
+    std::vector<std::uint64_t> shape;
+    model::TensorRole role{model::TensorRole::other};
+    std::optional<std::uint32_t> ggml_type;
+    ByteCount packed_offset{0U};
+    ByteCount bytes{0U};
+};
+
+// The six globals share one immutable buffer and therefore one ResidencyUse. Consumer descriptors
+// retain that buffer without duplicating its reservation or payload.
+class DeepseekV4LoadedGlobalTensorSet {
+public:
+    DeepseekV4LoadedGlobalTensorSet(const DeepseekV4LoadedGlobalTensorSet&) = delete;
+    DeepseekV4LoadedGlobalTensorSet& operator=(const DeepseekV4LoadedGlobalTensorSet&) = delete;
+    DeepseekV4LoadedGlobalTensorSet(DeepseekV4LoadedGlobalTensorSet&&) noexcept = default;
+    DeepseekV4LoadedGlobalTensorSet& operator=(DeepseekV4LoadedGlobalTensorSet&&) = delete;
+
+    [[nodiscard]] const std::string& logical_id() const noexcept { return logical_id_; }
+    [[nodiscard]] ByteCount payload_bytes() const noexcept { return payload_bytes_; }
+    [[nodiscard]] const std::vector<DeepseekV4BoundGlobalTensor>& tensors() const noexcept {
+        return tensors_;
+    }
+    [[nodiscard]] const DeepseekV4BoundGlobalTensor* find(std::string_view name) const noexcept;
+    [[nodiscard]] Result<std::span<const std::byte>> tensor(std::string_view name) const;
+    [[nodiscard]] std::shared_ptr<const model::ResidentByteBuffer> retain_buffer() const noexcept {
+        return buffer_;
+    }
+    [[nodiscard]] const model::BoundRangeSetLoadTelemetry& telemetry() const noexcept {
+        return telemetry_;
+    }
+
+private:
+    friend Result<DeepseekV4LoadedGlobalTensorSet>
+    load_deepseek_v4_bound_global_tensor_set(
+        const DeepseekV4GlobalArtifactBinding&,
+        const DeepseekV4GgufCatalogReport&,
+        model::ResidencyObject&,
+        safety::ResourceGovernor&,
+        const model::BoundRangeSetLoadOptions&);
+    DeepseekV4LoadedGlobalTensorSet(
+        std::string logical_id,
+        ByteCount payload_bytes,
+        std::vector<DeepseekV4BoundGlobalTensor> tensors,
+        std::shared_ptr<const model::ResidentByteBuffer> buffer,
+        model::BoundRangeSetLoadTelemetry telemetry);
+
+    std::string logical_id_;
+    ByteCount payload_bytes_{0U};
+    std::vector<DeepseekV4BoundGlobalTensor> tensors_;
+    std::shared_ptr<const model::ResidentByteBuffer> buffer_;
+    model::BoundRangeSetLoadTelemetry telemetry_;
+};
+
 [[nodiscard]] Result<DeepseekV4TrunkArtifactBinding>
 bind_deepseek_v4_trunk_range_artifact(
     const model::RangeArtifact& artifact,
@@ -139,7 +222,30 @@ load_deepseek_v4_bound_trunk_tensor_set(
     safety::ResourceGovernor& governor,
     const model::BoundRangeSetLoadOptions& options = {});
 
+[[nodiscard]] Result<DeepseekV4GlobalArtifactBinding>
+bind_deepseek_v4_global_range_artifact(
+    const model::RangeArtifact& artifact,
+    const DeepseekV4GgufCatalogReport& report,
+    const DeepseekV4GlobalTensorPlan& plan,
+    const DeepseekV4GgufCheckpointSpec& checkpoint_spec);
+
+[[nodiscard]] Result<std::string> deepseek_v4_bound_global_tensor_set_logical_id(
+    const DeepseekV4GlobalArtifactBinding& binding);
+
+// The caller must explicitly admit the verified aggregate payload. The generic 512 MiB default
+// intentionally refuses the current official 0731 globals until a larger bounded option and
+// matching Governor budget are supplied.
+[[nodiscard]] Result<DeepseekV4LoadedGlobalTensorSet>
+load_deepseek_v4_bound_global_tensor_set(
+    const DeepseekV4GlobalArtifactBinding& binding,
+    const DeepseekV4GgufCatalogReport& report,
+    model::ResidencyObject& residency,
+    safety::ResourceGovernor& governor,
+    const model::BoundRangeSetLoadOptions& options = {});
+
 [[nodiscard]] std::string to_json(const DeepseekV4TrunkArtifactBinding& binding);
 [[nodiscard]] std::string to_text(const DeepseekV4TrunkArtifactBinding& binding);
+[[nodiscard]] std::string to_json(const DeepseekV4GlobalArtifactBinding& binding);
+[[nodiscard]] std::string to_text(const DeepseekV4GlobalArtifactBinding& binding);
 
 }  // namespace vastloom::inference

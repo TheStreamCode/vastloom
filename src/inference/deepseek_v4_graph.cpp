@@ -2585,6 +2585,63 @@ Result<DeepseekV4PackedFloatTensor> deepseek_v4_bind_packed_float(
         elements.value());
 }
 
+Result<DeepseekV4PackedMatrix> deepseek_v4_bind_packed_matrix(
+    const DeepseekV4LoadedGlobalTensorSet& tensors,
+    std::string_view name,
+    std::size_t logical_columns) {
+    const auto* tensor = tensors.find(name);
+    if (tensor == nullptr) {
+        return make_error(ErrorCode::not_found,
+                          "DeepSeek global matrix tensor is unavailable",
+                          std::string(name));
+    }
+    if (!tensor->ggml_type.has_value() || tensor->shape.size() != 2U ||
+        *tensor->ggml_type == kGgmlTypeI32 ||
+        !storage_type_matches_dtype(*tensor->ggml_type, tensor->dtype) ||
+        tensor->shape[0] > std::numeric_limits<std::size_t>::max() ||
+        tensor->shape[1] > std::numeric_limits<std::size_t>::max() ||
+        tensor->packed_offset > std::numeric_limits<std::size_t>::max() ||
+        tensor->bytes > std::numeric_limits<std::size_t>::max()) {
+        return make_error(
+            ErrorCode::invalid_format,
+            "DeepSeek global matrix catalog descriptor is unsupported or malformed",
+            tensor->name);
+    }
+    return bind_resident_matrix(
+        tensors.retain_buffer(), static_cast<std::size_t>(tensor->packed_offset),
+        static_cast<std::size_t>(tensor->bytes), *tensor->ggml_type,
+        static_cast<std::size_t>(tensor->shape[1]), logical_columns,
+        static_cast<std::size_t>(tensor->shape[0]));
+}
+
+Result<DeepseekV4PackedFloatTensor> deepseek_v4_bind_packed_float(
+    const DeepseekV4LoadedGlobalTensorSet& tensors,
+    std::string_view name) {
+    const auto* tensor = tensors.find(name);
+    if (tensor == nullptr) {
+        return make_error(ErrorCode::not_found,
+                          "DeepSeek global float tensor is unavailable",
+                          std::string(name));
+    }
+    if (!tensor->ggml_type.has_value() ||
+        (*tensor->ggml_type != kGgmlTypeF32 &&
+         *tensor->ggml_type != kGgmlTypeBf16) ||
+        !storage_type_matches_dtype(*tensor->ggml_type, tensor->dtype) ||
+        tensor->packed_offset > std::numeric_limits<std::size_t>::max() ||
+        tensor->bytes > std::numeric_limits<std::size_t>::max()) {
+        return make_error(
+            ErrorCode::invalid_format,
+            "DeepSeek global float catalog descriptor is unsupported or malformed",
+            tensor->name);
+    }
+    auto elements = bounded_catalog_product(tensor->shape, tensor->name);
+    if (!elements) return elements.error();
+    return bind_resident_float(
+        tensors.retain_buffer(), static_cast<std::size_t>(tensor->packed_offset),
+        static_cast<std::size_t>(tensor->bytes), *tensor->ggml_type,
+        elements.value());
+}
+
 Result<DeepseekV4ReferenceConfig>
 deepseek_v4_reference_config_from_0731_gguf(
     const DeepseekV4GgufCatalogReport& report) {
@@ -3580,6 +3637,81 @@ deepseek_v4_bind_0731_gguf_layer0_trunk(
         return make_error(
             ErrorCode::resource_exhausted,
             "Unable to allocate the bounded DeepSeek 0731 layer-0 trunk binding");
+    }
+}
+
+Result<DeepseekV4ReferenceGlobals> deepseek_v4_bind_0731_gguf_globals(
+    const DeepseekV4LoadedGlobalTensorSet& tensors,
+    const DeepseekV4ReferenceConfig& config) {
+    try {
+        if (tensors.tensors().size() != 6U || config.vocabulary_size == 0U ||
+            config.width == 0U || config.hyper_multiplier == 0U ||
+            config.hyper_multiplier >
+                std::numeric_limits<std::size_t>::max() / config.width) {
+            return make_error(
+                ErrorCode::invalid_format,
+                "DeepSeek 0731 global binding requires six tensors and valid consumer dimensions");
+        }
+        struct MatrixMapping {
+            std::string_view source;
+            std::string_view consumer;
+            std::size_t rows;
+            std::size_t columns;
+        };
+        const std::array<MatrixMapping, 3U> matrices{{
+            {"token_embd.weight", "embed.weight", config.vocabulary_size,
+             config.width},
+            {"output.weight", "head.weight", config.vocabulary_size,
+             config.width},
+            {"output_hc_fn.weight", "hc_head_fn", config.hyper_multiplier,
+             config.hyper_multiplier * config.width},
+        }};
+        struct FloatMapping {
+            std::string_view source;
+            std::string_view consumer;
+            std::size_t elements;
+        };
+        const std::array<FloatMapping, 3U> floats{{
+            {"output_norm.weight", "norm.weight", config.width},
+            {"output_hc_base.weight", "hc_head_base", config.hyper_multiplier},
+            {"output_hc_scale.weight", "hc_head_scale", 1U},
+        }};
+
+        DeepseekV4ReferenceGlobals result;
+        for (const auto& mapping : matrices) {
+            auto matrix = deepseek_v4_bind_packed_matrix(
+                tensors, mapping.source, mapping.columns);
+            if (!matrix) return matrix.error();
+            if (matrix.value().rows != mapping.rows) {
+                return make_error(
+                    ErrorCode::invalid_format,
+                    "DeepSeek 0731 global matrix shape does not match its consumer",
+                    std::string(mapping.source));
+            }
+            result.matrices.emplace(mapping.consumer, matrix.take_value());
+        }
+        for (const auto& mapping : floats) {
+            auto tensor = deepseek_v4_bind_packed_float(tensors, mapping.source);
+            if (!tensor) return tensor.error();
+            if (tensor.value().elements != mapping.elements) {
+                return make_error(
+                    ErrorCode::invalid_format,
+                    "DeepSeek 0731 global float shape does not match its consumer",
+                    std::string(mapping.source));
+            }
+            result.float_tensors.emplace(mapping.consumer, tensor.take_value());
+        }
+        if (result.matrices.size() != matrices.size() ||
+            result.float_tensors.size() != floats.size()) {
+            return make_error(
+                ErrorCode::internal_error,
+                "DeepSeek 0731 global mapping is not one-to-one");
+        }
+        return result;
+    } catch (const std::bad_alloc&) {
+        return make_error(
+            ErrorCode::resource_exhausted,
+            "Unable to allocate bounded DeepSeek 0731 global binding");
     }
 }
 

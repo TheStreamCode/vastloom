@@ -1277,7 +1277,7 @@ int command_deepseek_gguf_range_bind(const std::vector<std::string>& args) {
 int command_deepseek_gguf_global_bind(const std::vector<std::string>& args) {
     const bool json = has_flag(args, "--json");
     auto valid = validate_options(
-        args, 2U, {"--context", "--batch-size"}, {"--json"});
+        args, 2U, {"--context", "--batch-size"}, {"--json", "--load-tensor-set"});
     if (!valid) return print_error(valid.error(), json);
     if (args.size() < 2U || vastloom::util::starts_with(args[0], "--") ||
         vastloom::util::starts_with(args[1], "--")) {
@@ -1323,8 +1323,54 @@ int command_deepseek_gguf_global_bind(const std::vector<std::string>& args) {
     auto binding = vastloom::inference::bind_deepseek_v4_global_range_artifact(
         artifact.value(), report.value(), plan.value(), spec);
     if (!binding) return print_error(binding.error(), json);
-    std::cout << (json ? vastloom::inference::to_json(binding.value())
-                      : vastloom::inference::to_text(binding.value())) << '\n';
+
+    if (!has_flag(args, "--load-tensor-set")) {
+        std::cout << (json ? vastloom::inference::to_json(binding.value())
+                          : vastloom::inference::to_text(binding.value())) << '\n';
+        return 0;
+    }
+
+    // The globals are dominated by two 297,861,120-byte Q4_K matrices, so the default 64 MiB range
+    // ceiling refuses them by design. Raise the bound to exactly what this verified binding holds
+    // rather than to a round number, and let the Governor reserve the whole set once.
+    auto config = vastloom::inference::deepseek_v4_reference_config_from_0731_gguf(report.value());
+    if (!config) return print_error(config.error(), json);
+    auto guard = vastloom::safety::ProcessSafetyGuard::apply(policy.value());
+    if (!guard) return print_error(guard.error(), json);
+    vastloom::safety::ResourceGovernor governor(policy.value().resources);
+    auto set_id = vastloom::inference::deepseek_v4_bound_global_tensor_set_logical_id(
+        binding.value());
+    if (!set_id) return print_error(set_id.error(), json);
+    auto residency = vastloom::model::ResidencyObject::create(
+        set_id.take_value(), binding.value().payload_bytes);
+    if (!residency) return print_error(residency.error(), json);
+    vastloom::model::BoundRangeSetLoadOptions load_options;
+    load_options.max_total_bytes = binding.value().payload_bytes;
+    load_options.max_range_bytes = binding.value().maximum_local_range_bytes;
+    load_options.max_ranges = binding.value().ranges.size();
+    auto loaded = vastloom::inference::load_deepseek_v4_bound_global_tensor_set(
+        binding.value(), report.value(), residency.value(), governor, load_options);
+    if (!loaded) return print_error(loaded.error(), json);
+    auto globals = vastloom::inference::deepseek_v4_bind_0731_gguf_globals(
+        loaded.value(), config.value());
+    if (!globals) return print_error(globals.error(), json);
+
+    const auto& telemetry = loaded.value().telemetry();
+    if (json) {
+        std::cout << "{\"ok\":true,\"resident_bytes\":" << loaded.value().payload_bytes()
+                  << ",\"tensors\":" << loaded.value().tensors().size()
+                  << ",\"graph_matrices\":" << globals.value().matrices.size()
+                  << ",\"graph_float_tensors\":" << globals.value().float_tensors.size()
+                  << ",\"ranges_read\":" << telemetry.range_count
+                  << ",\"elapsed_ms\":" << telemetry.elapsed_ms
+                  << ",\"execution_supported\":false}" << '\n';
+    } else {
+        std::cout << "Globals loaded:       " << loaded.value().payload_bytes()
+                  << " bytes in " << telemetry.range_count << " ranges\n"
+                  << "Graph consumers:      " << globals.value().matrices.size()
+                  << " matrices, " << globals.value().float_tensors.size() << " vectors\n"
+                  << "Execution:            unsupported; this binds payload, it does not run it\n";
+    }
     return 0;
 }
 

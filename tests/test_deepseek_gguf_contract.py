@@ -71,6 +71,17 @@ TRUNK_LOAD_CONTRACT = {
     "execution_supported": False,
 }
 
+# The six globals, dominated by two 297,861,120-byte Q4_K matrices, reaching the embedding, output
+# head, normalization and Hyper-Connection consumers through one governed reservation.
+GLOBALS_LOAD_CONTRACT = {
+    "resident_bytes": 596_000_788,
+    "tensors": 6,
+    "graph_matrices": 3,
+    "graph_float_tensors": 3,
+    "ranges_read": 6,
+    "execution_supported": False,
+}
+
 ROUTE_CONTRACT = {
     "layer": 0,
     "expected_top_k": 6,
@@ -104,6 +115,11 @@ COMMANDS = {
         ("deepseek-gguf-range-bind", "{model}", "{artifact}", "--layer", "0",
          "--experts", "35,53,200,222,245,254", "--load-tensor-set", "--json"),
         TRUNK_LOAD_CONTRACT,
+    ),
+    "globals-load": (
+        "0731 global payload consumer contract",
+        ("deepseek-gguf-global-bind", "{model}", "{artifact}", "--load-tensor-set", "--json"),
+        GLOBALS_LOAD_CONTRACT,
     ),
 }
 

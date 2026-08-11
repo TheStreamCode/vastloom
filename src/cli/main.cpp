@@ -1746,14 +1746,14 @@ int command_deepseek_forward(const std::vector<std::string>& args) {
     for (const auto& bundle : report.value().catalog.experts) {
         largest_expert = std::max(largest_expert, bundle.bytes);
     }
-    // A synchronous resolve hands the graph every expert the layer selected at once, so the cache
-    // must hold all of them simultaneously: up to one distinct bundle per token per slot. And the
-    // caches are per layer and all stay live, so this multiplies by depth - the earlier accounting
-    // charged a single cache and understated a full-depth pass by gigabytes.
+    // A synchronous resolve hands the graph every expert the layer selected at once, so one layer's
+    // cache must hold all of them: up to one distinct bundle per token per slot. Earlier layers
+    // release theirs as the graph advances, so the peak is two layers' worth rather than all 43 -
+    // the outgoing one may still be releasing while the incoming one loads.
     const auto per_layer_experts = std::min<std::size_t>(
         token_ids.size() * config.value().experts_per_token, config.value().expert_count);
     const auto cache_size = std::max<std::size_t>(expert_cache.value(), per_layer_experts);
-    const auto expert_bytes = largest_expert * cache_size * depth;
+    const auto expert_bytes = largest_expert * cache_size * std::min<std::size_t>(depth, 2U);
     const auto required = trunk_bytes + global_bytes + expert_bytes;
     const auto budget = policy.value().resources.ram_hard_limit;
 
@@ -1856,8 +1856,25 @@ int command_deepseek_forward(const std::vector<std::string>& args) {
         auto cache = vastloom::inference::DeepseekV4BoundedExpertCache::create(
             bindings.take_value(), governor, cache_options);
         if (!cache) return print_error(cache.error(), json);
-        graph.expert_providers.emplace(cache_options.block_prefix,
-                                       cache.value()->provider_binding());
+
+        // A layer's experts are dead the moment the next layer asks for its own, and the graph
+        // walks layers in order. Releasing the earlier caches here caps expert residency at one
+        // layer's working set instead of letting it accumulate across all 43 - which is what
+        // otherwise makes the cost scale with prompt length. A release that fails leaves the memory
+        // charged rather than pretending it is free; the Governor then refuses later work.
+        auto binding = cache.value()->provider_binding();
+        vastloom::inference::DeepseekV4ExpertProviderBinding staged;
+        staged.max_experts_per_request = binding.max_experts_per_request;
+        auto* live = &caches;
+        staged.resolve = [live, layer, resolve = binding.resolve](
+                             std::string_view block_prefix,
+                             std::span<const std::uint32_t> ids) {
+            for (std::size_t earlier = 0U; earlier < layer && earlier < live->size(); ++earlier) {
+                [[maybe_unused]] const auto released = (*live)[earlier]->clear();
+            }
+            return resolve(block_prefix, ids);
+        };
+        graph.expert_providers.emplace(cache_options.block_prefix, std::move(staged));
         caches.push_back(cache.take_value());
     }
     const auto load_elapsed = std::chrono::duration<double, std::milli>(

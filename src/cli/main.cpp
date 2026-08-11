@@ -650,6 +650,9 @@ int command_deepseek_gguf_inspect(const std::vector<std::string>& args) {
     vastloom::model::GgufReaderLimits reader_limits;
     reader_limits.retained_integral_array_keys = {
         "deepseek4.attention.compress_ratios"};
+    reader_limits.retained_floating_array_keys = {
+        "deepseek4.swiglu_clamp_exp",
+        "deepseek4.swiglu_clamp_shexp"};
     for (std::size_t index = 0U; index < positional_count; ++index) {
         Result<vastloom::model::GgufFile> opened = declared_sizes.empty()
             ? vastloom::model::GgufFile::open(cli_path(args[index]), reader_limits)

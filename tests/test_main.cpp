@@ -246,7 +246,7 @@ void test_gguf(const std::filesystem::path& root) {
     append_u32_le(header, 0x46554747U);
     append_u32_le(header, 3U);
     append_u64_le(header, 3U);
-    append_u64_le(header, 22U);
+    append_u64_le(header, 23U);
 
     append_gguf_string(header, "general.architecture");
     append_u32_le(header, static_cast<std::uint32_t>(vastloom::model::GgufValueType::string));
@@ -309,6 +309,13 @@ void test_gguf(const std::filesystem::path& root) {
     append_u64_le(header, 1U);
     append_u32_le(header, 0U);
 
+    append_gguf_string(header, "deepseek4.swiglu_clamp_exp");
+    append_u32_le(header, static_cast<std::uint32_t>(vastloom::model::GgufValueType::array));
+    append_u32_le(header, static_cast<std::uint32_t>(vastloom::model::GgufValueType::float32));
+    append_u64_le(header, 2U);
+    append_u32_le(header, std::bit_cast<std::uint32_t>(0.5F));
+    append_u32_le(header, std::bit_cast<std::uint32_t>(1.25F));
+
     append_gguf_string(header, "blk.0.ffn_down_exps.weight");
     append_u32_le(header, 3U);
     append_u64_le(header, 32U);
@@ -344,6 +351,8 @@ void test_gguf(const std::filesystem::path& root) {
     vastloom::model::GgufReaderLimits deepseek_limits;
     deepseek_limits.retained_integral_array_keys = {
         "deepseek4.attention.compress_ratios"};
+    deepseek_limits.retained_floating_array_keys = {
+        "deepseek4.swiglu_clamp_exp"};
     auto gguf = vastloom::model::GgufFile::open(full_path, deepseek_limits);
     CHECK(hidden_metadata_value_offset.has_value());
     auto oversized_architecture = full;
@@ -372,7 +381,7 @@ void test_gguf(const std::filesystem::path& root) {
         malformed_layer_path, deepseek_limits);
     CHECK(gguf && gguf.value().version() == 3U && gguf.value().alignment() == 32U &&
           gguf.value().data_offset() == data_offset && !gguf.value().header_only() &&
-          gguf.value().metadata().size() == 22U && gguf.value().tensors().size() == 3U);
+          gguf.value().metadata().size() == 23U && gguf.value().tensors().size() == 3U);
     if (gguf) {
         auto architecture = gguf.value().architecture();
         CHECK(architecture && architecture.value() == "deepseek4");
@@ -384,6 +393,11 @@ void test_gguf(const std::filesystem::path& root) {
             "deepseek4.attention.compress_ratios");
         CHECK(ratios != nullptr && ratios->signed_array_values.size() == 1U &&
               ratios->signed_array_values[0] == 0);
+        const auto* clamps = gguf.value().find_metadata(
+            "deepseek4.swiglu_clamp_exp");
+        CHECK(clamps != nullptr && clamps->floating_array_values.size() == 2U &&
+              clamps->floating_array_values[0] == 0.5 &&
+              clamps->floating_array_values[1] == 1.25);
         const auto* down = gguf.value().find_tensor("blk.0.ffn_down_exps.weight");
         const auto* gate = gguf.value().find_tensor("blk.0.ffn_gate_exps.weight");
         const auto* up = gguf.value().find_tensor("blk.0.ffn_up_exps.weight");
@@ -440,11 +454,35 @@ void test_gguf(const std::filesystem::path& root) {
     vastloom::model::GgufReaderLimits scalar_retention;
     scalar_retention.retained_integral_array_keys = {"general.alignment"};
     CHECK(!vastloom::model::GgufFile::open(full_path, scalar_retention));
+    scalar_retention = {};
+    scalar_retention.retained_floating_array_keys = {"general.alignment"};
+    CHECK(!vastloom::model::GgufFile::open(full_path, scalar_retention));
     vastloom::model::GgufReaderLimits duplicate_retention;
     duplicate_retention.retained_integral_array_keys = {
         "deepseek4.attention.compress_ratios",
         "deepseek4.attention.compress_ratios"};
     CHECK(!vastloom::model::GgufFile::open(full_path, duplicate_retention));
+    vastloom::model::GgufReaderLimits wrong_float_retention;
+    wrong_float_retention.retained_floating_array_keys = {
+        "deepseek4.attention.compress_ratios"};
+    CHECK(!vastloom::model::GgufFile::open(full_path, wrong_float_retention));
+    vastloom::model::GgufReaderLimits wrong_integral_retention;
+    wrong_integral_retention.retained_integral_array_keys = {
+        "deepseek4.swiglu_clamp_exp"};
+    CHECK(!vastloom::model::GgufFile::open(full_path, wrong_integral_retention));
+    vastloom::model::GgufReaderLimits cross_duplicate_retention;
+    cross_duplicate_retention.retained_integral_array_keys = {
+        "deepseek4.attention.compress_ratios"};
+    cross_duplicate_retention.retained_floating_array_keys = {
+        "deepseek4.attention.compress_ratios"};
+    CHECK(!vastloom::model::GgufFile::open(full_path, cross_duplicate_retention));
+    vastloom::model::GgufReaderLimits retained_array_budget;
+    retained_array_budget.retained_integral_array_keys = {
+        "deepseek4.attention.compress_ratios"};
+    retained_array_budget.retained_floating_array_keys = {
+        "deepseek4.swiglu_clamp_exp"};
+    retained_array_budget.max_retained_array_elements = 2U;
+    CHECK(!vastloom::model::GgufFile::open(full_path, retained_array_budget));
 
     auto truncated_header = header;
     truncated_header.pop_back();
@@ -2560,6 +2598,22 @@ void test_deepseek_v4_reference_graph(const std::filesystem::path& root) {
                   << result.error().context << ")\n";
         return;
     }
+    auto scheduled_graph = graph;
+    const std::size_t scheduled_blocks =
+        config.layer_count + config.mtp_layer_count;
+    scheduled_graph.config.routed_expert_swiglu_limits.assign(
+        scheduled_blocks, config.swiglu_limit);
+    scheduled_graph.config.shared_expert_swiglu_limits.assign(
+        scheduled_blocks, config.swiglu_limit);
+    scheduled_graph.config.swiglu_limit = 0.0F;
+    auto scheduled_result = vastloom::inference::deepseek_v4_reference_prefill(
+        scheduled_graph, token_ids);
+    CHECK(scheduled_result && scheduled_result.value().logits == result.value().logits &&
+          scheduled_result.value().mtp_logits == result.value().mtp_logits);
+    auto malformed_schedule = scheduled_graph;
+    malformed_schedule.config.shared_expert_swiglu_limits.pop_back();
+    CHECK(!vastloom::inference::deepseek_v4_reference_prefill(
+        malformed_schedule, token_ids));
     CHECK(incremental_state.next_position == token_ids.size());
     const float tolerance = float_value(fixture.value(), "absolute_tolerance");
     const auto expected_logits_value = expected_object->find("logits");
@@ -3680,6 +3734,117 @@ void test_deepseek_v4_reference_graph(const std::filesystem::path& root) {
             trunk_report.top_k = static_cast<std::uint32_t>(config.experts_per_token);
             trunk_report.imported_manifest_verified = true;
             trunk_report.imported_file_hashes_verified = true;
+            auto reference_report = trunk_report;
+            const auto& pinned_0731 =
+                vastloom::inference::pinned_deepseek_v4_flash_0731_iq1s_checkpoint();
+            reference_report.catalog.model_id = pinned_0731.model_id;
+            reference_report.catalog.revision = pinned_0731.revision;
+            reference_report.layers = static_cast<std::uint32_t>(config.layer_count);
+            reference_report.experts_per_layer =
+                static_cast<std::uint32_t>(config.expert_count);
+            reference_report.top_k =
+                static_cast<std::uint32_t>(config.experts_per_token);
+            reference_report.pinned_0731_checkpoint_spec_verified = true;
+            vastloom::inference::DeepseekV4GgufArchitectureConfig architecture;
+            architecture.vocabulary_size =
+                static_cast<std::uint32_t>(config.vocabulary_size);
+            architecture.maximum_context_tokens = 128U;
+            architecture.width = static_cast<std::uint32_t>(config.width);
+            architecture.layer_count =
+                static_cast<std::uint32_t>(config.layer_count);
+            architecture.hash_layer_count =
+                static_cast<std::uint32_t>(config.hash_layer_count);
+            architecture.head_count = static_cast<std::uint32_t>(config.head_count);
+            architecture.key_value_head_count = 1U;
+            architecture.expert_count =
+                static_cast<std::uint32_t>(config.expert_count);
+            architecture.experts_per_token =
+                static_cast<std::uint32_t>(config.experts_per_token);
+            architecture.expert_gating_function = 4U;
+            architecture.shared_expert_count = 1U;
+            architecture.intermediate_width =
+                static_cast<std::uint32_t>(config.intermediate_width);
+            architecture.query_lora_rank =
+                static_cast<std::uint32_t>(config.query_lora_rank);
+            architecture.head_width = static_cast<std::uint32_t>(config.head_width);
+            architecture.rope_width = static_cast<std::uint32_t>(config.rope_width);
+            architecture.output_groups =
+                static_cast<std::uint32_t>(config.output_groups);
+            architecture.output_lora_rank =
+                static_cast<std::uint32_t>(config.output_lora_rank);
+            architecture.window_size = static_cast<std::uint32_t>(config.window_size);
+            architecture.original_context_tokens =
+                static_cast<std::uint32_t>(config.original_context);
+            architecture.index_head_count =
+                static_cast<std::uint32_t>(config.index_head_count);
+            architecture.index_head_width =
+                static_cast<std::uint32_t>(config.index_head_width);
+            architecture.index_top_k =
+                static_cast<std::uint32_t>(config.index_top_k);
+            architecture.hyper_multiplier =
+                static_cast<std::uint32_t>(config.hyper_multiplier);
+            architecture.sinkhorn_iterations =
+                static_cast<std::uint32_t>(config.sinkhorn_iterations);
+            architecture.compression_rope_theta = config.compression_rope_theta;
+            architecture.rope_theta = config.rope_theta;
+            architecture.rope_factor = config.rope_factor;
+            architecture.beta_fast = config.beta_fast;
+            architecture.beta_slow = config.beta_slow;
+            architecture.norm_epsilon = config.norm_epsilon;
+            architecture.hyper_epsilon = config.hyper_epsilon;
+            architecture.route_scale = config.route_scale;
+            architecture.expert_weights_normalized = true;
+            architecture.rope_scaling_type = "yarn";
+            for (const auto ratio : config.compression_ratios) {
+                architecture.compression_ratios.push_back(
+                    static_cast<std::uint32_t>(ratio));
+            }
+            architecture.compression_ratios.push_back(0U);
+            architecture.routed_expert_swiglu_limits.assign(
+                config.layer_count, config.swiglu_limit);
+            architecture.shared_expert_swiglu_limits.assign(
+                config.layer_count, config.swiglu_limit);
+            reference_report.reference_architecture = architecture;
+            auto derived_config = vastloom::inference::
+                deepseek_v4_reference_config_from_0731_gguf(reference_report);
+            CHECK(derived_config && derived_config.value().mtp_layer_count == 0U &&
+                  derived_config.value().compression_ratios ==
+                      config.compression_ratios &&
+                  derived_config.value().routed_expert_swiglu_limits.size() ==
+                      config.layer_count &&
+                  derived_config.value().shared_expert_swiglu_limits.size() ==
+                      config.layer_count &&
+                  derived_config.value().swiglu_limit == 0.0F);
+            if (derived_config) {
+                CHECK(vastloom::inference::deepseek_v4_validate_0731_gguf_layer0_catalog(
+                    reference_report, derived_config.value()));
+                auto wrong_config = derived_config.value();
+                ++wrong_config.query_lora_rank;
+                CHECK(!vastloom::inference::deepseek_v4_validate_0731_gguf_layer0_catalog(
+                    reference_report, wrong_config));
+                auto wrong_bytes = reference_report;
+                const auto matrix = std::find_if(
+                    wrong_bytes.catalog.tensors.begin(),
+                    wrong_bytes.catalog.tensors.end(),
+                    [](const vastloom::model::LogicalTensorDescriptor& tensor) {
+                        return tensor.name == "blk.0.attn_q_a.weight";
+                    });
+                CHECK(matrix != wrong_bytes.catalog.tensors.end());
+                if (matrix != wrong_bytes.catalog.tensors.end()) {
+                    ++matrix->source.bytes;
+                    CHECK(!vastloom::inference::
+                              deepseek_v4_validate_0731_gguf_layer0_catalog(
+                                  wrong_bytes, derived_config.value()));
+                }
+            }
+            auto missing_clamps = reference_report;
+            missing_clamps.reference_architecture->routed_expert_swiglu_limits.pop_back();
+            CHECK(!vastloom::inference::deepseek_v4_reference_config_from_0731_gguf(
+                missing_clamps));
+            auto unpinned_report = reference_report;
+            unpinned_report.pinned_0731_checkpoint_spec_verified = false;
+            CHECK(!vastloom::inference::deepseek_v4_reference_config_from_0731_gguf(
+                unpinned_report));
             CHECK(trunk_artifact_ok && trunk_binding.ranges.size() == 21U &&
                   trunk_binding.payload_bytes == artifact_catalog.always_active_bytes &&
                   trunk_binding.payload_bytes == 2'844U);

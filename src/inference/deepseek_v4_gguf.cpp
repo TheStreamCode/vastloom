@@ -1,8 +1,11 @@
 #include "vastloom/inference/deepseek_v4_gguf.hpp"
 
+#include "vastloom/inference/deepseek_v4_reference.hpp"
+
 #include <algorithm>
 #include <array>
 #include <charconv>
+#include <cmath>
 #include <initializer_list>
 #include <limits>
 #include <map>
@@ -27,6 +30,28 @@ struct ParsedExpertTensor {
     std::uint32_t layer{0U};
     ExpertProjection projection{ExpertProjection::down};
 };
+
+bool checkpoint_specs_equal(const DeepseekV4GgufCheckpointSpec& left,
+                            const DeepseekV4GgufCheckpointSpec& right) {
+    if (left.model_id != right.model_id || left.revision != right.revision ||
+        left.layers != right.layers ||
+        left.experts_per_layer != right.experts_per_layer ||
+        left.top_k != right.top_k || left.shards.size() != right.shards.size()) {
+        return false;
+    }
+    for (std::size_t index = 0U; index < left.shards.size(); ++index) {
+        const auto& a = left.shards[index];
+        const auto& b = right.shards[index];
+        if (a.full_relative_path != b.full_relative_path ||
+            a.full_bytes != b.full_bytes || a.full_sha256 != b.full_sha256 ||
+            a.metadata_relative_path != b.metadata_relative_path ||
+            a.metadata_bytes != b.metadata_bytes ||
+            a.metadata_sha256 != b.metadata_sha256) {
+            return false;
+        }
+    }
+    return true;
+}
 
 std::optional<std::uint32_t> parse_block_layer(std::string_view name) {
     constexpr std::string_view prefix = "blk.";
@@ -160,6 +185,254 @@ Result<std::vector<std::uint32_t>> required_compress_ratios(
             result.push_back(static_cast<std::uint32_t>(value));
         }
     }
+    return result;
+}
+
+Result<float> required_float(const model::GgufFile& metadata,
+                             std::string_view key) {
+    const auto* entry = metadata.find_metadata(key);
+    if (entry == nullptr || !entry->floating_value.has_value() ||
+        !std::isfinite(*entry->floating_value) ||
+        *entry->floating_value <
+            -static_cast<double>(std::numeric_limits<float>::max()) ||
+        *entry->floating_value >
+            static_cast<double>(std::numeric_limits<float>::max())) {
+        return make_error(ErrorCode::invalid_format,
+                          "DeepSeek GGUF required floating metadata is missing or invalid",
+                          std::string(key));
+    }
+    return static_cast<float>(*entry->floating_value);
+}
+
+Result<bool> required_bool(const model::GgufFile& metadata,
+                           std::string_view key) {
+    const auto* entry = metadata.find_metadata(key);
+    if (entry == nullptr || !entry->boolean_value.has_value()) {
+        return make_error(ErrorCode::invalid_format,
+                          "DeepSeek GGUF required boolean metadata is missing or invalid",
+                          std::string(key));
+    }
+    return *entry->boolean_value;
+}
+
+Result<std::string> required_string(const model::GgufFile& metadata,
+                                    std::string_view key) {
+    const auto* entry = metadata.find_metadata(key);
+    if (entry == nullptr || !entry->string_value.has_value() ||
+        entry->string_value->empty()) {
+        return make_error(ErrorCode::invalid_format,
+                          "DeepSeek GGUF required string metadata is missing or invalid",
+                          std::string(key));
+    }
+    return *entry->string_value;
+}
+
+Result<std::vector<float>> required_float_schedule(
+    const model::GgufFile& metadata,
+    std::string_view key,
+    std::uint32_t expected_count) {
+    const auto* entry = metadata.find_metadata(key);
+    if (entry == nullptr || entry->type != model::GgufValueType::array ||
+        (entry->array_type != model::GgufValueType::float32 &&
+         entry->array_type != model::GgufValueType::float64) ||
+        entry->array_elements != expected_count ||
+        entry->floating_array_values.size() != expected_count) {
+        return make_error(
+            ErrorCode::invalid_format,
+            "DeepSeek GGUF floating schedule is missing, mistyped or incomplete",
+            std::string(key));
+    }
+    std::vector<float> result;
+    result.reserve(expected_count);
+    for (const double value : entry->floating_array_values) {
+        if (!std::isfinite(value) || value < 0.0 ||
+            value > static_cast<double>(std::numeric_limits<float>::max())) {
+            return make_error(ErrorCode::invalid_format,
+                              "DeepSeek GGUF floating schedule value is outside safe bounds",
+                              std::string(key));
+        }
+        result.push_back(static_cast<float>(value));
+    }
+    return result;
+}
+
+Result<DeepseekV4GgufArchitectureConfig> derive_reference_architecture(
+    const model::GgufSplitCatalog& split,
+    const model::LogicalTensorCatalog& catalog,
+    const DeepseekV4GgufCatalogOptions& options) {
+    if (split.shards.empty()) {
+        return make_error(ErrorCode::invalid_format,
+                          "DeepSeek GGUF split has no primary metadata shard");
+    }
+    const auto& metadata = split.shards.front();
+    auto layers = required_u32(metadata, "deepseek4.block_count");
+    auto hash_layers = required_u32(metadata, "deepseek4.hash_layer_count");
+    auto maximum_context = required_u32(metadata, "deepseek4.context_length");
+    auto width = required_u32(metadata, "deepseek4.embedding_length");
+    auto heads = required_u32(metadata, "deepseek4.attention.head_count");
+    auto kv_heads = required_u32(metadata, "deepseek4.attention.head_count_kv");
+    auto experts = required_u32(metadata, "deepseek4.expert_count");
+    auto top_k = required_u32(metadata, "deepseek4.expert_used_count");
+    auto gating = required_u32(metadata, "deepseek4.expert_gating_func");
+    auto shared_experts = required_u32(metadata, "deepseek4.expert_shared_count");
+    auto intermediate = required_u32(metadata, "deepseek4.expert_feed_forward_length");
+    auto query_lora = required_u32(metadata, "deepseek4.attention.q_lora_rank");
+    auto head_width = required_u32(metadata, "deepseek4.attention.key_length");
+    auto value_width = required_u32(metadata, "deepseek4.attention.value_length");
+    auto rope_width = required_u32(metadata, "deepseek4.rope.dimension_count");
+    auto output_groups = required_u32(metadata, "deepseek4.attention.output_group_count");
+    auto output_lora = required_u32(metadata, "deepseek4.attention.output_lora_rank");
+    auto window = required_u32(metadata, "deepseek4.attention.sliding_window");
+    auto original_context = required_u32(
+        metadata, "deepseek4.rope.scaling.original_context_length");
+    auto index_heads = required_u32(metadata, "deepseek4.attention.indexer.head_count");
+    auto index_width = required_u32(metadata, "deepseek4.attention.indexer.key_length");
+    auto index_top_k = required_u32(metadata, "deepseek4.attention.indexer.top_k");
+    auto hyper_multiplier = required_u32(metadata, "deepseek4.hyper_connection.count");
+    auto sinkhorn = required_u32(
+        metadata, "deepseek4.hyper_connection.sinkhorn_iterations");
+    const std::array<Result<std::uint32_t>*, 23U> required_unsigned{{
+        &layers, &hash_layers, &maximum_context, &width, &heads, &kv_heads,
+        &experts, &top_k, &gating, &shared_experts, &intermediate, &query_lora,
+        &head_width, &value_width, &rope_width, &output_groups, &output_lora,
+        &window, &original_context, &index_heads, &index_width, &index_top_k,
+        &hyper_multiplier,
+    }};
+    for (const auto* value : required_unsigned) {
+        if (!*value) return value->error();
+    }
+    if (!sinkhorn) return sinkhorn.error();
+
+    auto compression_rope = required_float(
+        metadata, "deepseek4.attention.compress_rope_freq_base");
+    auto rope_theta = required_float(metadata, "deepseek4.rope.freq_base");
+    auto rope_factor = required_float(metadata, "deepseek4.rope.scaling.factor");
+    auto beta_fast = required_float(metadata, "deepseek4.rope.scaling.yarn_beta_fast");
+    auto beta_slow = required_float(metadata, "deepseek4.rope.scaling.yarn_beta_slow");
+    auto norm_epsilon = required_float(
+        metadata, "deepseek4.attention.layer_norm_rms_epsilon");
+    auto hyper_epsilon = required_float(
+        metadata, "deepseek4.hyper_connection.epsilon");
+    auto route_scale = required_float(metadata, "deepseek4.expert_weights_scale");
+    const std::array<Result<float>*, 8U> required_floats{{
+        &compression_rope, &rope_theta, &rope_factor, &beta_fast,
+        &beta_slow, &norm_epsilon, &hyper_epsilon, &route_scale,
+    }};
+    for (const auto* value : required_floats) {
+        if (!*value) return value->error();
+    }
+    auto normalized = required_bool(metadata, "deepseek4.expert_weights_norm");
+    if (!normalized) return normalized.error();
+    auto rope_scaling = required_string(metadata, "deepseek4.rope.scaling.type");
+    if (!rope_scaling) return rope_scaling.error();
+
+    if (layers.value() != options.layers || experts.value() != options.experts_per_layer ||
+        top_k.value() != options.top_k || layers.value() == 0U ||
+        hash_layers.value() > layers.value() || maximum_context.value() == 0U ||
+        width.value() == 0U || heads.value() == 0U || kv_heads.value() != 1U ||
+        experts.value() == 0U || top_k.value() == 0U || top_k.value() > experts.value() ||
+        gating.value() != 4U || shared_experts.value() != 1U ||
+        intermediate.value() == 0U || query_lora.value() == 0U ||
+        head_width.value() == 0U || value_width.value() != head_width.value() ||
+        rope_width.value() == 0U || rope_width.value() > head_width.value() ||
+        rope_width.value() % 2U != 0U || output_groups.value() == 0U ||
+        output_lora.value() == 0U || window.value() == 0U ||
+        window.value() > maximum_context.value() || original_context.value() == 0U ||
+        original_context.value() > maximum_context.value() || index_heads.value() == 0U ||
+        index_width.value() < rope_width.value() || index_top_k.value() == 0U ||
+        hyper_multiplier.value() == 0U || hyper_multiplier.value() > 16U ||
+        sinkhorn.value() == 0U || !normalized.value() || rope_scaling.value() != "yarn" ||
+        compression_rope.value() <= 0.0F || rope_theta.value() <= 0.0F ||
+        rope_factor.value() <= 0.0F || beta_fast.value() <= 0.0F ||
+        beta_slow.value() <= 0.0F || norm_epsilon.value() <= 0.0F ||
+        hyper_epsilon.value() <= 0.0F || route_scale.value() <= 0.0F) {
+        return make_error(
+            ErrorCode::invalid_format,
+            "DeepSeek GGUF reference architecture metadata is unsupported or inconsistent",
+            options.model_id);
+    }
+    const std::uint64_t attention_width =
+        static_cast<std::uint64_t>(heads.value()) * head_width.value();
+    if (attention_width == 0U || attention_width % output_groups.value() != 0U) {
+        return make_error(ErrorCode::invalid_format,
+                          "DeepSeek GGUF attention width is incompatible with output groups",
+                          options.model_id);
+    }
+    if (layers.value() > std::numeric_limits<std::uint32_t>::max() -
+                             hash_layers.value()) {
+        return make_error(ErrorCode::invalid_format,
+                          "DeepSeek GGUF compression schedule length overflows",
+                          options.model_id);
+    }
+    auto ratios = required_compress_ratios(
+        metadata, layers.value() + hash_layers.value());
+    if (!ratios) return ratios.error();
+    if (!std::all_of(ratios.value().begin(), ratios.value().end(),
+                     [](std::uint32_t value) {
+                         return value == 0U || value == 4U || value == 128U;
+                     })) {
+        return make_error(ErrorCode::unsupported,
+                          "DeepSeek GGUF compression schedule contains an unsupported ratio",
+                          options.model_id);
+    }
+    auto routed_limits = required_float_schedule(
+        metadata, "deepseek4.swiglu_clamp_exp", layers.value());
+    if (!routed_limits) return routed_limits.error();
+    auto shared_limits = required_float_schedule(
+        metadata, "deepseek4.swiglu_clamp_shexp", layers.value());
+    if (!shared_limits) return shared_limits.error();
+
+    const auto embedding = std::find_if(
+        catalog.tensors.begin(), catalog.tensors.end(),
+        [](const model::LogicalTensorDescriptor& tensor) {
+            return tensor.name == "token_embd.weight";
+        });
+    if (embedding == catalog.tensors.end() || embedding->shape.size() != 2U ||
+        embedding->shape[0] != width.value() || embedding->shape[1] == 0U ||
+        embedding->shape[1] > std::numeric_limits<std::uint32_t>::max()) {
+        return make_error(ErrorCode::invalid_format,
+                          "DeepSeek GGUF token embedding cannot establish vocabulary size",
+                          options.model_id);
+    }
+
+    DeepseekV4GgufArchitectureConfig result;
+    result.vocabulary_size = static_cast<std::uint32_t>(embedding->shape[1]);
+    result.maximum_context_tokens = maximum_context.value();
+    result.width = width.value();
+    result.layer_count = layers.value();
+    result.hash_layer_count = hash_layers.value();
+    result.head_count = heads.value();
+    result.key_value_head_count = kv_heads.value();
+    result.expert_count = experts.value();
+    result.experts_per_token = top_k.value();
+    result.expert_gating_function = gating.value();
+    result.shared_expert_count = shared_experts.value();
+    result.intermediate_width = intermediate.value();
+    result.query_lora_rank = query_lora.value();
+    result.head_width = head_width.value();
+    result.rope_width = rope_width.value();
+    result.output_groups = output_groups.value();
+    result.output_lora_rank = output_lora.value();
+    result.window_size = window.value();
+    result.original_context_tokens = original_context.value();
+    result.index_head_count = index_heads.value();
+    result.index_head_width = index_width.value();
+    result.index_top_k = index_top_k.value();
+    result.hyper_multiplier = hyper_multiplier.value();
+    result.sinkhorn_iterations = sinkhorn.value();
+    result.compression_rope_theta = compression_rope.value();
+    result.rope_theta = rope_theta.value();
+    result.rope_factor = rope_factor.value();
+    result.beta_fast = beta_fast.value();
+    result.beta_slow = beta_slow.value();
+    result.norm_epsilon = norm_epsilon.value();
+    result.hyper_epsilon = hyper_epsilon.value();
+    result.route_scale = route_scale.value();
+    result.expert_weights_normalized = normalized.value();
+    result.rope_scaling_type = rope_scaling.take_value();
+    result.compression_ratios = ratios.take_value();
+    result.routed_expert_swiglu_limits = routed_limits.take_value();
+    result.shared_expert_swiglu_limits = shared_limits.take_value();
     return result;
 }
 
@@ -632,9 +905,16 @@ Result<DeepseekV4GgufCatalogReport> build_deepseek_v4_gguf_catalog(
         }
         auto working_set = derive_working_set(split, logical, options, maximum);
         if (!working_set) return working_set.error();
+        std::optional<DeepseekV4GgufArchitectureConfig> reference_architecture;
+        if (options.require_reference_architecture) {
+            auto derived = derive_reference_architecture(split, logical, options);
+            if (!derived) return derived.error();
+            reference_architecture = derived.take_value();
+        }
 
         DeepseekV4GgufCatalogReport report;
         report.catalog = std::move(logical);
+        report.reference_architecture = std::move(reference_architecture);
         report.layers = options.layers;
         report.experts_per_layer = options.experts_per_layer;
         report.top_k = options.top_k;
@@ -813,6 +1093,9 @@ Result<DeepseekV4GgufCatalogReport> inspect_deepseek_v4_gguf_checkpoint(
         reader_limits.max_header_bytes = 16U * MiB;
         reader_limits.retained_integral_array_keys = {
             "deepseek4.attention.compress_ratios"};
+        reader_limits.retained_floating_array_keys = {
+            "deepseek4.swiglu_clamp_exp",
+            "deepseek4.swiglu_clamp_shexp"};
         std::vector<model::GgufFile> shards;
         shards.reserve(spec.shards.size());
         for (std::size_t index = 0U; index < spec.shards.size(); ++index) {
@@ -843,6 +1126,9 @@ Result<DeepseekV4GgufCatalogReport> inspect_deepseek_v4_gguf_checkpoint(
         options.safe_vram_cap_bytes = inspect_options.safe_vram_cap_bytes;
         options.metadata_only = imported.value().metadata_only ||
                                 !imported.value().full_hash_verified;
+        const auto& pinned = pinned_deepseek_v4_flash_0731_iq1s_checkpoint();
+        const bool pinned_spec_verified = checkpoint_specs_equal(spec, pinned);
+        options.require_reference_architecture = pinned_spec_verified;
         // Logical source ranges always name the immutable full checkpoint objects. Metadata-only
         // header snapshots supply offsets and shapes, but must never become payload identities.
         options.source_shards.reserve(spec.shards.size());
@@ -852,8 +1138,19 @@ Result<DeepseekV4GgufCatalogReport> inspect_deepseek_v4_gguf_checkpoint(
         auto report = build_deepseek_v4_gguf_catalog(split.value(), options);
         if (!report) return report.error();
         report.value().imported_manifest_verified = true;
+        report.value().pinned_0731_checkpoint_spec_verified = pinned_spec_verified;
         report.value().imported_file_hashes_verified = imported.value().full_hash_verified;
         report.value().full_payload_present = !imported.value().metadata_only;
+        if (pinned_spec_verified) {
+            auto reference_config = deepseek_v4_reference_config_from_0731_gguf(
+                report.value());
+            if (!reference_config) return reference_config.error();
+            report.value().reference_config_verified = true;
+            auto layer0 = deepseek_v4_validate_0731_gguf_layer0_catalog(
+                report.value(), reference_config.value());
+            if (!layer0) return layer0.error();
+            report.value().layer0_reference_catalog_verified = true;
+        }
 
         if (!imported.value().metadata_only && imported.value().full_hash_verified &&
             !report.value().capacity_plan_candidate) {
@@ -882,12 +1179,51 @@ std::string to_json(const DeepseekV4GgufCatalogReport& report) {
            << ",\"execution_supported\":false"
            << ",\"checkpoint\":{\"imported_manifest_verified\":"
            << (report.imported_manifest_verified ? "true" : "false")
+           << ",\"pinned_0731_checkpoint_spec_verified\":"
+           << (report.pinned_0731_checkpoint_spec_verified ? "true" : "false")
+           << ",\"reference_config_verified\":"
+           << (report.reference_config_verified ? "true" : "false")
+           << ",\"layer0_reference_catalog_verified\":"
+           << (report.layer0_reference_catalog_verified ? "true" : "false")
            << ",\"imported_file_hashes_verified\":"
            << (report.imported_file_hashes_verified ? "true" : "false")
            << ",\"full_payload_present\":"
            << (report.full_payload_present ? "true" : "false")
            << ",\"executable_source_binding_verified\":"
            << (report.executable_source_binding_verified ? "true" : "false") << '}'
+           << ",\"reference_architecture\":{"
+           << "\"available\":"
+           << (report.reference_architecture.has_value() ? "true" : "false");
+    if (report.reference_architecture.has_value()) {
+        const auto& architecture = *report.reference_architecture;
+        output << ",\"vocabulary_size\":" << architecture.vocabulary_size
+               << ",\"maximum_context_tokens\":"
+               << architecture.maximum_context_tokens
+               << ",\"width\":" << architecture.width
+               << ",\"layer_count\":" << architecture.layer_count
+               << ",\"hash_layer_count\":" << architecture.hash_layer_count
+               << ",\"head_count\":" << architecture.head_count
+               << ",\"key_value_head_count\":"
+               << architecture.key_value_head_count
+               << ",\"expert_count\":" << architecture.expert_count
+               << ",\"experts_per_token\":" << architecture.experts_per_token
+               << ",\"shared_expert_count\":" << architecture.shared_expert_count
+               << ",\"intermediate_width\":" << architecture.intermediate_width
+               << ",\"compression_schedule_values\":"
+               << architecture.compression_ratios.size()
+               << ",\"routed_swiglu_schedule_values\":"
+               << architecture.routed_expert_swiglu_limits.size()
+               << ",\"shared_swiglu_schedule_values\":"
+               << architecture.shared_expert_swiglu_limits.size();
+        if (!architecture.routed_expert_swiglu_limits.empty() &&
+            !architecture.shared_expert_swiglu_limits.empty()) {
+            output << ",\"routed_swiglu_limit_layer0\":"
+                   << architecture.routed_expert_swiglu_limits.front()
+                   << ",\"shared_swiglu_limit_layer0\":"
+                   << architecture.shared_expert_swiglu_limits.front();
+        }
+    }
+    output << '}'
            << ",\"split_shards\":" << report.split_shards
            << ",\"physical_tensors\":" << report.physical_tensors
            << ",\"logical_tensors\":" << report.catalog.tensors.size()
@@ -970,6 +1306,10 @@ std::string to_text(const DeepseekV4GgufCatalogReport& report) {
            << (report.imported_file_hashes_verified ? "verified" : "not verified") << '\n'
            << "Executable binding:  "
            << (report.executable_source_binding_verified ? "verified" : "unavailable") << '\n'
+           << "Reference metadata:  "
+           << (report.reference_config_verified ? "verified" : "unavailable") << '\n'
+           << "Layer-0 descriptors: "
+           << (report.layer0_reference_catalog_verified ? "verified" : "unavailable") << '\n'
            << "RAM + VRAM pooling:  forbidden for one expert bundle" << '\n'
            << "Split shards:        " << report.split_shards << '\n'
            << "Physical tensors:    " << report.physical_tensors << '\n'

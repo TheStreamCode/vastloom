@@ -345,7 +345,7 @@ if(BUILD_TESTING AND VASTLOOM_BUILD_TESTS)
                 TIMEOUT 3600
                 RUN_SERIAL TRUE
                 PASS_REGULAR_EXPRESSION
-                    "\"imported_manifest_verified\":true.*\"planned_layers\":43"
+                    "\"imported_manifest_verified\":true.*\"pinned_0731_checkpoint_spec_verified\":true.*\"reference_config_verified\":true.*\"layer0_reference_catalog_verified\":true.*\"vocabulary_size\":129280.*\"compression_schedule_values\":46.*\"routed_swiglu_schedule_values\":43.*\"shared_swiglu_schedule_values\":43.*\"planned_layers\":43"
             )
             add_test(
                 NAME vastloom_deepseek_v4_gguf_probe_plan

@@ -27,13 +27,57 @@ struct DeepseekV4GgufCatalogOptions {
     ByteCount safe_ram_cap_bytes{0U};
     ByteCount safe_vram_cap_bytes{0U};
     bool metadata_only{false};
+    // Require the complete architecture metadata needed to construct the native reference
+    // configuration. Synthetic catalog tests may leave this disabled.
+    bool require_reference_architecture{false};
     // Optional immutable full-shard paths corresponding to split order. Header-prefix paths are
     // used only when this vector is empty.
     std::vector<std::filesystem::path> source_shards;
 };
 
+struct DeepseekV4GgufArchitectureConfig {
+    std::uint32_t vocabulary_size{0U};
+    std::uint32_t maximum_context_tokens{0U};
+    std::uint32_t width{0U};
+    std::uint32_t layer_count{0U};
+    std::uint32_t hash_layer_count{0U};
+    std::uint32_t head_count{0U};
+    std::uint32_t key_value_head_count{0U};
+    std::uint32_t expert_count{0U};
+    std::uint32_t experts_per_token{0U};
+    std::uint32_t expert_gating_function{0U};
+    std::uint32_t shared_expert_count{0U};
+    std::uint32_t intermediate_width{0U};
+    std::uint32_t query_lora_rank{0U};
+    std::uint32_t head_width{0U};
+    std::uint32_t rope_width{0U};
+    std::uint32_t output_groups{0U};
+    std::uint32_t output_lora_rank{0U};
+    std::uint32_t window_size{0U};
+    std::uint32_t original_context_tokens{0U};
+    std::uint32_t index_head_count{0U};
+    std::uint32_t index_head_width{0U};
+    std::uint32_t index_top_k{0U};
+    std::uint32_t hyper_multiplier{0U};
+    std::uint32_t sinkhorn_iterations{0U};
+    float compression_rope_theta{0.0F};
+    float rope_theta{0.0F};
+    float rope_factor{0.0F};
+    float beta_fast{0.0F};
+    float beta_slow{0.0F};
+    float norm_epsilon{0.0F};
+    float hyper_epsilon{0.0F};
+    float route_scale{0.0F};
+    bool expert_weights_normalized{false};
+    std::string rope_scaling_type;
+    std::vector<std::uint32_t> compression_ratios;
+    std::vector<float> routed_expert_swiglu_limits;
+    std::vector<float> shared_expert_swiglu_limits;
+};
+
 struct DeepseekV4GgufCatalogReport {
     model::LogicalTensorCatalog catalog;
+    std::optional<DeepseekV4GgufArchitectureConfig> reference_architecture;
     std::uint32_t layers{0U};
     std::uint32_t experts_per_layer{0U};
     std::uint32_t top_k{0U};
@@ -80,6 +124,9 @@ struct DeepseekV4GgufCatalogReport {
     ByteCount total_header_bytes{0U};
     ByteCount total_payload_bytes{0U};
     bool imported_manifest_verified{false};
+    bool pinned_0731_checkpoint_spec_verified{false};
+    bool reference_config_verified{false};
+    bool layer0_reference_catalog_verified{false};
     bool imported_file_hashes_verified{false};
     bool full_payload_present{false};
     bool executable_source_binding_verified{false};

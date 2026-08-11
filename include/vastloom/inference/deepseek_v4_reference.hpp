@@ -23,6 +23,7 @@ class ResidentByteBuffer;
 namespace vastloom::inference {
 
 class DeepseekV4LoadedTrunkTensorSet;
+struct DeepseekV4GgufCatalogReport;
 
 struct DeepseekV4RouteResult {
     std::vector<float> weights;
@@ -77,6 +78,10 @@ struct DeepseekV4ReferenceConfig {
     float norm_epsilon{0.0F};
     float hyper_epsilon{0.0F};
     float route_scale{0.0F};
+    // Empty schedules preserve the explicit scalar clamp used by reduced fixtures. Verified
+    // GGUF configurations provide one routed/shared value per main or MTP block.
+    std::vector<float> routed_expert_swiglu_limits;
+    std::vector<float> shared_expert_swiglu_limits;
     float swiglu_limit{0.0F};
 };
 
@@ -233,6 +238,17 @@ struct DeepseekV4ReferenceLayerTrunk {
 [[nodiscard]] Result<DeepseekV4ReferenceLayerTrunk>
 deepseek_v4_bind_0731_gguf_layer0_trunk(
     const DeepseekV4LoadedTrunkTensorSet& tensors,
+    const DeepseekV4ReferenceConfig& config);
+
+// Converts only a complete verified 0731 architecture snapshot. No tensor payload is read.
+[[nodiscard]] Result<DeepseekV4ReferenceConfig>
+deepseek_v4_reference_config_from_0731_gguf(
+    const DeepseekV4GgufCatalogReport& report);
+
+// Validates the exact 21 canonical layer-0 trunk descriptors against their native consumers
+// without allocating or reading any tensor payload.
+[[nodiscard]] Result<void> deepseek_v4_validate_0731_gguf_layer0_catalog(
+    const DeepseekV4GgufCatalogReport& report,
     const DeepseekV4ReferenceConfig& config);
 
 struct DeepseekV4ReferenceGraph {

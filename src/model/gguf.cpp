@@ -186,6 +186,8 @@ std::optional<ByteCount> fixed_value_bytes(GgufValueType type) noexcept {
     return std::nullopt;
 }
 
+enum class RetainedArrayKind : std::uint8_t { none, integral, floating };
+
 Result<void> parse_value(BoundedReader& reader,
                          GgufValueType type,
                          const GgufReaderLimits& limits,
@@ -193,7 +195,7 @@ Result<void> parse_value(BoundedReader& reader,
                          ArrayBudget& retained_budget,
                          std::uint32_t depth,
                          GgufMetadataEntry* summary,
-                         bool retain_integral_array = false) {
+                         RetainedArrayKind retained_array = RetainedArrayKind::none) {
     switch (type) {
         case GgufValueType::uint8: {
             auto value = reader.read_u8();
@@ -274,13 +276,41 @@ Result<void> parse_value(BoundedReader& reader,
                 summary->array_type = element_type.value();
                 summary->array_elements = length.value();
             }
-            if (retain_integral_array) {
+            if (retained_array != RetainedArrayKind::none) {
                 if (summary == nullptr || depth != 0U ||
                     length.value() > retained_budget.remaining_elements) {
                     return make_error(ErrorCode::resource_exhausted,
                                       "GGUF retained metadata arrays exceed the configured bound");
                 }
                 retained_budget.remaining_elements -= length.value();
+                if (retained_array == RetainedArrayKind::floating) {
+                    if (element_type.value() != GgufValueType::float32 &&
+                        element_type.value() != GgufValueType::float64) {
+                        return make_error(
+                            ErrorCode::invalid_format,
+                            "GGUF requested retained array is not floating-point");
+                    }
+                    summary->floating_array_values.reserve(
+                        static_cast<std::size_t>(length.value()));
+                    for (std::uint64_t index = 0U; index < length.value(); ++index) {
+                        GgufMetadataEntry item;
+                        auto parsed = parse_value(reader,
+                                                  element_type.value(),
+                                                  limits,
+                                                  budget,
+                                                  retained_budget,
+                                                  depth + 1U,
+                                                  &item);
+                        if (!parsed) return parsed.error();
+                        if (!item.floating_value.has_value()) {
+                            return make_error(
+                                ErrorCode::invalid_format,
+                                "GGUF retained floating-point array value is invalid");
+                        }
+                        summary->floating_array_values.push_back(*item.floating_value);
+                    }
+                    return {};
+                }
                 switch (element_type.value()) {
                     case GgufValueType::uint8:
                     case GgufValueType::uint16:
@@ -477,20 +507,30 @@ Result<GgufFile> GgufFile::open_with_declared_size(const std::filesystem::path& 
             limits.max_alignment < 8U || limits.max_dimensions == 0U || limits.max_dimensions > 64U ||
             limits.max_array_depth == 0U || limits.max_array_depth > 32U ||
             limits.max_retained_array_elements == 0U ||
-            limits.retained_integral_array_keys.size() > 64U) {
+            limits.retained_integral_array_keys.size() > 64U ||
+            limits.retained_floating_array_keys.size() >
+                64U - limits.retained_integral_array_keys.size()) {
             return make_error(ErrorCode::invalid_argument, "Invalid GGUF reader limits", path.string());
         }
-        for (std::size_t index = 0U; index < limits.retained_integral_array_keys.size(); ++index) {
-            const auto& key = limits.retained_integral_array_keys[index];
+        std::vector<std::string_view> retained_keys;
+        retained_keys.reserve(limits.retained_integral_array_keys.size() +
+                              limits.retained_floating_array_keys.size());
+        for (const auto& key : limits.retained_integral_array_keys) {
+            retained_keys.push_back(key);
+        }
+        for (const auto& key : limits.retained_floating_array_keys) {
+            retained_keys.push_back(key);
+        }
+        for (std::size_t index = 0U; index < retained_keys.size(); ++index) {
+            const auto key = retained_keys[index];
             if (!valid_metadata_key(key) ||
-                std::find(limits.retained_integral_array_keys.begin(),
-                          limits.retained_integral_array_keys.begin() +
-                              static_cast<std::ptrdiff_t>(index),
-                          key) != limits.retained_integral_array_keys.begin() +
-                                      static_cast<std::ptrdiff_t>(index)) {
+                std::find(retained_keys.begin(),
+                          retained_keys.begin() + static_cast<std::ptrdiff_t>(index),
+                          key) != retained_keys.begin() +
+                                     static_cast<std::ptrdiff_t>(index)) {
                 return make_error(ErrorCode::invalid_argument,
                                   "GGUF retained metadata key is invalid or duplicated",
-                                  key);
+                                  std::string(key));
             }
         }
         std::error_code error;
@@ -560,7 +600,12 @@ Result<GgufFile> GgufFile::open_with_declared_size(const std::filesystem::path& 
                 std::find(limits.retained_integral_array_keys.begin(),
                           limits.retained_integral_array_keys.end(),
                           entry.key) != limits.retained_integral_array_keys.end();
-            if (retain_integral_array && entry.type != GgufValueType::array) {
+            const bool retain_floating_array =
+                std::find(limits.retained_floating_array_keys.begin(),
+                          limits.retained_floating_array_keys.end(),
+                          entry.key) != limits.retained_floating_array_keys.end();
+            if ((retain_integral_array || retain_floating_array) &&
+                entry.type != GgufValueType::array) {
                 return make_error(ErrorCode::invalid_format,
                                   "GGUF requested retained metadata value is not an array",
                                   entry.key);
@@ -573,7 +618,11 @@ Result<GgufFile> GgufFile::open_with_declared_size(const std::filesystem::path& 
                                       retained_array_budget,
                                       0U,
                                       &entry,
-                                      retain_integral_array);
+                                      retain_integral_array
+                                          ? RetainedArrayKind::integral
+                                          : retain_floating_array
+                                                ? RetainedArrayKind::floating
+                                                : RetainedArrayKind::none);
             if (!parsed) return parsed.error();
             entry.encoded_value_bytes = reader.position() - value_start;
             result.metadata_by_key_.emplace(entry.key, result.metadata_.size());

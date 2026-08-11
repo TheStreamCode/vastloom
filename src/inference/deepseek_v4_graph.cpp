@@ -1,5 +1,6 @@
 #include "vastloom/inference/deepseek_v4_reference.hpp"
 
+#include "vastloom/inference/deepseek_v4_gguf.hpp"
 #include "vastloom/inference/deepseek_v4_range_artifact.hpp"
 #include "vastloom/inference/ggml_quantization.hpp"
 #include "vastloom/model/expert_loader.hpp"
@@ -214,6 +215,102 @@ bool storage_type_matches_dtype(std::uint32_t ggml_type,
         case kGgmlTypeIq1S: return dtype == model::TensorDType::quantized;
         default: return false;
     }
+}
+
+struct Layer0MatrixSpec {
+    std::string_view source;
+    std::string_view consumer;
+    std::size_t rows{0U};
+    std::size_t columns{0U};
+};
+
+struct Layer0FloatSpec {
+    std::string_view source;
+    std::string_view consumer;
+    std::size_t elements{0U};
+};
+
+struct Layer0TrunkLayout {
+    std::array<Layer0MatrixSpec, 11U> matrices;
+    std::array<Layer0FloatSpec, 9U> floats;
+    std::size_t routing_table_elements{0U};
+};
+
+Result<Layer0TrunkLayout> make_layer0_trunk_layout(
+    const DeepseekV4ReferenceConfig& config) {
+    if (config.layer_count == 0U || config.width == 0U ||
+        config.intermediate_width == 0U || config.head_count == 0U ||
+        config.head_width == 0U || config.query_lora_rank == 0U ||
+        config.output_groups == 0U || config.output_lora_rank == 0U ||
+        config.expert_count == 0U || config.experts_per_token == 0U ||
+        config.experts_per_token > config.expert_count ||
+        config.vocabulary_size == 0U || config.hyper_multiplier == 0U ||
+        config.head_count > std::numeric_limits<std::size_t>::max() /
+                                config.head_width ||
+        (config.head_count * config.head_width) % config.output_groups != 0U ||
+        config.hyper_multiplier > std::numeric_limits<std::size_t>::max() - 2U) {
+        return make_error(
+            ErrorCode::invalid_argument,
+            "DeepSeek 0731 layer-0 trunk binding configuration is invalid");
+    }
+    auto mix_width = bounded_product(
+        {2U + config.hyper_multiplier, config.hyper_multiplier},
+        "DeepSeek 0731 hyper-connection mix width");
+    if (!mix_width) return mix_width.error();
+    auto flattened_width = bounded_product(
+        {config.hyper_multiplier, config.width},
+        "DeepSeek 0731 hyper-connection input width");
+    if (!flattened_width) return flattened_width.error();
+    auto attention_width = bounded_product(
+        {config.head_count, config.head_width},
+        "DeepSeek 0731 attention width");
+    if (!attention_width) return attention_width.error();
+    auto output_rank_width = bounded_product(
+        {config.output_groups, config.output_lora_rank},
+        "DeepSeek 0731 output rank width");
+    if (!output_rank_width) return output_rank_width.error();
+    auto routing_table_elements = bounded_product(
+        {config.vocabulary_size, config.experts_per_token},
+        "DeepSeek 0731 hash routing table");
+    if (!routing_table_elements) return routing_table_elements.error();
+
+    Layer0TrunkLayout result{{{
+        {"blk.0.attn_kv.weight", "layers.0.attn.wkv.weight",
+         config.head_width, config.width},
+        {"blk.0.attn_output_a.weight", "layers.0.attn.wo_a.weight",
+         output_rank_width.value(), attention_width.value() / config.output_groups},
+        {"blk.0.attn_output_b.weight", "layers.0.attn.wo_b.weight",
+         config.width, output_rank_width.value()},
+        {"blk.0.attn_q_a.weight", "layers.0.attn.wq_a.weight",
+         config.query_lora_rank, config.width},
+        {"blk.0.attn_q_b.weight", "layers.0.attn.wq_b.weight",
+         attention_width.value(), config.query_lora_rank},
+        {"blk.0.ffn_down_shexp.weight", "layers.0.ffn.shared_experts.w2.weight",
+         config.width, config.intermediate_width},
+        {"blk.0.ffn_gate_inp.weight", "layers.0.ffn.gate.weight",
+         config.expert_count, config.width},
+        {"blk.0.ffn_gate_shexp.weight", "layers.0.ffn.shared_experts.w1.weight",
+         config.intermediate_width, config.width},
+        {"blk.0.ffn_up_shexp.weight", "layers.0.ffn.shared_experts.w3.weight",
+         config.intermediate_width, config.width},
+        {"blk.0.hc_attn_fn.weight", "layers.0.hc_attn_fn",
+         mix_width.value(), flattened_width.value()},
+        {"blk.0.hc_ffn_fn.weight", "layers.0.hc_ffn_fn",
+         mix_width.value(), flattened_width.value()},
+    }}, {{
+        {"blk.0.attn_kv_a_norm.weight", "layers.0.attn.kv_norm.weight",
+         config.head_width},
+        {"blk.0.attn_norm.weight", "layers.0.attn_norm.weight", config.width},
+        {"blk.0.attn_q_a_norm.weight", "layers.0.attn.q_norm.weight",
+         config.query_lora_rank},
+        {"blk.0.attn_sinks.weight", "layers.0.attn.attn_sink", config.head_count},
+        {"blk.0.ffn_norm.weight", "layers.0.ffn_norm.weight", config.width},
+        {"blk.0.hc_attn_base.weight", "layers.0.hc_attn_base", mix_width.value()},
+        {"blk.0.hc_attn_scale.weight", "layers.0.hc_attn_scale", 3U},
+        {"blk.0.hc_ffn_base.weight", "layers.0.hc_ffn_base", mix_width.value()},
+        {"blk.0.hc_ffn_scale.weight", "layers.0.hc_ffn_scale", 3U},
+    }}, routing_table_elements.value()};
+    return result;
 }
 
 Result<void> finite_values(std::span<const float> values, std::string_view context) {
@@ -1301,11 +1398,11 @@ Result<std::vector<float>> execute_expert(const DeepseekV4ReferenceGraph& graph,
                                           std::span<const float> input,
                                           std::span<const float> routing,
                                           std::size_t tokens,
+                                          float swiglu_limit,
                                           const DeepseekV4ResolvedExpert* resolved = nullptr) {
     const auto& config = graph.config;
     const std::string base(prefix);
-    if (tokens == 0U || !std::isfinite(config.swiglu_limit) ||
-        config.swiglu_limit < 0.0F) {
+    if (tokens == 0U || !std::isfinite(swiglu_limit) || swiglu_limit < 0.0F) {
         return make_error(ErrorCode::invalid_argument,
                           "DeepSeek graph expert dimensions or clamp are invalid", base);
     }
@@ -1347,12 +1444,12 @@ Result<std::vector<float>> execute_expert(const DeepseekV4ReferenceGraph& graph,
                 gate.value()[token * config.intermediate_width + column]);
             double up_value = static_cast<double>(
                 up.value()[token * config.intermediate_width + column]);
-            if (config.swiglu_limit > 0.0F) {
+            if (swiglu_limit > 0.0F) {
                 gate_value = std::min(gate_value,
-                                      static_cast<double>(config.swiglu_limit));
+                                      static_cast<double>(swiglu_limit));
                 up_value = std::clamp(up_value,
-                                      -static_cast<double>(config.swiglu_limit),
-                                      static_cast<double>(config.swiglu_limit));
+                                      -static_cast<double>(swiglu_limit),
+                                      static_cast<double>(swiglu_limit));
             }
             double value = gate_value / (1.0 + std::exp(-gate_value)) * up_value;
             if (!routing.empty()) value *= static_cast<double>(routing[token]);
@@ -1373,12 +1470,30 @@ struct MoeResult {
 
 Result<MoeResult> moe_forward(const DeepseekV4ReferenceGraph& graph,
                               std::string_view block_prefix,
+                              std::size_t clamp_layer,
                               bool hash_route,
                               std::span<const float> input,
                               std::span<const std::uint32_t> token_ids,
                               std::size_t token_count) {
     const auto& config = graph.config;
     const std::string base = std::string(block_prefix) + ".ffn";
+    const bool has_schedules = !config.routed_expert_swiglu_limits.empty() ||
+                               !config.shared_expert_swiglu_limits.empty();
+    const std::size_t expected_schedule_count =
+        config.layer_count + config.mtp_layer_count;
+    if (has_schedules &&
+        (config.routed_expert_swiglu_limits.size() != expected_schedule_count ||
+         config.shared_expert_swiglu_limits.size() != expected_schedule_count ||
+         clamp_layer >= expected_schedule_count)) {
+        return make_error(ErrorCode::invalid_argument,
+                          "DeepSeek graph SwiGLU clamp schedule is malformed", base);
+    }
+    const float routed_swiglu_limit = has_schedules
+        ? config.routed_expert_swiglu_limits[clamp_layer]
+        : config.swiglu_limit;
+    const float shared_swiglu_limit = has_schedules
+        ? config.shared_expert_swiglu_limits[clamp_layer]
+        : config.swiglu_limit;
     auto gate_logits = linear_tensor(graph, base + ".gate.weight", input,
                                      token_count, config.width,
                                      config.expert_count, base + ".gate");
@@ -1606,7 +1721,8 @@ Result<MoeResult> moe_forward(const DeepseekV4ReferenceGraph& graph,
                     route.value().weights[token * config.experts_per_token + slot];
                 auto expert_output = execute_expert(
                     graph, base + ".experts." + std::to_string(expert), token_input,
-                    std::span<const float>(&route_weight, 1U), 1U, resolved);
+                    std::span<const float>(&route_weight, 1U), 1U,
+                    routed_swiglu_limit, resolved);
                 if (!expert_output) return expert_output.error();
                 for (std::size_t column = 0U; column < config.width; ++column) {
                     output[token * config.width + column] += expert_output.value()[column];
@@ -1646,7 +1762,8 @@ Result<MoeResult> moe_forward(const DeepseekV4ReferenceGraph& graph,
                           "Unable to retain selected-expert telemetry",
                           base);
     }
-    auto shared = execute_expert(graph, base + ".shared_experts", input, {}, token_count);
+    auto shared = execute_expert(graph, base + ".shared_experts", input, {}, token_count,
+                                 shared_swiglu_limit);
     if (!shared) return shared.error();
     for (std::size_t index = 0U; index < output.size(); ++index) {
         output[index] += shared.value()[index];
@@ -1783,7 +1900,11 @@ Result<BlockResult> block_prefill(const DeepseekV4ReferenceGraph& graph,
         ffn_mix.value().reduced, ffn_norm_weight.value(), token_count,
         config.width, config.norm_epsilon);
     if (!normalized_ffn) return normalized_ffn.error();
-    auto moe = moe_forward(graph, base, hash_route, normalized_ffn.value(), token_ids,
+    const std::size_t clamp_layer = std::string_view(block_prefix).starts_with("mtp.")
+        ? config.layer_count + trace_layer
+        : trace_layer;
+    auto moe = moe_forward(graph, base, clamp_layer, hash_route,
+                           normalized_ffn.value(), token_ids,
                            token_count);
     if (!moe) return moe.error();
     auto ffn_post = deepseek_v4_hc_post(moe.value().output, residual_ffn,
@@ -1841,7 +1962,11 @@ Result<BlockResult> block_incremental(
         config.width, config.norm_epsilon);
     if (!normalized_ffn) return normalized_ffn.error();
     const std::array<std::uint32_t, 1U> token_ids{token_id};
-    auto moe = moe_forward(graph, base, hash_route, normalized_ffn.value(), token_ids, 1U);
+    const std::size_t clamp_layer = std::string_view(block_prefix).starts_with("mtp.")
+        ? config.layer_count + trace_layer
+        : trace_layer;
+    auto moe = moe_forward(graph, base, clamp_layer, hash_route,
+                           normalized_ffn.value(), token_ids, 1U);
     if (!moe) return moe.error();
     auto ffn_post = deepseek_v4_hc_post(moe.value().output, residual_ffn,
                                         ffn_mix.value().split, config.width);
@@ -1995,6 +2120,29 @@ Result<void> validate_graph(const DeepseekV4ReferenceGraph& graph,
     if (!std::isfinite(config.swiglu_limit) || config.swiglu_limit < 0.0F) {
         return make_error(ErrorCode::invalid_argument,
                           "DeepSeek reference graph SwiGLU clamp is invalid");
+    }
+    const bool has_swiglu_schedules =
+        !config.routed_expert_swiglu_limits.empty() ||
+        !config.shared_expert_swiglu_limits.empty();
+    const std::size_t expected_swiglu_values =
+        config.layer_count + config.mtp_layer_count;
+    if (has_swiglu_schedules &&
+        (config.routed_expert_swiglu_limits.size() != expected_swiglu_values ||
+         config.shared_expert_swiglu_limits.size() != expected_swiglu_values)) {
+        return make_error(ErrorCode::invalid_argument,
+                          "DeepSeek reference graph SwiGLU schedules are malformed");
+    }
+    for (const auto& schedule : {std::span<const float>(
+                                      config.routed_expert_swiglu_limits),
+                                  std::span<const float>(
+                                      config.shared_expert_swiglu_limits)}) {
+        for (const float value : schedule) {
+            if (!std::isfinite(value) || value < 0.0F) {
+                return make_error(
+                    ErrorCode::invalid_argument,
+                    "DeepSeek reference graph SwiGLU schedule value is invalid");
+            }
+        }
     }
     for (const auto token : token_ids) {
         if (token >= config.vocabulary_size) {
@@ -2326,100 +2474,297 @@ Result<DeepseekV4PackedFloatTensor> deepseek_v4_bind_packed_float(
         elements.value());
 }
 
+Result<DeepseekV4ReferenceConfig>
+deepseek_v4_reference_config_from_0731_gguf(
+    const DeepseekV4GgufCatalogReport& report) {
+    try {
+        const auto& pinned = pinned_deepseek_v4_flash_0731_iq1s_checkpoint();
+        if (!report.imported_manifest_verified ||
+            !report.pinned_0731_checkpoint_spec_verified ||
+            report.catalog.model_id != pinned.model_id ||
+            report.catalog.revision != pinned.revision ||
+            !report.reference_architecture.has_value()) {
+            return make_error(
+                ErrorCode::integrity_error,
+                "DeepSeek 0731 reference configuration requires the pinned verified metadata identity");
+        }
+        const auto& source = *report.reference_architecture;
+        if (source.layer_count != report.layers ||
+            source.expert_count != report.experts_per_layer ||
+            source.experts_per_token != report.top_k ||
+            source.compression_ratios.size() !=
+                static_cast<std::size_t>(source.layer_count) + source.hash_layer_count ||
+            source.routed_expert_swiglu_limits.size() != source.layer_count ||
+            source.shared_expert_swiglu_limits.size() != source.layer_count ||
+            source.key_value_head_count != 1U || source.shared_expert_count != 1U ||
+            source.expert_gating_function != 4U ||
+            !source.expert_weights_normalized || source.rope_scaling_type != "yarn" ||
+            source.vocabulary_size == 0U || source.maximum_context_tokens == 0U ||
+            source.width == 0U || source.layer_count == 0U ||
+            source.hash_layer_count > source.layer_count || source.head_count == 0U ||
+            source.expert_count == 0U || source.experts_per_token == 0U ||
+            source.experts_per_token > source.expert_count ||
+            source.intermediate_width == 0U || source.query_lora_rank == 0U ||
+            source.head_width == 0U || source.rope_width == 0U ||
+            source.rope_width > source.head_width || source.rope_width % 2U != 0U ||
+            source.output_groups == 0U || source.output_lora_rank == 0U ||
+            source.window_size == 0U ||
+            source.window_size > source.maximum_context_tokens ||
+            source.original_context_tokens == 0U ||
+            source.original_context_tokens > source.maximum_context_tokens ||
+            source.index_head_count == 0U ||
+            source.index_head_width < source.rope_width || source.index_top_k == 0U ||
+            source.hyper_multiplier == 0U || source.hyper_multiplier > 16U ||
+            source.sinkhorn_iterations == 0U) {
+            return make_error(
+                ErrorCode::invalid_format,
+                "DeepSeek 0731 verified architecture snapshot is incomplete or inconsistent");
+        }
+        const std::array<float, 8U> positive_scalars{{
+            source.compression_rope_theta, source.rope_theta, source.rope_factor,
+            source.beta_fast, source.beta_slow, source.norm_epsilon,
+            source.hyper_epsilon, source.route_scale,
+        }};
+        if (!std::all_of(positive_scalars.begin(), positive_scalars.end(),
+                         [](float value) {
+                             return std::isfinite(value) && value > 0.0F;
+                         }) ||
+            !std::all_of(source.compression_ratios.begin(),
+                         source.compression_ratios.end(),
+                         [](std::uint32_t value) {
+                             return value == 0U || value == 4U || value == 128U;
+                         })) {
+            return make_error(
+                ErrorCode::invalid_format,
+                "DeepSeek 0731 verified architecture schedule or scalar is unsupported");
+        }
+        for (const auto& limits : {
+                 std::span<const float>(source.routed_expert_swiglu_limits),
+                 std::span<const float>(source.shared_expert_swiglu_limits)}) {
+            if (!std::all_of(limits.begin(), limits.end(), [](float value) {
+                    return std::isfinite(value) && value >= 0.0F;
+                })) {
+                return make_error(
+                    ErrorCode::invalid_format,
+                    "DeepSeek 0731 verified SwiGLU schedule contains an invalid value");
+            }
+        }
+        DeepseekV4ReferenceConfig result;
+        result.vocabulary_size = source.vocabulary_size;
+        result.width = source.width;
+        result.intermediate_width = source.intermediate_width;
+        result.layer_count = source.layer_count;
+        result.hash_layer_count = source.hash_layer_count;
+        result.mtp_layer_count = 0U;
+        result.head_count = source.head_count;
+        result.expert_count = source.expert_count;
+        result.experts_per_token = source.experts_per_token;
+        result.query_lora_rank = source.query_lora_rank;
+        result.head_width = source.head_width;
+        result.rope_width = source.rope_width;
+        result.output_groups = source.output_groups;
+        result.output_lora_rank = source.output_lora_rank;
+        result.window_size = source.window_size;
+        result.compression_ratios.assign(
+            source.compression_ratios.begin(),
+            source.compression_ratios.begin() +
+                static_cast<std::ptrdiff_t>(source.layer_count));
+        result.compression_rope_theta = source.compression_rope_theta;
+        result.original_context = source.original_context_tokens;
+        result.rope_theta = source.rope_theta;
+        result.rope_factor = source.rope_factor;
+        result.beta_fast = source.beta_fast;
+        result.beta_slow = source.beta_slow;
+        result.index_head_count = source.index_head_count;
+        result.index_head_width = source.index_head_width;
+        result.index_top_k = source.index_top_k;
+        result.hyper_multiplier = source.hyper_multiplier;
+        result.sinkhorn_iterations = source.sinkhorn_iterations;
+        result.norm_epsilon = source.norm_epsilon;
+        result.hyper_epsilon = source.hyper_epsilon;
+        result.route_scale = source.route_scale;
+        result.routed_expert_swiglu_limits = source.routed_expert_swiglu_limits;
+        result.shared_expert_swiglu_limits = source.shared_expert_swiglu_limits;
+        result.swiglu_limit = 0.0F;
+        auto layout = make_layer0_trunk_layout(result);
+        if (!layout) return layout.error();
+        return result;
+    } catch (const std::bad_alloc&) {
+        return make_error(
+            ErrorCode::resource_exhausted,
+            "Unable to allocate the bounded DeepSeek 0731 reference configuration");
+    }
+}
+
+Result<void> deepseek_v4_validate_0731_gguf_layer0_catalog(
+    const DeepseekV4GgufCatalogReport& report,
+    const DeepseekV4ReferenceConfig& config) {
+    auto expected = deepseek_v4_reference_config_from_0731_gguf(report);
+    if (!expected) return expected.error();
+    const auto& canonical = expected.value();
+    if (config.vocabulary_size != canonical.vocabulary_size ||
+        config.width != canonical.width ||
+        config.intermediate_width != canonical.intermediate_width ||
+        config.layer_count != canonical.layer_count ||
+        config.hash_layer_count != canonical.hash_layer_count ||
+        config.mtp_layer_count != canonical.mtp_layer_count ||
+        config.head_count != canonical.head_count ||
+        config.expert_count != canonical.expert_count ||
+        config.experts_per_token != canonical.experts_per_token ||
+        config.query_lora_rank != canonical.query_lora_rank ||
+        config.head_width != canonical.head_width ||
+        config.rope_width != canonical.rope_width ||
+        config.output_groups != canonical.output_groups ||
+        config.output_lora_rank != canonical.output_lora_rank ||
+        config.window_size != canonical.window_size ||
+        config.compression_ratios != canonical.compression_ratios ||
+        config.mtp_compression_ratios != canonical.mtp_compression_ratios ||
+        config.compression_rope_theta != canonical.compression_rope_theta ||
+        config.original_context != canonical.original_context ||
+        config.rope_theta != canonical.rope_theta ||
+        config.rope_factor != canonical.rope_factor ||
+        config.beta_fast != canonical.beta_fast ||
+        config.beta_slow != canonical.beta_slow ||
+        config.index_head_count != canonical.index_head_count ||
+        config.index_head_width != canonical.index_head_width ||
+        config.index_top_k != canonical.index_top_k ||
+        config.hyper_multiplier != canonical.hyper_multiplier ||
+        config.sinkhorn_iterations != canonical.sinkhorn_iterations ||
+        config.norm_epsilon != canonical.norm_epsilon ||
+        config.hyper_epsilon != canonical.hyper_epsilon ||
+        config.route_scale != canonical.route_scale ||
+        config.routed_expert_swiglu_limits !=
+            canonical.routed_expert_swiglu_limits ||
+        config.shared_expert_swiglu_limits !=
+            canonical.shared_expert_swiglu_limits ||
+        config.swiglu_limit != canonical.swiglu_limit) {
+        return make_error(
+            ErrorCode::invalid_argument,
+            "DeepSeek 0731 layer-0 catalog configuration differs from verified metadata");
+    }
+    auto layout = make_layer0_trunk_layout(config);
+    if (!layout) return layout.error();
+
+    const auto find_tensor = [&](std::string_view name)
+        -> const model::LogicalTensorDescriptor* {
+        const auto found = std::find_if(
+            report.catalog.tensors.begin(), report.catalog.tensors.end(),
+            [name](const model::LogicalTensorDescriptor& tensor) {
+                return tensor.name == name;
+            });
+        return found == report.catalog.tensors.end() ? nullptr : &*found;
+    };
+    const auto validate_storage = [&](const model::LogicalTensorDescriptor& tensor,
+                                      std::size_t rows,
+                                      std::size_t storage_columns) -> Result<void> {
+        if (!tensor.ggml_type.has_value() ||
+            !storage_type_matches_dtype(*tensor.ggml_type, tensor.dtype)) {
+            return make_error(
+                ErrorCode::unsupported,
+                "DeepSeek 0731 layer-0 tensor storage type has no reference kernel",
+                tensor.name);
+        }
+        auto bytes = ggml_storage_bytes(
+            *tensor.ggml_type, rows, storage_columns,
+            QuantizedKernelLimits{kMaximumGraphElements});
+        if (!bytes) return bytes.error();
+        if (bytes.value() != tensor.source.bytes) {
+            return make_error(
+                ErrorCode::integrity_error,
+                "DeepSeek 0731 layer-0 encoded byte count disagrees with its shape",
+                tensor.name);
+        }
+        return {};
+    };
+
+    std::size_t layer0_tensor_count = 0U;
+    for (const auto& tensor : report.catalog.tensors) {
+        if (tensor.layer == 0U &&
+            tensor.role != model::TensorRole::routed_expert) {
+            ++layer0_tensor_count;
+        }
+    }
+    if (layer0_tensor_count != 21U) {
+        return make_error(
+            ErrorCode::invalid_format,
+            "DeepSeek 0731 layer 0 does not contain exactly 21 non-routed tensors",
+            std::to_string(layer0_tensor_count));
+    }
+    for (const auto& mapping : layout.value().matrices) {
+        const auto* tensor = find_tensor(mapping.source);
+        if (tensor == nullptr || tensor->layer != 0U || tensor->expert.has_value() ||
+            tensor->shape.size() != 2U || tensor->shape[1] != mapping.rows ||
+            tensor->shape[0] < mapping.columns ||
+            tensor->shape[0] > std::numeric_limits<std::size_t>::max()) {
+            return make_error(
+                ErrorCode::invalid_format,
+                "DeepSeek 0731 layer-0 matrix descriptor does not match its consumer",
+                std::string(mapping.source));
+        }
+        auto valid = validate_storage(
+            *tensor, mapping.rows, static_cast<std::size_t>(tensor->shape[0]));
+        if (!valid) return valid.error();
+    }
+    for (const auto& mapping : layout.value().floats) {
+        const auto* tensor = find_tensor(mapping.source);
+        if (tensor == nullptr || tensor->layer != 0U || tensor->expert.has_value() ||
+            !tensor->ggml_type.has_value() ||
+            (*tensor->ggml_type != kGgmlTypeF32 &&
+             *tensor->ggml_type != kGgmlTypeBf16)) {
+            return make_error(
+                ErrorCode::invalid_format,
+                "DeepSeek 0731 layer-0 float descriptor does not match its consumer",
+                std::string(mapping.source));
+        }
+        auto elements = bounded_catalog_product(tensor->shape, tensor->name);
+        if (!elements) return elements.error();
+        if (elements.value() != mapping.elements) {
+            return make_error(
+                ErrorCode::invalid_format,
+                "DeepSeek 0731 layer-0 float element count does not match its consumer",
+                tensor->name);
+        }
+        auto valid = validate_storage(*tensor, 1U, elements.value());
+        if (!valid) return valid.error();
+    }
+    const auto* table = find_tensor("blk.0.ffn_gate_tid2eid.weight");
+    if (table == nullptr || table->layer != 0U || table->expert.has_value() ||
+        table->dtype != model::TensorDType::i32 ||
+        table->ggml_type != kGgmlTypeI32) {
+        return make_error(
+            ErrorCode::invalid_format,
+            "DeepSeek 0731 layer-0 routing table descriptor is missing or mistyped");
+    }
+    auto table_elements = bounded_catalog_product(table->shape, table->name);
+    if (!table_elements) return table_elements.error();
+    if (table_elements.value() != layout.value().routing_table_elements) {
+        return make_error(
+            ErrorCode::invalid_format,
+            "DeepSeek 0731 layer-0 routing table has the wrong element count",
+            table->name);
+    }
+    auto table_storage = validate_storage(*table, 1U, table_elements.value());
+    if (!table_storage) return table_storage.error();
+    return {};
+}
+
 Result<DeepseekV4ReferenceLayerTrunk>
 deepseek_v4_bind_0731_gguf_layer0_trunk(
     const DeepseekV4LoadedTrunkTensorSet& tensors,
     const DeepseekV4ReferenceConfig& config) {
     try {
         constexpr std::size_t expected_tensor_count = 21U;
-        if (tensors.tensors().size() != expected_tensor_count ||
-            config.layer_count == 0U || config.width == 0U ||
-            config.intermediate_width == 0U || config.head_count == 0U ||
-            config.head_width == 0U || config.query_lora_rank == 0U ||
-            config.output_groups == 0U || config.output_lora_rank == 0U ||
-            config.expert_count == 0U || config.experts_per_token == 0U ||
-            config.vocabulary_size == 0U || config.hyper_multiplier == 0U ||
-            config.head_count > std::numeric_limits<std::size_t>::max() /
-                                    config.head_width ||
-            (config.head_count * config.head_width) % config.output_groups != 0U ||
-            config.hyper_multiplier > std::numeric_limits<std::size_t>::max() - 2U) {
+        if (tensors.tensors().size() != expected_tensor_count) {
             return make_error(
-                ErrorCode::invalid_argument,
-                "DeepSeek 0731 layer-0 trunk binding configuration is invalid");
+                ErrorCode::invalid_format,
+                "DeepSeek 0731 layer-0 trunk binding requires exactly 21 tensors");
         }
-        auto mix_width = bounded_product(
-            {2U + config.hyper_multiplier, config.hyper_multiplier},
-            "DeepSeek 0731 hyper-connection mix width");
-        if (!mix_width) return mix_width.error();
-        auto flattened_width = bounded_product(
-            {config.hyper_multiplier, config.width},
-            "DeepSeek 0731 hyper-connection input width");
-        if (!flattened_width) return flattened_width.error();
-        auto attention_width = bounded_product(
-            {config.head_count, config.head_width},
-            "DeepSeek 0731 attention width");
-        if (!attention_width) return attention_width.error();
-        auto output_rank_width = bounded_product(
-            {config.output_groups, config.output_lora_rank},
-            "DeepSeek 0731 output rank width");
-        if (!output_rank_width) return output_rank_width.error();
-
-        struct MatrixMapping {
-            std::string_view source;
-            std::string_view consumer;
-            std::size_t rows;
-            std::size_t columns;
-        };
-        const std::array<MatrixMapping, 11U> matrices{{
-            {"blk.0.attn_kv.weight", "layers.0.attn.wkv.weight",
-             config.head_width, config.width},
-            {"blk.0.attn_output_a.weight", "layers.0.attn.wo_a.weight",
-             output_rank_width.value(), attention_width.value() / config.output_groups},
-            {"blk.0.attn_output_b.weight", "layers.0.attn.wo_b.weight",
-             config.width, output_rank_width.value()},
-            {"blk.0.attn_q_a.weight", "layers.0.attn.wq_a.weight",
-             config.query_lora_rank, config.width},
-            {"blk.0.attn_q_b.weight", "layers.0.attn.wq_b.weight",
-             attention_width.value(), config.query_lora_rank},
-            {"blk.0.ffn_down_shexp.weight",
-             "layers.0.ffn.shared_experts.w2.weight",
-             config.width, config.intermediate_width},
-            {"blk.0.ffn_gate_inp.weight", "layers.0.ffn.gate.weight",
-             config.expert_count, config.width},
-            {"blk.0.ffn_gate_shexp.weight",
-             "layers.0.ffn.shared_experts.w1.weight",
-             config.intermediate_width, config.width},
-            {"blk.0.ffn_up_shexp.weight",
-             "layers.0.ffn.shared_experts.w3.weight",
-             config.intermediate_width, config.width},
-            {"blk.0.hc_attn_fn.weight", "layers.0.hc_attn_fn",
-             mix_width.value(), flattened_width.value()},
-            {"blk.0.hc_ffn_fn.weight", "layers.0.hc_ffn_fn",
-             mix_width.value(), flattened_width.value()},
-        }};
-        struct FloatMapping {
-            std::string_view source;
-            std::string_view consumer;
-            std::size_t elements;
-        };
-        const std::array<FloatMapping, 9U> floats{{
-            {"blk.0.attn_kv_a_norm.weight", "layers.0.attn.kv_norm.weight",
-             config.head_width},
-            {"blk.0.attn_norm.weight", "layers.0.attn_norm.weight", config.width},
-            {"blk.0.attn_q_a_norm.weight", "layers.0.attn.q_norm.weight",
-             config.query_lora_rank},
-            {"blk.0.attn_sinks.weight", "layers.0.attn.attn_sink",
-             config.head_count},
-            {"blk.0.ffn_norm.weight", "layers.0.ffn_norm.weight", config.width},
-            {"blk.0.hc_attn_base.weight", "layers.0.hc_attn_base", mix_width.value()},
-            {"blk.0.hc_attn_scale.weight", "layers.0.hc_attn_scale", 3U},
-            {"blk.0.hc_ffn_base.weight", "layers.0.hc_ffn_base", mix_width.value()},
-            {"blk.0.hc_ffn_scale.weight", "layers.0.hc_ffn_scale", 3U},
-        }};
+        auto layout = make_layer0_trunk_layout(config);
+        if (!layout) return layout.error();
 
         DeepseekV4ReferenceLayerTrunk result;
         result.layer = 0U;
-        for (const auto& mapping : matrices) {
+        for (const auto& mapping : layout.value().matrices) {
             auto matrix = deepseek_v4_bind_packed_matrix(
                 tensors, mapping.source, mapping.columns);
             if (!matrix) return matrix.error();
@@ -2431,7 +2776,7 @@ deepseek_v4_bind_0731_gguf_layer0_trunk(
             }
             result.matrices.emplace(mapping.consumer, matrix.take_value());
         }
-        for (const auto& mapping : floats) {
+        for (const auto& mapping : layout.value().floats) {
             auto tensor = deepseek_v4_bind_packed_float(tensors, mapping.source);
             if (!tensor) return tensor.error();
             if (tensor.value().elements != mapping.elements) {
@@ -2445,11 +2790,7 @@ deepseek_v4_bind_0731_gguf_layer0_trunk(
         auto table = deepseek_v4_bind_packed_i32(
             tensors, "blk.0.ffn_gate_tid2eid.weight");
         if (!table) return table.error();
-        auto table_elements = bounded_product(
-            {config.vocabulary_size, config.experts_per_token},
-            "DeepSeek 0731 hash routing table");
-        if (!table_elements) return table_elements.error();
-        if (table.value().elements != table_elements.value()) {
+        if (table.value().elements != layout.value().routing_table_elements) {
             return make_error(
                 ErrorCode::invalid_format,
                 "DeepSeek 0731 hash routing table shape does not match its consumer",
@@ -2457,8 +2798,8 @@ deepseek_v4_bind_0731_gguf_layer0_trunk(
         }
         result.integer_tensors.emplace(
             "layers.0.ffn.gate.tid2eid", table.take_value());
-        if (result.matrices.size() != matrices.size() ||
-            result.float_tensors.size() != floats.size() ||
+        if (result.matrices.size() != layout.value().matrices.size() ||
+            result.float_tensors.size() != layout.value().floats.size() ||
             result.integer_tensors.size() != 1U) {
             return make_error(
                 ErrorCode::internal_error,

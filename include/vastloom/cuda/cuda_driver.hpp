@@ -2,6 +2,7 @@
 
 #include <cstdint>
 #include <memory>
+#include <span>
 #include <string>
 #include <vector>
 
@@ -47,6 +48,22 @@ public:
         ByteCount bytes,
         ByteCount minimum_free_vram_after) = 0;
     [[nodiscard]] virtual Result<void> release(const CudaBackendAllocation& allocation) = 0;
+    [[nodiscard]] virtual Result<void> copy_from_host(
+        const CudaBackendAllocation& allocation,
+        ByteCount destination_offset,
+        std::span<const std::byte> source) = 0;
+    [[nodiscard]] virtual Result<void> copy_to_host(
+        const CudaBackendAllocation& allocation,
+        ByteCount source_offset,
+        std::span<std::byte> destination) = 0;
+    [[nodiscard]] virtual Result<void> launch_rms_norm(
+        const CudaBackendAllocation& allocation,
+        ByteCount input_offset,
+        ByteCount weight_offset,
+        ByteCount output_offset,
+        std::size_t row_count,
+        std::size_t width,
+        float epsilon) = 0;
 };
 
 class CudaAllocation {
@@ -97,6 +114,23 @@ public:
         ByteCount minimum_free_vram_after,
         safety::ResourceGovernor& governor,
         std::string tag) const;
+
+    [[nodiscard]] Result<void> copy_from_host(
+        CudaAllocation& allocation,
+        ByteCount destination_offset,
+        std::span<const std::byte> source) const;
+    [[nodiscard]] Result<void> copy_to_host(
+        CudaAllocation& allocation,
+        ByteCount source_offset,
+        std::span<std::byte> destination) const;
+    [[nodiscard]] Result<void> launch_rms_norm(
+        CudaAllocation& allocation,
+        ByteCount input_offset,
+        ByteCount weight_offset,
+        ByteCount output_offset,
+        std::size_t row_count,
+        std::size_t width,
+        float epsilon) const;
 
 private:
     explicit CudaDriver(std::shared_ptr<CudaDriverBackend> backend);

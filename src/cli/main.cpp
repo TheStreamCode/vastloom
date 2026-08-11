@@ -22,11 +22,13 @@
 #include "vastloom/cli/tiny_commands.hpp"
 #include "vastloom/core/bytes.hpp"
 #include "vastloom/cuda/cuda_driver.hpp"
+#include "vastloom/cuda/cuda_rms_norm.hpp"
 #include "vastloom/hardware/hardware_probe.hpp"
 #include "vastloom/inference/gpt2_tokenizer.hpp"
 #include "vastloom/inference/deepseek_v4_gguf.hpp"
 #include "vastloom/inference/deepseek_v4_range_artifact.hpp"
 #include "vastloom/inference/deepseek_v4_model.hpp"
+#include "vastloom/inference/deepseek_v4_reference.hpp"
 #include "vastloom/inference/llama_model.hpp"
 #include "vastloom/inference/olmoe_model.hpp"
 #include "vastloom/inference/olmoe_runtime.hpp"
@@ -230,8 +232,9 @@ void print_help() {
         << "      Run adapter-specific deterministic end-to-end generation probes.\n\n"
         << "  doctor [--storage PATH] [--json]\n"
         << "      Detect CPU, RAM, NVIDIA VRAM and storage without allocating model memory.\n\n"
-        << "  cuda-info [--allocation-smoke SIZE] [--minimum-free-vram SIZE] [--json]\n"
-        << "      Probe the native CUDA driver; optional smoke allocation is capped and governed.\n\n"
+        << "  cuda-info [--allocation-smoke SIZE|--rmsnorm-smoke]"
+           " [--minimum-free-vram SIZE] [--json]\n"
+        << "      Probe CUDA; optionally run a governed allocation or CPU-verified RMSNorm.\n\n"
         << "  inspect MANIFEST_OR_MODEL_HEADERS [--declared-size SIZE] [--tensor-limit N] [--json]\n"
         << "      Inspect a manifest, bounded Safetensors checkpoint or GGUF v3 header.\n\n"
         << "  verify MANIFEST [--model-root PATH] [--full] [--json]\n"
@@ -331,29 +334,40 @@ int command_cuda_info(const std::vector<std::string>& args) {
     const bool json = has_flag(args, "--json");
     if (has_flag(args, "--help")) {
         std::cout
-            << "Usage: vastloom cuda-info [--allocation-smoke SIZE]"
+            << "Usage: vastloom cuda-info [--allocation-smoke SIZE|--rmsnorm-smoke]"
                " [--minimum-free-vram SIZE] [--json]\n"
             << "Loads the CUDA Driver API dynamically; no CUDA toolkit is required. The optional\n"
             << "allocation is limited to 64 MiB, reserves Governor VRAM first and preserves at\n"
-            << "least 1 GiB of live device headroom unless a larger reserve is requested.\n";
+            << "least 1 GiB of live device headroom unless a larger reserve is requested.\n"
+            << "--rmsnorm-smoke transfers two 4096-wide FP32 rows, launches native PTX, copies\n"
+            << "the output back and compares it with the bounded CPU reference.\n";
         return 0;
     }
     auto valid = validate_options(args, 0U,
                                   {"--allocation-smoke", "--minimum-free-vram"},
-                                  {"--json", "--help"});
+                                  {"--json", "--help", "--rmsnorm-smoke"});
     if (!valid) return print_error(valid.error(), json);
-    const bool smoke_requested = option_value(args, "--allocation-smoke").has_value();
-    if (!smoke_requested && option_value(args, "--minimum-free-vram").has_value()) {
+    const bool allocation_smoke_requested =
+        option_value(args, "--allocation-smoke").has_value();
+    const bool rmsnorm_smoke_requested = has_flag(args, "--rmsnorm-smoke");
+    if (allocation_smoke_requested && rmsnorm_smoke_requested) {
         return print_error(vastloom::make_error(
                                vastloom::ErrorCode::invalid_argument,
-                               "--minimum-free-vram requires --allocation-smoke"),
+                               "--allocation-smoke and --rmsnorm-smoke are mutually exclusive"),
+                           json);
+    }
+    const bool operation_requested = allocation_smoke_requested || rmsnorm_smoke_requested;
+    if (!operation_requested && option_value(args, "--minimum-free-vram").has_value()) {
+        return print_error(vastloom::make_error(
+                               vastloom::ErrorCode::invalid_argument,
+                               "--minimum-free-vram requires a CUDA smoke operation"),
                            json);
     }
     auto smoke_bytes = optional_bytes(args, "--allocation-smoke", 0U);
     auto minimum_free = optional_bytes(args, "--minimum-free-vram", 1U * vastloom::GiB);
     if (!smoke_bytes) return print_error(smoke_bytes.error(), json);
     if (!minimum_free) return print_error(minimum_free.error(), json);
-    if (smoke_requested &&
+    if (allocation_smoke_requested &&
         (smoke_bytes.value() == 0U || smoke_bytes.value() > 64U * vastloom::MiB)) {
         return print_error(vastloom::make_error(
                                vastloom::ErrorCode::invalid_argument,
@@ -366,12 +380,15 @@ int command_cuda_info(const std::vector<std::string>& args) {
     auto probe = driver.value().probe();
     if (!probe) return print_error(probe.error(), json);
 
-    bool smoke_passed = false;
-    if (smoke_requested) {
+    bool allocation_smoke_passed = false;
+    bool rmsnorm_smoke_passed = false;
+    double rmsnorm_max_abs_error = 0.0;
+    vastloom::cuda::CudaRmsNormStats rmsnorm_stats;
+    if (operation_requested) {
         if (probe.value().devices.empty()) {
             return print_error(vastloom::make_error(
                                    vastloom::ErrorCode::not_found,
-                                   "CUDA allocation smoke requires device ordinal 0"),
+                                   "CUDA smoke operation requires device ordinal 0"),
                                json);
         }
         auto hardware = vastloom::hardware::HardwareProbe::collect(
@@ -390,11 +407,65 @@ int command_cuda_info(const std::vector<std::string>& args) {
         auto safe = process_guard.value().sample_and_check();
         if (!safe) return print_error(safe.error(), json);
         vastloom::safety::ResourceGovernor governor(policy.value().resources);
-        auto allocation = driver.value().allocate(
-            0, smoke_bytes.value(), minimum_free.value(), governor, "cuda-info-smoke");
-        if (!allocation) return print_error(allocation.error(), json);
-        auto released = allocation.value().release();
-        if (!released) return print_error(released.error(), json);
+        if (allocation_smoke_requested) {
+            auto allocation = driver.value().allocate(
+                0, smoke_bytes.value(), minimum_free.value(), governor, "cuda-info-smoke");
+            if (!allocation) return print_error(allocation.error(), json);
+            auto released = allocation.value().release();
+            if (!released) return print_error(released.error(), json);
+            allocation_smoke_passed = true;
+        } else {
+            constexpr std::size_t rows = 2U;
+            constexpr std::size_t width = 4'096U;
+            constexpr float epsilon = 1.0e-6F;
+            constexpr double tolerance = 3.0e-5;
+            constexpr std::size_t elements = rows * width;
+            constexpr ByteCount matrix_bytes = elements * sizeof(float);
+            constexpr ByteCount weight_bytes = width * sizeof(float);
+            constexpr ByteCount caller_host_bytes = 2U * matrix_bytes + weight_bytes;
+            auto caller_host = governor.try_reserve(
+                vastloom::safety::ResourceKind::scratch, caller_host_bytes,
+                "cuda-rmsnorm-smoke-input-reference");
+            if (!caller_host) return print_error(caller_host.error(), json);
+            std::vector<float> input(elements);
+            std::vector<float> weight(width);
+            for (std::size_t index = 0U; index < input.size(); ++index) {
+                input[index] = static_cast<float>(
+                    static_cast<int>(index % 257U) - 128) / 64.0F;
+            }
+            for (std::size_t index = 0U; index < weight.size(); ++index) {
+                weight[index] = 0.75F + static_cast<float>(index % 17U) / 32.0F;
+            }
+            auto expected = vastloom::inference::deepseek_v4_rms_norm(
+                input, weight, rows, width, epsilon);
+            if (!expected) return print_error(expected.error(), json);
+            auto actual = vastloom::cuda::cuda_rms_norm(
+                driver.value(), input, weight, rows, width, epsilon, governor,
+                {.device_ordinal = 0,
+                 .minimum_free_vram_after = minimum_free.value()});
+            if (!actual) return print_error(actual.error(), json);
+            if (actual.value().output.size() != expected.value().size()) {
+                return print_error(vastloom::make_error(
+                                       vastloom::ErrorCode::integrity_error,
+                                       "CUDA RMSNorm returned an invalid output size"),
+                                   json);
+            }
+            for (std::size_t index = 0U; index < actual.value().output.size(); ++index) {
+                rmsnorm_max_abs_error = std::max(
+                    rmsnorm_max_abs_error,
+                    std::abs(static_cast<double>(actual.value().output[index]) -
+                             static_cast<double>(expected.value()[index])));
+            }
+            if (rmsnorm_max_abs_error > tolerance) {
+                return print_error(vastloom::make_error(
+                                       vastloom::ErrorCode::integrity_error,
+                                       "CUDA RMSNorm does not match the CPU reference",
+                                       std::to_string(rmsnorm_max_abs_error)),
+                                   json);
+            }
+            rmsnorm_stats = actual.value().stats;
+            rmsnorm_smoke_passed = true;
+        }
         const auto snapshot = governor.snapshot();
         if (snapshot.reserved[static_cast<std::size_t>(
                 vastloom::safety::ResourceKind::vram)] != 0U) {
@@ -403,12 +474,11 @@ int command_cuda_info(const std::vector<std::string>& args) {
                                    "CUDA smoke left a residual VRAM reservation"),
                                json);
         }
-        smoke_passed = true;
     }
 
     if (json) {
         std::string output = vastloom::cuda::to_json(probe.value());
-        if (smoke_requested) {
+        if (operation_requested) {
             if (output.empty() || output.back() != '}') {
                 return print_error(vastloom::make_error(
                                        vastloom::ErrorCode::internal_error,
@@ -416,19 +486,39 @@ int command_cuda_info(const std::vector<std::string>& args) {
                                    true);
             }
             output.pop_back();
-            output += ",\"allocation_smoke\":{\"passed\":";
-            output += smoke_passed ? "true" : "false";
-            output += ",\"bytes\":" + std::to_string(smoke_bytes.value()) +
-                      ",\"minimum_free_vram_after\":" +
-                      std::to_string(minimum_free.value()) + "}}";
+            if (allocation_smoke_requested) {
+                output += ",\"allocation_smoke\":{\"passed\":";
+                output += allocation_smoke_passed ? "true" : "false";
+                output += ",\"bytes\":" + std::to_string(smoke_bytes.value()) +
+                          ",\"minimum_free_vram_after\":" +
+                          std::to_string(minimum_free.value()) + "}}";
+            } else {
+                output += ",\"rmsnorm_smoke\":{\"passed\":";
+                output += rmsnorm_smoke_passed ? "true" : "false";
+                output += ",\"rows\":" + std::to_string(rmsnorm_stats.row_count) +
+                          ",\"width\":" + std::to_string(rmsnorm_stats.width) +
+                          ",\"max_abs_error\":" + std::to_string(rmsnorm_max_abs_error) +
+                          ",\"device_buffer_bytes\":" +
+                          std::to_string(rmsnorm_stats.device_buffer_bytes) +
+                          ",\"host_to_device_bytes\":" +
+                          std::to_string(rmsnorm_stats.host_to_device_bytes) +
+                          ",\"device_to_host_bytes\":" +
+                          std::to_string(rmsnorm_stats.device_to_host_bytes) +
+                          ",\"minimum_free_vram_after\":" +
+                          std::to_string(minimum_free.value()) + "}}";
+            }
         }
         std::cout << output << '\n';
     } else {
         std::cout << vastloom::cuda::to_text(probe.value());
-        if (smoke_requested) {
+        if (allocation_smoke_requested) {
             std::cout << "Allocation:     PASS (" << vastloom::format_bytes(smoke_bytes.value())
                       << ", released; live reserve "
                       << vastloom::format_bytes(minimum_free.value()) << ")\n";
+        } else if (rmsnorm_smoke_requested) {
+            std::cout << "RMSNorm:        PASS (" << rmsnorm_stats.row_count << "x"
+                      << rmsnorm_stats.width << ", max abs error "
+                      << rmsnorm_max_abs_error << ", released)\n";
         }
     }
     return 0;

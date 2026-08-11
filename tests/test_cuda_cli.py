@@ -38,8 +38,9 @@ def main() -> int:
     args = parser.parse_args()
 
     help_result = run(args.vastloom, "cuda-info", "--help")
-    require(help_result.returncode == 0 and "64 MiB" in help_result.stdout,
-            "cuda-info help is missing its bounded allocation contract", help_result)
+    require(help_result.returncode == 0 and "64 MiB" in help_result.stdout
+            and "native PTX" in help_result.stdout,
+            "cuda-info help is missing its bounded allocation/kernel contract", help_result)
 
     for arguments in (
         ("--unknown", "--json"),
@@ -47,6 +48,8 @@ def main() -> int:
         ("--allocation-smoke", "--json"),
         ("--allocation-smoke", "0", "--json"),
         ("--allocation-smoke", "65MiB", "--json"),
+        ("--rmsnorm-smoke", "--rmsnorm-smoke", "--json"),
+        ("--allocation-smoke", "1MiB", "--rmsnorm-smoke", "--json"),
         ("--minimum-free-vram", "1GiB", "--json"),
     ):
         rejected = run(args.vastloom, "cuda-info", *arguments)
@@ -81,6 +84,23 @@ def main() -> int:
                 "cuda-info returned an incomplete device record",
                 probe,
             )
+        rmsnorm = run(args.vastloom, "cuda-info", "--rmsnorm-smoke", "--json")
+        require(rmsnorm.returncode == 0, "CUDA RMSNorm smoke failed", rmsnorm)
+        rmsnorm_payload = json.loads(rmsnorm.stdout)
+        smoke = rmsnorm_payload.get("rmsnorm_smoke")
+        require(
+            isinstance(smoke, dict)
+            and smoke.get("passed") is True
+            and smoke.get("rows") == 2
+            and smoke.get("width") == 4096
+            and isinstance(smoke.get("max_abs_error"), (int, float))
+            and smoke["max_abs_error"] <= 3.0e-5
+            and smoke.get("device_buffer_bytes") == 81920
+            and smoke.get("host_to_device_bytes") == 49152
+            and smoke.get("device_to_host_bytes") == 32768,
+            "successful CUDA RMSNorm smoke output is malformed",
+            rmsnorm,
+        )
     else:
         payload = error_payload(probe)
         require(payload.get("ok") is False and isinstance(payload.get("error"), str),

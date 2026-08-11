@@ -1,8 +1,10 @@
 #include "vastloom/cuda/cuda_driver.hpp"
 
 #include <array>
+#include <cmath>
 #include <cstring>
 #include <initializer_list>
+#include <iterator>
 #include <limits>
 #include <mutex>
 #include <sstream>
@@ -35,6 +37,9 @@ using CuResult = int;
 using CuDevice = int;
 using CuContext = void*;
 using CuDevicePointer = std::uint64_t;
+using CuModule = void*;
+using CuFunction = void*;
+using CuStream = void*;
 
 constexpr CuResult kCudaSuccess = 0;
 constexpr int kAttributeMaximumThreadsPerBlock = 1;
@@ -42,8 +47,87 @@ constexpr int kAttributeMultiprocessorCount = 16;
 constexpr int kAttributeUnifiedAddressing = 41;
 constexpr int kAttributeComputeCapabilityMajor = 75;
 constexpr int kAttributeComputeCapabilityMinor = 76;
+constexpr int kJitErrorLogBuffer = 5;
+constexpr int kJitErrorLogBufferSizeBytes = 6;
 constexpr std::size_t kMaximumDeviceNameBytes = 256U;
 constexpr std::size_t kMaximumAllocationTagBytes = 1'024U;
+constexpr std::size_t kMaximumJitLogBytes = 8U * 1'024U;
+
+constexpr std::string_view kRmsNormPtx = R"ptx(
+.version 7.0
+.target sm_52
+.address_size 64
+
+.visible .entry vastloom_rms_norm_f32(
+    .param .u64 input_param,
+    .param .u64 weight_param,
+    .param .u64 output_param,
+    .param .u32 rows_param,
+    .param .u32 width_param,
+    .param .f32 epsilon_param
+)
+{
+    .reg .pred %p<4>;
+    .reg .b32 %r<9>;
+    .reg .b64 %rd<8>;
+    .reg .f32 %f<9>;
+
+    ld.param.u64 %rd0, [input_param];
+    ld.param.u64 %rd1, [weight_param];
+    ld.param.u64 %rd2, [output_param];
+    ld.param.u32 %r0, [rows_param];
+    ld.param.u32 %r1, [width_param];
+    ld.param.f32 %f0, [epsilon_param];
+    mov.u32 %r2, %ctaid.x;
+    mov.u32 %r3, %tid.x;
+    setp.ge.u32 %p0, %r2, %r0;
+    @%p0 bra DONE;
+    setp.ne.u32 %p0, %r3, 0;
+    @%p0 bra DONE;
+    mul.lo.u32 %r4, %r2, %r1;
+    mov.f32 %f1, 0f00000000;
+    mov.u32 %r5, 0;
+
+SUM_LOOP:
+    setp.ge.u32 %p1, %r5, %r1;
+    @%p1 bra SUM_DONE;
+    add.u32 %r6, %r4, %r5;
+    mul.wide.u32 %rd3, %r6, 4;
+    add.u64 %rd4, %rd0, %rd3;
+    ld.global.f32 %f2, [%rd4];
+    fma.rn.f32 %f1, %f2, %f2, %f1;
+    add.u32 %r5, %r5, 1;
+    bra SUM_LOOP;
+
+SUM_DONE:
+    cvt.rn.f32.u32 %f3, %r1;
+    div.rn.f32 %f4, %f1, %f3;
+    add.rn.f32 %f4, %f4, %f0;
+    sqrt.rn.f32 %f5, %f4;
+    mov.f32 %f6, 0f3F800000;
+    div.rn.f32 %f7, %f6, %f5;
+    mov.u32 %r5, 0;
+OUTPUT_LOOP:
+    setp.ge.u32 %p2, %r5, %r1;
+    @%p2 bra DONE;
+    add.u32 %r6, %r4, %r5;
+    mul.wide.u32 %rd3, %r6, 4;
+    add.u64 %rd4, %rd0, %rd3;
+    ld.global.f32 %f2, [%rd4];
+    mul.wide.u32 %rd5, %r5, 4;
+    add.u64 %rd6, %rd1, %rd5;
+    ld.global.f32 %f8, [%rd6];
+    mul.rn.f32 %f2, %f2, %f7;
+    mul.rn.f32 %f2, %f2, %f8;
+    add.u64 %rd4, %rd2, %rd3;
+    st.global.f32 [%rd4], %f2;
+    add.u32 %r5, %r5, 1;
+    bra OUTPUT_LOOP;
+
+DONE:
+    ret;
+}
+)ptx";
 
 void quarantine_backend(std::shared_ptr<CudaDriverBackend> backend) noexcept {
     // A failed external release may leave a live device allocation/context. Keep the driver
@@ -72,6 +156,19 @@ using CuCtxPopCurrent = CuResult(VASTLOOM_CUDA_CALL*)(CuContext*);
 using CuMemGetInfo = CuResult(VASTLOOM_CUDA_CALL*)(std::size_t*, std::size_t*);
 using CuMemAlloc = CuResult(VASTLOOM_CUDA_CALL*)(CuDevicePointer*, std::size_t);
 using CuMemFree = CuResult(VASTLOOM_CUDA_CALL*)(CuDevicePointer);
+using CuMemcpyHostToDevice = CuResult(VASTLOOM_CUDA_CALL*)(CuDevicePointer, const void*,
+                                                          std::size_t);
+using CuMemcpyDeviceToHost = CuResult(VASTLOOM_CUDA_CALL*)(void*, CuDevicePointer,
+                                                          std::size_t);
+using CuModuleLoadData = CuResult(VASTLOOM_CUDA_CALL*)(CuModule*, const void*, unsigned int,
+                                                      int*, void**);
+using CuModuleGetFunction = CuResult(VASTLOOM_CUDA_CALL*)(CuFunction*, CuModule, const char*);
+using CuModuleUnload = CuResult(VASTLOOM_CUDA_CALL*)(CuModule);
+using CuLaunchKernel = CuResult(VASTLOOM_CUDA_CALL*)(CuFunction, unsigned int, unsigned int,
+                                                    unsigned int, unsigned int, unsigned int,
+                                                    unsigned int, unsigned int, CuStream, void**,
+                                                    void**);
+using CuContextSynchronize = CuResult(VASTLOOM_CUDA_CALL*)();
 using CuGetErrorName = CuResult(VASTLOOM_CUDA_CALL*)(CuResult, const char**);
 using CuGetErrorString = CuResult(VASTLOOM_CUDA_CALL*)(CuResult, const char**);
 
@@ -297,6 +394,141 @@ public:
         return {};
     }
 
+    [[nodiscard]] Result<void> copy_from_host(
+        const CudaBackendAllocation& allocation,
+        ByteCount destination_offset,
+        std::span<const std::byte> source) override {
+        std::scoped_lock lock(mutex_);
+        auto range = validate_allocation_range(allocation, destination_offset, source.size());
+        if (!range) return range.error();
+        auto* context = reinterpret_cast<CuContext>(allocation.context);
+        CuResult status = context_push_(context);
+        if (status != kCudaSuccess) return cuda_error("cuCtxPushCurrent_v2", status);
+        status = copy_host_to_device_(allocation.device_pointer + destination_offset,
+                                      source.data(), source.size());
+        auto popped = pop_context_locked(context);
+        if (status != kCudaSuccess) return cuda_error("cuMemcpyHtoD_v2", status);
+        if (!popped) return popped.error();
+        return {};
+    }
+
+    [[nodiscard]] Result<void> copy_to_host(
+        const CudaBackendAllocation& allocation,
+        ByteCount source_offset,
+        std::span<std::byte> destination) override {
+        std::scoped_lock lock(mutex_);
+        auto range = validate_allocation_range(allocation, source_offset, destination.size());
+        if (!range) return range.error();
+        auto* context = reinterpret_cast<CuContext>(allocation.context);
+        CuResult status = context_push_(context);
+        if (status != kCudaSuccess) return cuda_error("cuCtxPushCurrent_v2", status);
+        status = copy_device_to_host_(destination.data(),
+                                      allocation.device_pointer + source_offset,
+                                      destination.size());
+        auto popped = pop_context_locked(context);
+        if (status != kCudaSuccess) return cuda_error("cuMemcpyDtoH_v2", status);
+        if (!popped) return popped.error();
+        return {};
+    }
+
+    [[nodiscard]] Result<void> launch_rms_norm(
+        const CudaBackendAllocation& allocation,
+        ByteCount input_offset,
+        ByteCount weight_offset,
+        ByteCount output_offset,
+        std::size_t row_count,
+        std::size_t width,
+        float epsilon) override {
+        std::scoped_lock lock(mutex_);
+        if (row_count == 0U || width == 0U || !std::isfinite(epsilon) || epsilon <= 0.0F ||
+            row_count > std::numeric_limits<std::uint32_t>::max() ||
+            width > std::numeric_limits<std::uint32_t>::max()) {
+            return make_error(ErrorCode::invalid_argument,
+                              "CUDA RMSNorm launch dimensions are invalid");
+        }
+        if (width > std::numeric_limits<std::size_t>::max() / row_count ||
+            width > std::numeric_limits<ByteCount>::max() / row_count ||
+            row_count * width > std::numeric_limits<ByteCount>::max() / sizeof(float)) {
+            return make_error(ErrorCode::resource_exhausted,
+                              "CUDA RMSNorm launch byte count overflows");
+        }
+        const ByteCount element_count = static_cast<ByteCount>(row_count * width);
+        const ByteCount matrix_bytes = element_count * sizeof(float);
+        if (width > std::numeric_limits<ByteCount>::max() / sizeof(float)) {
+            return make_error(ErrorCode::resource_exhausted,
+                              "CUDA RMSNorm weight byte count overflows");
+        }
+        const ByteCount weight_bytes = static_cast<ByteCount>(width) * sizeof(float);
+        for (const auto& [offset, bytes] :
+             {std::pair{input_offset, matrix_bytes}, std::pair{weight_offset, weight_bytes},
+              std::pair{output_offset, matrix_bytes}}) {
+            auto range = validate_allocation_range(allocation, offset, bytes);
+            if (!range) return range.error();
+            if (offset % alignof(float) != 0U) {
+                return make_error(ErrorCode::invalid_argument,
+                                  "CUDA RMSNorm buffer offsets must be FP32-aligned");
+            }
+        }
+        const auto overlaps = [](ByteCount first_offset, ByteCount first_bytes,
+                                 ByteCount second_offset, ByteCount second_bytes) {
+            return first_offset < second_offset + second_bytes &&
+                   second_offset < first_offset + first_bytes;
+        };
+        if (overlaps(input_offset, matrix_bytes, weight_offset, weight_bytes) ||
+            overlaps(input_offset, matrix_bytes, output_offset, matrix_bytes) ||
+            overlaps(weight_offset, weight_bytes, output_offset, matrix_bytes)) {
+            return make_error(ErrorCode::invalid_argument,
+                              "CUDA RMSNorm input, weight and output ranges must not overlap");
+        }
+
+        auto* context = reinterpret_cast<CuContext>(allocation.context);
+        CuResult status = context_push_(context);
+        if (status != kCudaSuccess) return cuda_error("cuCtxPushCurrent_v2", status);
+        CuModule module = nullptr;
+        std::array<char, kMaximumJitLogBytes> jit_error_log{};
+        int jit_options[] = {kJitErrorLogBufferSizeBytes, kJitErrorLogBuffer};
+        void* jit_option_values[] = {
+            reinterpret_cast<void*>(static_cast<std::uintptr_t>(jit_error_log.size())),
+            jit_error_log.data()};
+        status = module_load_data_(&module, kRmsNormPtx.data(), 2U, jit_options,
+                                   jit_option_values);
+        if (status != kCudaSuccess) {
+            static_cast<void>(pop_context_locked(context));
+            auto error = cuda_error("cuModuleLoadDataEx", status);
+            if (jit_error_log.front() != '\0') {
+                const auto log_end = std::find(jit_error_log.begin(), jit_error_log.end(), '\0');
+                error.context += ", JIT log: ";
+                error.context.append(
+                    jit_error_log.data(),
+                    static_cast<std::size_t>(std::distance(jit_error_log.begin(), log_end)));
+            }
+            return error;
+        }
+        CuFunction function = nullptr;
+        status = module_get_function_(&function, module, "vastloom_rms_norm_f32");
+        if (status != kCudaSuccess) {
+            static_cast<void>(module_unload_(module));
+            static_cast<void>(pop_context_locked(context));
+            return cuda_error("cuModuleGetFunction", status);
+        }
+        CuDevicePointer input_pointer = allocation.device_pointer + input_offset;
+        CuDevicePointer weight_pointer = allocation.device_pointer + weight_offset;
+        CuDevicePointer output_pointer = allocation.device_pointer + output_offset;
+        auto rows = static_cast<std::uint32_t>(row_count);
+        auto columns = static_cast<std::uint32_t>(width);
+        void* parameters[] = {&input_pointer, &weight_pointer, &output_pointer,
+                              &rows, &columns, &epsilon};
+        status = launch_kernel_(function, rows, 1U, 1U, 1U, 1U, 1U, 0U, nullptr,
+                                parameters, nullptr);
+        if (status == kCudaSuccess) status = context_synchronize_();
+        const CuResult unload_status = module_unload_(module);
+        auto popped = pop_context_locked(context);
+        if (status != kCudaSuccess) return cuda_error("CUDA RMSNorm launch/synchronize", status);
+        if (unload_status != kCudaSuccess) return cuda_error("cuModuleUnload", unload_status);
+        if (!popped) return popped.error();
+        return {};
+    }
+
 private:
     DynamicCudaBackend() = default;
 
@@ -345,6 +577,17 @@ private:
         VASTLOOM_LOAD_CUDA(memory_info_, CuMemGetInfo, "cuMemGetInfo_v2");
         VASTLOOM_LOAD_CUDA(memory_allocate_, CuMemAlloc, "cuMemAlloc_v2");
         VASTLOOM_LOAD_CUDA(memory_free_, CuMemFree, "cuMemFree_v2");
+        VASTLOOM_LOAD_CUDA(copy_host_to_device_, CuMemcpyHostToDevice,
+                           "cuMemcpyHtoD_v2");
+        VASTLOOM_LOAD_CUDA(copy_device_to_host_, CuMemcpyDeviceToHost,
+                           "cuMemcpyDtoH_v2");
+        VASTLOOM_LOAD_CUDA(module_load_data_, CuModuleLoadData, "cuModuleLoadDataEx");
+        VASTLOOM_LOAD_CUDA(module_get_function_, CuModuleGetFunction,
+                           "cuModuleGetFunction");
+        VASTLOOM_LOAD_CUDA(module_unload_, CuModuleUnload, "cuModuleUnload");
+        VASTLOOM_LOAD_CUDA(launch_kernel_, CuLaunchKernel, "cuLaunchKernel");
+        VASTLOOM_LOAD_CUDA(context_synchronize_, CuContextSynchronize,
+                           "cuCtxSynchronize");
         VASTLOOM_LOAD_CUDA(error_name_, CuGetErrorName, "cuGetErrorName");
         VASTLOOM_LOAD_CUDA(error_string_, CuGetErrorString, "cuGetErrorString");
 #undef VASTLOOM_LOAD_CUDA
@@ -402,6 +645,34 @@ private:
                           std::move(context));
     }
 
+    [[nodiscard]] static Result<void> validate_allocation_range(
+        const CudaBackendAllocation& allocation,
+        ByteCount offset,
+        ByteCount bytes) {
+        if (allocation.context == 0U || allocation.device_pointer == 0U ||
+            allocation.bytes == 0U || bytes == 0U || offset > allocation.bytes ||
+            bytes > allocation.bytes - offset ||
+            offset > std::numeric_limits<CuDevicePointer>::max() -
+                         allocation.device_pointer ||
+            bytes > std::numeric_limits<CuDevicePointer>::max() -
+                        allocation.device_pointer - offset) {
+            return make_error(ErrorCode::invalid_argument,
+                              "CUDA device buffer range is invalid");
+        }
+        return {};
+    }
+
+    [[nodiscard]] Result<void> pop_context_locked(CuContext expected) const {
+        CuContext popped = nullptr;
+        const CuResult status = context_pop_(&popped);
+        if (status != kCudaSuccess) return cuda_error("cuCtxPopCurrent_v2", status);
+        if (popped != expected) {
+            return make_error(ErrorCode::internal_error,
+                              "CUDA context stack returned a different context");
+        }
+        return {};
+    }
+
     void pop_and_release_locked(CuDevice device) const noexcept {
         CuContext popped = nullptr;
         static_cast<void>(context_pop_(&popped));
@@ -430,6 +701,13 @@ private:
     CuMemGetInfo memory_info_{nullptr};
     CuMemAlloc memory_allocate_{nullptr};
     CuMemFree memory_free_{nullptr};
+    CuMemcpyHostToDevice copy_host_to_device_{nullptr};
+    CuMemcpyDeviceToHost copy_device_to_host_{nullptr};
+    CuModuleLoadData module_load_data_{nullptr};
+    CuModuleGetFunction module_get_function_{nullptr};
+    CuModuleUnload module_unload_{nullptr};
+    CuLaunchKernel launch_kernel_{nullptr};
+    CuContextSynchronize context_synchronize_{nullptr};
     CuGetErrorName error_name_{nullptr};
     CuGetErrorString error_string_{nullptr};
 };
@@ -604,6 +882,117 @@ Result<CudaAllocation> CudaDriver::allocate(
                           "CUDA backend returned an invalid allocation handle");
     }
     return CudaAllocation(backend_, allocated.take_value(), reservation.take_value());
+}
+
+Result<void> CudaDriver::copy_from_host(
+    CudaAllocation& allocation,
+    ByteCount destination_offset,
+    std::span<const std::byte> source) const {
+    if (!allocation.valid() || allocation.backend_.get() != backend_.get()) {
+        return make_error(ErrorCode::invalid_argument,
+                          "CUDA allocation does not belong to this driver");
+    }
+    if (source.empty() || destination_offset > allocation.bytes() ||
+        source.size() > allocation.bytes() - destination_offset) {
+        return make_error(ErrorCode::invalid_argument,
+                          "CUDA host-to-device copy range is invalid");
+    }
+    try {
+        return backend_->copy_from_host(allocation.allocation_, destination_offset, source);
+    } catch (const std::exception& exception) {
+        return make_error(ErrorCode::internal_error,
+                          "CUDA backend threw during host-to-device copy", exception.what());
+    } catch (...) {
+        return make_error(ErrorCode::internal_error,
+                          "CUDA backend threw an unknown host-to-device copy exception");
+    }
+}
+
+Result<void> CudaDriver::copy_to_host(
+    CudaAllocation& allocation,
+    ByteCount source_offset,
+    std::span<std::byte> destination) const {
+    if (!allocation.valid() || allocation.backend_.get() != backend_.get()) {
+        return make_error(ErrorCode::invalid_argument,
+                          "CUDA allocation does not belong to this driver");
+    }
+    if (destination.empty() || source_offset > allocation.bytes() ||
+        destination.size() > allocation.bytes() - source_offset) {
+        return make_error(ErrorCode::invalid_argument,
+                          "CUDA device-to-host copy range is invalid");
+    }
+    try {
+        return backend_->copy_to_host(allocation.allocation_, source_offset, destination);
+    } catch (const std::exception& exception) {
+        return make_error(ErrorCode::internal_error,
+                          "CUDA backend threw during device-to-host copy", exception.what());
+    } catch (...) {
+        return make_error(ErrorCode::internal_error,
+                          "CUDA backend threw an unknown device-to-host copy exception");
+    }
+}
+
+Result<void> CudaDriver::launch_rms_norm(
+    CudaAllocation& allocation,
+    ByteCount input_offset,
+    ByteCount weight_offset,
+    ByteCount output_offset,
+    std::size_t row_count,
+    std::size_t width,
+    float epsilon) const {
+    if (!allocation.valid() || allocation.backend_.get() != backend_.get()) {
+        return make_error(ErrorCode::invalid_argument,
+                          "CUDA allocation does not belong to this driver");
+    }
+    if (row_count == 0U || width == 0U || !std::isfinite(epsilon) || epsilon <= 0.0F) {
+        return make_error(ErrorCode::invalid_argument,
+                          "CUDA RMSNorm launch parameters are invalid");
+    }
+    if (row_count > std::numeric_limits<std::uint32_t>::max() ||
+        width > std::numeric_limits<std::uint32_t>::max() ||
+        width > std::numeric_limits<std::size_t>::max() / row_count ||
+        width > std::numeric_limits<ByteCount>::max() / row_count ||
+        row_count * width > std::numeric_limits<ByteCount>::max() / sizeof(float) ||
+        width > std::numeric_limits<ByteCount>::max() / sizeof(float)) {
+        return make_error(ErrorCode::resource_exhausted,
+                          "CUDA RMSNorm launch byte count overflows");
+    }
+    const ByteCount matrix_bytes =
+        static_cast<ByteCount>(row_count * width) * sizeof(float);
+    const ByteCount weight_bytes = static_cast<ByteCount>(width) * sizeof(float);
+    const auto valid_range = [&](ByteCount offset, ByteCount bytes) {
+        return offset <= allocation.bytes() && bytes <= allocation.bytes() - offset;
+    };
+    if (!valid_range(input_offset, matrix_bytes) ||
+        !valid_range(weight_offset, weight_bytes) ||
+        !valid_range(output_offset, matrix_bytes) ||
+        input_offset % alignof(float) != 0U ||
+        weight_offset % alignof(float) != 0U ||
+        output_offset % alignof(float) != 0U) {
+        return make_error(ErrorCode::invalid_argument,
+                          "CUDA RMSNorm buffer ranges are invalid");
+    }
+    const auto overlaps = [](ByteCount first_offset, ByteCount first_bytes,
+                             ByteCount second_offset, ByteCount second_bytes) {
+        return first_offset < second_offset + second_bytes &&
+               second_offset < first_offset + first_bytes;
+    };
+    if (overlaps(input_offset, matrix_bytes, weight_offset, weight_bytes) ||
+        overlaps(input_offset, matrix_bytes, output_offset, matrix_bytes) ||
+        overlaps(weight_offset, weight_bytes, output_offset, matrix_bytes)) {
+        return make_error(ErrorCode::invalid_argument,
+                          "CUDA RMSNorm input, weight and output ranges must not overlap");
+    }
+    try {
+        return backend_->launch_rms_norm(allocation.allocation_, input_offset, weight_offset,
+                                         output_offset, row_count, width, epsilon);
+    } catch (const std::exception& exception) {
+        return make_error(ErrorCode::internal_error,
+                          "CUDA backend threw during RMSNorm launch", exception.what());
+    } catch (...) {
+        return make_error(ErrorCode::internal_error,
+                          "CUDA backend threw an unknown RMSNorm exception");
+    }
 }
 
 std::string cuda_driver_version_text(int encoded_version) {

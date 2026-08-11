@@ -71,6 +71,7 @@ include(CMakePackageConfigHelpers)
 add_library(vastloom_core STATIC
     src/core/bytes.cpp
     src/cuda/cuda_driver.cpp
+    src/cuda/cuda_rms_norm.cpp
     src/hardware/hardware_probe.cpp
     src/inference/gpt2_tokenizer.cpp
     src/inference/ggml_quantization.cpp

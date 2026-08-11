@@ -23,6 +23,7 @@ namespace vastloom::inference {
 namespace {
 
 constexpr std::size_t kMaximumGraphElements = 64U * 1024U * 1024U;
+constexpr std::size_t kMaximumPackedFloatElements = 1U * 1024U * 1024U;
 constexpr std::size_t kMaximumReferenceTokens = 4096U;
 constexpr std::size_t kMaximumReferenceLayers = 16U;
 
@@ -122,6 +123,39 @@ Result<DeepseekV4PackedIntegerTensor> bind_resident_i32(
     return tensor;
 }
 
+Result<DeepseekV4PackedFloatTensor> bind_resident_float(
+    std::shared_ptr<const model::ResidentByteBuffer> resident,
+    std::size_t offset,
+    std::size_t available_bytes,
+    std::uint32_t ggml_type,
+    std::size_t elements) {
+    if (resident == nullptr ||
+        (ggml_type != kGgmlTypeF32 && ggml_type != kGgmlTypeBf16)) {
+        return make_error(ErrorCode::invalid_argument,
+                          "DeepSeek resident float binding is invalid");
+    }
+    auto required = ggml_storage_bytes(
+        ggml_type, 1U, elements,
+        QuantizedKernelLimits{kMaximumPackedFloatElements});
+    if (!required) return required.error();
+    if (available_bytes != required.value()) {
+        return make_error(ErrorCode::integrity_error,
+                          "DeepSeek resident float byte count does not match its descriptor");
+    }
+    const auto payload = resident->bytes();
+    if (offset > payload.size() || available_bytes > payload.size() - offset) {
+        return make_error(ErrorCode::integrity_error,
+                          "DeepSeek resident float range exceeds its retained buffer");
+    }
+    DeepseekV4PackedFloatTensor tensor;
+    tensor.ggml_type = ggml_type;
+    tensor.elements = elements;
+    tensor.resident = std::move(resident);
+    tensor.resident_offset = offset;
+    tensor.resident_bytes = available_bytes;
+    return tensor;
+}
+
 Result<std::size_t> bounded_product(std::initializer_list<std::size_t> factors,
                                     std::string context) {
     std::size_t result = 1U;
@@ -193,11 +227,58 @@ Result<void> finite_values(std::span<const float> values, std::string_view conte
     return {};
 }
 
-Result<std::span<const float>> float_tensor(const DeepseekV4ReferenceGraph& graph,
-                                            std::string_view name,
-                                            std::initializer_list<std::size_t> shape) {
+class ResolvedFloatTensor {
+public:
+    explicit ResolvedFloatTensor(std::span<const float> borrowed) noexcept
+        : borrowed_(borrowed) {}
+
+    explicit ResolvedFloatTensor(std::vector<float> decoded) noexcept
+        : decoded_(std::move(decoded)) {}
+
+    [[nodiscard]] std::span<const float> values() const noexcept {
+        if (!decoded_.empty()) return decoded_;
+        return borrowed_;
+    }
+
+    [[nodiscard]] const float& operator[](std::size_t index) const noexcept {
+        return values()[index];
+    }
+
+    [[nodiscard]] operator std::span<const float>() const noexcept { return values(); }
+
+private:
+    std::span<const float> borrowed_;
+    std::vector<float> decoded_;
+};
+
+Result<ResolvedFloatTensor> float_tensor(const DeepseekV4ReferenceGraph& graph,
+                                         std::string_view name,
+                                         std::initializer_list<std::size_t> shape) {
     auto expected = bounded_product(shape, std::string(name));
     if (!expected) return expected.error();
+    const auto packed = graph.packed_float_tensors.find(name);
+    if (packed != graph.packed_float_tensors.end()) {
+        if (packed->second.elements != expected.value() ||
+            packed->second.elements > kMaximumPackedFloatElements ||
+            (packed->second.ggml_type != kGgmlTypeF32 &&
+             packed->second.ggml_type != kGgmlTypeBf16)) {
+            return make_error(ErrorCode::invalid_format,
+                              "DeepSeek packed float tensor shape or type does not match",
+                              std::string(name));
+        }
+        auto payload = packed_payload(
+            packed->second.encoded, packed->second.resident,
+            packed->second.resident_offset, packed->second.resident_bytes, name);
+        if (!payload) return payload.error();
+        std::vector<float> decoded(expected.value());
+        Result<void> status = packed->second.ggml_type == kGgmlTypeF32
+            ? dequantize_f32_le(payload.value(), decoded)
+            : dequantize_bf16(payload.value(), decoded);
+        if (!status) return status.error();
+        auto finite = finite_values(decoded, name);
+        if (!finite) return finite.error();
+        return ResolvedFloatTensor(std::move(decoded));
+    }
     const auto found = graph.float_tensors.find(name);
     if (found == graph.float_tensors.end()) {
         return make_error(ErrorCode::invalid_format,
@@ -209,7 +290,7 @@ Result<std::span<const float>> float_tensor(const DeepseekV4ReferenceGraph& grap
     }
     auto finite = finite_values(found->second, name);
     if (!finite) return finite.error();
-    return std::span<const float>(found->second);
+    return ResolvedFloatTensor(std::span<const float>(found->second));
 }
 
 Result<std::vector<std::uint32_t>> integer_tensor(
@@ -2218,6 +2299,179 @@ Result<DeepseekV4PackedIntegerTensor> deepseek_v4_bind_packed_i32(
         static_cast<std::size_t>(tensor->bytes), elements.value());
 }
 
+Result<DeepseekV4PackedFloatTensor> deepseek_v4_bind_packed_float(
+    const DeepseekV4LoadedTrunkTensorSet& tensors,
+    std::string_view name) {
+    const auto* tensor = tensors.find(name);
+    if (tensor == nullptr) {
+        return make_error(ErrorCode::not_found,
+                          "DeepSeek trunk float tensor is unavailable",
+                          std::string(name));
+    }
+    if (!tensor->ggml_type.has_value() ||
+        (*tensor->ggml_type != kGgmlTypeF32 &&
+         *tensor->ggml_type != kGgmlTypeBf16) ||
+        !storage_type_matches_dtype(*tensor->ggml_type, tensor->dtype) ||
+        tensor->packed_offset > std::numeric_limits<std::size_t>::max() ||
+        tensor->bytes > std::numeric_limits<std::size_t>::max()) {
+        return make_error(ErrorCode::invalid_format,
+                          "DeepSeek trunk float catalog descriptor is unsupported or malformed",
+                          tensor->name);
+    }
+    auto elements = bounded_catalog_product(tensor->shape, tensor->name);
+    if (!elements) return elements.error();
+    return bind_resident_float(
+        tensors.retain_buffer(), static_cast<std::size_t>(tensor->packed_offset),
+        static_cast<std::size_t>(tensor->bytes), *tensor->ggml_type,
+        elements.value());
+}
+
+Result<DeepseekV4ReferenceLayerTrunk>
+deepseek_v4_bind_0731_gguf_layer0_trunk(
+    const DeepseekV4LoadedTrunkTensorSet& tensors,
+    const DeepseekV4ReferenceConfig& config) {
+    try {
+        constexpr std::size_t expected_tensor_count = 21U;
+        if (tensors.tensors().size() != expected_tensor_count ||
+            config.layer_count == 0U || config.width == 0U ||
+            config.intermediate_width == 0U || config.head_count == 0U ||
+            config.head_width == 0U || config.query_lora_rank == 0U ||
+            config.output_groups == 0U || config.output_lora_rank == 0U ||
+            config.expert_count == 0U || config.experts_per_token == 0U ||
+            config.vocabulary_size == 0U || config.hyper_multiplier == 0U ||
+            config.head_count > std::numeric_limits<std::size_t>::max() /
+                                    config.head_width ||
+            (config.head_count * config.head_width) % config.output_groups != 0U ||
+            config.hyper_multiplier > std::numeric_limits<std::size_t>::max() - 2U) {
+            return make_error(
+                ErrorCode::invalid_argument,
+                "DeepSeek 0731 layer-0 trunk binding configuration is invalid");
+        }
+        auto mix_width = bounded_product(
+            {2U + config.hyper_multiplier, config.hyper_multiplier},
+            "DeepSeek 0731 hyper-connection mix width");
+        if (!mix_width) return mix_width.error();
+        auto flattened_width = bounded_product(
+            {config.hyper_multiplier, config.width},
+            "DeepSeek 0731 hyper-connection input width");
+        if (!flattened_width) return flattened_width.error();
+        auto attention_width = bounded_product(
+            {config.head_count, config.head_width},
+            "DeepSeek 0731 attention width");
+        if (!attention_width) return attention_width.error();
+        auto output_rank_width = bounded_product(
+            {config.output_groups, config.output_lora_rank},
+            "DeepSeek 0731 output rank width");
+        if (!output_rank_width) return output_rank_width.error();
+
+        struct MatrixMapping {
+            std::string_view source;
+            std::string_view consumer;
+            std::size_t rows;
+            std::size_t columns;
+        };
+        const std::array<MatrixMapping, 11U> matrices{{
+            {"blk.0.attn_kv.weight", "layers.0.attn.wkv.weight",
+             config.head_width, config.width},
+            {"blk.0.attn_output_a.weight", "layers.0.attn.wo_a.weight",
+             output_rank_width.value(), attention_width.value() / config.output_groups},
+            {"blk.0.attn_output_b.weight", "layers.0.attn.wo_b.weight",
+             config.width, output_rank_width.value()},
+            {"blk.0.attn_q_a.weight", "layers.0.attn.wq_a.weight",
+             config.query_lora_rank, config.width},
+            {"blk.0.attn_q_b.weight", "layers.0.attn.wq_b.weight",
+             attention_width.value(), config.query_lora_rank},
+            {"blk.0.ffn_down_shexp.weight",
+             "layers.0.ffn.shared_experts.w2.weight",
+             config.width, config.intermediate_width},
+            {"blk.0.ffn_gate_inp.weight", "layers.0.ffn.gate.weight",
+             config.expert_count, config.width},
+            {"blk.0.ffn_gate_shexp.weight",
+             "layers.0.ffn.shared_experts.w1.weight",
+             config.intermediate_width, config.width},
+            {"blk.0.ffn_up_shexp.weight",
+             "layers.0.ffn.shared_experts.w3.weight",
+             config.intermediate_width, config.width},
+            {"blk.0.hc_attn_fn.weight", "layers.0.hc_attn_fn",
+             mix_width.value(), flattened_width.value()},
+            {"blk.0.hc_ffn_fn.weight", "layers.0.hc_ffn_fn",
+             mix_width.value(), flattened_width.value()},
+        }};
+        struct FloatMapping {
+            std::string_view source;
+            std::string_view consumer;
+            std::size_t elements;
+        };
+        const std::array<FloatMapping, 9U> floats{{
+            {"blk.0.attn_kv_a_norm.weight", "layers.0.attn.kv_norm.weight",
+             config.head_width},
+            {"blk.0.attn_norm.weight", "layers.0.attn_norm.weight", config.width},
+            {"blk.0.attn_q_a_norm.weight", "layers.0.attn.q_norm.weight",
+             config.query_lora_rank},
+            {"blk.0.attn_sinks.weight", "layers.0.attn.attn_sink",
+             config.head_count},
+            {"blk.0.ffn_norm.weight", "layers.0.ffn_norm.weight", config.width},
+            {"blk.0.hc_attn_base.weight", "layers.0.hc_attn_base", mix_width.value()},
+            {"blk.0.hc_attn_scale.weight", "layers.0.hc_attn_scale", 3U},
+            {"blk.0.hc_ffn_base.weight", "layers.0.hc_ffn_base", mix_width.value()},
+            {"blk.0.hc_ffn_scale.weight", "layers.0.hc_ffn_scale", 3U},
+        }};
+
+        DeepseekV4ReferenceLayerTrunk result;
+        result.layer = 0U;
+        for (const auto& mapping : matrices) {
+            auto matrix = deepseek_v4_bind_packed_matrix(
+                tensors, mapping.source, mapping.columns);
+            if (!matrix) return matrix.error();
+            if (matrix.value().rows != mapping.rows) {
+                return make_error(
+                    ErrorCode::invalid_format,
+                    "DeepSeek 0731 trunk matrix shape does not match its consumer",
+                    std::string(mapping.source));
+            }
+            result.matrices.emplace(mapping.consumer, matrix.take_value());
+        }
+        for (const auto& mapping : floats) {
+            auto tensor = deepseek_v4_bind_packed_float(tensors, mapping.source);
+            if (!tensor) return tensor.error();
+            if (tensor.value().elements != mapping.elements) {
+                return make_error(
+                    ErrorCode::invalid_format,
+                    "DeepSeek 0731 trunk float shape does not match its consumer",
+                    std::string(mapping.source));
+            }
+            result.float_tensors.emplace(mapping.consumer, tensor.take_value());
+        }
+        auto table = deepseek_v4_bind_packed_i32(
+            tensors, "blk.0.ffn_gate_tid2eid.weight");
+        if (!table) return table.error();
+        auto table_elements = bounded_product(
+            {config.vocabulary_size, config.experts_per_token},
+            "DeepSeek 0731 hash routing table");
+        if (!table_elements) return table_elements.error();
+        if (table.value().elements != table_elements.value()) {
+            return make_error(
+                ErrorCode::invalid_format,
+                "DeepSeek 0731 hash routing table shape does not match its consumer",
+                "blk.0.ffn_gate_tid2eid.weight");
+        }
+        result.integer_tensors.emplace(
+            "layers.0.ffn.gate.tid2eid", table.take_value());
+        if (result.matrices.size() != matrices.size() ||
+            result.float_tensors.size() != floats.size() ||
+            result.integer_tensors.size() != 1U) {
+            return make_error(
+                ErrorCode::internal_error,
+                "DeepSeek 0731 layer-0 trunk mapping is not one-to-one");
+        }
+        return result;
+    } catch (const std::bad_alloc&) {
+        return make_error(
+            ErrorCode::resource_exhausted,
+            "Unable to allocate the bounded DeepSeek 0731 layer-0 trunk binding");
+    }
+}
+
 Result<DeepseekV4ReferenceForwardResult> deepseek_v4_reference_prefill(
     const DeepseekV4ReferenceGraph& graph,
     std::span<const std::uint32_t> token_ids,
@@ -2244,7 +2498,7 @@ Result<DeepseekV4ReferenceForwardResult> deepseek_v4_reference_prefill(
     std::vector<float> hidden(hidden_count.value());
     for (std::size_t token = 0U; token < token_count; ++token) {
         for (std::size_t copy = 0U; copy < config.hyper_multiplier; ++copy) {
-            std::copy_n(embedding.value().begin() +
+            std::copy_n(embedding.value().values().begin() +
                             static_cast<std::ptrdiff_t>(token_ids[token] * config.width),
                         config.width,
                         hidden.begin() + static_cast<std::ptrdiff_t>(
@@ -2274,7 +2528,7 @@ Result<DeepseekV4ReferenceForwardResult> deepseek_v4_reference_prefill(
         const std::string mtp_base = "mtp.0";
         std::vector<float> embedded(token_count * config.width);
         for (std::size_t token = 0U; token < token_count; ++token) {
-            std::copy_n(embedding.value().begin() +
+            std::copy_n(embedding.value().values().begin() +
                             static_cast<std::ptrdiff_t>(token_ids[token] * config.width),
                         config.width,
                         embedded.begin() +
@@ -2358,7 +2612,7 @@ Result<DeepseekV4ReferenceForwardResult> deepseek_v4_reference_decode(
                                   {config.vocabulary_size, config.width});
     if (!embedding) return embedding.error();
     std::vector<float> embedded(config.width);
-    std::copy_n(embedding.value().begin() +
+    std::copy_n(embedding.value().values().begin() +
                     static_cast<std::ptrdiff_t>(token_id * config.width),
                 config.width, embedded.begin());
     auto hidden_count = bounded_product(

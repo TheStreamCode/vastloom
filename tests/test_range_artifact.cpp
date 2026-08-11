@@ -1,3 +1,4 @@
+#include <algorithm>
 #include <array>
 #include <chrono>
 #include <cstddef>
@@ -15,6 +16,7 @@
 
 #include "vastloom/inference/deepseek_v4_gguf.hpp"
 #include "vastloom/inference/deepseek_v4_range_artifact.hpp"
+#include "vastloom/inference/deepseek_v4_reference.hpp"
 #include "vastloom/inference/ggml_quantization.hpp"
 #include "vastloom/model/bound_range_loader.hpp"
 #include "vastloom/model/range_artifact.hpp"
@@ -580,13 +582,82 @@ void test_range_artifact(const std::filesystem::path& root) {
                       loaded.value().tensor("blk.0.ffn_norm.weight") &&
                       !loaded.value().tensor("missing.weight") &&
                       loaded.value().telemetry().range_count == 2U);
-                if (loaded) retained = loaded.value().retain_buffer();
+                if (loaded) {
+                    auto float_tensor =
+                        vastloom::inference::deepseek_v4_bind_packed_float(
+                            loaded.value(), "blk.0.ffn_norm.weight");
+                    CHECK(float_tensor &&
+                          float_tensor.value().ggml_type ==
+                              vastloom::inference::kGgmlTypeF32 &&
+                          float_tensor.value().elements == 1U &&
+                          float_tensor.value().resident_bytes == 4U &&
+                          !vastloom::inference::deepseek_v4_bind_packed_i32(
+                              loaded.value(), "blk.0.ffn_norm.weight") &&
+                          !vastloom::inference::deepseek_v4_bind_packed_float(
+                              loaded.value(), "missing.weight"));
+                    retained = loaded.value().retain_buffer();
+                }
             }
             CHECK(residency.value().snapshot() &&
                   residency.value().snapshot().value().active_uses == 1U &&
                   !residency.value().evict_ram());
             retained.reset();
             CHECK(residency.value().evict_ram());
+        }
+
+        // The same governed binding accepts BF16 vector storage when catalog dtype, GGML type,
+        // shape and exact byte count agree. The fixture bytes decode to two finite BF16 values.
+        auto bf16_report = complete_fixture.report;
+        auto bf16_binding = complete_binding.value();
+        const std::string bf16_name = "blk.0.ffn_norm.weight";
+        const auto bf16_descriptor = std::find_if(
+            bf16_report.catalog.tensors.begin(), bf16_report.catalog.tensors.end(),
+            [&](const auto& tensor) { return tensor.name == bf16_name; });
+        const auto bf16_range = std::find_if(
+            bf16_binding.ranges.begin(), bf16_binding.ranges.end(),
+            [&](const auto& range) { return range.tensor_name == bf16_name; });
+        CHECK(bf16_descriptor != bf16_report.catalog.tensors.end() &&
+              bf16_range != bf16_binding.ranges.end());
+        if (bf16_descriptor != bf16_report.catalog.tensors.end() &&
+            bf16_range != bf16_binding.ranges.end()) {
+            bf16_descriptor->dtype = vastloom::model::TensorDType::bf16;
+            bf16_descriptor->shape = {2U};
+            bf16_descriptor->ggml_type = vastloom::inference::kGgmlTypeBf16;
+            bf16_range->ggml_type = vastloom::inference::kGgmlTypeBf16;
+            auto bf16_finalized =
+                vastloom::model::finalize_logical_tensor_catalog(bf16_report.catalog);
+            auto bf16_id =
+                vastloom::inference::deepseek_v4_bound_trunk_tensor_set_logical_id(
+                    bf16_binding);
+            auto bf16_residency = bf16_id
+                ? vastloom::model::ResidencyObject::create(
+                      bf16_id.value(), bf16_binding.payload_bytes)
+                : vastloom::Result<vastloom::model::ResidencyObject>(
+                      vastloom::make_error(vastloom::ErrorCode::internal_error,
+                                           "missing BF16 tensor-set identity"));
+            CHECK(bf16_finalized && bf16_residency);
+            if (bf16_finalized && bf16_residency) {
+                {
+                    auto loaded =
+                        vastloom::inference::load_deepseek_v4_bound_trunk_tensor_set(
+                            bf16_binding, bf16_report, bf16_residency.value(),
+                            governor, options);
+                    CHECK(loaded);
+                    if (loaded) {
+                        auto bound =
+                            vastloom::inference::deepseek_v4_bind_packed_float(
+                                loaded.value(), bf16_name);
+                        CHECK(bound &&
+                              bound.value().ggml_type ==
+                                  vastloom::inference::kGgmlTypeBf16 &&
+                              bound.value().elements == 2U &&
+                              bound.value().resident_bytes == 4U);
+                    }
+                }
+                CHECK(bf16_residency.value().evict_ram() &&
+                      governor.snapshot().reserved[0] == 0U &&
+                      governor.snapshot().reserved[2] == 0U);
+            }
         }
 
         auto check_preflight_rejection = [&](auto mutate) {

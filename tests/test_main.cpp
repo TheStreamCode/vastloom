@@ -2904,6 +2904,45 @@ void test_deepseek_v4_reference_graph(const std::filesystem::path& root) {
     layer_matrices.push_back(
         {"layers.0.ffn.shared_experts.w3.weight", config.intermediate_width,
          config.width, vastloom::model::TensorRole::shared_expert});
+    struct FloatVectorSpec {
+        std::string name;
+        vastloom::model::TensorRole role;
+    };
+    const std::array<FloatVectorSpec, 9U> layer_float_vectors{{
+        {"layers.0.attn.attn_sink", vastloom::model::TensorRole::attention},
+        {"layers.0.attn.kv_norm.weight", vastloom::model::TensorRole::normalization},
+        {"layers.0.attn.q_norm.weight", vastloom::model::TensorRole::normalization},
+        {"layers.0.attn_norm.weight", vastloom::model::TensorRole::normalization},
+        {"layers.0.ffn_norm.weight", vastloom::model::TensorRole::normalization},
+        {"layers.0.hc_attn_base", vastloom::model::TensorRole::hyper_connection},
+        {"layers.0.hc_attn_scale", vastloom::model::TensorRole::hyper_connection},
+        {"layers.0.hc_ffn_base", vastloom::model::TensorRole::hyper_connection},
+        {"layers.0.hc_ffn_scale", vastloom::model::TensorRole::hyper_connection},
+    }};
+    const std::map<std::string, std::string, std::less<>> layer0_gguf_names{{
+        {"layers.0.attn.wkv.weight", "blk.0.attn_kv.weight"},
+        {"layers.0.attn.kv_norm.weight", "blk.0.attn_kv_a_norm.weight"},
+        {"layers.0.attn_norm.weight", "blk.0.attn_norm.weight"},
+        {"layers.0.attn.wo_a.weight", "blk.0.attn_output_a.weight"},
+        {"layers.0.attn.wo_b.weight", "blk.0.attn_output_b.weight"},
+        {"layers.0.attn.wq_a.weight", "blk.0.attn_q_a.weight"},
+        {"layers.0.attn.q_norm.weight", "blk.0.attn_q_a_norm.weight"},
+        {"layers.0.attn.wq_b.weight", "blk.0.attn_q_b.weight"},
+        {"layers.0.attn.attn_sink", "blk.0.attn_sinks.weight"},
+        {"layers.0.ffn.shared_experts.w2.weight", "blk.0.ffn_down_shexp.weight"},
+        {"layers.0.ffn.gate.weight", "blk.0.ffn_gate_inp.weight"},
+        {"layers.0.ffn.shared_experts.w1.weight", "blk.0.ffn_gate_shexp.weight"},
+        {"layers.0.ffn.gate.tid2eid", "blk.0.ffn_gate_tid2eid.weight"},
+        {"layers.0.ffn_norm.weight", "blk.0.ffn_norm.weight"},
+        {"layers.0.ffn.shared_experts.w3.weight", "blk.0.ffn_up_shexp.weight"},
+        {"layers.0.hc_attn_base", "blk.0.hc_attn_base.weight"},
+        {"layers.0.hc_attn_fn", "blk.0.hc_attn_fn.weight"},
+        {"layers.0.hc_attn_scale", "blk.0.hc_attn_scale.weight"},
+        {"layers.0.hc_ffn_base", "blk.0.hc_ffn_base.weight"},
+        {"layers.0.hc_ffn_fn", "blk.0.hc_ffn_fn.weight"},
+        {"layers.0.hc_ffn_scale", "blk.0.hc_ffn_scale.weight"},
+    }};
+    CHECK(layer0_gguf_names.size() == 21U);
     const auto make_iq1_s = [](std::size_t rows, std::size_t salt) {
         std::vector<std::byte> encoded(
             rows * vastloom::inference::kIq1SBlockBytes);
@@ -3256,7 +3295,83 @@ void test_deepseek_v4_reference_graph(const std::filesystem::path& root) {
                   layer_matrices.size() - routed_matrix_count + 1U &&
               file_plan.value().tiles.size() == file_plan.value().tensor_count);
 
-        if (file_fixture_ok && finalized && file_plan && !file_plan.value().tiles.empty()) {
+        // The legacy per-object streaming fixture above remains byte-for-byte stable. Extend a
+        // separate catalog over the same immutable file with every F32 vector consumed by layer
+        // zero so the aggregate artifact path can prove a complete 21-object trunk boundary.
+        auto artifact_catalog = packed_catalog;
+        std::map<std::string, std::vector<std::byte>, std::less<>> artifact_float_bytes;
+        vastloom::ByteCount artifact_file_offset = file_offset;
+        bool artifact_catalog_ok = true;
+        for (auto& descriptor : artifact_catalog.tensors) {
+            if (descriptor.role == vastloom::model::TensorRole::routed_expert ||
+                descriptor.layer != 0U) {
+                continue;
+            }
+            const auto canonical = layer0_gguf_names.find(descriptor.name);
+            CHECK(canonical != layer0_gguf_names.end());
+            if (canonical == layer0_gguf_names.end()) {
+                artifact_catalog_ok = false;
+                break;
+            }
+            descriptor.name = canonical->second;
+        }
+        {
+            std::ofstream output(packed_path, std::ios::binary | std::ios::app);
+            for (const auto& spec : layer_float_vectors) {
+                const auto found = graph.float_tensors.find(spec.name);
+                CHECK(found != graph.float_tensors.end() && !found->second.empty());
+                if (!output || found == graph.float_tensors.end() || found->second.empty()) {
+                    artifact_catalog_ok = false;
+                    break;
+                }
+                std::vector<std::byte> encoded(found->second.size() *
+                                               vastloom::inference::kF32ElementBytes);
+                for (std::size_t index = 0U; index < found->second.size(); ++index) {
+                    const auto bits = std::bit_cast<std::uint32_t>(found->second[index]);
+                    for (unsigned byte = 0U; byte < 4U; ++byte) {
+                        encoded[index * 4U + byte] = static_cast<std::byte>(
+                            (bits >> (byte * 8U)) & 0xffU);
+                    }
+                }
+                output.write(reinterpret_cast<const char*>(encoded.data()),
+                             static_cast<std::streamsize>(encoded.size()));
+                if (!output) {
+                    artifact_catalog_ok = false;
+                    break;
+                }
+                vastloom::model::LogicalTensorDescriptor descriptor;
+                descriptor.name = layer0_gguf_names.at(spec.name);
+                descriptor.dtype = vastloom::model::TensorDType::f32;
+                descriptor.shape = {
+                    static_cast<std::uint64_t>(found->second.size())};
+                descriptor.role = spec.role;
+                descriptor.layer = 0U;
+                descriptor.source = vastloom::model::TensorSourceRange{
+                    packed_path, artifact_file_offset,
+                    static_cast<vastloom::ByteCount>(encoded.size())};
+                descriptor.ggml_type = vastloom::inference::kGgmlTypeF32;
+                artifact_catalog.tensors.push_back(std::move(descriptor));
+                artifact_file_offset += static_cast<vastloom::ByteCount>(encoded.size());
+                artifact_float_bytes.emplace(
+                    layer0_gguf_names.at(spec.name), std::move(encoded));
+            }
+            output.flush();
+            artifact_catalog_ok = artifact_catalog_ok && static_cast<bool>(output);
+        }
+        auto artifact_finalized = artifact_catalog_ok
+            ? vastloom::model::finalize_logical_tensor_catalog(artifact_catalog)
+            : vastloom::Result<void>(vastloom::make_error(
+                  vastloom::ErrorCode::internal_error,
+                  "unable to build packed float-vector fixture"));
+        CHECK(artifact_catalog_ok && artifact_finalized &&
+              artifact_float_bytes.size() == layer_float_vectors.size() &&
+              artifact_file_offset == 8'380U &&
+              artifact_catalog.tensor_bytes == 8'380U &&
+              artifact_catalog.routed_expert_bytes == 5'536U &&
+              artifact_catalog.always_active_bytes == 2'844U);
+
+        if (file_fixture_ok && finalized && file_plan && artifact_catalog_ok &&
+            artifact_finalized && !file_plan.value().tiles.empty()) {
             vastloom::model::TensorTileLoadOptions tile_options;
             tile_options.max_tile_bytes = 16U * vastloom::KiB;
             tile_options.measure_process_io = false;
@@ -3479,8 +3594,8 @@ void test_deepseek_v4_reference_graph(const std::filesystem::path& root) {
             std::filesystem::create_directories(trunk_artifact_root / "ranges");
             vastloom::inference::DeepseekV4TrunkArtifactBinding trunk_binding;
             trunk_binding.artifact_root = trunk_artifact_root;
-            trunk_binding.model_id = packed_catalog.model_id;
-            trunk_binding.revision = packed_catalog.revision;
+            trunk_binding.model_id = artifact_catalog.model_id;
+            trunk_binding.revision = artifact_catalog.revision;
             trunk_binding.source_plan_sha256 = std::string(64U, 'a');
             trunk_binding.layer = 0U;
             trunk_binding.metadata_catalog_hashes_verified = true;
@@ -3488,23 +3603,38 @@ void test_deepseek_v4_reference_graph(const std::filesystem::path& root) {
             trunk_binding.exact_source_binding_verified = true;
             bool trunk_artifact_ok = true;
             for (std::size_t tensor_index = 0U;
-                 tensor_index < packed_catalog.tensors.size(); ++tensor_index) {
-                const auto& descriptor = packed_catalog.tensors[tensor_index];
+                 tensor_index < artifact_catalog.tensors.size(); ++tensor_index) {
+                const auto& descriptor = artifact_catalog.tensors[tensor_index];
                 if (descriptor.role == vastloom::model::TensorRole::routed_expert ||
                     !descriptor.layer.has_value() || *descriptor.layer != 0U) {
                     continue;
                 }
+                const auto consumer = std::find_if(
+                    layer0_gguf_names.begin(), layer0_gguf_names.end(),
+                    [&](const auto& mapping) {
+                        return mapping.second == descriptor.name;
+                    });
+                CHECK(consumer != layer0_gguf_names.end());
+                if (consumer == layer0_gguf_names.end()) {
+                    trunk_artifact_ok = false;
+                    break;
+                }
                 const std::vector<std::byte>* encoded = nullptr;
                 if (descriptor.ggml_type == vastloom::inference::kGgmlTypeI32) {
                     const auto found =
-                        packed_graph.packed_integer_tensors.find(descriptor.name);
+                        packed_graph.packed_integer_tensors.find(consumer->first);
                     if (found != packed_graph.packed_integer_tensors.end()) {
                         encoded = &found->second.encoded;
                     }
                 } else {
-                    const auto found = packed_graph.packed_matrices.find(descriptor.name);
+                    const auto found = packed_graph.packed_matrices.find(consumer->first);
                     if (found != packed_graph.packed_matrices.end()) {
                         encoded = &found->second.encoded;
+                    } else {
+                        const auto float_found = artifact_float_bytes.find(descriptor.name);
+                        if (float_found != artifact_float_bytes.end()) {
+                            encoded = &float_found->second;
+                        }
                     }
                 }
                 CHECK(encoded != nullptr && !encoded->empty() &&
@@ -3543,16 +3673,16 @@ void test_deepseek_v4_reference_graph(const std::filesystem::path& root) {
                     descriptor.source.bytes);
             }
             vastloom::inference::DeepseekV4GgufCatalogReport trunk_report;
-            trunk_report.catalog = packed_catalog;
+            trunk_report.catalog = artifact_catalog;
             trunk_report.layers = 1U;
             trunk_report.experts_per_layer =
                 static_cast<std::uint32_t>(config.expert_count);
             trunk_report.top_k = static_cast<std::uint32_t>(config.experts_per_token);
             trunk_report.imported_manifest_verified = true;
             trunk_report.imported_file_hashes_verified = true;
-            CHECK(trunk_artifact_ok && trunk_binding.ranges.size() == 12U &&
-                  trunk_binding.payload_bytes == packed_catalog.always_active_bytes &&
-                  trunk_binding.payload_bytes == 2'644U);
+            CHECK(trunk_artifact_ok && trunk_binding.ranges.size() == 21U &&
+                  trunk_binding.payload_bytes == artifact_catalog.always_active_bytes &&
+                  trunk_binding.payload_bytes == 2'844U);
 
             vastloom::safety::ResourceLimits trunk_limits;
             trunk_limits.host_memory_hard_limit =
@@ -3584,62 +3714,81 @@ void test_deepseek_v4_reference_graph(const std::filesystem::path& root) {
                         vastloom::inference::load_deepseek_v4_bound_trunk_tensor_set(
                             trunk_binding, trunk_report, trunk_residency.value(),
                             trunk_governor, trunk_options);
-                    CHECK(loaded && loaded.value().tensors().size() == 12U &&
-                          loaded.value().telemetry().range_count == 12U &&
-                          loaded.value().telemetry().logical_bytes == 2'644U);
+                    CHECK(loaded && loaded.value().tensors().size() == 21U &&
+                          loaded.value().telemetry().range_count == 21U &&
+                          loaded.value().telemetry().logical_bytes == 2'844U);
                     if (!loaded) {
                         artifact_graph_ok = false;
                     } else {
-                        for (const auto& spec : layer_matrices) {
-                            if (spec.expert.has_value()) {
-                                const auto found =
-                                    governed_graph.packed_matrices.find(spec.name);
-                                CHECK(found != governed_graph.packed_matrices.end());
-                                if (found == governed_graph.packed_matrices.end()) {
-                                    artifact_graph_ok = false;
-                                    break;
-                                }
+                        auto bound_layer =
+                            vastloom::inference::deepseek_v4_bind_0731_gguf_layer0_trunk(
+                                loaded.value(), config);
+                        CHECK(bound_layer && bound_layer.value().layer == 0U &&
+                              bound_layer.value().matrices.size() == 11U &&
+                              bound_layer.value().integer_tensors.size() == 1U &&
+                              bound_layer.value().float_tensors.size() == 9U);
+                        auto wrong_config = config;
+                        ++wrong_config.query_lora_rank;
+                        CHECK(!vastloom::inference::
+                                  deepseek_v4_bind_0731_gguf_layer0_trunk(
+                                      loaded.value(), wrong_config));
+                        if (!bound_layer) {
+                            artifact_graph_ok = false;
+                        } else {
+                            for (auto& [name, matrix] :
+                                 bound_layer.value().matrices) {
                                 artifact_graph.packed_matrices.emplace(
-                                    spec.name, found->second);
-                            } else {
-                                auto bound =
-                                    vastloom::inference::deepseek_v4_bind_packed_matrix(
-                                        loaded.value(), spec.name, spec.columns);
-                                CHECK(bound);
-                                if (!bound) {
-                                    artifact_graph_ok = false;
-                                    break;
-                                }
-                                artifact_graph.packed_matrices.emplace(
-                                    spec.name, bound.take_value());
+                                    name, std::move(matrix));
+                                artifact_graph.float_tensors.erase(name);
                             }
+                            for (auto& [name, tensor] :
+                                 bound_layer.value().integer_tensors) {
+                                artifact_graph.packed_integer_tensors.emplace(
+                                    name, std::move(tensor));
+                                artifact_graph.integer_tensors.erase(name);
+                            }
+                            for (auto& [name, tensor] :
+                                 bound_layer.value().float_tensors) {
+                                artifact_graph.packed_float_tensors.emplace(
+                                    name, std::move(tensor));
+                                artifact_graph.float_tensors.erase(name);
+                            }
+                        }
+                        for (const auto& spec : layer_matrices) {
+                            if (!spec.expert.has_value()) continue;
+                            const auto found =
+                                governed_graph.packed_matrices.find(spec.name);
+                            CHECK(found != governed_graph.packed_matrices.end());
+                            if (found == governed_graph.packed_matrices.end()) {
+                                artifact_graph_ok = false;
+                                break;
+                            }
+                            artifact_graph.packed_matrices.emplace(
+                                spec.name, found->second);
                             artifact_graph.float_tensors.erase(spec.name);
                         }
-                        if (artifact_graph_ok) {
-                            auto route =
-                                vastloom::inference::deepseek_v4_bind_packed_i32(
-                                    loaded.value(), hash_table_name);
-                            CHECK(route);
-                            if (!route) {
-                                artifact_graph_ok = false;
-                            } else {
-                                artifact_graph.packed_integer_tensors.emplace(
-                                    hash_table_name, route.take_value());
-                                artifact_graph.integer_tensors.erase(hash_table_name);
-                            }
-                        }
+                        CHECK(!vastloom::inference::deepseek_v4_bind_packed_float(
+                                  loaded.value(), layer0_gguf_names.at(hash_table_name)) &&
+                              !vastloom::inference::deepseek_v4_bind_packed_i32(
+                                  loaded.value(), layer0_gguf_names.at(
+                                                      layer_float_vectors.front().name)) &&
+                              !vastloom::inference::deepseek_v4_bind_packed_matrix(
+                                  loaded.value(), layer0_gguf_names.at(
+                                                      layer_float_vectors.front().name),
+                                  1U));
                     }
                 }
                 auto retained = trunk_residency.value().snapshot();
                 CHECK(retained && retained.value().state ==
                                       vastloom::model::ResidencyState::ram_ready &&
                       retained.value().active_uses == 1U &&
-                      retained.value().ram_reserved_bytes == 2'644U &&
+                      retained.value().ram_reserved_bytes == 2'844U &&
                       retained.value().staging_reserved_bytes == 0U &&
                       !trunk_residency.value().evict_ram());
             }
             CHECK(artifact_graph_ok && artifact_graph.packed_matrices.size() == 23U &&
-                  artifact_graph.packed_integer_tensors.size() == 1U);
+                  artifact_graph.packed_integer_tensors.size() == 1U &&
+                  artifact_graph.packed_float_tensors.size() == 9U);
             if (artifact_graph_ok) {
                 vastloom::inference::DeepseekV4ReferenceState oracle_artifact_state;
                 vastloom::inference::DeepseekV4ReferenceState artifact_state;
@@ -3663,9 +3812,57 @@ void test_deepseek_v4_reference_graph(const std::filesystem::path& root) {
                                                oracle_decode.value());
                     }
                 }
+
+                const auto& float_name = layer_float_vectors.front().name;
+                {
+                    auto wrong_elements = artifact_graph;
+                    ++wrong_elements.packed_float_tensors.at(float_name).elements;
+                    CHECK(!vastloom::inference::deepseek_v4_reference_prefill(
+                        wrong_elements, token_ids));
+                }
+                {
+                    auto wrong_type = artifact_graph;
+                    wrong_type.packed_float_tensors.at(float_name).ggml_type =
+                        vastloom::inference::kGgmlTypeI32;
+                    CHECK(!vastloom::inference::deepseek_v4_reference_prefill(
+                        wrong_type, token_ids));
+                }
+                {
+                    auto truncated = artifact_graph;
+                    --truncated.packed_float_tensors.at(float_name).resident_bytes;
+                    CHECK(!vastloom::inference::deepseek_v4_reference_prefill(
+                        truncated, token_ids));
+                }
+                {
+                    auto ambiguous = artifact_graph;
+                    ambiguous.packed_float_tensors.at(float_name).encoded.push_back(
+                        std::byte{0U});
+                    CHECK(!vastloom::inference::deepseek_v4_reference_prefill(
+                        ambiguous, token_ids));
+                }
+                {
+                    auto non_finite = artifact_graph;
+                    auto& tensor = non_finite.packed_float_tensors.at(float_name);
+                    tensor.resident.reset();
+                    tensor.resident_offset = 0U;
+                    tensor.resident_bytes = 0U;
+                    tensor.encoded = artifact_float_bytes.at(
+                        layer0_gguf_names.at(float_name));
+                    const std::array<std::byte, 4U> nan_bits{
+                        std::byte{0x00U}, std::byte{0x00U},
+                        std::byte{0xc0U}, std::byte{0x7fU}};
+                    std::copy(nan_bits.begin(), nan_bits.end(), tensor.encoded.begin());
+                    const auto before = artifact_state;
+                    CHECK(!vastloom::inference::deepseek_v4_reference_decode(
+                        non_finite, 12U, artifact_state));
+                    CHECK(artifact_state.next_position == before.next_position &&
+                          artifact_state.layers[0].window_key_values ==
+                              before.layers[0].window_key_values);
+                }
             }
             artifact_graph.packed_matrices.clear();
             artifact_graph.packed_integer_tensors.clear();
+            artifact_graph.packed_float_tensors.clear();
             if (trunk_residency) {
                 auto released = trunk_residency.value().snapshot();
                 CHECK(released && released.value().active_uses == 0U &&

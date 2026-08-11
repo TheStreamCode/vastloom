@@ -122,6 +122,15 @@ struct DeepseekV4PackedIntegerTensor {
     std::size_t resident_bytes{0U};
 };
 
+struct DeepseekV4PackedFloatTensor {
+    std::uint32_t ggml_type{0U};
+    std::size_t elements{0U};
+    std::vector<std::byte> encoded;
+    std::shared_ptr<const model::ResidentByteBuffer> resident;
+    std::size_t resident_offset{0U};
+    std::size_t resident_bytes{0U};
+};
+
 struct DeepseekV4ResolvedExpert {
     std::uint32_t expert_id{0U};
     DeepseekV4PackedMatrix w1;
@@ -207,12 +216,32 @@ struct DeepseekV4ExpertProviderBinding {
     const DeepseekV4LoadedTrunkTensorSet& tensors,
     std::string_view name);
 
+[[nodiscard]] Result<DeepseekV4PackedFloatTensor> deepseek_v4_bind_packed_float(
+    const DeepseekV4LoadedTrunkTensorSet& tensors,
+    std::string_view name);
+
+// Explicit canonical-name adapter for the 21 always-active tensors in layer 0 of the pinned
+// DeepSeek V4 Flash 0731 GGUF graph. It validates every logical consumer shape and returns a
+// detached binding set; callers decide when to publish it into a reference graph.
+struct DeepseekV4ReferenceLayerTrunk {
+    std::size_t layer{0U};
+    std::map<std::string, DeepseekV4PackedMatrix, std::less<>> matrices;
+    std::map<std::string, DeepseekV4PackedIntegerTensor, std::less<>> integer_tensors;
+    std::map<std::string, DeepseekV4PackedFloatTensor, std::less<>> float_tensors;
+};
+
+[[nodiscard]] Result<DeepseekV4ReferenceLayerTrunk>
+deepseek_v4_bind_0731_gguf_layer0_trunk(
+    const DeepseekV4LoadedTrunkTensorSet& tensors,
+    const DeepseekV4ReferenceConfig& config);
+
 struct DeepseekV4ReferenceGraph {
     DeepseekV4ReferenceConfig config;
     std::map<std::string, std::vector<float>, std::less<>> float_tensors;
     std::map<std::string, std::vector<std::uint32_t>, std::less<>> integer_tensors;
     std::map<std::string, DeepseekV4PackedMatrix, std::less<>> packed_matrices;
     std::map<std::string, DeepseekV4PackedIntegerTensor, std::less<>> packed_integer_tensors;
+    std::map<std::string, DeepseekV4PackedFloatTensor, std::less<>> packed_float_tensors;
     std::map<std::string, DeepseekV4ExpertProviderBinding, std::less<>> expert_providers;
 };
 

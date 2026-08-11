@@ -452,13 +452,13 @@ The successful graph path is still a reduced synthetic catalog, not an official 
 vastloom.range-artifact.v1 directory
   -> bounded JSON and closed file-set validation
   -> local size plus SHA-256 verification for every range
-  -> reproduce trunk plan from hash-verified pinned GGUF metadata
-  -> exact model/revision/layer/label/source span/full-object identity match
+  -> reproduce trunk or six-global plan from hash-verified pinned GGUF metadata
+  -> exact model/revision/scope/label/source span/full-object identity match
   -> offset-zero immutable local tile views
   -> complete-tensor preflight before residency
   -> aggregate RAM + maximum-range staging reservation
   -> direct packed reads + second in-memory SHA-256 per range
-  -> one retained RAM use lease + typed matrix/I32 graph views
+  -> one retained RAM use lease + typed matrix/I32/F32/BF16 graph views
   -> reduced fixture execution only; official execution remains unsupported
 ```
 
@@ -467,7 +467,8 @@ lower those bounds. It rejects root or payload symlinks, relative-path traversal
 files, source overlap, inconsistent object identity, size/hash mismatch and any artifact claiming
 to be a complete checkpoint or executable. The DeepSeek binder additionally requires full local
 range hashes, hash-verified pinned metadata and a plan reproducible from that catalog. It supports
-only trunk scope while routing authority remains false. The manifest's raw plan SHA-256 is retained
+trunk and dedicated global scopes while routing authority remains false. Expert-bearing scopes
+still require explicit authority. The manifest's raw plan SHA-256 is retained
 as provenance; exact regenerated range identities, rather than a shell-dependent JSON newline or
 encoding, are the native binding authority.
 
@@ -493,6 +494,17 @@ the separately verified catalog. Each range must be one complete final tensor at
 must preserve exact role, GGML type and original source identity. Matrix and I32 graph binders
 retain the one shared buffer, infer physical shape from the catalog and reject unsupported storage
 or logical-width mismatches without copying encoded data.
+
+The parallel global adapter first closes the complete checkpoint catalog, then emits exactly six
+indivisible ranges in canonical consumer order. On the pinned 0731 metadata they occupy one source
+object and total 596,000,788 bytes; each Q4_K embedding/head matrix is 297,861,120 bytes. A global
+artifact is rebound to those exact source spans and loaded under one aggregate reservation. Three
+packed matrix views map to `embed.weight`, `head.weight` and `hc_head_fn`; three F32/BF16 views map
+to `norm.weight`, `hc_head_base` and `hc_head_scale`. All retain the same immutable buffer and one
+use lease. Because the official total and maximum range exceed the 512 MiB/64 MiB defaults, a real
+caller must explicitly admit both verified plan values without exceeding the unchanged 4 GiB/1 GiB
+absolute ceilings. The official plan passed importer dry-run only; the executable parity test uses
+a small Q8_0/F32 fixture.
 
 The scalar storage layer now recognizes every GGML type present in those 1,193 layer tensors.
 Q8_0, Q5_K and Q6_K follow the exact pinned ggml block layouts; BF16 and F32 are decoded from

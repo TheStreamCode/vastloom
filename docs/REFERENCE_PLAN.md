@@ -134,9 +134,19 @@ transactional matvec, row lookup and reduced prefill/decode graph parity. Routed
 projections now have the same pinned scalar/transactional/row boundary and a separate reduced
 prefill/decode graph parity gate.
 
-After the retained packed-global binding exists, the payload gate requires explicit user
-authorization to acquire the exact 138,867,160-byte trunk ranges, execute the real `tid2eid`
-route for a pinned input and fetch only its six selected complete experts.
+The retained packed-global boundary now exists. Verified metadata emits exactly six global ranges
+in one object: 596,000,788 bytes total with a 297,861,120-byte maximum. Their dedicated immutable
+artifact scope is rebound to the pinned source spans, and a reduced Q8_0/F32 fixture retains all
+six consumers through one aggregate Governor-backed RAM buffer and one lease while prefill/decode
+matches the direct packed graph. The official range set passed no-network importer dry-run only.
+It exceeds both the importer's 256 MiB default selected-payload cap and the loader's 512 MiB total/
+64 MiB per-range defaults, so a future transfer/load requires explicit verified limits as well as
+explicit user authorization; the unchanged absolute caps and live Governor still apply.
+
+The next payload gate requires explicit user authorization to acquire the exact 138,867,160-byte
+trunk ranges, execute the real `tid2eid` route for a pinned input and fetch only its six selected
+complete expert bundles. The 596,000,788-byte official global set may be acquired separately only
+when the same disk, hash and aggregate-residency gates pass.
 
 Kimi K3 is not a reference-PC execution target. The project treats it as metadata/capacity-only
 because no exact profile has proved that its complete expert bundle fits one real tier on the

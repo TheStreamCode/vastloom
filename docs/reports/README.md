@@ -13,6 +13,10 @@ hardware, commands, measurements and limitations.
 
 ## Current report
 
+- [`M9_DEEPSEEK_GLOBAL_TENSOR_SET_VALIDATION.md`](M9_DEEPSEEK_GLOBAL_TENSOR_SET_VALIDATION.md) —
+  exact 596,000,788-byte six-global plan from verified official metadata, dedicated immutable
+  range-artifact scope, one aggregate governed fixture buffer/lease and embedding/head/norm/
+  Hyper-Connection prefill/decode parity; the official payload passed dry-run only.
 - [`M9_DEEPSEEK_MXFP4_EXPERT_KERNEL_VALIDATION.md`](M9_DEEPSEEK_MXFP4_EXPERT_KERNEL_VALIDATION.md) —
   pinned-ggml MXFP4 E8M0/E2M1 scalar dequantization/matvec parity, bounded complete-matrix row
   lookup and alternate reduced IQ1_S-gate/up plus MXFP4-down prefill/decode graph parity, with no

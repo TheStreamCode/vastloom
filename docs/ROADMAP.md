@@ -295,8 +295,11 @@ unbounded allocation and clean recovery from injected CUDA failures.
   alternate reduced MoE graph with IQ1_S W1/W3 and MXFP4 W2 through prefill and incremental
   decode. See the
   [MXFP4 expert-kernel validation](reports/M9_DEEPSEEK_MXFP4_EXPERT_KERNEL_VALIDATION.md).
-- [ ] Bind all six retained global consumers through one governed transaction without weakening
-  the execution gate.
+- [x] Bind all six retained global consumers through one governed transaction without weakening
+  the execution gate. Official metadata produces six exact ranges totaling 596,000,788 bytes
+  with a 297,861,120-byte maximum; its importer passed dry-run only. A reduced Q8_0/F32 artifact
+  retains one lease across embedding, output, norm and Hyper-Connection prefill/decode parity;
+  see the [global tensor-set validation](reports/M9_DEEPSEEK_GLOBAL_TENSOR_SET_VALIDATION.md).
 - [ ] Execute that probe by acquiring the bounded official trunk ranges, decoding the real
   `tid2eid` route and loading only its six selected complete expert bundles.
 - [ ] Pinned host buffers.

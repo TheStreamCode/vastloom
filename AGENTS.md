@@ -77,7 +77,12 @@ have pinned-ggml scalar dequantization/matvec and row-decoder parity; an alterna
 with every routed W1/W3 matrix in IQ2_XXS matches its independently dequantized prefill/decode
 oracle. MXFP4 now has pinned-ggml scalar dequantization/matvec and row-decoder parity as well; a
 second alternate reduced graph with every routed W2 matrix in MXFP4 matches independently
-dequantized prefill/decode. No official IQ2_XXS, MXFP4 or global payload was read. A complete
+dequantized prefill/decode. The six global consumers now also have an exact pinned-metadata plan:
+596,000,788 bytes in six ranges with a 297,861,120-byte maximum. A dedicated non-routed artifact
+scope replays every immutable source span, and a reduced Q8_0/F32 fixture loads all six through one
+aggregate governed RAM buffer/lease into embedding, output, normalization and Hyper-Connection
+prefill/decode parity. The official set passed importer dry-run only. No official IQ2_XXS, MXFP4
+or global payload was read. A complete
 0731 quantized layer/token
 path, physical NVMe overlap,
 generation and CUDA remain unvalidated.

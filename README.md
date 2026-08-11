@@ -98,6 +98,12 @@ model conversion.
 > IQ2_XXS matches independently dequantized prefill and decode. MXFP4 now has the same bounded
 > decoder, matvec and row-lookup boundary; a second reduced graph with every routed down matrix in
 > MXFP4 also matches independently dequantized prefill and decode.
+> The six official global tensors now have their own deterministic plan and immutable artifact
+> scope. Verified metadata closes at 596,000,788 bytes in six ranges, led by two 297,861,120-byte
+> Q4_K matrices. A reduced Q8_0/F32 fixture loads the same six logical consumers into one
+> aggregate Governor-backed buffer and retains exactly one lease across embedding, output,
+> normalization and Hyper-Connection prefill/decode parity. The official range set passed a
+> no-network dry-run only; none of its payload was downloaded or executed.
 > The complete 82.54 GB payload
 > has not been downloaded or executed; this synthetic gate is not a complete official DeepSeek
 > layer/token path,
@@ -200,6 +206,8 @@ The alternate packed gate/up execution slice is documented in the
 [`M9 IQ2_XXS expert-kernel report`](docs/reports/M9_DEEPSEEK_IQ2XXS_EXPERT_KERNEL_VALIDATION.md).
 The alternate packed down-projection execution slice is documented in the
 [`M9 MXFP4 expert-kernel report`](docs/reports/M9_DEEPSEEK_MXFP4_EXPERT_KERNEL_VALIDATION.md).
+The complete governed six-global plan, artifact and consumer boundary is documented in the
+[`M9 global tensor-set report`](docs/reports/M9_DEEPSEEK_GLOBAL_TENSOR_SET_VALIDATION.md).
 The pinned importer and immutable full-source admission boundary are documented in the
 [`M7 checkpoint-binding report`](docs/reports/M7_DEEPSEEK_GGUF_CHECKPOINT_BINDING_VALIDATION.md).
 Current and candidate model support is kept explicit in the
@@ -378,6 +386,14 @@ portability target, not a validated platform claim.
   MXFP4: Q4_K feeds the bounded packed embedding/output path, while alternate reduced MoE graphs
   execute IQ2_XXS routed gate/up matrices or MXFP4 routed down matrices. All three formats have
   bounded row lookup and transactional matvec dispatch.
+- **Governed six-global binding:** `deepseek-gguf-global-plan` derives the exact six official
+  ranges from the closed catalog. The dedicated `globals` importer scope preserves the same
+  explicit network authorization, byte cap, disk reserve and atomic immutable publication rules.
+  Native rebinding replays the plan against the pinned source identities, and the loader reserves
+  the complete packed destination plus only the largest range as staging before any allocation or
+  read. The fixture binds embedding, output head, output norm and all three output
+  Hyper-Connection tensors from one shared lease. The official 596,000,788-byte plan passed
+  dry-run only.
 - **Header-derived traffic floor:** the encoded routed experts total 75,547,803,648 bytes;
   a top-6 no-cache decode would request 1,770,651,648 logical expert bytes per token before
   caching/prefetch gains. This is not measured physical SSD traffic or a speed claim.
@@ -696,9 +712,18 @@ vastloom deepseek-gguf-probe-plan $model `
   --layer 0 --experts 0,1,2,3,4,5 --context 4096 --batch-size 1 --json |
   Out-File -LiteralPath $plan -Encoding utf8
 
+$globals = Join-Path $env:TEMP 'vastloom-deepseek-globals-plan.json'
+vastloom deepseek-gguf-global-plan $model --context 4096 --batch-size 1 --json |
+  Out-File -LiteralPath $globals -Encoding utf8
+
 python tools\import_hf_ranges.py `
   --model deepseek-v4-flash-0731-gguf-iq1s `
   --plan $plan --store C:\VastloomModels --scope trunk --dry-run --json
+
+python tools\import_hf_ranges.py `
+  --model deepseek-v4-flash-0731-gguf-iq1s `
+  --plan $globals --store C:\VastloomModels --scope globals `
+  --max-total-mib 569 --dry-run --json
 ```
 
 The command requires the exact model ID, 40-character revision, paths, sizes and SHA-256 values.
@@ -720,12 +745,20 @@ but this is not authorization to add that flag: the real 138,867,160-byte transf
 the user's explicit approval. UTF-8 and UTF-8-BOM plan files are accepted; UTF-16 shell
 redirection is not.
 
+The global plan is likewise metadata-only and deterministic: it contains six ranges totaling
+596,000,788 bytes, with a 297,861,120-byte maximum. Its dry-run raises only the importer's selected
+payload cap to 569 MiB; it still makes no network request. A real transfer requires the same
+explicit approval and does not make the artifact executable.
+
 After an explicitly authorized import, the non-executing verification sequence is:
 
 ```powershell
 vastloom range-artifact-inspect $artifact --json
 vastloom deepseek-gguf-range-bind $model $artifact `
   --layer 0 --experts 0,1,2,3,4,5 --context 4096 --batch-size 1 --json
+
+vastloom deepseek-gguf-global-bind $model $globalArtifact `
+  --context 4096 --batch-size 1 --json
 ```
 
 The second command always performs local range hashes and has no `--no-verify` bypass. The expert
@@ -806,9 +839,13 @@ vastloom deepseek-gguf-checkpoint MODEL_DIRECTORY [--context N] [--batch-size N]
     [--no-verify] [--json]
 vastloom deepseek-gguf-probe-plan MODEL_DIRECTORY --layer N --experts CSV
     [--tile-size SIZE] [--context N] [--batch-size N] [--no-verify] [--json]
+vastloom deepseek-gguf-global-plan MODEL_DIRECTORY
+    [--context N] [--batch-size N] [--no-verify] [--json]
 vastloom range-artifact-inspect ARTIFACT_DIRECTORY [--no-verify] [--json]
 vastloom deepseek-gguf-range-bind MODEL_DIRECTORY ARTIFACT_DIRECTORY --layer N --experts CSV
     [--tile-size SIZE] [--context N] [--batch-size N] [--json]
+vastloom deepseek-gguf-global-bind MODEL_DIRECTORY ARTIFACT_DIRECTORY
+    [--context N] [--batch-size N] [--json]
 vastloom moe-logits MODEL_DIRECTORY --text TEXT [--chat] [--top N]
     [--cache no-cache|lru|lfu|static-hot] [--cache-bytes SIZE]
     [--io sync|async] [--io-cache buffered|bypass] [--expert-read whole|staged]
@@ -919,8 +956,10 @@ It currently has:
   tile/expert-to-DeepSeek fixture consumer and reduced router-first bounded expert cache with an
   opt-in single-owner asynchronous batch; partial immutable range publication and a native
   closed-world verifier/exact trunk binder now feed a complete reduced packed trunk catalog,
-  including retained F32/BF16 vectors, into one aggregate governed tensor set; any official trunk
-  payload read and the full-model loop remain absent;
+  including retained F32/BF16 vectors, into one aggregate governed tensor set; a parallel
+  six-global fixture transaction now feeds every global consumer from one aggregate lease, while
+  the official 596,000,788-byte global payload, any official trunk payload read and the full-model
+  loop remain absent;
 - no VRAM expert tier or pinned host buffers; direct/unbuffered I/O is currently an
   opt-in OLMoE measurement protocol, not the production path for every adapter;
 - OLMoE currently exposes final-logit probes and route telemetry, not decoding/chat;

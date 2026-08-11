@@ -278,10 +278,18 @@ The 0731 GGUF reader adds a metadata-only safety boundary:
   unverified, routing authority false, plan-only true and execution unsupported. The current
   layer-0 plan's 177,795,544 logical bytes are neither downloaded bytes nor physical-device
   telemetry and do not relax the single-tier expert gate;
+- `deepseek-gguf-global-plan` first closes the complete pinned checkpoint catalog, then exposes
+  exactly six canonical non-routed ranges with routing authority false. The official metadata
+  plan totals 596,000,788 bytes in one source object and has a 297,861,120-byte maximum range;
+  planning reads no tensor payload and never authorizes execution;
 - partial range import is a separate derived-artifact path under `models/optimized`. It requires
   `--allow-range-download` for any network access, defaults to a 256 MiB selected-payload cap and
   300 GiB free-space reserve, and refuses plans larger than 16 MiB, more than 4,096 ranges or any
   individual range above 1 GiB;
+- the dedicated `globals` import scope rejects expert roles and any routing-authority claim. The
+  official set exceeds the 256 MiB default selected-payload cap, so even an authorized transfer
+  must explicitly admit its verified byte total; its validation performed a no-network dry-run
+  only;
 - only revision-pinned object URLs are constructed. HTTP 206, exact start/end/complete-object
   `Content-Range`, exact `Content-Length`, bounded reads, fsync and a second local SHA-256 pass are
   mandatory. A response partial is removed on failure and never resumed across responses;
@@ -308,6 +316,13 @@ The 0731 GGUF reader adds a metadata-only safety boundary:
   entire file set and exact aggregate total, then reserves all destination RAM plus only the
   maximum-range staging allowance before allocation. Reads land directly in final packed
   subspans; `RAM_READY` is atomic for the whole set and one shared lease protects every view;
+- the DeepSeek global binder independently regenerates the exact six-range plan and requires a
+  closed, fully rehashed `globals` artifact with matching pinned model, revision, object identity
+  and original source spans. Its loader requires the whole set, reserves one packed destination
+  plus maximum-range staging and publishes one shared lease only after all six rehashes pass.
+  Because the official set exceeds the 512 MiB total and 64 MiB per-range defaults, both loader
+  limits must be raised explicitly from the verified plan without changing the 4 GiB/1 GiB
+  absolute ceilings or bypassing the Governor;
 - the DeepSeek tensor-set adapter additionally requires one complete final offset-zero range for
   every non-routed tensor in the bound layer catalog. Missing, duplicate, split, wrong-role/type/
   source or corrupt inputs cannot publish a partial graph. The current graph consumer proves this
@@ -337,9 +352,11 @@ The 0731 GGUF reader adds a metadata-only safety boundary:
 
 The local validation used one complete 5.26 MB metadata shard and two 16 MiB HTTP-range prefixes;
 it did not download the 82.54 GB profile. Three separate exact ranges totaling 6,488,064 bytes
-were used for the real expert test and remain outside the immutable model store. Every range is
-rehash-verified before loading. Header-derived logical bytes/token are planning data, not physical
-device telemetry and never relax Resource Governor limits.
+were used for the real expert test and remain outside the immutable model store. The official
+596,000,788-byte global set was planned and dry-run only; its executable test used a small
+Q8_0/F32 fixture. Every loaded range is rehash-verified before use. Header-derived logical
+bytes/token are planning data, not physical device telemetry and never relax Resource Governor
+limits.
 
 ## Real OLMoE streaming bounds
 

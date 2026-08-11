@@ -9,7 +9,10 @@
 #include <limits>
 #include <new>
 #include <string_view>
+#include <system_error>
+#include <thread>
 #include <utility>
+#include <vector>
 
 namespace vastloom::inference {
 namespace {
@@ -577,28 +580,76 @@ Result<void> matvec_blocked(std::span<const std::byte> encoded_matrix,
     if (!validated) return validated.error();
 
     const std::size_t blocks_per_row = columns / BlockElements;
-    std::array<float, BlockElements> decoded{};
-    for (std::size_t row = 0U; row < rows; ++row) {
-        double sum = 0.0;
-        for (std::size_t block = 0U; block < blocks_per_row; ++block) {
-            const std::size_t encoded_block = row * blocks_per_row + block;
-            auto status = std::invoke(
-                std::forward<Decoder>(decoder),
-                encoded_matrix.data() + encoded_block * BlockBytes,
-                std::span<float, BlockElements>(decoded));
-            if (!status) return status.error();
-            const std::size_t input_base = block * BlockElements;
-            for (std::size_t column = 0U; column < BlockElements; ++column) {
-                sum += static_cast<double>(decoded[column]) *
-                       static_cast<double>(input[input_base + column]);
+
+    // One row's work: decoded into a caller-owned scratch block so each worker keeps its own.
+    const auto compute_rows = [&](std::size_t first, std::size_t last,
+                                  std::array<float, BlockElements>& decoded) -> Result<void> {
+        for (std::size_t row = first; row < last; ++row) {
+            double sum = 0.0;
+            for (std::size_t block = 0U; block < blocks_per_row; ++block) {
+                const std::size_t encoded_block = row * blocks_per_row + block;
+                auto status = std::invoke(
+                    decoder, encoded_matrix.data() + encoded_block * BlockBytes,
+                    std::span<float, BlockElements>(decoded));
+                if (!status) return status.error();
+                const std::size_t input_base = block * BlockElements;
+                for (std::size_t column = 0U; column < BlockElements; ++column) {
+                    sum += static_cast<double>(decoded[column]) *
+                           static_cast<double>(input[input_base + column]);
+                }
             }
+            const float value = static_cast<float>(sum);
+            if (!std::isfinite(value)) {
+                return make_error(ErrorCode::invalid_format,
+                                  "Blocked matvec produced a non-finite result");
+            }
+            output[row] = value;
         }
-        const float value = static_cast<float>(sum);
-        if (!std::isfinite(value)) {
-            return make_error(ErrorCode::invalid_format,
-                              "Blocked matvec produced a non-finite result");
+        return {};
+    };
+
+    // Below this a thread costs more than the rows it would take.
+    constexpr std::size_t kMinimumRowsPerWorker = 64U;
+    const unsigned requested = std::max(1U, limits.max_threads);
+    const auto affordable = static_cast<unsigned>(
+        std::min<std::size_t>(rows / kMinimumRowsPerWorker, requested));
+    const unsigned workers = std::max(1U, affordable);
+
+    if (workers == 1U) {
+        std::array<float, BlockElements> decoded{};
+        return compute_rows(0U, rows, decoded);
+    }
+
+    std::vector<Result<void>> outcomes(workers, Result<void>{});
+    std::vector<std::thread> threads;
+    try {
+        threads.reserve(workers - 1U);
+        const std::size_t rows_per_worker = (rows + workers - 1U) / workers;
+        for (unsigned worker = 1U; worker < workers; ++worker) {
+            const std::size_t first = std::min(rows, worker * rows_per_worker);
+            const std::size_t last = std::min(rows, first + rows_per_worker);
+            if (first >= last) continue;
+            threads.emplace_back([&, worker, first, last]() {
+                std::array<float, BlockElements> decoded{};
+                outcomes[worker] = compute_rows(first, last, decoded);
+            });
         }
-        output[row] = value;
+        std::array<float, BlockElements> decoded{};
+        outcomes[0] = compute_rows(0U, std::min(rows, rows_per_worker), decoded);
+    } catch (const std::system_error&) {
+        // Thread creation failed partway. Join whatever started, then fall back to finishing the
+        // remaining rows here rather than leaving the output half written.
+        for (auto& thread : threads) {
+            if (thread.joinable()) thread.join();
+        }
+        std::array<float, BlockElements> decoded{};
+        return compute_rows(0U, rows, decoded);
+    }
+    for (auto& thread : threads) {
+        if (thread.joinable()) thread.join();
+    }
+    for (auto& outcome : outcomes) {
+        if (!outcome) return outcome.error();
     }
     return {};
 }

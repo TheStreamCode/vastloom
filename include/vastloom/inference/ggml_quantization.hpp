@@ -43,6 +43,11 @@ inline constexpr std::uint32_t kGgmlTypeMxfp4 = 39U;
 
 struct QuantizedKernelLimits {
     std::size_t max_elements{64'000'000U};
+    // Rows of a matvec are independent, so they may be split across threads. Each row is computed
+    // exactly as it would be serially, in the same order over its own blocks, so results stay
+    // bit-identical to the single-threaded reference - the split changes who does the work, never
+    // what is accumulated. One means serial, which stays the default.
+    unsigned max_threads{1U};
 };
 
 struct RoutedExpertScratch {

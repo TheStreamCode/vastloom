@@ -1527,6 +1527,7 @@ int command_deepseek_layer_probe(const std::vector<std::string>& args) {
     // checkpoint declares it, only the depth is cut to what has been imported. Layer 0 is
     // hash-routed, so the reduced hash-layer count stays 1.
     auto layer_config = config.value();
+    layer_config.cpu_threads = policy.value().cpu_threads;
     layer_config.layer_count = 1U;
     layer_config.hash_layer_count = std::min<std::size_t>(layer_config.hash_layer_count, 1U);
     layer_config.mtp_layer_count = 0U;
@@ -1804,6 +1805,9 @@ int command_deepseek_forward(const std::vector<std::string>& args) {
 
     vastloom::safety::ResourceGovernor governor(policy.value().resources);
     auto layer_config = config.value();
+    // The Governor's thread budget, not the machine's core count: the policy already decided how
+    // much of the CPU this process may take while leaving the host usable.
+    layer_config.cpu_threads = policy.value().cpu_threads;
     layer_config.layer_count = depth;
     layer_config.hash_layer_count = std::min(layer_config.hash_layer_count, depth);
     layer_config.mtp_layer_count = 0U;

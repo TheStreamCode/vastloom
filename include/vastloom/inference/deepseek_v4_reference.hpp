@@ -94,6 +94,10 @@ struct DeepseekV4ReferenceConfig {
     std::vector<float> routed_expert_swiglu_limits;
     std::vector<float> shared_expert_swiglu_limits;
     float swiglu_limit{0.0F};
+    // Worker threads the packed matvecs may use. Rows are independent and each is computed exactly
+    // as it would be serially, so this changes speed and nothing else. One keeps the reference
+    // behaviour, which is what every fixture test relies on.
+    unsigned cpu_threads{1U};
 };
 
 struct DeepseekV4PackedMatrix {

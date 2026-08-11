@@ -655,7 +655,8 @@ Result<std::vector<float>> linear_packed_matrix(
     std::size_t rows,
     std::size_t input_width,
     std::size_t output_width,
-    std::string_view context) {
+    std::string_view context,
+    unsigned cpu_threads = 1U) {
     if (!supports_reference_matvec_ggml_type(matrix.ggml_type)) {
         return make_error(ErrorCode::unsupported,
                           "DeepSeek packed matrix type has no reference matvec",
@@ -689,6 +690,7 @@ Result<std::vector<float>> linear_packed_matrix(
     std::vector<float> output(output_count.value());
     QuantizedKernelLimits limits;
     limits.max_elements = storage_count.value();
+    limits.max_threads = cpu_threads;
     for (std::size_t row = 0U; row < rows; ++row) {
         std::fill(padded_input.begin(), padded_input.end(), 0.0F);
         std::copy_n(input.begin() + static_cast<std::ptrdiff_t>(row * input_width),
@@ -790,7 +792,8 @@ Result<std::vector<float>> linear_tensor(const DeepseekV4ReferenceGraph& graph,
     const auto packed = graph.packed_matrices.find(name);
     if (packed != graph.packed_matrices.end()) {
         return linear_packed_matrix(packed->second, name, input, rows,
-                                    input_width, output_width, context);
+                                    input_width, output_width, context,
+                                    graph.config.cpu_threads);
     }
     auto weight = float_tensor(graph, name, {output_width, input_width});
     if (!weight) return weight.error();
@@ -1673,7 +1676,8 @@ Result<std::vector<float>> execute_expert(const DeepseekV4ReferenceGraph& graph,
         if (matrix != nullptr) {
             return linear_packed_matrix(*matrix, name, values, tokens,
                                         input_columns, output_rows,
-                                        base + std::string(suffix));
+                                        base + std::string(suffix),
+                                        graph.config.cpu_threads);
         }
         return linear_tensor(graph, name, values, tokens, input_columns,
                              output_rows, base + std::string(suffix));

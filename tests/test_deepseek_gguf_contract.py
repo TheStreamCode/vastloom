@@ -19,31 +19,33 @@ import subprocess
 from host_pressure import host_pressure_reason, skipped
 
 
+# Keys are dotted paths into the JSON document. The previous regular expression matched anywhere
+# in the serialised text, so it could not tell a top-level field from a nested one; these paths can.
 CHECKPOINT_CONTRACT = {
-    "imported_manifest_verified": True,
-    "pinned_0731_checkpoint_spec_verified": True,
-    "reference_config_verified": True,
-    "layer0_reference_catalog_verified": True,
-    "all_layer_reference_catalogs_verified": True,
-    "checkpoint_reference_catalog_verified": True,
-    "reference_catalog_validated_layers": 43,
-    "reference_catalog_validated_tensors": 1_193,
-    "reference_catalog_validated_bytes": 6_390_088_008,
-    "reference_catalog_global_tensors": 6,
-    "reference_catalog_global_bytes": 596_000_788,
-    "reference_catalog_expert_bundles": 11_008,
-    "reference_catalog_expert_tensor_slices": 33_024,
-    "reference_catalog_physical_expert_tensors": 129,
-    "vocabulary_size": 129_280,
-    "compression_schedule_values": 46,
-    "routed_swiglu_schedule_values": 43,
-    "shared_swiglu_schedule_values": 43,
+    "checkpoint.imported_manifest_verified": True,
+    "checkpoint.pinned_0731_checkpoint_spec_verified": True,
+    "checkpoint.reference_config_verified": True,
+    "checkpoint.layer0_reference_catalog_verified": True,
+    "checkpoint.all_layer_reference_catalogs_verified": True,
+    "checkpoint.checkpoint_reference_catalog_verified": True,
+    "checkpoint.reference_catalog_validated_layers": 43,
+    "checkpoint.reference_catalog_validated_tensors": 1_193,
+    "checkpoint.reference_catalog_validated_bytes": 6_390_088_008,
+    "checkpoint.reference_catalog_global_tensors": 6,
+    "checkpoint.reference_catalog_global_bytes": 596_000_788,
+    "checkpoint.reference_catalog_expert_bundles": 11_008,
+    "checkpoint.reference_catalog_expert_tensor_slices": 33_024,
+    "checkpoint.reference_catalog_physical_expert_tensors": 129,
+    "reference_architecture.vocabulary_size": 129_280,
+    "reference_architecture.compression_schedule_values": 46,
+    "reference_architecture.routed_swiglu_schedule_values": 43,
+    "reference_architecture.shared_swiglu_schedule_values": 43,
     "physical_tensors": 1_328,
     "logical_tensors": 34_223,
     "tensor_bytes": 82_533_892_444,
     "always_active_bytes": 6_986_088_796,
     "routed_expert_bytes": 75_547_803_648,
-    "planned_layers": 43,
+    "layer_streaming.planned_layers": 43,
 }
 
 PROBE_PLAN_CONTRACT = {
@@ -70,6 +72,19 @@ COMMANDS = {
 }
 
 
+MISSING = "<missing>"
+
+
+def resolve(payload: object, path: str) -> object:
+    """Follow a dotted path into the parsed document."""
+    current = payload
+    for part in path.split("."):
+        if not isinstance(current, dict) or part not in current:
+            return MISSING
+        current = current[part]
+    return current
+
+
 def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--vastloom", type=Path, required=True)
@@ -94,9 +109,9 @@ def main() -> int:
 
     payload = json.loads(process.stdout)
     mismatches = [
-        f"  {key}: expected {value!r}, got {payload.get(key, '<missing>')!r}"
-        for key, value in expected.items()
-        if payload.get(key) != value
+        f"  {path}: expected {value!r}, got {resolve(payload, path)!r}"
+        for path, value in expected.items()
+        if resolve(payload, path) != value
     ]
     if mismatches:
         raise AssertionError(f"{contract} changed:\n" + "\n".join(mismatches))

@@ -251,6 +251,19 @@ deepseek_v4_reference_config_from_0731_gguf(
     const DeepseekV4GgufCatalogReport& report,
     const DeepseekV4ReferenceConfig& config);
 
+struct DeepseekV4ReferenceCatalogValidation {
+    std::size_t layers{0U};
+    std::size_t tensors{0U};
+    std::uint64_t bytes{0U};
+};
+
+// Validates every canonical main-layer non-routed descriptor against the native reference
+// consumers without allocating or reading tensor payload.
+[[nodiscard]] Result<DeepseekV4ReferenceCatalogValidation>
+deepseek_v4_validate_0731_gguf_layer_catalogs(
+    const DeepseekV4GgufCatalogReport& report,
+    const DeepseekV4ReferenceConfig& config);
+
 struct DeepseekV4ReferenceGraph {
     DeepseekV4ReferenceConfig config;
     std::map<std::string, std::vector<float>, std::less<>> float_tensors;

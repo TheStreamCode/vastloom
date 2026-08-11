@@ -127,6 +127,10 @@ struct DeepseekV4GgufCatalogReport {
     bool pinned_0731_checkpoint_spec_verified{false};
     bool reference_config_verified{false};
     bool layer0_reference_catalog_verified{false};
+    bool all_layer_reference_catalogs_verified{false};
+    std::size_t reference_catalog_validated_layers{0U};
+    std::size_t reference_catalog_validated_tensors{0U};
+    ByteCount reference_catalog_validated_bytes{0U};
     bool imported_file_hashes_verified{false};
     bool full_payload_present{false};
     bool executable_source_binding_verified{false};

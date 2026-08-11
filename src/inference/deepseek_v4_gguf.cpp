@@ -1150,6 +1150,16 @@ Result<DeepseekV4GgufCatalogReport> inspect_deepseek_v4_gguf_checkpoint(
                 report.value(), reference_config.value());
             if (!layer0) return layer0.error();
             report.value().layer0_reference_catalog_verified = true;
+            auto all_layers = deepseek_v4_validate_0731_gguf_layer_catalogs(
+                report.value(), reference_config.value());
+            if (!all_layers) return all_layers.error();
+            report.value().all_layer_reference_catalogs_verified = true;
+            report.value().reference_catalog_validated_layers =
+                all_layers.value().layers;
+            report.value().reference_catalog_validated_tensors =
+                all_layers.value().tensors;
+            report.value().reference_catalog_validated_bytes =
+                all_layers.value().bytes;
         }
 
         if (!imported.value().metadata_only && imported.value().full_hash_verified &&
@@ -1185,6 +1195,14 @@ std::string to_json(const DeepseekV4GgufCatalogReport& report) {
            << (report.reference_config_verified ? "true" : "false")
            << ",\"layer0_reference_catalog_verified\":"
            << (report.layer0_reference_catalog_verified ? "true" : "false")
+           << ",\"all_layer_reference_catalogs_verified\":"
+           << (report.all_layer_reference_catalogs_verified ? "true" : "false")
+           << ",\"reference_catalog_validated_layers\":"
+           << report.reference_catalog_validated_layers
+           << ",\"reference_catalog_validated_tensors\":"
+           << report.reference_catalog_validated_tensors
+           << ",\"reference_catalog_validated_bytes\":"
+           << report.reference_catalog_validated_bytes
            << ",\"imported_file_hashes_verified\":"
            << (report.imported_file_hashes_verified ? "true" : "false")
            << ",\"full_payload_present\":"
@@ -1310,6 +1328,11 @@ std::string to_text(const DeepseekV4GgufCatalogReport& report) {
            << (report.reference_config_verified ? "verified" : "unavailable") << '\n'
            << "Layer-0 descriptors: "
            << (report.layer0_reference_catalog_verified ? "verified" : "unavailable") << '\n'
+           << "All layer descriptors: "
+           << (report.all_layer_reference_catalogs_verified ? "verified" : "unavailable")
+           << " (" << report.reference_catalog_validated_layers << " layers, "
+           << report.reference_catalog_validated_tensors << " tensors, "
+           << report.reference_catalog_validated_bytes << " bytes)" << '\n'
            << "RAM + VRAM pooling:  forbidden for one expert bundle" << '\n'
            << "Split shards:        " << report.split_shards << '\n'
            << "Physical tensors:    " << report.physical_tensors << '\n'

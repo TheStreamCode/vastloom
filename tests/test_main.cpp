@@ -3818,6 +3818,87 @@ void test_deepseek_v4_reference_graph(const std::filesystem::path& root) {
             if (derived_config) {
                 CHECK(vastloom::inference::deepseek_v4_validate_0731_gguf_layer0_catalog(
                     reference_report, derived_config.value()));
+                auto one_layer_report = reference_report;
+                one_layer_report.layers = 1U;
+                one_layer_report.reference_architecture->layer_count = 1U;
+                one_layer_report.reference_architecture->hash_layer_count = 1U;
+                one_layer_report.reference_architecture->compression_ratios = {
+                    static_cast<std::uint32_t>(config.compression_ratios.front()), 0U};
+                one_layer_report.reference_architecture->routed_expert_swiglu_limits = {
+                    config.swiglu_limit};
+                one_layer_report.reference_architecture->shared_expert_swiglu_limits = {
+                    config.swiglu_limit};
+                const auto one_layer_table = std::find_if(
+                    one_layer_report.catalog.tensors.begin(),
+                    one_layer_report.catalog.tensors.end(),
+                    [](const vastloom::model::LogicalTensorDescriptor& tensor) {
+                        return tensor.name == "blk.0.ffn_gate_tid2eid.weight";
+                    });
+                CHECK(one_layer_table != one_layer_report.catalog.tensors.end());
+                if (one_layer_table != one_layer_report.catalog.tensors.end()) {
+                    one_layer_table->shape = {
+                        static_cast<std::uint64_t>(config.experts_per_token),
+                        static_cast<std::uint64_t>(config.vocabulary_size)};
+                }
+                auto one_layer_config = vastloom::inference::
+                    deepseek_v4_reference_config_from_0731_gguf(one_layer_report);
+                CHECK(one_layer_config);
+                if (one_layer_config) {
+                    auto all_layers = vastloom::inference::
+                        deepseek_v4_validate_0731_gguf_layer_catalogs(
+                            one_layer_report, one_layer_config.value());
+                    CHECK(all_layers && all_layers.value().layers == 1U &&
+                          all_layers.value().tensors == 21U &&
+                          all_layers.value().bytes == 2'844U);
+                    auto wrong_table_shape = one_layer_report;
+                    const auto flattened_table = std::find_if(
+                        wrong_table_shape.catalog.tensors.begin(),
+                        wrong_table_shape.catalog.tensors.end(),
+                        [](const vastloom::model::LogicalTensorDescriptor& tensor) {
+                            return tensor.name == "blk.0.ffn_gate_tid2eid.weight";
+                        });
+                    CHECK(flattened_table != wrong_table_shape.catalog.tensors.end());
+                    if (flattened_table != wrong_table_shape.catalog.tensors.end()) {
+                        flattened_table->shape = {
+                            static_cast<std::uint64_t>(
+                                config.experts_per_token * config.vocabulary_size)};
+                        CHECK(!vastloom::inference::
+                                   deepseek_v4_validate_0731_gguf_layer_catalogs(
+                                       wrong_table_shape, one_layer_config.value()));
+                    }
+                    auto unexpected_tensor = one_layer_report;
+                    const auto first_non_routed = std::find_if(
+                        unexpected_tensor.catalog.tensors.begin(),
+                        unexpected_tensor.catalog.tensors.end(),
+                        [](const vastloom::model::LogicalTensorDescriptor& tensor) {
+                            return tensor.layer == 0U &&
+                                   tensor.role !=
+                                       vastloom::model::TensorRole::routed_expert;
+                        });
+                    CHECK(first_non_routed != unexpected_tensor.catalog.tensors.end());
+                    if (first_non_routed != unexpected_tensor.catalog.tensors.end()) {
+                        auto extra = *first_non_routed;
+                        extra.name = "blk.0.unexpected.weight";
+                        unexpected_tensor.catalog.tensors.push_back(std::move(extra));
+                        CHECK(!vastloom::inference::
+                                   deepseek_v4_validate_0731_gguf_layer_catalogs(
+                                       unexpected_tensor, one_layer_config.value()));
+                    }
+                    auto wrong_role = one_layer_report;
+                    const auto query = std::find_if(
+                        wrong_role.catalog.tensors.begin(),
+                        wrong_role.catalog.tensors.end(),
+                        [](const vastloom::model::LogicalTensorDescriptor& tensor) {
+                            return tensor.name == "blk.0.attn_q_a.weight";
+                        });
+                    CHECK(query != wrong_role.catalog.tensors.end());
+                    if (query != wrong_role.catalog.tensors.end()) {
+                        query->role = vastloom::model::TensorRole::other;
+                        CHECK(!vastloom::inference::
+                                   deepseek_v4_validate_0731_gguf_layer_catalogs(
+                                       wrong_role, one_layer_config.value()));
+                    }
+                }
                 auto wrong_config = derived_config.value();
                 ++wrong_config.query_lora_rank;
                 CHECK(!vastloom::inference::deepseek_v4_validate_0731_gguf_layer0_catalog(

@@ -11,6 +11,7 @@
 #include <chrono>
 #include <cmath>
 #include <exception>
+#include <initializer_list>
 #include <limits>
 #include <new>
 #include <numbers>
@@ -222,12 +223,14 @@ struct Layer0MatrixSpec {
     std::string_view consumer;
     std::size_t rows{0U};
     std::size_t columns{0U};
+    model::TensorRole role{model::TensorRole::other};
 };
 
 struct Layer0FloatSpec {
     std::string_view source;
     std::string_view consumer;
     std::size_t elements{0U};
+    model::TensorRole role{model::TensorRole::other};
 };
 
 struct Layer0TrunkLayout {
@@ -276,39 +279,50 @@ Result<Layer0TrunkLayout> make_layer0_trunk_layout(
 
     Layer0TrunkLayout result{{{
         {"blk.0.attn_kv.weight", "layers.0.attn.wkv.weight",
-         config.head_width, config.width},
+         config.head_width, config.width, model::TensorRole::attention},
         {"blk.0.attn_output_a.weight", "layers.0.attn.wo_a.weight",
-         output_rank_width.value(), attention_width.value() / config.output_groups},
+         output_rank_width.value(), attention_width.value() / config.output_groups,
+         model::TensorRole::attention},
         {"blk.0.attn_output_b.weight", "layers.0.attn.wo_b.weight",
-         config.width, output_rank_width.value()},
+         config.width, output_rank_width.value(), model::TensorRole::attention},
         {"blk.0.attn_q_a.weight", "layers.0.attn.wq_a.weight",
-         config.query_lora_rank, config.width},
+         config.query_lora_rank, config.width, model::TensorRole::attention},
         {"blk.0.attn_q_b.weight", "layers.0.attn.wq_b.weight",
-         attention_width.value(), config.query_lora_rank},
+         attention_width.value(), config.query_lora_rank,
+         model::TensorRole::attention},
         {"blk.0.ffn_down_shexp.weight", "layers.0.ffn.shared_experts.w2.weight",
-         config.width, config.intermediate_width},
+         config.width, config.intermediate_width, model::TensorRole::shared_expert},
         {"blk.0.ffn_gate_inp.weight", "layers.0.ffn.gate.weight",
-         config.expert_count, config.width},
+         config.expert_count, config.width, model::TensorRole::router},
         {"blk.0.ffn_gate_shexp.weight", "layers.0.ffn.shared_experts.w1.weight",
-         config.intermediate_width, config.width},
+         config.intermediate_width, config.width, model::TensorRole::shared_expert},
         {"blk.0.ffn_up_shexp.weight", "layers.0.ffn.shared_experts.w3.weight",
-         config.intermediate_width, config.width},
+         config.intermediate_width, config.width, model::TensorRole::shared_expert},
         {"blk.0.hc_attn_fn.weight", "layers.0.hc_attn_fn",
-         mix_width.value(), flattened_width.value()},
+         mix_width.value(), flattened_width.value(),
+         model::TensorRole::hyper_connection},
         {"blk.0.hc_ffn_fn.weight", "layers.0.hc_ffn_fn",
-         mix_width.value(), flattened_width.value()},
+         mix_width.value(), flattened_width.value(),
+         model::TensorRole::hyper_connection},
     }}, {{
         {"blk.0.attn_kv_a_norm.weight", "layers.0.attn.kv_norm.weight",
-         config.head_width},
-        {"blk.0.attn_norm.weight", "layers.0.attn_norm.weight", config.width},
+         config.head_width, model::TensorRole::normalization},
+        {"blk.0.attn_norm.weight", "layers.0.attn_norm.weight", config.width,
+         model::TensorRole::normalization},
         {"blk.0.attn_q_a_norm.weight", "layers.0.attn.q_norm.weight",
-         config.query_lora_rank},
-        {"blk.0.attn_sinks.weight", "layers.0.attn.attn_sink", config.head_count},
-        {"blk.0.ffn_norm.weight", "layers.0.ffn_norm.weight", config.width},
-        {"blk.0.hc_attn_base.weight", "layers.0.hc_attn_base", mix_width.value()},
-        {"blk.0.hc_attn_scale.weight", "layers.0.hc_attn_scale", 3U},
-        {"blk.0.hc_ffn_base.weight", "layers.0.hc_ffn_base", mix_width.value()},
-        {"blk.0.hc_ffn_scale.weight", "layers.0.hc_ffn_scale", 3U},
+         config.query_lora_rank, model::TensorRole::normalization},
+        {"blk.0.attn_sinks.weight", "layers.0.attn.attn_sink", config.head_count,
+         model::TensorRole::attention},
+        {"blk.0.ffn_norm.weight", "layers.0.ffn_norm.weight", config.width,
+         model::TensorRole::normalization},
+        {"blk.0.hc_attn_base.weight", "layers.0.hc_attn_base", mix_width.value(),
+         model::TensorRole::hyper_connection},
+        {"blk.0.hc_attn_scale.weight", "layers.0.hc_attn_scale", 3U,
+         model::TensorRole::hyper_connection},
+        {"blk.0.hc_ffn_base.weight", "layers.0.hc_ffn_base", mix_width.value(),
+         model::TensorRole::hyper_connection},
+        {"blk.0.hc_ffn_scale.weight", "layers.0.hc_ffn_scale", 3U,
+         model::TensorRole::hyper_connection},
     }}, routing_table_elements.value()};
     return result;
 }
@@ -2693,6 +2707,7 @@ Result<void> deepseek_v4_validate_0731_gguf_layer0_catalog(
     for (const auto& mapping : layout.value().matrices) {
         const auto* tensor = find_tensor(mapping.source);
         if (tensor == nullptr || tensor->layer != 0U || tensor->expert.has_value() ||
+            tensor->role != mapping.role ||
             tensor->shape.size() != 2U || tensor->shape[1] != mapping.rows ||
             tensor->shape[0] < mapping.columns ||
             tensor->shape[0] > std::numeric_limits<std::size_t>::max()) {
@@ -2708,6 +2723,7 @@ Result<void> deepseek_v4_validate_0731_gguf_layer0_catalog(
     for (const auto& mapping : layout.value().floats) {
         const auto* tensor = find_tensor(mapping.source);
         if (tensor == nullptr || tensor->layer != 0U || tensor->expert.has_value() ||
+            tensor->role != mapping.role ||
             !tensor->ggml_type.has_value() ||
             (*tensor->ggml_type != kGgmlTypeF32 &&
              *tensor->ggml_type != kGgmlTypeBf16)) {
@@ -2746,6 +2762,263 @@ Result<void> deepseek_v4_validate_0731_gguf_layer0_catalog(
     auto table_storage = validate_storage(*table, 1U, table_elements.value());
     if (!table_storage) return table_storage.error();
     return {};
+}
+
+Result<DeepseekV4ReferenceCatalogValidation>
+deepseek_v4_validate_0731_gguf_layer_catalogs(
+    const DeepseekV4GgufCatalogReport& report,
+    const DeepseekV4ReferenceConfig& config) {
+    try {
+        auto layer0 = deepseek_v4_validate_0731_gguf_layer0_catalog(report, config);
+        if (!layer0) return layer0.error();
+        if (config.layer_count != report.layers ||
+            config.compression_ratios.size() != config.layer_count) {
+            return make_error(
+                ErrorCode::invalid_argument,
+                "DeepSeek 0731 all-layer catalog configuration is inconsistent");
+        }
+        auto common = make_layer0_trunk_layout(config);
+        if (!common) return common.error();
+
+        DeepseekV4ReferenceCatalogValidation result;
+        const auto find_tensor = [&](std::string_view name)
+            -> const model::LogicalTensorDescriptor* {
+            const auto found = std::find_if(
+                report.catalog.tensors.begin(), report.catalog.tensors.end(),
+                [name](const model::LogicalTensorDescriptor& tensor) {
+                    return tensor.name == name;
+                });
+            return found == report.catalog.tensors.end() ? nullptr : &*found;
+        };
+        const auto validate_storage = [&](const model::LogicalTensorDescriptor& tensor,
+                                          std::size_t rows,
+                                          std::size_t storage_columns) -> Result<void> {
+            if (!tensor.ggml_type.has_value() ||
+                !storage_type_matches_dtype(*tensor.ggml_type, tensor.dtype)) {
+                return make_error(
+                    ErrorCode::unsupported,
+                    "DeepSeek 0731 layer tensor storage type has no reference kernel",
+                    tensor.name);
+            }
+            auto bytes = ggml_storage_bytes(
+                *tensor.ggml_type, rows, storage_columns,
+                QuantizedKernelLimits{kMaximumGraphElements});
+            if (!bytes) return bytes.error();
+            if (bytes.value() != tensor.source.bytes) {
+                return make_error(
+                    ErrorCode::integrity_error,
+                    "DeepSeek 0731 layer tensor encoded bytes disagree with shape/storage",
+                    tensor.name);
+            }
+            return {};
+        };
+        const auto record_tensor = [&](const model::LogicalTensorDescriptor& tensor)
+            -> Result<void> {
+            if (result.tensors == std::numeric_limits<std::size_t>::max()) {
+                return make_error(ErrorCode::resource_exhausted,
+                                  "DeepSeek 0731 validated tensor count overflows");
+            }
+            auto total = checked_add(result.bytes, tensor.source.bytes);
+            if (!total) return total.error();
+            ++result.tensors;
+            result.bytes = total.value();
+            return {};
+        };
+
+        for (std::size_t layer = 0U; layer < config.layer_count; ++layer) {
+            const auto prefix = "blk." + std::to_string(layer);
+            const auto layer_name = [&](std::string_view layer0_name) {
+                return prefix + std::string(layer0_name.substr(5U));
+            };
+            const auto validate_matrix = [&](const std::string& name,
+                                             std::size_t rows,
+                                             std::size_t columns,
+                                             model::TensorRole role) -> Result<void> {
+                const auto* tensor = find_tensor(name);
+                if (tensor == nullptr || !tensor->layer.has_value() ||
+                    *tensor->layer != layer || tensor->expert.has_value() ||
+                    tensor->role != role || tensor->shape.size() != 2U ||
+                    tensor->shape[1] != rows || tensor->shape[0] < columns ||
+                    tensor->shape[0] > std::numeric_limits<std::size_t>::max()) {
+                    return make_error(
+                        ErrorCode::invalid_format,
+                        "DeepSeek 0731 layer matrix descriptor does not match its consumer",
+                        name);
+                }
+                auto valid = validate_storage(
+                    *tensor, rows, static_cast<std::size_t>(tensor->shape[0]));
+                if (!valid) return valid.error();
+                return record_tensor(*tensor);
+            };
+            const auto validate_float = [&](const std::string& name,
+                                            std::initializer_list<std::uint64_t> shape,
+                                            model::TensorRole role) -> Result<void> {
+                const auto* tensor = find_tensor(name);
+                if (tensor == nullptr || !tensor->layer.has_value() ||
+                    *tensor->layer != layer || tensor->expert.has_value() ||
+                    tensor->role != role || !tensor->ggml_type.has_value() ||
+                    (*tensor->ggml_type != kGgmlTypeF32 &&
+                     *tensor->ggml_type != kGgmlTypeBf16) ||
+                    tensor->shape.size() != shape.size() ||
+                    !std::equal(tensor->shape.begin(), tensor->shape.end(),
+                                shape.begin(), shape.end())) {
+                    return make_error(
+                        ErrorCode::invalid_format,
+                        "DeepSeek 0731 layer float descriptor does not match its consumer",
+                        name);
+                }
+                auto elements = bounded_catalog_product(tensor->shape, tensor->name);
+                if (!elements) return elements.error();
+                auto valid = validate_storage(*tensor, 1U, elements.value());
+                if (!valid) return valid.error();
+                return record_tensor(*tensor);
+            };
+
+            const std::size_t before_layer = result.tensors;
+            for (const auto& mapping : common.value().matrices) {
+                auto valid = validate_matrix(layer_name(mapping.source), mapping.rows,
+                                             mapping.columns, mapping.role);
+                if (!valid) return valid.error();
+            }
+            for (const auto& mapping : common.value().floats) {
+                auto valid = validate_float(layer_name(mapping.source),
+                                            {mapping.elements}, mapping.role);
+                if (!valid) return valid.error();
+            }
+
+            if (layer < config.hash_layer_count) {
+                const auto name = prefix + ".ffn_gate_tid2eid.weight";
+                const auto* table = find_tensor(name);
+                if (table == nullptr || !table->layer.has_value() ||
+                    *table->layer != layer || table->expert.has_value() ||
+                    table->role != model::TensorRole::router ||
+                    table->dtype != model::TensorDType::i32 ||
+                    table->ggml_type != kGgmlTypeI32 || table->shape.size() != 2U ||
+                    table->shape[0] != config.experts_per_token ||
+                    table->shape[1] != config.vocabulary_size) {
+                    return make_error(
+                        ErrorCode::invalid_format,
+                        "DeepSeek 0731 hash routing descriptor does not match its consumer",
+                        name);
+                }
+                auto storage = validate_storage(
+                    *table, 1U, common.value().routing_table_elements);
+                if (!storage) return storage.error();
+                auto recorded = record_tensor(*table);
+                if (!recorded) return recorded.error();
+            } else {
+                auto valid = validate_float(prefix + ".exp_probs_b.bias",
+                                            {config.expert_count},
+                                            model::TensorRole::other);
+                if (!valid) return valid.error();
+            }
+
+            const std::size_t ratio = config.compression_ratios[layer];
+            if (ratio != 0U) {
+                if (ratio != 4U && ratio != 128U) {
+                    return make_error(
+                        ErrorCode::unsupported,
+                        "DeepSeek 0731 layer compression ratio is unsupported",
+                        std::to_string(layer));
+                }
+                const std::size_t coefficient = ratio == 4U ? 2U : 1U;
+                auto projected_width = bounded_product(
+                    {coefficient, config.head_width},
+                    "DeepSeek 0731 attention compressor width");
+                if (!projected_width) return projected_width.error();
+                for (const auto suffix : {".attn_compressor_gate.weight",
+                                          ".attn_compressor_kv.weight"}) {
+                    auto valid = validate_matrix(prefix + suffix,
+                                                 projected_width.value(),
+                                                 config.width,
+                                                 model::TensorRole::attention);
+                    if (!valid) return valid.error();
+                }
+                auto ape = validate_float(prefix + ".attn_compressor_ape.weight",
+                                          {projected_width.value(), ratio},
+                                          model::TensorRole::attention);
+                if (!ape) return ape.error();
+                auto norm = validate_float(prefix + ".attn_compressor_norm.weight",
+                                           {config.head_width},
+                                           model::TensorRole::normalization);
+                if (!norm) return norm.error();
+
+                if (ratio == 4U) {
+                    auto index_width = bounded_product(
+                        {config.index_head_count, config.index_head_width},
+                        "DeepSeek 0731 indexer query width");
+                    if (!index_width) return index_width.error();
+                    auto index_projected_width = bounded_product(
+                        {2U, config.index_head_width},
+                        "DeepSeek 0731 indexer compressor width");
+                    if (!index_projected_width) return index_projected_width.error();
+                    auto query = validate_matrix(prefix + ".indexer.attn_q_b.weight",
+                                                 index_width.value(),
+                                                 config.query_lora_rank,
+                                                 model::TensorRole::attention);
+                    if (!query) return query.error();
+                    auto projection = validate_matrix(prefix + ".indexer.proj.weight",
+                                                      config.index_head_count,
+                                                      config.width,
+                                                      model::TensorRole::other);
+                    if (!projection) return projection.error();
+                    for (const auto suffix : {".indexer_compressor_gate.weight",
+                                              ".indexer_compressor_kv.weight"}) {
+                        auto valid = validate_matrix(prefix + suffix,
+                                                     index_projected_width.value(),
+                                                     config.width,
+                                                     model::TensorRole::other);
+                        if (!valid) return valid.error();
+                    }
+                    auto index_ape = validate_float(
+                        prefix + ".indexer_compressor_ape.weight",
+                        {index_projected_width.value(), ratio},
+                        model::TensorRole::other);
+                    if (!index_ape) return index_ape.error();
+                    auto index_norm = validate_float(
+                        prefix + ".indexer_compressor_norm.weight",
+                        {config.index_head_width},
+                        model::TensorRole::normalization);
+                    if (!index_norm) return index_norm.error();
+                }
+            }
+
+            std::size_t actual_layer_tensors = 0U;
+            for (const auto& tensor : report.catalog.tensors) {
+                if (tensor.layer.has_value() && *tensor.layer == layer &&
+                    tensor.role != model::TensorRole::routed_expert) {
+                    ++actual_layer_tensors;
+                }
+            }
+            const std::size_t expected_layer_tensors = result.tensors - before_layer;
+            if (actual_layer_tensors != expected_layer_tensors) {
+                return make_error(
+                    ErrorCode::invalid_format,
+                    "DeepSeek 0731 layer contains an unexpected non-routed tensor set",
+                    std::to_string(layer));
+            }
+            ++result.layers;
+        }
+
+        if ((report.layer_trunk_planned_layers != 0U &&
+             report.layer_trunk_planned_layers != result.layers) ||
+            (report.layer_trunk_tensor_count != 0U &&
+             report.layer_trunk_tensor_count != result.tensors) ||
+            (report.reference_storage_types_complete &&
+             (report.reference_storage_type_covered_tensor_count != result.tensors ||
+              report.reference_storage_type_covered_bytes != result.bytes ||
+              report.reference_storage_type_unsupported_tensor_count != 0U ||
+              report.reference_storage_type_unsupported_bytes != 0U))) {
+            return make_error(
+                ErrorCode::integrity_error,
+                "DeepSeek 0731 validated layer catalog disagrees with planning totals");
+        }
+        return result;
+    } catch (const std::bad_alloc&) {
+        return make_error(
+            ErrorCode::resource_exhausted,
+            "Unable to allocate the bounded DeepSeek 0731 all-layer catalog validation");
+    }
 }
 
 Result<DeepseekV4ReferenceLayerTrunk>

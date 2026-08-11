@@ -255,6 +255,17 @@ deepseek_v4_bind_0731_gguf_layer0_trunk(
     const DeepseekV4LoadedTrunkTensorSet& tensors,
     const DeepseekV4ReferenceConfig& config);
 
+// The same adapter for any layer of the pinned checkpoint. Layer 0 has 21 always-active tensors;
+// deeper layers add a learned-router bias instead of the hash table, an attention compressor when
+// their compression ratio is non-zero, and an indexer as well at ratio 4. Every loaded tensor must
+// reach a consumer, so a layer whose set does not match its declared layout is refused rather than
+// partially bound.
+[[nodiscard]] Result<DeepseekV4ReferenceLayerTrunk>
+deepseek_v4_bind_0731_gguf_layer_trunk(
+    const DeepseekV4LoadedTrunkTensorSet& tensors,
+    const DeepseekV4ReferenceConfig& config,
+    std::size_t layer);
+
 struct DeepseekV4ReferenceGlobals {
     std::map<std::string, DeepseekV4PackedMatrix, std::less<>> matrices;
     std::map<std::string, DeepseekV4PackedFloatTensor, std::less<>> float_tensors;

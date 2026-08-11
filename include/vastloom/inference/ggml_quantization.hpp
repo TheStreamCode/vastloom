@@ -135,6 +135,21 @@ struct RoutedExpertScratch {
     std::span<float> output,
     const QuantizedKernelLimits& limits = {});
 
+// Decodes complete little-endian GGML IQ2_XXS blocks into caller-owned FP32 storage.
+[[nodiscard]] Result<void> dequantize_iq2_xxs(
+    std::span<const std::byte> encoded,
+    std::span<float> output,
+    const QuantizedKernelLimits& limits = {});
+
+// Reference matrix-vector product for consecutive GGML IQ2_XXS rows.
+[[nodiscard]] Result<void> matvec_iq2_xxs_f32(
+    std::span<const std::byte> encoded_matrix,
+    std::size_t rows,
+    std::size_t columns,
+    std::span<const float> input,
+    std::span<float> output,
+    const QuantizedKernelLimits& limits = {});
+
 // Decodes complete little-endian GGML IQ1_S blocks into caller-owned FP32 storage.
 [[nodiscard]] Result<void> dequantize_iq1_s(
     std::span<const std::byte> encoded,

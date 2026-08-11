@@ -14,11 +14,15 @@
 namespace vastloom::inference {
 namespace {
 
-// The IQ1_S codebook is derived from ggml commit
+// The immutable IQ codebooks are derived from ggml commit
 // 30bf8685ed4eb0a47f2b06229543327749904150 under its MIT license. See NOTICE and
-// third_party/ggml/LICENSE. Keeping the immutable codebook local avoids a runtime dependency.
+// third_party/ggml/LICENSE. Keeping them local avoids a runtime dependency.
 constexpr std::array<std::uint64_t, 2'048U> kIq1SGrid{
 #include "iq1s_grid.inc"
+};
+
+constexpr std::array<std::uint64_t, 256U> kIq2XxsGrid{
+#include "iq2xxs_grid.inc"
 };
 
 constexpr std::array<std::uint32_t, 256U> kIq3XxsGrid{
@@ -37,6 +41,19 @@ consteval std::uint64_t iq1_s_grid_fingerprint() {
 }
 
 static_assert(iq1_s_grid_fingerprint() == UINT64_C(0x6703ed863501ae2e));
+
+consteval std::uint64_t iq2_xxs_grid_fingerprint() {
+    std::uint64_t hash = UINT64_C(14695981039346656037);
+    for (const std::uint64_t value : kIq2XxsGrid) {
+        for (unsigned shift = 0U; shift < 64U; shift += 8U) {
+            hash ^= static_cast<std::uint8_t>((value >> shift) & 0xffU);
+            hash *= UINT64_C(1099511628211);
+        }
+    }
+    return hash;
+}
+
+static_assert(iq2_xxs_grid_fingerprint() == UINT64_C(0xbb4ee025b5ac6e8e));
 
 consteval std::uint64_t iq3_xxs_grid_fingerprint() {
     std::uint64_t hash = UINT64_C(14695981039346656037);
@@ -184,6 +201,41 @@ Result<void> decode_iq1_s_block(const std::byte* encoded,
                 const auto value = std::bit_cast<std::int8_t>(raw);
                 output[group * 32U + subblock * 8U + lane] =
                     local_scale * (static_cast<float>(value) + delta);
+            }
+        }
+    }
+    return {};
+}
+
+Result<void> decode_iq2_xxs_block(
+    const std::byte* encoded,
+    std::span<float, kIq2XxsBlockElements> output) {
+    const float scale = fp16_to_float(read_u16_le(encoded));
+    if (!std::isfinite(scale)) {
+        return make_error(ErrorCode::invalid_format,
+                          "IQ2_XXS block scale is not finite");
+    }
+    const std::byte* quantized = encoded + 2U;
+    for (std::size_t group = 0U; group < 8U; ++group) {
+        const std::byte* packed = quantized + group * 8U;
+        const std::uint32_t auxiliary = read_u32_le(packed + 4U);
+        const float local_scale = scale *
+                                  (0.5F + static_cast<float>(auxiliary >> 28U)) * 0.25F;
+        for (std::size_t subblock = 0U; subblock < 4U; ++subblock) {
+            const auto grid_index = std::to_integer<std::uint8_t>(packed[subblock]);
+            const std::uint64_t grid = kIq2XxsGrid[grid_index];
+            const std::uint32_t sign_index =
+                (auxiliary >> static_cast<unsigned>(7U * subblock)) & 127U;
+            const std::uint8_t signs = static_cast<std::uint8_t>(
+                sign_index | ((static_cast<std::uint32_t>(std::popcount(sign_index)) & 1U)
+                              << 7U));
+            const std::size_t base = group * 32U + subblock * 8U;
+            for (std::size_t lane = 0U; lane < 8U; ++lane) {
+                const auto magnitude = static_cast<std::uint8_t>(
+                    (grid >> static_cast<unsigned>(lane * 8U)) & 0xffU);
+                const float sign = (signs & (1U << lane)) != 0U ? -1.0F : 1.0F;
+                output[base + lane] =
+                    local_scale * static_cast<float>(magnitude) * sign;
             }
         }
     }
@@ -672,6 +724,7 @@ bool supports_reference_matvec_ggml_type(std::uint32_t ggml_type) noexcept {
         case kGgmlTypeQ4K:
         case kGgmlTypeQ5K:
         case kGgmlTypeQ6K:
+        case kGgmlTypeIq2Xxs:
         case kGgmlTypeIq3Xxs:
         case kGgmlTypeIq1S:
         case kGgmlTypeBf16: return true;
@@ -711,7 +764,6 @@ Result<std::size_t> ggml_storage_bytes(std::uint32_t ggml_type,
             block_bytes = kQ6KBlockBytes;
             break;
         case kGgmlTypeIq2Xxs:
-            // Layout-only support for mixed 0731 expert metadata.
             block_elements = kIq2XxsBlockElements;
             block_bytes = kIq2XxsBlockBytes;
             break;
@@ -883,6 +935,30 @@ Result<void> matvec_q6_k_f32(std::span<const std::byte> encoded_matrix,
     return matvec_blocked<kQ6KBlockElements, kQ6KBlockBytes>(
         encoded_matrix, rows, columns, input, output, limits, validator,
         decode_q6_k_block);
+}
+
+Result<void> dequantize_iq2_xxs(std::span<const std::byte> encoded,
+                                std::span<float> output,
+                                const QuantizedKernelLimits& limits) {
+    const auto validator = [](std::span<const std::byte> bytes) -> Result<void> {
+        return validate_block_scales(bytes, kIq2XxsBlockBytes);
+    };
+    return dequantize_blocked<kIq2XxsBlockElements, kIq2XxsBlockBytes>(
+        encoded, output, limits, validator, decode_iq2_xxs_block);
+}
+
+Result<void> matvec_iq2_xxs_f32(std::span<const std::byte> encoded_matrix,
+                                std::size_t rows,
+                                std::size_t columns,
+                                std::span<const float> input,
+                                std::span<float> output,
+                                const QuantizedKernelLimits& limits) {
+    const auto validator = [](std::span<const std::byte> bytes) -> Result<void> {
+        return validate_block_scales(bytes, kIq2XxsBlockBytes);
+    };
+    return matvec_blocked<kIq2XxsBlockElements, kIq2XxsBlockBytes>(
+        encoded_matrix, rows, columns, input, output, limits, validator,
+        decode_iq2_xxs_block);
 }
 
 Result<void> dequantize_iq1_s(std::span<const std::byte> encoded,
@@ -1136,6 +1212,7 @@ Result<void> dequantize_ggml_row_f32(
         case kGgmlTypeQ4K: return dequantize_q4_k(encoded_row, output, limits);
         case kGgmlTypeQ5K: return dequantize_q5_k(encoded_row, output, limits);
         case kGgmlTypeQ6K: return dequantize_q6_k(encoded_row, output, limits);
+        case kGgmlTypeIq2Xxs: return dequantize_iq2_xxs(encoded_row, output, limits);
         case kGgmlTypeIq3Xxs: return dequantize_iq3_xxs(encoded_row, output, limits);
         case kGgmlTypeIq1S: return dequantize_iq1_s(encoded_row, output, limits);
         case kGgmlTypeBf16: return dequantize_bf16(encoded_row, output, limits);
@@ -1190,6 +1267,10 @@ Result<void> matvec_ggml_f32_transactional(
             break;
         case kGgmlTypeQ6K:
             status = matvec_q6_k_f32(
+                encoded_matrix, rows, columns, input, scratch, limits);
+            break;
+        case kGgmlTypeIq2Xxs:
+            status = matvec_iq2_xxs_f32(
                 encoded_matrix, rows, columns, input, scratch, limits);
             break;
         case kGgmlTypeIq3Xxs:

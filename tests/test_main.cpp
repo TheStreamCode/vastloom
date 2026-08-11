@@ -1110,6 +1110,7 @@ void test_trunk_storage_reference_kernels() {
              vastloom::inference::kGgmlTypeQ4K,
              vastloom::inference::kGgmlTypeQ5K,
              vastloom::inference::kGgmlTypeQ6K,
+             vastloom::inference::kGgmlTypeIq2Xxs,
              vastloom::inference::kGgmlTypeIq3Xxs,
              vastloom::inference::kGgmlTypeIq1S,
              vastloom::inference::kGgmlTypeBf16}) {
@@ -1121,10 +1122,6 @@ void test_trunk_storage_reference_kernels() {
         vastloom::inference::kGgmlTypeI32));
     CHECK(vastloom::inference::supports_reference_storage_ggml_type(
         vastloom::inference::kGgmlTypeI32));
-    CHECK(!vastloom::inference::supports_reference_matvec_ggml_type(
-        vastloom::inference::kGgmlTypeIq2Xxs));
-    CHECK(!vastloom::inference::supports_reference_storage_ggml_type(
-        vastloom::inference::kGgmlTypeIq2Xxs));
     CHECK(!vastloom::inference::supports_reference_matvec_ggml_type(
         vastloom::inference::kGgmlTypeMxfp4));
     CHECK(!vastloom::inference::supports_reference_storage_ggml_type(
@@ -1344,6 +1341,101 @@ void test_iq1_s_reference_kernel() {
     CHECK(decoded == unchanged);
     input[0] = std::numeric_limits<float>::quiet_NaN();
     CHECK(!vastloom::inference::matvec_iq1_s_f32(encoded, 3U, 512U, input, output));
+}
+
+void test_iq2_xxs_reference_kernel() {
+    constexpr std::array<std::uint16_t, 6U> scales{
+        0x3c00U, 0xb800U, 0x3555U, 0x4000U, 0x0400U, 0x0001U};
+    std::vector<std::byte> encoded(
+        scales.size() * vastloom::inference::kIq2XxsBlockBytes);
+    for (std::size_t block = 0U; block < scales.size(); ++block) {
+        const std::size_t base = block * vastloom::inference::kIq2XxsBlockBytes;
+        encoded[base] = static_cast<std::byte>(scales[block] & 0xffU);
+        encoded[base + 1U] = static_cast<std::byte>(scales[block] >> 8U);
+        for (std::size_t index = 0U; index < 32U; ++index) {
+            const auto packed = static_cast<std::uint16_t>(
+                (block * 733U + index * 977U + 0x1234U) & 0xffffU);
+            encoded[base + 2U + index * 2U] =
+                static_cast<std::byte>(packed & 0xffU);
+            encoded[base + 3U + index * 2U] =
+                static_cast<std::byte>(packed >> 8U);
+        }
+    }
+
+    std::vector<float> decoded(scales.size() * vastloom::inference::kIq2XxsBlockElements);
+    auto status = vastloom::inference::dequantize_iq2_xxs(encoded, decoded);
+    CHECK(status);
+    std::uint64_t hash = UINT64_C(14695981039346656037);
+    for (const float value : decoded) {
+        const std::uint32_t bits = std::bit_cast<std::uint32_t>(value);
+        for (unsigned shift = 0U; shift < 32U; shift += 8U) {
+            hash ^= static_cast<std::uint8_t>((bits >> shift) & 0xffU);
+            hash *= UINT64_C(1099511628211);
+        }
+    }
+    CHECK(hash == UINT64_C(0x9bca8e03f48dafe9));
+    CHECK(decoded[0] == 9.375F && decoded[7] == 3.0F && decoded[8] == -16.125F &&
+          decoded[31] == -3.0F && decoded[32] == 5.0F && decoded[63] == -5.0F &&
+          decoded[127] == -9.0F && decoded[255] == 17.0F &&
+          decoded[256] == 2.5F && decoded[511] == 8.5F);
+
+    std::vector<float> input(512U);
+    for (std::size_t column = 0U; column < input.size(); ++column) {
+        const int centered = static_cast<int>(column % 29U) - 14;
+        input[column] = static_cast<float>(centered) * 0.03125F +
+                        static_cast<float>(column % 3U) * 0.0078125F;
+    }
+    std::array<float, 3U> output{};
+    auto multiplied = vastloom::inference::matvec_iq2_xxs_f32(
+        encoded, 3U, 512U, input, output);
+    CHECK(multiplied);
+    CHECK(output[0] == -32.86767578125F);
+    CHECK(output[1] == -284.89828491210938F);
+    CHECK(std::abs(output[2] - (-0.011499286629259586F)) <= 1.0e-9F);
+
+    std::vector<float> row(512U);
+    CHECK(vastloom::inference::dequantize_ggml_row_f32(
+        vastloom::inference::kGgmlTypeIq2Xxs, encoded, 3U, 512U, 1U, row));
+    CHECK(std::equal(row.begin(), row.end(), decoded.begin() + 512));
+
+    std::array<float, 3U> scratch{};
+    std::array<float, 3U> published{17.0F, 17.0F, 17.0F};
+    CHECK(vastloom::inference::matvec_ggml_f32_transactional(
+        vastloom::inference::kGgmlTypeIq2Xxs, encoded, 3U, 512U, input,
+        scratch, published));
+    CHECK(published == output);
+
+    auto truncated = encoded;
+    truncated.pop_back();
+    CHECK(!vastloom::inference::dequantize_iq2_xxs(truncated, decoded));
+    CHECK(!vastloom::inference::dequantize_iq2_xxs(encoded, std::span<float>{}));
+    vastloom::inference::QuantizedKernelLimits small_limits;
+    small_limits.max_elements = 256U;
+    CHECK(!vastloom::inference::dequantize_iq2_xxs(encoded, decoded, small_limits));
+    CHECK(!vastloom::inference::matvec_iq2_xxs_f32(encoded, 3U, 255U, input, output));
+    CHECK(!vastloom::inference::matvec_iq2_xxs_f32(truncated, 3U, 512U, input, output));
+    CHECK(!vastloom::inference::dequantize_ggml_row_f32(
+        vastloom::inference::kGgmlTypeIq2Xxs, encoded, 3U, 512U, 3U, row));
+
+    auto invalid_scale = encoded;
+    invalid_scale[4U * vastloom::inference::kIq2XxsBlockBytes] = std::byte{0x00U};
+    invalid_scale[4U * vastloom::inference::kIq2XxsBlockBytes + 1U] = std::byte{0x7cU};
+    auto unchanged = decoded;
+    CHECK(!vastloom::inference::dequantize_iq2_xxs(invalid_scale, decoded));
+    CHECK(decoded == unchanged);
+    const auto unchanged_row = row;
+    CHECK(!vastloom::inference::dequantize_ggml_row_f32(
+        vastloom::inference::kGgmlTypeIq2Xxs, invalid_scale, 3U, 512U, 2U, row));
+    CHECK(row == unchanged_row);
+    std::fill(published.begin(), published.end(), 17.0F);
+    CHECK(!vastloom::inference::matvec_ggml_f32_transactional(
+        vastloom::inference::kGgmlTypeIq2Xxs, invalid_scale, 3U, 512U, input,
+        scratch, published));
+    CHECK(std::all_of(published.begin(), published.end(),
+                      [](float value) { return value == 17.0F; }));
+    input[0] = std::numeric_limits<float>::quiet_NaN();
+    CHECK(!vastloom::inference::matvec_iq2_xxs_f32(
+        encoded, 3U, 512U, input, output));
 }
 
 void test_iq3_xxs_reference_kernel() {
@@ -3238,6 +3330,26 @@ void test_deepseek_v4_reference_graph(const std::filesystem::path& root) {
         }
         return encoded;
     };
+    const auto make_iq2_xxs = [](std::size_t rows, std::size_t salt) {
+        std::vector<std::byte> encoded(
+            rows * vastloom::inference::kIq2XxsBlockBytes);
+        for (std::size_t row = 0U; row < rows; ++row) {
+            const std::size_t base =
+                row * vastloom::inference::kIq2XxsBlockBytes;
+            encoded[base] = std::byte{0x00U};
+            encoded[base + 1U] = std::byte{0x20U};
+            for (std::size_t index = 0U; index < 32U; ++index) {
+                const auto packed = static_cast<std::uint16_t>(
+                    (salt * 431U + row * 733U + index * 977U + 0x1234U) &
+                    0xffffU);
+                encoded[base + 2U + index * 2U] =
+                    static_cast<std::byte>(packed & 0xffU);
+                encoded[base + 3U + index * 2U] =
+                    static_cast<std::byte>(packed >> 8U);
+            }
+        }
+        return encoded;
+    };
     const auto make_iq3_xxs = [](std::size_t rows, std::size_t salt) {
         std::vector<std::byte> encoded(
             rows * vastloom::inference::kIq3XxsBlockBytes);
@@ -3473,6 +3585,91 @@ void test_deepseek_v4_reference_graph(const std::filesystem::path& root) {
             truncated_route.packed_integer_tensors.at(hash_table_name).encoded.pop_back();
             CHECK(!vastloom::inference::deepseek_v4_reference_prefill(
                 truncated_route, token_ids));
+        }
+
+        // Exercise the alternate IQ2_XXS gate/up variant admitted by the official profile.
+        // Replacing every routed W1/W3 matrix guarantees that every selected route traverses
+        // IQ2_XXS; the independently dequantized graph remains the numerical oracle.
+        auto iq2_graph = packed_graph;
+        auto iq2_oracle = quantized_oracle;
+        bool iq2_graph_ok = true;
+        for (std::size_t expert = 0U; expert < config.expert_count; ++expert) {
+            for (const std::string_view weight : {"w1", "w3"}) {
+                const std::string name =
+                    "layers.0.ffn.experts." + std::to_string(expert) + "." +
+                    std::string(weight) + ".weight";
+                const auto spec = std::find_if(
+                    layer_matrices.begin(), layer_matrices.end(),
+                    [&name](const MatrixSpec& candidate) {
+                        return candidate.name == name;
+                    });
+                CHECK(spec != layer_matrices.end());
+                if (spec == layer_matrices.end()) {
+                    iq2_graph_ok = false;
+                    break;
+                }
+                auto encoded = make_iq2_xxs(
+                    spec->rows, expert * 2U + (weight == "w3" ? 2U : 1U));
+                std::vector<float> padded(
+                    spec->rows * vastloom::inference::kIq2XxsBlockElements);
+                auto decoded = vastloom::inference::dequantize_iq2_xxs(
+                    encoded, padded);
+                CHECK(decoded);
+                if (!decoded) {
+                    iq2_graph_ok = false;
+                    break;
+                }
+                std::vector<float> logical(spec->rows * spec->columns);
+                for (std::size_t row = 0U; row < spec->rows; ++row) {
+                    std::copy_n(
+                        padded.begin() + static_cast<std::ptrdiff_t>(
+                            row * vastloom::inference::kIq2XxsBlockElements),
+                        spec->columns,
+                        logical.begin() + static_cast<std::ptrdiff_t>(
+                            row * spec->columns));
+                }
+                iq2_oracle.float_tensors[name] = std::move(logical);
+                iq2_graph.packed_matrices[name] =
+                    vastloom::inference::DeepseekV4PackedMatrix{
+                        vastloom::inference::kGgmlTypeIq2Xxs,
+                        spec->rows, spec->columns,
+                        vastloom::inference::kIq2XxsBlockElements,
+                        std::move(encoded)};
+            }
+            if (!iq2_graph_ok) break;
+        }
+        if (iq2_graph_ok) {
+            vastloom::inference::DeepseekV4ReferenceState iq2_oracle_state;
+            vastloom::inference::DeepseekV4ReferenceState iq2_state;
+            auto expected_iq2 = vastloom::inference::deepseek_v4_reference_prefill(
+                iq2_oracle, token_ids, &iq2_oracle_state);
+            auto actual_iq2 = vastloom::inference::deepseek_v4_reference_prefill(
+                iq2_graph, token_ids, &iq2_state);
+            CHECK(expected_iq2 && actual_iq2);
+            if (expected_iq2 && actual_iq2) {
+                compare_packed_forward(actual_iq2.value(), expected_iq2.value());
+                auto expected_iq2_decode =
+                    vastloom::inference::deepseek_v4_reference_decode(
+                        iq2_oracle, 10U, iq2_oracle_state);
+                auto actual_iq2_decode =
+                    vastloom::inference::deepseek_v4_reference_decode(
+                        iq2_graph, 10U, iq2_state);
+                CHECK(expected_iq2_decode && actual_iq2_decode);
+                if (expected_iq2_decode && actual_iq2_decode) {
+                    compare_packed_forward(actual_iq2_decode.value(),
+                                           expected_iq2_decode.value());
+                }
+            }
+            auto corrupt_iq2 = iq2_graph;
+            for (auto& entry : corrupt_iq2.packed_matrices) {
+                auto& matrix = entry.second;
+                if (matrix.ggml_type == vastloom::inference::kGgmlTypeIq2Xxs) {
+                    matrix.encoded[0] = std::byte{0x00U};
+                    matrix.encoded[1] = std::byte{0x7cU};
+                }
+            }
+            CHECK(!vastloom::inference::deepseek_v4_reference_prefill(
+                corrupt_iq2, token_ids));
         }
 
         // Persist the exact packed fixture, load trunk tensors as complete bounded tiles and
@@ -5952,6 +6149,7 @@ int main() {
     test_gguf(root);
     test_trunk_storage_reference_kernels();
     test_iq1_s_reference_kernel();
+    test_iq2_xxs_reference_kernel();
     test_iq3_xxs_reference_kernel();
     test_quantized_routed_expert_contract();
     test_logical_tensor_catalog();

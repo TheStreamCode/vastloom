@@ -222,6 +222,29 @@ load_deepseek_v4_bound_trunk_tensor_set(
     safety::ResourceGovernor& governor,
     const model::BoundRangeSetLoadOptions& options = {});
 
+struct DeepseekV4CatalogRelocation {
+    model::LogicalTensorCatalog catalog;
+    std::size_t relocated_tensors{0U};
+    std::size_t relocated_expert_bundles{0U};
+    ByteCount relocated_bytes{0U};
+};
+
+// Rewrites a verified catalog so the tensors present in imported range artifacts read from those
+// local files instead of from the complete checkpoint object.
+//
+// Every consumer downstream - expert bindings, the bounded cache, the reference graph - already
+// works from catalog source ranges. Relocating those ranges is therefore all that separates
+// "payload imported" from "payload executable", and it keeps one catalog rather than a parallel
+// local-only representation.
+//
+// Tensors absent from the supplied artifacts keep their original source and stay unreadable, which
+// is what makes a partial import safe to execute against: touching one of them fails on a missing
+// file rather than silently reading the wrong bytes. Each artifact range must match exactly one
+// catalog tensor by source object, offset and length, or the relocation fails.
+[[nodiscard]] Result<DeepseekV4CatalogRelocation> deepseek_v4_relocate_catalog_to_artifacts(
+    const model::LogicalTensorCatalog& catalog,
+    std::span<const model::RangeArtifact> artifacts);
+
 // The authoritative expert selection of one token in a hash-routed layer.
 struct DeepseekV4HashRouteResolution {
     std::uint32_t layer{0U};

@@ -45,6 +45,8 @@ set(VASTLOOM_DEEPSEEK_V4_GGUF_HEADER "" CACHE FILEPATH
     "Optional pinned DeepSeek V4 Flash 0731 GGUF split-zero metadata shard")
 set(VASTLOOM_DEEPSEEK_V4_TRUNK_ARTIFACT "" CACHE PATH
     "Optional imported vastloom.range-artifact.v1 directory holding the official layer-0 trunk")
+set(VASTLOOM_DEEPSEEK_V4_EXPERT_ARTIFACT "" CACHE PATH
+    "Optional imported vastloom.range-artifact.v1 directory holding the selected expert bundles")
 set(VASTLOOM_DEEPSEEK_V4_GLOBALS_ARTIFACT "" CACHE PATH
     "Optional imported vastloom.range-artifact.v1 directory holding the official global tensors")
 set(VASTLOOM_DEEPSEEK_V4_GGUF_CHECKPOINT "" CACHE PATH
@@ -410,6 +412,25 @@ if(BUILD_TESTING AND VASTLOOM_BUILD_TESTS)
                 )
                 set_tests_properties(vastloom_deepseek_v4_trunk_payload_load PROPERTIES
                     TIMEOUT 600
+                    RUN_SERIAL TRUE
+                )
+            endif()
+            if(VASTLOOM_DEEPSEEK_V4_TRUNK_ARTIFACT AND
+               VASTLOOM_DEEPSEEK_V4_EXPERT_ARTIFACT AND
+               VASTLOOM_DEEPSEEK_V4_GLOBALS_ARTIFACT)
+                add_test(
+                    NAME vastloom_deepseek_v4_official_layer_probe
+                    COMMAND ${Python3_EXECUTABLE}
+                        ${CMAKE_CURRENT_SOURCE_DIR}/tests/test_deepseek_gguf_contract.py
+                        --vastloom $<TARGET_FILE:vastloom>
+                        --model ${VASTLOOM_DEEPSEEK_V4_GGUF_CHECKPOINT}
+                        --artifact ${VASTLOOM_DEEPSEEK_V4_TRUNK_ARTIFACT}
+                        --experts ${VASTLOOM_DEEPSEEK_V4_EXPERT_ARTIFACT}
+                        --globals ${VASTLOOM_DEEPSEEK_V4_GLOBALS_ARTIFACT}
+                        --command layer-probe
+                )
+                set_tests_properties(vastloom_deepseek_v4_official_layer_probe PROPERTIES
+                    TIMEOUT 900
                     RUN_SERIAL TRUE
                 )
             endif()

@@ -25,6 +25,7 @@
 #include "vastloom/cuda/cuda_rms_norm.hpp"
 #include "vastloom/hardware/hardware_probe.hpp"
 #include "vastloom/inference/gpt2_tokenizer.hpp"
+#include "vastloom/inference/deepseek_v4_expert_provider.hpp"
 #include "vastloom/inference/deepseek_v4_gguf.hpp"
 #include "vastloom/inference/deepseek_v4_range_artifact.hpp"
 #include "vastloom/inference/deepseek_v4_model.hpp"
@@ -278,6 +279,10 @@ void print_help() {
         << "      Plan the exact six checkpoint-global tensors; never fetch or execute them.\n\n"
         << "  range-artifact-inspect ARTIFACT_DIRECTORY [--no-verify] [--json]\n"
         << "      Validate a bounded immutable range artifact; never promotes it to execution.\n\n"
+        << "  deepseek-layer-probe MODEL_DIRECTORY TRUNK_ARTIFACT EXPERT_ARTIFACT GLOBAL_ARTIFACT"
+           " [--token ID] [--json]\n"
+        << "      Execute one real layer from imported payload. This is one layer of 43, not the\n"
+        << "      model's output; the logits it prints are the first layer's alone.\n\n"
         << "  deepseek-gguf-range-bind MODEL_DIRECTORY ARTIFACT_DIRECTORY --layer N --experts CSV"
            " [--tile-size SIZE] [--context N] [--batch-size N] [--json]\n"
         << "      Rehash and bind a trunk artifact to pinned DeepSeek metadata; still non-executing.\n\n"
@@ -1374,6 +1379,242 @@ int command_deepseek_gguf_global_bind(const std::vector<std::string>& args) {
     return 0;
 }
 
+// Executes one real DeepSeek layer from imported payload.
+//
+// The graph this builds is a single layer plus the checkpoint's own embedding, normalization and
+// output head. That is deliberately not the model: the real network is 43 layers deep, and the
+// logits below are what the first layer alone produces. What it does establish is that the official
+// quantized weights - Q8_0 attention, Q5_K/Q6_K shared expert, BF16 router, IQ1_S/IQ3_XXS routed
+// experts, the I32 routing table and the Q4_K embedding - execute together through the native
+// kernels on real payload, with the router choosing the experts.
+int command_deepseek_layer_probe(const std::vector<std::string>& args) {
+    const bool json = has_flag(args, "--json");
+    auto valid = validate_options(
+        args, 4U, {"--token", "--context", "--batch-size"}, {"--json"});
+    if (!valid) return print_error(valid.error(), json);
+    if (args.size() < 4U) {
+        return print_error(
+            vastloom::make_error(
+                vastloom::ErrorCode::invalid_argument,
+                "deepseek-layer-probe requires MODEL_DIRECTORY TRUNK_ARTIFACT EXPERT_ARTIFACT "
+                "GLOBAL_ARTIFACT"),
+            json);
+    }
+    for (std::size_t index = 0U; index < 4U; ++index) {
+        if (vastloom::util::starts_with(args[index], "--")) {
+            return print_error(
+                vastloom::make_error(vastloom::ErrorCode::invalid_argument,
+                                     "deepseek-layer-probe requires four directories first"),
+                json);
+        }
+    }
+    auto token = optional_size(args, "--token", 0U);
+    auto context = optional_size(args, "--context", 4'096U);
+    auto batch_size = optional_size(args, "--batch-size", 1U);
+    if (!token) return print_error(token.error(), json);
+    if (!context) return print_error(context.error(), json);
+    if (!batch_size) return print_error(batch_size.error(), json);
+    if (token.value() > std::numeric_limits<std::uint32_t>::max() ||
+        context.value() == 0U || context.value() > 1'048'576U ||
+        batch_size.value() == 0U || batch_size.value() > 8U) {
+        return print_error(
+            vastloom::make_error(vastloom::ErrorCode::invalid_argument,
+                                 "DeepSeek layer probe bounds are invalid"),
+            json);
+    }
+
+    const auto checkpoint_root = cli_path(args[0]);
+    auto hardware = vastloom::hardware::HardwareProbe::collect(checkpoint_root);
+    if (!hardware) return print_error(hardware.error(), json);
+    auto policy = vastloom::safety::make_safe_runtime_policy(hardware.value());
+    if (!policy) return print_error(policy.error(), json);
+    auto process_guard = vastloom::safety::ProcessSafetyGuard::apply(policy.value());
+    if (!process_guard) return print_error(process_guard.error(), json);
+
+    vastloom::inference::DeepseekV4GgufCheckpointInspectOptions inspect_options;
+    inspect_options.verify_hashes = true;
+    inspect_options.context_tokens = static_cast<std::uint32_t>(context.value());
+    inspect_options.batch_size = static_cast<std::uint32_t>(batch_size.value());
+    inspect_options.safe_ram_cap_bytes = policy.value().resources.host_memory_hard_limit;
+    inspect_options.safe_vram_cap_bytes = policy.value().resources.vram_hard_limit;
+    const auto& spec = vastloom::inference::pinned_deepseek_v4_flash_0731_iq1s_checkpoint();
+    auto report = vastloom::inference::inspect_deepseek_v4_gguf_checkpoint(
+        checkpoint_root, spec, inspect_options);
+    if (!report) return print_error(report.error(), json);
+    auto config = vastloom::inference::deepseek_v4_reference_config_from_0731_gguf(report.value());
+    if (!config) return print_error(config.error(), json);
+
+    std::vector<vastloom::model::RangeArtifact> artifacts;
+    for (std::size_t index = 1U; index < 4U; ++index) {
+        auto artifact = vastloom::model::verify_range_artifact(cli_path(args[index]));
+        if (!artifact) return print_error(artifact.error(), json);
+        artifacts.push_back(artifact.take_value());
+    }
+    auto relocated = vastloom::inference::deepseek_v4_relocate_catalog_to_artifacts(
+        report.value().catalog, artifacts);
+    if (!relocated) return print_error(relocated.error(), json);
+
+    vastloom::safety::ResourceGovernor governor(policy.value().resources);
+
+    // Bind the trunk and globals through their verified artifact paths, exactly as the two
+    // --load-tensor-set gates do, then hand the packed results to a one-layer graph.
+    auto trunk_plan = vastloom::inference::build_deepseek_v4_layer_probe_plan(
+        report.value(), 0U, std::array<std::uint32_t, 6U>{35U, 53U, 200U, 222U, 245U, 254U},
+        vastloom::model::kDefaultLayerStreamingTileBytes);
+    if (!trunk_plan) return print_error(trunk_plan.error(), json);
+    auto trunk_binding = vastloom::inference::bind_deepseek_v4_trunk_range_artifact(
+        artifacts[0], report.value(), trunk_plan.value(), spec);
+    if (!trunk_binding) return print_error(trunk_binding.error(), json);
+    auto trunk_set_id = vastloom::inference::deepseek_v4_bound_trunk_tensor_set_logical_id(
+        trunk_binding.value());
+    if (!trunk_set_id) return print_error(trunk_set_id.error(), json);
+    auto trunk_residency = vastloom::model::ResidencyObject::create(
+        trunk_set_id.take_value(), trunk_binding.value().payload_bytes);
+    if (!trunk_residency) return print_error(trunk_residency.error(), json);
+    vastloom::model::BoundRangeSetLoadOptions trunk_options;
+    trunk_options.max_total_bytes = trunk_binding.value().payload_bytes;
+    trunk_options.max_range_bytes = trunk_binding.value().maximum_local_range_bytes;
+    trunk_options.max_ranges = trunk_binding.value().ranges.size();
+    auto trunk_tensors = vastloom::inference::load_deepseek_v4_bound_trunk_tensor_set(
+        trunk_binding.value(), report.value(), trunk_residency.value(), governor, trunk_options);
+    if (!trunk_tensors) return print_error(trunk_tensors.error(), json);
+    auto trunk = vastloom::inference::deepseek_v4_bind_0731_gguf_layer0_trunk(
+        trunk_tensors.value(), config.value());
+    if (!trunk) return print_error(trunk.error(), json);
+
+    auto global_plan = vastloom::inference::build_deepseek_v4_global_tensor_plan(report.value());
+    if (!global_plan) return print_error(global_plan.error(), json);
+    auto global_binding = vastloom::inference::bind_deepseek_v4_global_range_artifact(
+        artifacts[2], report.value(), global_plan.value(), spec);
+    if (!global_binding) return print_error(global_binding.error(), json);
+    auto global_set_id = vastloom::inference::deepseek_v4_bound_global_tensor_set_logical_id(
+        global_binding.value());
+    if (!global_set_id) return print_error(global_set_id.error(), json);
+    auto global_residency = vastloom::model::ResidencyObject::create(
+        global_set_id.take_value(), global_binding.value().payload_bytes);
+    if (!global_residency) return print_error(global_residency.error(), json);
+    vastloom::model::BoundRangeSetLoadOptions global_options;
+    global_options.max_total_bytes = global_binding.value().payload_bytes;
+    global_options.max_range_bytes = global_binding.value().maximum_local_range_bytes;
+    global_options.max_ranges = global_binding.value().ranges.size();
+    auto global_tensors = vastloom::inference::load_deepseek_v4_bound_global_tensor_set(
+        global_binding.value(), report.value(), global_residency.value(), governor,
+        global_options);
+    if (!global_tensors) return print_error(global_tensors.error(), json);
+    auto globals = vastloom::inference::deepseek_v4_bind_0731_gguf_globals(
+        global_tensors.value(), config.value());
+    if (!globals) return print_error(globals.error(), json);
+
+    // The routed experts come from the relocated catalog, so the bounded cache streams them out of
+    // the imported artifact instead of the absent 82 GB checkpoint.
+    auto expert_bindings = vastloom::inference::deepseek_v4_make_gguf_expert_bindings(
+        relocated.value().catalog, 0U, report.value().experts_per_layer, config.value().width,
+        config.value().intermediate_width);
+    if (!expert_bindings) return print_error(expert_bindings.error(), json);
+    vastloom::inference::DeepseekV4ExpertCacheOptions cache_options;
+    cache_options.block_prefix = "layers.0.ffn";
+    cache_options.max_cached_experts = 6U;
+    cache_options.max_experts_per_request = 6U;
+    auto cache = vastloom::inference::DeepseekV4BoundedExpertCache::create(
+        expert_bindings.take_value(), governor, cache_options);
+    if (!cache) return print_error(cache.error(), json);
+
+    // One layer of the real configuration: every dimension, schedule and epsilon stays as the
+    // checkpoint declares it, only the depth is cut to what has been imported. Layer 0 is
+    // hash-routed, so the reduced hash-layer count stays 1.
+    auto layer_config = config.value();
+    layer_config.layer_count = 1U;
+    layer_config.hash_layer_count = std::min<std::size_t>(layer_config.hash_layer_count, 1U);
+    layer_config.mtp_layer_count = 0U;
+    layer_config.mtp_compression_ratios.clear();
+    layer_config.compression_ratios.resize(1U);
+    if (!layer_config.routed_expert_swiglu_limits.empty()) {
+        layer_config.routed_expert_swiglu_limits.resize(1U);
+    }
+    if (!layer_config.shared_expert_swiglu_limits.empty()) {
+        layer_config.shared_expert_swiglu_limits.resize(1U);
+    }
+
+    vastloom::inference::DeepseekV4ReferenceGraph graph;
+    graph.config = std::move(layer_config);
+    for (auto& [name, matrix] : trunk.value().matrices) {
+        graph.packed_matrices.emplace(name, std::move(matrix));
+    }
+    for (auto& [name, tensor] : trunk.value().float_tensors) {
+        graph.packed_float_tensors.emplace(name, std::move(tensor));
+    }
+    for (auto& [name, tensor] : trunk.value().integer_tensors) {
+        graph.packed_integer_tensors.emplace(name, std::move(tensor));
+    }
+    for (auto& [name, matrix] : globals.value().matrices) {
+        graph.packed_matrices.emplace(name, std::move(matrix));
+    }
+    for (auto& [name, tensor] : globals.value().float_tensors) {
+        graph.packed_float_tensors.emplace(name, std::move(tensor));
+    }
+    graph.expert_providers.emplace("layers.0.ffn", cache.value()->provider_binding());
+
+    const std::array<std::uint32_t, 1U> token_ids{static_cast<std::uint32_t>(token.value())};
+    const auto started = std::chrono::steady_clock::now();
+    auto forward = vastloom::inference::deepseek_v4_reference_prefill(graph, token_ids);
+    if (!forward) return print_error(forward.error(), json);
+    const auto elapsed = std::chrono::duration<double, std::milli>(
+        std::chrono::steady_clock::now() - started).count();
+
+    const auto snapshot = cache.value()->snapshot();
+    std::vector<std::uint32_t> executed_experts;
+    if (!forward.value().layers.empty()) {
+        for (const auto& access : forward.value().layers.front().expert_accesses) {
+            executed_experts.push_back(access.expert_id);
+        }
+    }
+    double logit_minimum = 0.0;
+    double logit_maximum = 0.0;
+    if (!forward.value().logits.empty()) {
+        const auto [low, high] = std::minmax_element(forward.value().logits.begin(),
+                                                     forward.value().logits.end());
+        logit_minimum = *low;
+        logit_maximum = *high;
+    }
+
+    if (json) {
+        std::cout << "{\"ok\":true,\"complete_model\":false,\"executed_layers\":1"
+                  << ",\"model_layers\":" << config.value().layer_count
+                  << ",\"token\":" << token.value()
+                  << ",\"logits\":" << forward.value().logits.size()
+                  << ",\"logit_minimum\":" << logit_minimum
+                  << ",\"logit_maximum\":" << logit_maximum
+                  << ",\"argmax_token\":" << forward.value().greedy_token_id
+                  << ",\"experts_executed\":[";
+        for (std::size_t index = 0U; index < executed_experts.size(); ++index) {
+            if (index != 0U) std::cout << ',';
+            std::cout << executed_experts[index];
+        }
+        std::cout << "],\"expert_bytes_read\":" << snapshot.logical_bytes_read
+                  << ",\"expert_misses\":" << snapshot.misses
+                  << ",\"trunk_bytes\":" << trunk_tensors.value().payload_bytes()
+                  << ",\"global_bytes\":" << global_tensors.value().payload_bytes()
+                  << ",\"relocated_tensors\":" << relocated.value().relocated_tensors
+                  << ",\"relocated_expert_bundles\":" << relocated.value().relocated_expert_bundles
+                  << ",\"elapsed_ms\":" << elapsed << '}' << '\n';
+    } else {
+        std::cout << "DeepSeek layer probe:  token " << token.value() << '\n'
+                  << "Executed layers:       1 of " << config.value().layer_count
+                  << " (this is not the model's output)\n"
+                  << "Routed experts:        ";
+        for (std::size_t index = 0U; index < executed_experts.size(); ++index) {
+            if (index != 0U) std::cout << ", ";
+            std::cout << executed_experts[index];
+        }
+        std::cout << '\n'
+                  << "Expert bytes read:     " << snapshot.logical_bytes_read << '\n'
+                  << "Logits:                " << forward.value().logits.size()
+                  << " values in [" << logit_minimum << ", " << logit_maximum << "]\n"
+                  << "Elapsed:               " << elapsed << " ms\n";
+    }
+    return 0;
+}
+
 Result<void> write_olmoe_trace_atomic(const std::filesystem::path& path,
                                       const std::vector<vastloom::inference::ExpertTraceEvent>& events) {
     if (path.empty()) return vastloom::make_error(vastloom::ErrorCode::invalid_argument, "OLMoE trace path is empty");
@@ -2051,6 +2292,7 @@ int dispatch_cli(const std::vector<std::string>& arguments) {
         if (command == "deepseek-gguf-global-plan") return command_deepseek_gguf_global_plan(args);
         if (command == "range-artifact-inspect") return command_range_artifact_inspect(args);
         if (command == "deepseek-gguf-range-bind") return command_deepseek_gguf_range_bind(args);
+        if (command == "deepseek-layer-probe") return command_deepseek_layer_probe(args);
         if (command == "deepseek-gguf-global-bind") return command_deepseek_gguf_global_bind(args);
         if (command == "moe-logits") return command_moe_logits(args);
         if (command == "heartbeat-write") return command_heartbeat_write(args);

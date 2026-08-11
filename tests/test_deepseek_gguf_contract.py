@@ -82,6 +82,26 @@ GLOBALS_LOAD_CONTRACT = {
     "execution_supported": False,
 }
 
+# One real layer of 43, executed from official payload: Q8_0 attention, Q5_K/Q6_K shared expert,
+# BF16 router, I32 routing table, IQ1_S/IQ3_XXS routed experts and the Q4_K embedding, with the
+# checkpoint's own router choosing the six experts. These logits are the first layer's, not the
+# model's.
+LAYER_PROBE_CONTRACT = {
+    "complete_model": False,
+    "executed_layers": 1,
+    "model_layers": 43,
+    "token": 0,
+    "logits": 129_280,
+    "argmax_token": 30_528,
+    "experts_executed": [254, 222, 245, 200, 53, 35],
+    "expert_bytes_read": 38_928_384,
+    "expert_misses": 6,
+    "trunk_bytes": 138_867_160,
+    "global_bytes": 596_000_788,
+    "relocated_tensors": 45,
+    "relocated_expert_bundles": 6,
+}
+
 ROUTE_CONTRACT = {
     "layer": 0,
     "expected_top_k": 6,
@@ -121,6 +141,12 @@ COMMANDS = {
         ("deepseek-gguf-global-bind", "{model}", "{artifact}", "--load-tensor-set", "--json"),
         GLOBALS_LOAD_CONTRACT,
     ),
+    "layer-probe": (
+        "0731 official layer-0 execution contract",
+        ("deepseek-layer-probe", "{model}", "{artifact}", "{experts}", "{globals}",
+         "--token", "0", "--json"),
+        LAYER_PROBE_CONTRACT,
+    ),
 }
 
 
@@ -144,21 +170,29 @@ def main() -> int:
     parser.add_argument(
         "--artifact",
         type=Path,
-        help="imported trunk range artifact; required by the route and trunk-load contracts",
+        help="imported trunk range artifact; required by the route, trunk-load and layer contracts",
     )
+    parser.add_argument("--experts", type=Path, help="imported selected-expert range artifact")
+    parser.add_argument("--globals", type=Path, help="imported global range artifact")
     parser.add_argument("--command", choices=sorted(COMMANDS), required=True)
     args = parser.parse_args()
 
     contract, template, expected = COMMANDS[args.command]
-    model = str(args.model.resolve(strict=True))
-    artifact = ""
-    if any("{artifact}" in part for part in template):
-        if args.artifact is None:
-            raise SystemExit(f"{contract} requires --artifact")
-        artifact = str(args.artifact.resolve(strict=True))
+    substitutions = {"model": str(args.model.resolve(strict=True))}
+    for name, value in (
+        ("artifact", args.artifact),
+        ("experts", args.experts),
+        ("globals", args.globals),
+    ):
+        if not any("{" + name + "}" in part for part in template):
+            continue
+        if value is None:
+            raise SystemExit(f"{contract} requires --{name}")
+        substitutions[name] = str(value.resolve(strict=True))
     arguments = [
         str(args.vastloom),
-        *(part.format(model=model, artifact=artifact) for part in template),
+        *(part.format(**{key: substitutions.get(key, "") for key in
+                         ("model", "artifact", "experts", "globals")}) for part in template),
     ]
     process = subprocess.run(
         arguments, check=False, capture_output=True, text=True, encoding="utf-8", timeout=3_600

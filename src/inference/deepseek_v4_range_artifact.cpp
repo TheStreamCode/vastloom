@@ -323,6 +323,105 @@ Result<model::LoadedBoundRange> load_deepseek_v4_bound_trunk_range(
         options);
 }
 
+Result<DeepseekV4CatalogRelocation> deepseek_v4_relocate_catalog_to_artifacts(
+    const model::LogicalTensorCatalog& catalog,
+    std::span<const model::RangeArtifact> artifacts) {
+    if (artifacts.empty()) {
+        return make_error(ErrorCode::invalid_argument,
+                          "Catalog relocation requires at least one verified range artifact",
+                          catalog.model_id);
+    }
+    try {
+        // Source identity is (object, offset, bytes); the catalog guarantees it is unique.
+        struct SourceKey {
+            std::string object;
+            ByteCount offset;
+            ByteCount bytes;
+            bool operator<(const SourceKey& other) const noexcept {
+                if (object != other.object) return object < other.object;
+                if (offset != other.offset) return offset < other.offset;
+                return bytes < other.bytes;
+            }
+        };
+        std::map<SourceKey, std::size_t> by_source;
+        for (std::size_t index = 0U; index < catalog.tensors.size(); ++index) {
+            const auto& source = catalog.tensors[index].source;
+            by_source.emplace(
+                SourceKey{source.shard.filename().string(), source.offset, source.bytes}, index);
+        }
+
+        DeepseekV4CatalogRelocation result;
+        result.catalog = catalog;
+        // The source catalog describes a checkpoint whose payload was never fetched. After
+        // relocation the imported tensors do have readable payload, so consumers that refuse
+        // metadata-only catalogs must be allowed to proceed. This does not claim the whole
+        // checkpoint is present: every tensor that was not relocated still points at an absent
+        // file and fails on open rather than reading anything.
+        result.catalog.metadata_only = false;
+        std::set<std::size_t> relocated;
+        for (const auto& artifact : artifacts) {
+            if (!artifact.full_hash_verified || artifact.execution_supported ||
+                artifact.complete_checkpoint_verified ||
+                artifact.model_id != catalog.model_id ||
+                artifact.revision != catalog.revision) {
+                return make_error(
+                    ErrorCode::integrity_error,
+                    "Range artifact identity does not match the catalog it would relocate",
+                    artifact.root.string());
+            }
+            for (const auto& entry : artifact.ranges) {
+                const auto found = by_source.find(
+                    SourceKey{entry.source_object, entry.source_offset, entry.source_bytes});
+                if (found == by_source.end()) {
+                    return make_error(
+                        ErrorCode::not_found,
+                        "Imported range does not correspond to any catalog tensor", entry.label);
+                }
+                if (!relocated.insert(found->second).second) {
+                    return make_error(ErrorCode::invalid_format,
+                                      "Two imported ranges claim the same catalog tensor",
+                                      entry.label);
+                }
+                auto& tensor = result.catalog.tensors[found->second];
+                if (entry.bytes != tensor.source.bytes) {
+                    return make_error(
+                        ErrorCode::integrity_error,
+                        "Imported range length differs from its catalog tensor", entry.label);
+                }
+                tensor.source = model::TensorSourceRange{entry.path, 0U, entry.bytes};
+                result.relocated_bytes += entry.bytes;
+            }
+        }
+        result.relocated_tensors = relocated.size();
+
+        // An expert bundle is only usable when every one of its tensors moved: a bundle half in the
+        // artifact and half in an absent checkpoint would read across two different worlds.
+        for (auto& bundle : result.catalog.experts) {
+            const bool complete = std::all_of(
+                bundle.tensor_indices.begin(), bundle.tensor_indices.end(),
+                [&relocated](std::size_t index) { return relocated.count(index) != 0U; });
+            if (!complete) continue;
+            // Coalesced bundles cover several tensors per read, so a positional rewrite would be
+            // wrong. This checkpoint reads one range per tensor; anything else must not be guessed.
+            if (bundle.read_ranges.size() != bundle.tensor_indices.size()) {
+                return make_error(
+                    ErrorCode::unsupported,
+                    "Relocating a coalesced expert bundle is not supported",
+                    "layer " + std::to_string(bundle.layer) + " expert " +
+                        std::to_string(bundle.expert));
+            }
+            for (std::size_t slot = 0U; slot < bundle.tensor_indices.size(); ++slot) {
+                bundle.read_ranges[slot] = result.catalog.tensors[bundle.tensor_indices[slot]].source;
+            }
+            ++result.relocated_expert_bundles;
+        }
+        return result;
+    } catch (const std::bad_alloc&) {
+        return make_error(ErrorCode::resource_exhausted,
+                          "Unable to allocate the relocated DeepSeek catalog", catalog.model_id);
+    }
+}
+
 Result<DeepseekV4HashRouteResolution> deepseek_v4_resolve_hash_route(
     const DeepseekV4TrunkArtifactBinding& binding,
     const DeepseekV4GgufCatalogReport& report,

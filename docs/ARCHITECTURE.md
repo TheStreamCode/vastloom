@@ -361,9 +361,11 @@ and coalesced read bytes must equal the bundle total. The physical partition mus
 `1,193 layer + 6 global + 129 packed expert = 1,328`; the logical partition must be
 `1,193 + 6 + 33,024 = 34,223`. Checked byte accumulation must close at 82,533,892,444 bytes.
 The catalog pass recognizes Q4_K, IQ2_XXS and MXFP4 as GGML block layouts without authorizing
-execution. A separate pinned-ggml parity gate now admits Q4_K through
-`supports_reference_matvec_ggml_type`; IQ2_XXS and MXFP4 remain outside it. This preserves the
-distinction between metadata closure and a tested native kernel.
+execution. Separate pinned-ggml parity gates now admit Q4_K and IQ2_XXS through
+`supports_reference_matvec_ggml_type`. Q4_K supports bounded embedding-row access; IQ2_XXS
+supports bounded row decode, transactional matvec and an alternate reduced routed-expert graph.
+MXFP4 remains outside the execution capability query. This preserves the distinction between
+metadata closure and a tested native kernel.
 
 Every non-routed `blk.N.*` descriptor now retains its checked layer identity. The shared layer
 planner walks catalog order, excludes routed-expert bundles and splits each immutable tensor range

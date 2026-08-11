@@ -287,8 +287,12 @@ unbounded allocation and clean recovery from injected CUDA failures.
   reduced packed embedding/output matrices in prefill and incremental decode without allocating
   the full FP32 table. See the
   [Q4_K global-kernel validation](reports/M9_DEEPSEEK_Q4K_GLOBAL_KERNEL_VALIDATION.md).
-- [ ] Add pinned-ggml parity kernels for IQ2_XXS and MXFP4, then bind all six retained global
-  consumers without weakening the execution gate.
+- [x] Add pinned-ggml IQ2_XXS parity, transactional matvec and bounded row lookup; execute an
+  alternate reduced MoE graph with IQ2_XXS W1/W3 and IQ3_XXS W2 through prefill and incremental
+  decode. See the
+  [IQ2_XXS expert-kernel validation](reports/M9_DEEPSEEK_IQ2XXS_EXPERT_KERNEL_VALIDATION.md).
+- [ ] Add pinned-ggml parity for MXFP4, then bind all six retained global consumers without
+  weakening the execution gate.
 - [ ] Execute that probe by acquiring the bounded official trunk ranges, decoding the real
   `tid2eid` route and loading only its six selected complete expert bundles.
 - [ ] Pinned host buffers.

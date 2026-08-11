@@ -93,8 +93,10 @@ model conversion.
 > expert slices. The complete partition is exact: 1,328 physical tensors become 34,223 logical
 > descriptors accounting for 82,533,892,444 known tensor bytes. Q4_K now has a scalar
 > pinned-ggml oracle, transactional matvec and bounded row lookup; reduced packed embedding and
-> output-head prefill/decode match their dequantized graph oracle. The mixed IQ2_XXS/MXFP4 expert
-> variants remain layout-validated only and still lack native kernels.
+> output-head prefill/decode match their dequantized graph oracle. IQ2_XXS now has the same
+> bounded scalar/transactional boundary, and a reduced graph with every routed gate/up matrix in
+> IQ2_XXS matches independently dequantized prefill and decode. MXFP4 down-expert variants remain
+> layout-validated only.
 > The complete 82.54 GB payload
 > has not been downloaded or executed; this synthetic gate is not a complete official DeepSeek
 > layer/token path,
@@ -193,6 +195,8 @@ The full global/trunk/expert physical and logical closure is documented in the
 [`M9 checkpoint catalog report`](docs/reports/M9_DEEPSEEK_CHECKPOINT_CATALOG_VALIDATION.md).
 The first packed global-weight execution slice is documented in the
 [`M9 Q4_K global-kernel report`](docs/reports/M9_DEEPSEEK_Q4K_GLOBAL_KERNEL_VALIDATION.md).
+The alternate packed gate/up execution slice is documented in the
+[`M9 IQ2_XXS expert-kernel report`](docs/reports/M9_DEEPSEEK_IQ2XXS_EXPERT_KERNEL_VALIDATION.md).
 The pinned importer and immutable full-source admission boundary are documented in the
 [`M7 checkpoint-binding report`](docs/reports/M7_DEEPSEEK_GGUF_CHECKPOINT_BINDING_VALIDATION.md).
 Current and candidate model support is kept explicit in the
@@ -367,8 +371,9 @@ portability target, not a validated platform claim.
   and 129 packed expert containers. The logical view contains 34,223 descriptors: 1,193 layer
   tensors, six globals and 33,024 slices across 11,008 bundles. Always-active 6,986,088,796 bytes
   plus routed 75,547,803,648 bytes equals 82,533,892,444 known tensor bytes. This catalog gate
-  itself performs layout arithmetic only. A later parity gate now enables scalar Q4_K and a
-  bounded packed embedding/output path; IQ2_XXS and MXFP4 remain rejected by
+  itself performs layout arithmetic only. Later parity gates now enable scalar Q4_K and
+  IQ2_XXS: Q4_K feeds the bounded packed embedding/output path, while an alternate reduced
+  MoE graph executes IQ2_XXS routed gate/up matrices. MXFP4 remains rejected by
   `supports_reference_matvec_ggml_type`.
 - **Header-derived traffic floor:** the encoded routed experts total 75,547,803,648 bytes;
   a top-6 no-cache decode would request 1,770,651,648 logical expert bytes per token before
@@ -900,8 +905,9 @@ It currently has:
   FP32 prefill oracle, file-backed governed Q8_0 layer, official 0731 GGUF metadata catalog and
   verified source-binding boundary; no full-checkpoint DeepSeek, MiniMax or Kimi execution adapter;
 - no CUDA, ROCm, Vulkan or Metal inference backend;
-- scalar IQ1_S/IQ3_XXS expert, Q4_K global and Q8_0/Q5_K/Q6_K/BF16/F32 trunk reference kernels,
-  plus bounded Q4_K row lookup and I32 router-table decoding, one deterministic reduced
+- scalar IQ1_S/IQ2_XXS/IQ3_XXS expert, Q4_K global and Q8_0/Q5_K/Q6_K/BF16/F32 trunk
+  reference kernels, plus bounded Q4_K/IQ2_XXS row lookup and I32 router-table decoding, one
+  deterministic reduced
   mixed-format layer composition and one
   separately validated real selected-expert cache/kernel bridge; an exact checkpoint-shaped range
   plan exists, but no authoritative official-payload route/layer/token execution, SIMD/fused
@@ -940,7 +946,7 @@ merely SSD throughput. It is:
 
 The next technical sequence remains incremental:
 
-1. complete the remaining IQ2_XXS/MXFP4 scalar parity gates and the retained six-global binder;
+1. complete the remaining MXFP4 scalar parity gate and the retained six-global binder;
 2. after explicit user authorization, use the completed bounded importer to acquire only the exact
    138,867,160-byte layer-0 trunk ranges while preserving the model-store free-space reserve;
 3. bind and execute those 21 official objects through the now-verified metadata-derived reference

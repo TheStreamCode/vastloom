@@ -222,6 +222,37 @@ load_deepseek_v4_bound_trunk_tensor_set(
     safety::ResourceGovernor& governor,
     const model::BoundRangeSetLoadOptions& options = {});
 
+// The authoritative expert selection of one token in a hash-routed layer.
+struct DeepseekV4HashRouteResolution {
+    std::uint32_t layer{0U};
+    std::uint32_t token{0U};
+    std::uint32_t expert_count{0U};
+    std::uint32_t experts_per_token{0U};
+    std::string table_tensor_name;
+    std::string table_range_sha256;
+    ByteCount table_bytes{0U};
+    std::vector<std::uint32_t> slot_experts;
+    std::vector<std::uint32_t> unique_experts;
+};
+
+// Resolves which experts a token actually selects, from the imported trunk payload.
+//
+// This is the one routing decision that can be proven without executing the model. In a hash-routed
+// layer the selection is a pure lookup: `indices[slot] = tid2eid[token * top_k + slot]`. The gate
+// logits weight those experts but cannot change which ones are chosen. Layers with a learned router
+// are refused: their selection depends on activations that only execution can produce.
+//
+// The table is read through the same governed, rehashed range path as any other payload, so a
+// result here carries the artifact's own integrity guarantee.
+// The routing table is read through its own bounded residency, which this function owns: only it
+// knows which range holds the table, and the loader requires a residency created for exactly that
+// range's logical identity and byte count.
+[[nodiscard]] Result<DeepseekV4HashRouteResolution> deepseek_v4_resolve_hash_route(
+    const DeepseekV4TrunkArtifactBinding& binding,
+    const DeepseekV4GgufCatalogReport& report,
+    std::uint32_t token,
+    safety::ResourceGovernor& governor);
+
 [[nodiscard]] Result<DeepseekV4GlobalArtifactBinding>
 bind_deepseek_v4_global_range_artifact(
     const model::RangeArtifact& artifact,

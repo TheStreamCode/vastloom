@@ -1,6 +1,7 @@
 #include "vastloom/inference/deepseek_v4_range_artifact.hpp"
 
 #include <algorithm>
+#include <cstring>
 #include <limits>
 #include <map>
 #include <new>
@@ -320,6 +321,115 @@ Result<model::LoadedBoundRange> load_deepseek_v4_bound_trunk_range(
         residency,
         governor,
         options);
+}
+
+Result<DeepseekV4HashRouteResolution> deepseek_v4_resolve_hash_route(
+    const DeepseekV4TrunkArtifactBinding& binding,
+    const DeepseekV4GgufCatalogReport& report,
+    std::uint32_t token,
+    safety::ResourceGovernor& governor) {
+    if (!report.reference_architecture.has_value()) {
+        return make_error(
+            ErrorCode::unsupported,
+            "DeepSeek hash-route resolution requires verified architecture metadata",
+            binding.model_id);
+    }
+    const auto& architecture = report.reference_architecture.value();
+    if (architecture.hash_layer_count == 0U || binding.layer >= architecture.hash_layer_count) {
+        return make_error(
+            ErrorCode::unsupported,
+            "DeepSeek layer uses a learned router; its selection cannot be derived without execution",
+            "layer " + std::to_string(binding.layer));
+    }
+    if (architecture.vocabulary_size == 0U || architecture.experts_per_token == 0U ||
+        architecture.expert_count == 0U ||
+        architecture.experts_per_token > architecture.expert_count) {
+        return make_error(ErrorCode::invalid_format,
+                          "DeepSeek hash-route architecture dimensions are invalid",
+                          binding.model_id);
+    }
+    if (token >= architecture.vocabulary_size) {
+        return make_error(ErrorCode::invalid_argument,
+                          "DeepSeek hash-route token id exceeds the pinned vocabulary",
+                          std::to_string(token));
+    }
+
+    const std::string table_name =
+        "blk." + std::to_string(binding.layer) + ".ffn_gate_tid2eid.weight";
+    const auto found = std::find_if(
+        binding.ranges.begin(), binding.ranges.end(),
+        [&table_name](const DeepseekV4BoundTrunkRange& range) {
+            return range.tensor_name == table_name;
+        });
+    if (found == binding.ranges.end()) {
+        return make_error(ErrorCode::not_found,
+                          "The imported trunk artifact does not contain the routing table",
+                          table_name);
+    }
+    if (found->tensor_offset != 0U || !found->final_tile) {
+        return make_error(
+            ErrorCode::unsupported,
+            "DeepSeek routing tables must be bound as one complete tile", table_name);
+    }
+    const auto elements =
+        static_cast<std::uint64_t>(architecture.vocabulary_size) * architecture.experts_per_token;
+    const auto expected_bytes = elements * sizeof(std::int32_t);
+    if (found->local_source.bytes != expected_bytes) {
+        return make_error(ErrorCode::invalid_format,
+                          "DeepSeek routing table size does not match its pinned dimensions",
+                          table_name);
+    }
+
+    const auto range_index =
+        static_cast<std::size_t>(std::distance(binding.ranges.begin(), found));
+    auto logical_id = deepseek_v4_bound_trunk_range_logical_id(binding, range_index);
+    if (!logical_id) return logical_id.error();
+    auto residency =
+        model::ResidencyObject::create(logical_id.take_value(), found->local_source.bytes);
+    if (!residency) return residency.error();
+    auto loaded =
+        load_deepseek_v4_bound_trunk_range(binding, range_index, residency.value(), governor);
+    if (!loaded) return loaded.error();
+    const auto bytes = loaded.value().bytes();
+    if (bytes.size() != expected_bytes) {
+        return make_error(ErrorCode::integrity_error,
+                          "DeepSeek routing table payload changed size after verification",
+                          table_name);
+    }
+
+    try {
+        DeepseekV4HashRouteResolution resolution;
+        resolution.layer = binding.layer;
+        resolution.token = token;
+        resolution.expert_count = architecture.expert_count;
+        resolution.experts_per_token = architecture.experts_per_token;
+        resolution.table_tensor_name = table_name;
+        resolution.table_range_sha256 = found->local_sha256;
+        resolution.table_bytes = found->local_source.bytes;
+        resolution.slot_experts.reserve(architecture.experts_per_token);
+        const auto row = static_cast<std::size_t>(token) * architecture.experts_per_token;
+        for (std::uint32_t slot = 0U; slot < architecture.experts_per_token; ++slot) {
+            std::int32_t value = 0;
+            std::memcpy(&value, bytes.data() + (row + slot) * sizeof(std::int32_t),
+                        sizeof(value));
+            if (value < 0 || static_cast<std::uint32_t>(value) >= architecture.expert_count) {
+                return make_error(
+                    ErrorCode::invalid_format,
+                    "DeepSeek routing table names an out-of-range expert", table_name);
+            }
+            resolution.slot_experts.push_back(static_cast<std::uint32_t>(value));
+        }
+        resolution.unique_experts = resolution.slot_experts;
+        std::sort(resolution.unique_experts.begin(), resolution.unique_experts.end());
+        resolution.unique_experts.erase(
+            std::unique(resolution.unique_experts.begin(), resolution.unique_experts.end()),
+            resolution.unique_experts.end());
+        return resolution;
+    } catch (const std::bad_alloc&) {
+        return make_error(ErrorCode::resource_exhausted,
+                          "Unable to allocate the bounded DeepSeek hash-route result",
+                          table_name);
+    }
 }
 
 Result<DeepseekV4LoadedTrunkTensorSet>

@@ -198,8 +198,57 @@ def main() -> int:
             "--layer",
             "0",
         )
-        require(missing_probe_experts.returncode != 0 and "requires --layer" in missing_probe_experts.stderr,
-                "probe planner accepted a missing selected-expert set", missing_probe_experts)
+        require(
+            missing_probe_experts.returncode != 0
+            and "either --experts or --route-artifact" in missing_probe_experts.stderr,
+            "probe planner accepted a missing selected-expert set", missing_probe_experts)
+
+        # Routing authority comes from one source or the other, never both and never half of one.
+        both_sources = run(
+            args.vastloom,
+            "deepseek-gguf-probe-plan",
+            str(model),
+            "--layer",
+            "0",
+            "--experts",
+            "0,1,2,3,4,5",
+            "--route-artifact",
+            str(model),
+            "--token",
+            "0",
+        )
+        require(
+            both_sources.returncode != 0
+            and "either --experts or --route-artifact" in both_sources.stderr,
+            "probe planner accepted two competing routing sources", both_sources)
+
+        route_without_token = run(
+            args.vastloom,
+            "deepseek-gguf-probe-plan",
+            str(model),
+            "--layer",
+            "0",
+            "--route-artifact",
+            str(model),
+        )
+        require(
+            route_without_token.returncode != 0
+            and "must be supplied together" in route_without_token.stderr,
+            "probe planner accepted a route artifact without a token", route_without_token)
+
+        token_without_route = run(
+            args.vastloom,
+            "deepseek-gguf-probe-plan",
+            str(model),
+            "--layer",
+            "0",
+            "--token",
+            "0",
+        )
+        require(
+            token_without_route.returncode != 0
+            and "must be supplied together" in token_without_route.stderr,
+            "probe planner accepted a token without a route artifact", token_without_route)
 
         malformed_probe_experts = run(
             args.vastloom,

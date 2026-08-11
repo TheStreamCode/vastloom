@@ -196,9 +196,16 @@ struct DeepseekV4ProbeExpert {
 // Exact, non-executing range plan for one checkpoint-shaped layer/token probe. The caller must
 // provide the top-k result after the trunk/router phase; this function validates the IDs and
 // ranges but cannot prove routing authority. Metadata-only catalogs may be planned but never loaded.
+//
+// A hash-routed layer is the one case where authority can be established without executing the
+// model: its selection is a pure lookup in the pinned `tid2eid` table. When such a plan is built
+// from a verified table read, `routing_authority_verified` is set and `routing_token` records the
+// token the selection belongs to.
 struct DeepseekV4LayerProbePlan {
     std::string model_id;
     std::string revision;
+    bool routing_authority_verified{false};
+    std::optional<std::uint32_t> routing_token;
     bool metadata_only{true};
     bool imported_file_hashes_verified{false};
     bool full_payload_present{false};

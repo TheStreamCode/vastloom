@@ -267,9 +267,12 @@ void print_help() {
         << "  deepseek-gguf-checkpoint MODEL_DIRECTORY [--context N] [--batch-size N]"
            " [--no-verify] [--json]\n"
         << "      Verify and bind the pinned 0731 UD-IQ1_S import under single-tier admission.\n\n"
-        << "  deepseek-gguf-probe-plan MODEL_DIRECTORY --layer N --experts CSV"
+        << "  deepseek-gguf-probe-plan MODEL_DIRECTORY --layer N"
+           " [--experts CSV | --route-artifact DIR --token ID]"
            " [--tile-size SIZE] [--context N] [--batch-size N] [--no-verify] [--json]\n"
-        << "      Plan exact trunk and caller-supplied selected-expert ranges; never fetch or execute them.\n\n"
+        << "      Plan exact trunk and selected-expert ranges; never fetch or execute them.\n"
+        << "      --route-artifact reads the pinned hash-routing table from an imported trunk and\n"
+        << "      lets the checkpoint name the experts, which caller-supplied IDs cannot prove.\n\n"
         << "  deepseek-gguf-global-plan MODEL_DIRECTORY [--context N] [--batch-size N]"
            " [--no-verify] [--json]\n"
         << "      Plan the exact six checkpoint-global tensors; never fetch or execute them.\n\n"
@@ -940,7 +943,8 @@ int command_deepseek_gguf_probe_plan(const std::vector<std::string>& args) {
     auto valid = validate_options(
         args,
         1U,
-        {"--layer", "--experts", "--tile-size", "--context", "--batch-size"},
+        {"--layer", "--experts", "--tile-size", "--context", "--batch-size",
+         "--route-artifact", "--token"},
         {"--no-verify", "--json"});
     if (!valid) return print_error(valid.error(), json);
     if (args.empty() || vastloom::util::starts_with(args.front(), "--")) {
@@ -952,30 +956,53 @@ int command_deepseek_gguf_probe_plan(const std::vector<std::string>& args) {
     }
     const auto layer_option = option_value(args, "--layer");
     const auto expert_option = option_value(args, "--experts");
-    if (!layer_option.has_value() || !expert_option.has_value()) {
+    const auto route_option = option_value(args, "--route-artifact");
+    const auto token_option = option_value(args, "--token");
+    // Either the caller supplies the top-k it obtained elsewhere, or the planner derives it from an
+    // imported hash-routing table. Supplying both would leave it ambiguous which one has authority.
+    if (route_option.has_value() != token_option.has_value()) {
+        return print_error(
+            vastloom::make_error(
+                vastloom::ErrorCode::invalid_argument,
+                "--route-artifact and --token must be supplied together"),
+            json);
+    }
+    if (route_option.has_value() == expert_option.has_value()) {
+        return print_error(
+            vastloom::make_error(
+                vastloom::ErrorCode::invalid_argument,
+                "deepseek-gguf-probe-plan requires either --experts or --route-artifact with --token"),
+            json);
+    }
+    if (!layer_option.has_value()) {
         return print_error(
             vastloom::make_error(vastloom::ErrorCode::invalid_argument,
-                                 "deepseek-gguf-probe-plan requires --layer and caller-supplied --experts IDs"),
+                                 "deepseek-gguf-probe-plan requires --layer"),
             json);
     }
     auto layer = optional_size(args, "--layer", 0U);
-    auto experts = parse_expert_ids(*expert_option);
+    auto experts = expert_option.has_value()
+        ? parse_expert_ids(*expert_option)
+        : vastloom::Result<std::vector<std::uint32_t>>{std::vector<std::uint32_t>{}};
+    auto routing_token = optional_size(args, "--token", 0U);
     auto tile_size = optional_bytes(
         args, "--tile-size", vastloom::model::kDefaultLayerStreamingTileBytes);
     auto context = optional_size(args, "--context", 4'096U);
     auto batch_size = optional_size(args, "--batch-size", 1U);
     if (!layer) return print_error(layer.error(), json);
     if (!experts) return print_error(experts.error(), json);
+    if (!routing_token) return print_error(routing_token.error(), json);
     if (!tile_size) return print_error(tile_size.error(), json);
     if (!context) return print_error(context.error(), json);
     if (!batch_size) return print_error(batch_size.error(), json);
     if (layer.value() > std::numeric_limits<std::uint32_t>::max() ||
+        routing_token.value() > std::numeric_limits<std::uint32_t>::max() ||
         tile_size.value() == 0U || tile_size.value() > 1U * vastloom::GiB ||
         context.value() == 0U || context.value() > 1'048'576U ||
         batch_size.value() == 0U || batch_size.value() > 8U) {
         return print_error(
             vastloom::make_error(vastloom::ErrorCode::invalid_argument,
-                                 "DeepSeek probe layer, tile, context or batch bound is invalid"),
+                                 "DeepSeek probe layer, token, tile, context or batch bound is invalid"),
             json);
     }
 
@@ -996,12 +1023,58 @@ int command_deepseek_gguf_probe_plan(const std::vector<std::string>& args) {
         vastloom::inference::pinned_deepseek_v4_flash_0731_iq1s_checkpoint(),
         options);
     if (!report) return print_error(report.error(), json);
+
+    // Authoritative mode: read the pinned routing table out of the already imported trunk and let
+    // the checkpoint itself name the experts. The intermediate plan exists only to bind the
+    // artifact; its caller-supplied expert list is discarded once the table has spoken.
+    std::optional<vastloom::inference::DeepseekV4HashRouteResolution> route;
+    if (route_option.has_value()) {
+        // The trunk binding is independent of which experts are selected, but the planner still
+        // requires a well-formed top-k. Use the lowest legal IDs to reach the routing table; the
+        // real selection replaces them below and is the only one that reaches the final plan.
+        std::vector<std::uint32_t> placeholder;
+        try {
+            placeholder.reserve(report.value().top_k);
+            for (std::uint32_t index = 0U; index < report.value().top_k; ++index) {
+                placeholder.push_back(index);
+            }
+        } catch (const std::bad_alloc&) {
+            return print_error(
+                vastloom::make_error(vastloom::ErrorCode::resource_exhausted,
+                                     "Unable to allocate the routing bootstrap plan"),
+                json);
+        }
+        auto binding_plan = vastloom::inference::build_deepseek_v4_layer_probe_plan(
+            report.value(),
+            static_cast<std::uint32_t>(layer.value()),
+            placeholder,
+            tile_size.value());
+        if (!binding_plan) return print_error(binding_plan.error(), json);
+        auto artifact = vastloom::model::verify_range_artifact(cli_path(*route_option));
+        if (!artifact) return print_error(artifact.error(), json);
+        auto binding = vastloom::inference::bind_deepseek_v4_trunk_range_artifact(
+            artifact.value(), report.value(), binding_plan.value(),
+            vastloom::inference::pinned_deepseek_v4_flash_0731_iq1s_checkpoint());
+        if (!binding) return print_error(binding.error(), json);
+        vastloom::safety::ResourceGovernor governor(policy.value().resources);
+        auto resolved = vastloom::inference::deepseek_v4_resolve_hash_route(
+            binding.value(), report.value(),
+            static_cast<std::uint32_t>(routing_token.value()), governor);
+        if (!resolved) return print_error(resolved.error(), json);
+        route = resolved.take_value();
+        experts = route->unique_experts;
+    }
+
     auto plan = vastloom::inference::build_deepseek_v4_layer_probe_plan(
         report.value(),
         static_cast<std::uint32_t>(layer.value()),
         experts.value(),
         tile_size.value());
     if (!plan) return print_error(plan.error(), json);
+    if (route.has_value()) {
+        plan.value().routing_authority_verified = true;
+        plan.value().routing_token = route->token;
+    }
     std::cout << (json ? vastloom::inference::to_json(plan.value())
                       : vastloom::inference::to_text(plan.value())) << '\n';
     return 0;

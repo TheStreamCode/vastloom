@@ -302,9 +302,15 @@ std::string to_json(const DeepseekV4LayerProbePlan& plan) {
            << "\",\"plan_only\":true,\"execution_supported\":false"
            << ",\"layer\":" << plan.layer
            << ",\"expected_top_k\":" << plan.expected_top_k
-           << ",\"selection_source\":\"caller-supplied-unverified\""
-           << ",\"routing_authority_verified\":false"
-           << ",\"payload_access\":{\"metadata_only\":"
+           << ",\"selection_source\":\""
+           << (plan.routing_authority_verified ? "official-tid2eid-verified"
+                                               : "caller-supplied-unverified")
+           << "\",\"routing_authority_verified\":"
+           << (plan.routing_authority_verified ? "true" : "false")
+           << ",\"routing_token\":";
+    if (plan.routing_token.has_value()) output << *plan.routing_token;
+    else output << "null";
+    output << ",\"payload_access\":{\"metadata_only\":"
            << (plan.metadata_only ? "true" : "false")
            << ",\"imported_file_hashes_verified\":"
            << (plan.imported_file_hashes_verified ? "true" : "false")
@@ -391,7 +397,14 @@ std::string to_text(const DeepseekV4LayerProbePlan& plan) {
            << "Metadata only:        " << (plan.metadata_only ? "yes" : "no") << '\n'
            << "Executable binding:   "
            << (plan.executable_source_binding_verified ? "verified" : "unavailable") << '\n'
-           << "Routing contract:     caller must supply authoritative output; planner cannot prove it";
+           << "Routing contract:     ";
+    if (plan.routing_authority_verified) {
+        output << "official tid2eid table read for token ";
+        if (plan.routing_token.has_value()) output << *plan.routing_token;
+        else output << "(unrecorded)";
+    } else {
+        output << "caller must supply authoritative output; planner cannot prove it";
+    }
     return output.str();
 }
 

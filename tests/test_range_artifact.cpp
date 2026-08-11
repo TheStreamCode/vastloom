@@ -3,6 +3,7 @@
 #include <chrono>
 #include <cstddef>
 #include <cstdint>
+#include <cstring>
 #include <filesystem>
 #include <fstream>
 #include <iomanip>
@@ -82,7 +83,9 @@ std::string artifact_manifest(const Fixture& fixture,
                               std::uint64_t first_offset_delta = 0U,
                               std::optional<std::string> source_hash_override = std::nullopt,
                               bool execution_supported = false,
-                              std::string_view first_artifact = "ranges/0000.bin") {
+                              std::string_view first_artifact = "ranges/0000.bin",
+                              std::string_view source_object = "model-00001.gguf",
+                              std::uint64_t source_object_bytes = 64U) {
     std::ostringstream output;
     output << "{\"complete_checkpoint_verified\":false,"
               "\"execution_supported\":"
@@ -105,12 +108,13 @@ std::string artifact_manifest(const Fixture& fixture,
                << "\",\"role\":\"trunk\",\"sha256\":\""
                << (local_hash ? local_hash.value() : std::string(64U, '0'))
                << "\",\"source_bytes\":" << planned.source.bytes
-               << ",\"source_object\":\"model-00001.gguf\","
-                  "\"source_object_bytes\":64,\"source_object_sha256\":\""
+               << ",\"source_object\":\"" << source_object
+               << "\",\"source_object_bytes\":" << source_object_bytes
+               << ",\"source_object_sha256\":\""
                << source_hash_override.value_or(fixture.source_hash)
                << "\",\"source_offset\":"
                << planned.source.offset + (index == 0U ? first_offset_delta : 0U)
-               << ",\"source_path\":\"weights/model-00001.gguf\"}";
+               << ",\"source_path\":\"weights/" << source_object << "\"}";
     }
     output << "],\"revision\":\"fixture-revision\","
               "\"routing_authority_verified\":false,\"scope\":\"trunk\","
@@ -819,12 +823,172 @@ void test_global_scope_artifact(const std::filesystem::path& root) {
     CHECK(!vastloom::model::verify_range_artifact(artifact));
 }
 
+// A hash-routed layer selects its experts by looking the token up in the pinned tid2eid table, so
+// the selection can be proven from imported payload alone. This fixture is the smallest table that
+// still exercises every branch: an ordinary row, a row whose slots repeat, and the bounds.
+Fixture make_route_fixture(const std::filesystem::path& root,
+                           std::uint32_t hash_layer_count) {
+    Fixture fixture;
+    fixture.root = root;
+    std::filesystem::create_directories(root);
+    fixture.source = root / "route-00001.gguf";
+
+    constexpr std::uint32_t kVocabulary = 4U;
+    constexpr std::uint32_t kTopK = 2U;
+    constexpr std::uint32_t kExpertCount = 4U;
+    const std::array<std::int32_t, kVocabulary * kTopK> table{3, 1, 0, 2, 2, 2, 3, 0};
+    std::array<std::byte, 4U + sizeof(table)> source_bytes{};
+    for (std::size_t index = 0U; index < 4U; ++index) {
+        source_bytes[index] = static_cast<std::byte>(index);
+    }
+    std::memcpy(source_bytes.data() + 4U, table.data(), sizeof(table));
+    write_bytes(fixture.source, source_bytes);
+    auto source_hash = vastloom::util::sha256_file(fixture.source);
+    CHECK(source_hash);
+    fixture.source_hash = source_hash ? source_hash.value() : std::string(64U, '0');
+
+    vastloom::model::LogicalTensorCatalog catalog;
+    // The shared manifest writer pins this identity; the routing fixture reuses it deliberately.
+    catalog.model_id = "test/deepseek-range-artifact";
+    catalog.revision = "fixture-revision";
+    catalog.metadata_only = true;
+    catalog.tensors = {
+        {"blk.0.ffn_gate_tid2eid.weight", vastloom::model::TensorDType::i32,
+         {kVocabulary, kTopK}, vastloom::model::TensorRole::router, 0U, std::nullopt, false,
+         {fixture.source, 4U, sizeof(table)}, 0U},
+        {"blk.0.ffn_gate_exps.weight.expert.0", vastloom::model::TensorDType::f32, {1U},
+         vastloom::model::TensorRole::routed_expert, 0U, 0U, false,
+         {fixture.source, 0U, 4U}, 0U},
+    };
+    CHECK(vastloom::model::finalize_logical_tensor_catalog(catalog));
+    fixture.report.catalog = std::move(catalog);
+    fixture.report.layers = 1U;
+    fixture.report.experts_per_layer = kExpertCount;
+    fixture.report.top_k = 1U;
+    fixture.report.imported_manifest_verified = true;
+    fixture.report.imported_file_hashes_verified = true;
+
+    vastloom::inference::DeepseekV4GgufArchitectureConfig architecture;
+    architecture.vocabulary_size = kVocabulary;
+    architecture.experts_per_token = kTopK;
+    architecture.expert_count = kExpertCount;
+    architecture.hash_layer_count = hash_layer_count;
+    architecture.layer_count = 1U;
+    fixture.report.reference_architecture = architecture;
+
+    const std::array<std::uint32_t, 1U> selected{0U};
+    auto plan = vastloom::inference::build_deepseek_v4_layer_probe_plan(
+        fixture.report, 0U, selected, 64U, 16U);
+    CHECK(plan);
+    if (plan) fixture.plan = plan.take_value();
+
+    fixture.spec.model_id = fixture.report.catalog.model_id;
+    fixture.spec.revision = fixture.report.catalog.revision;
+    fixture.spec.layers = 1U;
+    fixture.spec.experts_per_layer = kExpertCount;
+    fixture.spec.top_k = 1U;
+    fixture.spec.shards = {{"weights/route-00001.gguf", source_bytes.size(), fixture.source_hash,
+                            "headers/route-00001.gguf.header", 4U, std::string(64U, 'b')}};
+
+    fixture.artifact = root / "route-artifact";
+    std::filesystem::create_directories(fixture.artifact / "ranges");
+    for (std::size_t index = 0U; index < fixture.plan.trunk_ranges.size(); ++index) {
+        const auto& range = fixture.plan.trunk_ranges[index].source;
+        write_bytes(fixture.artifact / range_name(index),
+                    read_range(fixture.source, range.offset, range.bytes));
+    }
+    write_manifest(fixture, artifact_manifest(fixture, 0U, std::nullopt, false, "ranges/0000.bin",
+                                              "route-00001.gguf", source_bytes.size()));
+    return fixture;
+}
+
+void test_hash_route_resolution(const std::filesystem::path& root) {
+    vastloom::safety::ResourceLimits limits;
+    limits.host_memory_hard_limit = 1U * vastloom::MiB;
+    limits.ram_hard_limit = 1U * vastloom::MiB;
+    limits.vram_hard_limit = 1U;
+    limits.staging_hard_limit = 1U * vastloom::MiB;
+    limits.scratch_hard_limit = 1U * vastloom::MiB;
+    vastloom::safety::ResourceGovernor governor(limits);
+
+    auto fixture = make_route_fixture(root / "hash-route", 1U);
+    auto artifact = vastloom::model::verify_range_artifact(fixture.artifact);
+    CHECK(artifact);
+    if (!artifact) return;
+    auto binding = vastloom::inference::bind_deepseek_v4_trunk_range_artifact(
+        artifact.value(), fixture.report, fixture.plan, fixture.spec);
+    CHECK(binding);
+    if (!binding) return;
+
+    const std::vector<std::uint32_t> expected_first_slots{3U, 1U};
+    const std::vector<std::uint32_t> expected_first_unique{1U, 3U};
+    const std::vector<std::uint32_t> expected_repeated_slots{2U, 2U};
+    const std::vector<std::uint32_t> expected_repeated_unique{2U};
+    const std::vector<std::uint32_t> expected_last_slots{3U, 0U};
+
+    auto first = vastloom::inference::deepseek_v4_resolve_hash_route(
+        binding.value(), fixture.report, 0U, governor);
+    CHECK(first && first.value().slot_experts == expected_first_slots &&
+          first.value().unique_experts == expected_first_unique &&
+          first.value().token == 0U && first.value().layer == 0U &&
+          first.value().experts_per_token == 2U && first.value().expert_count == 4U &&
+          first.value().table_tensor_name == "blk.0.ffn_gate_tid2eid.weight" &&
+          first.value().table_bytes == 32U);
+
+    // A token whose slots name the same expert twice must resolve to one bundle, not two reads.
+    auto repeated = vastloom::inference::deepseek_v4_resolve_hash_route(
+        binding.value(), fixture.report, 2U, governor);
+    CHECK(repeated && repeated.value().slot_experts == expected_repeated_slots &&
+          repeated.value().unique_experts == expected_repeated_unique);
+
+    auto last = vastloom::inference::deepseek_v4_resolve_hash_route(
+        binding.value(), fixture.report, 3U, governor);
+    CHECK(last && last.value().slot_experts == expected_last_slots);
+
+    // Out-of-vocabulary tokens, learned-router layers and missing architecture are all refused.
+    CHECK(!vastloom::inference::deepseek_v4_resolve_hash_route(
+        binding.value(), fixture.report, 4U, governor));
+
+    auto without_architecture = fixture.report;
+    without_architecture.reference_architecture.reset();
+    CHECK(!vastloom::inference::deepseek_v4_resolve_hash_route(
+        binding.value(), without_architecture, 0U, governor));
+
+    auto learned = fixture.report;
+    learned.reference_architecture.value().hash_layer_count = 0U;
+    CHECK(!vastloom::inference::deepseek_v4_resolve_hash_route(
+        binding.value(), learned, 0U, governor));
+
+    // An expert id outside the pinned expert count means the table is not what the catalog claims.
+    auto narrowed = fixture.report;
+    narrowed.reference_architecture.value().expert_count = 2U;
+    CHECK(!vastloom::inference::deepseek_v4_resolve_hash_route(
+        binding.value(), narrowed, 0U, governor));
+
+    // A layer whose trunk never included the routing table cannot be resolved from payload.
+    auto plain = make_fixture(root / "hash-route-missing-table");
+    auto plain_artifact = vastloom::model::verify_range_artifact(plain.artifact);
+    CHECK(plain_artifact);
+    if (plain_artifact) {
+        auto plain_report = plain.report;
+        plain_report.reference_architecture = fixture.report.reference_architecture;
+        auto plain_binding = vastloom::inference::bind_deepseek_v4_trunk_range_artifact(
+            plain_artifact.value(), plain.report, plain.plan, plain.spec);
+        CHECK(plain_binding);
+        if (plain_binding) {
+            CHECK(!vastloom::inference::deepseek_v4_resolve_hash_route(
+                plain_binding.value(), plain_report, 0U, governor));
+        }
+    }
+}
+
 }  // namespace
 
 int main() {
     const auto root = make_temp_dir();
     test_range_artifact(root);
     test_global_scope_artifact(root);
+    test_hash_route_resolution(root);
     std::error_code error;
     std::filesystem::remove_all(root, error);
     if (failures != 0) {

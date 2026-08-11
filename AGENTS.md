@@ -91,7 +91,15 @@ dequantized prefill/decode. The six global consumers now also have an exact pinn
 scope replays every immutable source span, and a reduced Q8_0/F32 fixture loads all six through one
 aggregate governed RAM buffer/lease into embedding, output, normalization and Hyper-Connection
 prefill/decode parity. The official set passed importer dry-run only. No official IQ2_XXS, MXFP4
-or global payload was read. The first official payload is now local. Hash-routed layers select experts by table lookup, so the
+or global payload was read. One real DeepSeek layer now executes from official payload: the catalog is relocated onto imported
+artifacts, and token 0 runs through Q8_0 attention, Q5_K/Q6_K shared expert, BF16 router, I32 table,
+IQ1_S/IQ3_XXS experts and Q4_K embedding to produce 129,280 deterministic layer-0 logits. That is
+one layer of 43 and every command reports it as such. `deepseek-forward` executes to an explicit
+`--layers` depth straight from a complete checkpoint, refusing in advance any depth whose exact
+resident cost exceeds the live safe RAM budget; the full 43-layer pass needs 7,056,343,388 bytes.
+Full-depth execution, generation and any throughput claim remain unvalidated.
+
+The first official payload is now local. Hash-routed layers select experts by table lookup, so the
 imported layer-0 trunk (21 ranges, 138,867,160 bytes) answers the routing question without executing
 anything: `deepseek_v4_resolve_hash_route` reads the pinned `blk.0.ffn_gate_tid2eid` table through
 the governed rehashed range path and token 0 resolves to experts 35, 53, 200, 222, 245 and 254. That

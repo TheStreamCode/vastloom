@@ -118,6 +118,14 @@ model conversion.
 > two 4,096-wide FP32 rows plus their weights to the GPU, launches a toolkit-free scalar PTX
 > RMSNorm, copies the result back and compares it with the existing DeepSeek CPU reference.
 > Windows and WSL both passed at `0.000025` maximum absolute error and released all VRAM.
+> **One real DeepSeek layer now executes from official weights.** The checkpoint's own router picks
+> the experts, and eight quantizations run together — Q8_0 attention, Q5_K/Q6_K shared expert, BF16
+> router, I32 routing table, IQ1_S/IQ3_XXS routed experts and the Q4_K embedding — producing 129,280
+> deterministic logits for the first layer. One layer of 43: every command reports
+> `executed_layers` against `model_layers` so a partial pass cannot read as the model's answer.
+> `deepseek-forward` runs to an explicit depth from a complete checkpoint and refuses in advance any
+> depth that would not fit the live safe RAM budget, which always leaves 8 GiB to the host.
+>
 > The first official payload is now local, and the checkpoint itself decided which of it to fetch.
 > DeepSeek's first three layers route by table lookup rather than by a learned gate, so the imported
 > layer-0 trunk — 21 ranges, 138,867,160 bytes — contains the `tid2eid` table that determines a

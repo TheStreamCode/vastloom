@@ -322,8 +322,16 @@ recorded in the [M8 CUDA RMSNorm report](reports/M8_CUDA_RMSNORM_VALIDATION.md).
   245 and 254 under `official-tid2eid-verified`. That authority opened the selected-expert scope and
   imported those six complete bundles (18 ranges, 38,928,384 bytes). See the
   [authoritative routing validation](reports/M9_DEEPSEEK_AUTHORITATIVE_ROUTING_VALIDATION.md).
-- [ ] Execute that probe: feed the imported trunk and its six selected expert bundles through the
-  quantized kernels as one complete official layer and match an independent oracle.
+- [x] Execute that probe: one complete official layer runs from imported payload with the
+  checkpoint's own router selecting the experts. Token 0 executes experts 254, 222, 245, 200, 53 and
+  35 through Q8_0/Q5_K/Q6_K/BF16/I32/IQ1_S/IQ3_XXS/Q4_K kernels and produces 129,280 layer-0 logits
+  deterministically. See the
+  [official layer execution validation](reports/M9_DEEPSEEK_OFFICIAL_LAYER_EXECUTION_VALIDATION.md).
+  This is one layer of 43, not the model's output, and it is not yet matched against an independent
+  oracle.
+- [ ] Acquire the remaining 42 layer trunks (6,390,088,008 bytes total) and execute a complete
+  forward pass. From layer 3 the router is learned, so expert selection is only knowable during
+  execution — the streaming case this project exists for.
 - [ ] Pinned host buffers.
 - [ ] Direct/overlapped NVMe reads where supported.
 - [ ] Resident-trunk and bounded streamed-trunk placement profiles.

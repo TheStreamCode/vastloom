@@ -2,6 +2,17 @@
 
 ## Unreleased
 
+- Executed the first real DeepSeek layer from official payload. `deepseek-layer-probe` relocates the
+  verified catalog onto the imported artifacts, loads trunk and globals through their governed
+  reservations and runs one complete layer with the checkpoint's own router selecting the experts.
+  Token 0 executes experts 254, 222, 245, 200, 53 and 35, reads 38,928,384 expert bytes and produces
+  129,280 logits in `[-16.0828, 15.4815]` in 1.07 s; two runs agree exactly. Q8_0, Q5_K, Q6_K, BF16,
+  I32, IQ1_S, IQ3_XXS and Q4_K all execute together for the first time. This is one layer of 43 and
+  the command says so — `complete_model: false` — so these logits are not the model's output.
+  Relocation is partial by design: a tensor no artifact provided keeps an absent source and fails on
+  open, which is what stops a token whose experts were never imported from executing against wrong
+  bytes.
+
 - Imported the first official DeepSeek V4 Flash 0731 weight payload and made the routing decision
   that justifies it. Hash-routed layers select experts by table lookup, so `blk.0.ffn_gate_tid2eid`
   — part of the trunk — determines the selection for a token without executing anything. The

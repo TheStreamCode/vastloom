@@ -13,6 +13,10 @@ hardware, commands, measurements and limitations.
 
 ## Current report
 
+- [`M9_DEEPSEEK_OFFICIAL_LAYER_EXECUTION_VALIDATION.md`](M9_DEEPSEEK_OFFICIAL_LAYER_EXECUTION_VALIDATION.md) —
+  first real DeepSeek layer executed from official payload: catalog relocation onto imported
+  artifacts, eight quantizations running together, the checkpoint's own router choosing six experts,
+  and deterministic layer-0 logits. One layer of 43, not the model's output.
 - [`M9_DEEPSEEK_AUTHORITATIVE_ROUTING_VALIDATION.md`](M9_DEEPSEEK_AUTHORITATIVE_ROUTING_VALIDATION.md) —
   first official DeepSeek payload import: the layer-0 trunk, the pinned `tid2eid` table read through
   the governed range path, one token's authoritative expert selection and the six complete bundles

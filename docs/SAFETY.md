@@ -259,10 +259,11 @@ The 0731 GGUF reader adds a metadata-only safety boundary:
   It publishes success only after six globals, 11,008 bundles, 33,024 expert slices, the
   1,328-object physical partition and all 82,533,892,444 known tensor bytes close exactly;
 - recognizing Q4_K, IQ2_XXS and MXFP4 block sizes in a catalog never exposes execution by itself.
-  Q4_K and IQ2_XXS enter the native capability query only through their later pinned-parity
-  kernels; MXFP4 remains rejected. Their row lookup validates the complete encoded matrix size,
-  caps descriptor arithmetic and decodes only one bounded caller-owned row. Transactional
-  matvec publishes no caller-visible output until the complete operation succeeds;
+  Each format enters the native capability query only through its later pinned-parity kernel.
+  Their row lookup validates the complete encoded matrix size, caps descriptor arithmetic and
+  decodes only one bounded caller-owned row. MXFP4 additionally rejects any E8M0/E2M1 block whose
+  FP32 products overflow. Transactional matvec publishes no caller-visible output until the
+  complete operation succeeds;
 - a header-prefix path cannot be used as an executable tensor source. Full source paths are
   exposed only for a complete immutable import after every full-file SHA-256 succeeds and one
   expert bundle fits wholly in safe RAM or wholly in safe VRAM. `--no-verify` forces metadata-only

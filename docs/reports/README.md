@@ -13,6 +13,10 @@ hardware, commands, measurements and limitations.
 
 ## Current report
 
+- [`M9_DEEPSEEK_MXFP4_EXPERT_KERNEL_VALIDATION.md`](M9_DEEPSEEK_MXFP4_EXPERT_KERNEL_VALIDATION.md) —
+  pinned-ggml MXFP4 E8M0/E2M1 scalar dequantization/matvec parity, bounded complete-matrix row
+  lookup and alternate reduced IQ1_S-gate/up plus MXFP4-down prefill/decode graph parity, with no
+  official MXFP4 payload acquisition.
 - [`M9_DEEPSEEK_IQ2XXS_EXPERT_KERNEL_VALIDATION.md`](M9_DEEPSEEK_IQ2XXS_EXPERT_KERNEL_VALIDATION.md) —
   pinned-ggml IQ2_XXS scalar dequantization/matvec parity, bounded complete-matrix row lookup and
   alternate reduced IQ2_XXS-gate/up plus IQ3_XXS-down prefill/decode graph parity, with no

@@ -361,11 +361,11 @@ and coalesced read bytes must equal the bundle total. The physical partition mus
 `1,193 layer + 6 global + 129 packed expert = 1,328`; the logical partition must be
 `1,193 + 6 + 33,024 = 34,223`. Checked byte accumulation must close at 82,533,892,444 bytes.
 The catalog pass recognizes Q4_K, IQ2_XXS and MXFP4 as GGML block layouts without authorizing
-execution. Separate pinned-ggml parity gates now admit Q4_K and IQ2_XXS through
-`supports_reference_matvec_ggml_type`. Q4_K supports bounded embedding-row access; IQ2_XXS
-supports bounded row decode, transactional matvec and an alternate reduced routed-expert graph.
-MXFP4 remains outside the execution capability query. This preserves the distinction between
-metadata closure and a tested native kernel.
+execution. Separate pinned-ggml parity gates now admit all three through
+`supports_reference_matvec_ggml_type`. Each supports bounded row decode and transactional matvec;
+Q4_K feeds reduced embedding/output consumers, IQ2_XXS feeds an alternate routed gate/up graph
+and MXFP4 feeds an alternate routed down graph. The official checkpoint still remains
+non-executing: format capability does not replace verified source, layer and token gates.
 
 Every non-routed `blk.N.*` descriptor now retains its checked layer identity. The shared layer
 planner walks catalog order, excludes routed-expert bundles and splits each immutable tensor range
@@ -606,6 +606,9 @@ materializes only one caller-selected physical row, allowing token embedding loo
 529-million-element FP32 allocation. The reduced graph consumes both packed `embed.weight` and
 `head.weight` in prefill and incremental decode; the 1,073,741,824-element descriptor ceiling
 admits the pinned 129,280 x 4,096 matrices without permitting unbounded matrix arithmetic.
+MXFP4 down projections use one E8M0 scale and 16 packed E2M1 bytes per 32 values. Their bounded
+validator evaluates every scaled nibble before output publication and rejects FP32 overflow;
+standalone decode/matvec/row lookup and an all-routed-W2 reduced graph match the pinned oracle.
 One exact DeepSeek 0731 layer-0/expert-0 gate/up/down bundle is loaded through the shared bounded
 worker and `RAM_READY` lease, then resolved through a one-entry router-first RAM cache. The same
 bundle also passes the optional asynchronous begin/acquire path. Canonical

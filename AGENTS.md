@@ -75,8 +75,10 @@ dequantization/matvec oracle and a bounded single-row decoder; reduced packed em
 head prefill/decode match an independently dequantized graph. IQ2_XXS gate/up weights now also
 have pinned-ggml scalar dequantization/matvec and row-decoder parity; an alternate reduced graph
 with every routed W1/W3 matrix in IQ2_XXS matches its independently dequantized prefill/decode
-oracle. MXFP4 down-expert variants remain layout-only, and no official IQ2_XXS or global payload
-was read. A complete 0731 quantized layer/token
+oracle. MXFP4 now has pinned-ggml scalar dequantization/matvec and row-decoder parity as well; a
+second alternate reduced graph with every routed W2 matrix in MXFP4 matches independently
+dequantized prefill/decode. No official IQ2_XXS, MXFP4 or global payload was read. A complete
+0731 quantized layer/token
 path, physical NVMe overlap,
 generation and CUDA remain unvalidated.
 Windows and Linux CPU paths are tested; macOS/Metal remain unvalidated. Laguna S 2.1 remains a

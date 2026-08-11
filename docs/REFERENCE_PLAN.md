@@ -130,12 +130,13 @@ slices, and reconciles physical, logical and byte partitions. The real pinned re
 physical tensors, 34,223 logical descriptors and 82,533,892,444 known tensor bytes. This also
 surfaces the remaining execution formats explicitly. Global Q4_K now has a separately validated
 scalar kernel and bounded packed-row path. Routed IQ2_XXS now has its own pinned scalar kernel,
-transactional matvec, row lookup and reduced prefill/decode graph parity; MXFP4 retains bounded
-byte-layout validation but no native kernel claim.
+transactional matvec, row lookup and reduced prefill/decode graph parity. Routed MXFP4 down
+projections now have the same pinned scalar/transactional/row boundary and a separate reduced
+prefill/decode graph parity gate.
 
-After the MXFP4 parity kernel and retained packed-global binding exist, the payload gate
-requires explicit user authorization to acquire the exact 138,867,160-byte trunk ranges, execute
-the real `tid2eid` route for a pinned input and fetch only its six selected complete experts.
+After the retained packed-global binding exists, the payload gate requires explicit user
+authorization to acquire the exact 138,867,160-byte trunk ranges, execute the real `tid2eid`
+route for a pinned input and fetch only its six selected complete experts.
 
 Kimi K3 is not a reference-PC execution target. The project treats it as metadata/capacity-only
 because no exact profile has proved that its complete expert bundle fits one real tier on the

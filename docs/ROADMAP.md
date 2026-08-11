@@ -291,8 +291,12 @@ unbounded allocation and clean recovery from injected CUDA failures.
   alternate reduced MoE graph with IQ2_XXS W1/W3 and IQ3_XXS W2 through prefill and incremental
   decode. See the
   [IQ2_XXS expert-kernel validation](reports/M9_DEEPSEEK_IQ2XXS_EXPERT_KERNEL_VALIDATION.md).
-- [ ] Add pinned-ggml parity for MXFP4, then bind all six retained global consumers without
-  weakening the execution gate.
+- [x] Add pinned-ggml MXFP4 parity, transactional matvec and bounded row lookup; execute an
+  alternate reduced MoE graph with IQ1_S W1/W3 and MXFP4 W2 through prefill and incremental
+  decode. See the
+  [MXFP4 expert-kernel validation](reports/M9_DEEPSEEK_MXFP4_EXPERT_KERNEL_VALIDATION.md).
+- [ ] Bind all six retained global consumers through one governed transaction without weakening
+  the execution gate.
 - [ ] Execute that probe by acquiring the bounded official trunk ranges, decoding the real
   `tid2eid` route and loading only its six selected complete expert bundles.
 - [ ] Pinned host buffers.

@@ -326,6 +326,19 @@ hash verification and live single-tier expert admission. Skipping hashes forces 
 catalog back to metadata-only. Exact encoded byte accounting is available to planning, but the
 real full payload has not been imported and layer/token execution remains outside this slice.
 
+For the exact pinned checkpoint spec, the bounded reader retains only three explicitly named
+architecture arrays: the 46-value compression schedule and the independent 43-value routed and
+shared SwiGLU clamp schedules. Integral and floating arrays share one aggregate element budget;
+wrong types, duplicate requested keys, scalars and incomplete schedules fail closed. The verified
+snapshot constructs `DeepseekV4ReferenceConfig` directly from GGUF metadata, including vocabulary,
+context, attention/indexer, Hyper-Connection, MoE and YaRN dimensions. Synthetic and unpinned
+catalogs cannot claim this bridge merely by presenting compatible tensor names.
+
+The separate layer-0 catalog validator reuses the canonical consumer layout from the resident
+trunk binder. It verifies exactly 11 matrices, nine F32/BF16 vectors and one I32 `tid2eid` table,
+including logical dimensions, GGML storage type and recomputed encoded byte count. It allocates no
+tensor buffer and reads no payload; it is a metadata-to-consumer contract, not execution.
+
 Every non-routed `blk.N.*` descriptor now retains its checked layer identity. The shared layer
 planner walks catalog order, excludes routed-expert bundles and splits each immutable tensor range
 at a 64 MiB ceiling. On the real 0731 metadata this produces complete plans for 43/43 layers:
@@ -487,6 +500,11 @@ Those ranges use the canonical official `blk.0.*` names. An explicit 0731 adapte
 the hash-table element count, and returns a detached binding set. There is no heuristic suffix
 matching and no partial graph publication on failure.
 
+The same canonical layout is now checked independently against the real pinned 0731 catalog
+before any range is acquired. The exact metadata-derived configuration supplies all consumer
+dimensions, and the validator recomputes each encoded span from shape and GGML type. The official
+layer-0 result is 21 descriptors and 138,867,160 logical bytes, with zero payload reads.
+
 Packed F32/BF16 vectors retain exact subranges of the same shared immutable buffer. The scalar
 reference path decodes explicit little-endian storage into transient FP32 only at consumption,
 rejects non-finite values and caps that scratch at 1,048,576 elements (4 MiB). Matrix payloads
@@ -494,6 +512,12 @@ remain encoded and block-decoded by their existing kernels. The four routed bund
 other 5,536 bytes independently. After every loader wrapper is destroyed, complete reduced
 prefill and incremental decode still match the independently dequantized oracle. This proves the
 closed tensor-set/name-adapter/graph ownership boundary, not official 0731 payload execution.
+
+Routed and shared expert execution now consume distinct per-block SwiGLU limits when verified
+schedules are present. Both schedules are validated before graph execution; main blocks index by
+main-layer number and MTP blocks use their offset after the main layers. Reduced legacy fixtures
+retain their explicit single scalar only when both schedules are absent. This mirrors the pinned
+upstream graph's separate `swiglu_clamp_exp` and `swiglu_clamp_shexp` metadata semantics.
 
 The router-first reduced slice stops after authoritative routing, deduplicates expert IDs and
 calls a block-scoped provider before expert compute. The reusable synchronous baseline owns a

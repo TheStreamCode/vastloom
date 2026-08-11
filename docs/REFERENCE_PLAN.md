@@ -116,10 +116,12 @@ artifact buffer.
 The newer complete layer-0 fixture extends that boundary to 21 canonical objects and 2,844 trunk
 bytes: 11 matrices, nine retained F32 vectors and one I32 table bind through an explicit 0731
 name/shape adapter. With four separately governed expert bundles, complete reduced prefill/decode
-matches its oracle and releases the aggregate lease cleanly. The next gate is deriving the exact
-reference configuration from verified GGUF metadata and validating the 21 real descriptors
-without payload access. Only after that contract passes should the user be asked to authorize the
-real transfer.
+matches its oracle and releases the aggregate lease cleanly. The exact pinned GGUF metadata now
+derives the native reference configuration and validates the 21 real layer-0 descriptors without
+payload access. That contract includes both official SwiGLU clamp schedules instead of applying a
+single fixture scalar to routed and shared experts. The next gate requires explicit user
+authorization to acquire the exact 138,867,160-byte trunk ranges, execute the real `tid2eid`
+route for a pinned input and fetch only its six selected complete experts.
 
 Kimi K3 is not a reference-PC execution target. The project treats it as metadata/capacity-only
 because no exact profile has proved that its complete expert bundle fits one real tier on the

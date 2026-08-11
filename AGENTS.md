@@ -60,10 +60,12 @@ hit/miss/eviction/logical-byte telemetry. Canonical 0731 GGUF identities now bin
 first-miss/second-hit telemetry, pinned ggml output and lease cleanup pass across tested compilers.
 The same real expert also passes the asynchronous future/cache/kernel boundary, although one
 expert alone cannot prove useful overlap. The mixed-format layer uses reduced synthetic IQ bytes;
-the real 4,096/2,048 expert is not yet composed with official trunk payload. The exact reference
-configuration is not yet derived from verified GGUF metadata, and no official trunk tensor was
-loaded. A complete 0731 quantized layer/token path, physical NVMe overlap, generation and CUDA
-remain unvalidated.
+the real 4,096/2,048 expert is not yet composed with official trunk payload. The exact pinned
+0731 GGUF metadata now derives the native 43-layer reference configuration, including separate
+43-value routed/shared SwiGLU clamp schedules and the 46-value compression schedule. A
+buffer-free validator maps all 21 official layer-0 non-routed descriptors to exact graph-consumer
+dimensions and encoded storage sizes. No official trunk tensor was loaded. A complete 0731
+quantized layer/token path, physical NVMe overlap, generation and CUDA remain unvalidated.
 Windows and Linux CPU paths are tested; macOS/Metal remain unvalidated. Laguna S 2.1 remains a
 reviewed compatibility target, not a validated execution path.
 

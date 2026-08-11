@@ -83,8 +83,12 @@ model conversion.
 > aggregate artifact buffer: 11 matrices, nine retained F32 vectors and one I32 route table are
 > published under canonical `blk.0.*` GGUF identities and mapped explicitly to their graph
 > consumers. Four indivisible IQ1_S/IQ3_XXS expert bundles remain separately governed; prefill and
-> decode still match the independent oracle. The complete 82.54 GB payload has not been downloaded
-> or executed; this synthetic gate is not a complete official DeepSeek layer/token path,
+> decode still match the independent oracle. The exact verified 0731 metadata now directly
+> constructs the native 43-layer reference configuration, retains the 46-value compression and
+> separate 43-value routed/shared SwiGLU schedules, and validates every official layer-0 trunk
+> descriptor against its graph consumer without reading payload. The complete 82.54 GB payload
+> has not been downloaded or executed; this synthetic gate is not a complete official DeepSeek
+> layer/token path,
 > physical-NVMe performance, generation or CUDA implementation.
 
 ## Why Vastloom exists
@@ -171,6 +175,9 @@ The first governed bound-range-to-scalar transaction is documented in the
 [`M9 bound trunk-load report`](docs/reports/M9_DEEPSEEK_BOUND_TRUNK_LOAD_VALIDATION.md).
 The complete reduced artifact tensor-set transaction and graph parity gate are documented in the
 [`M9 trunk tensor-set report`](docs/reports/M9_DEEPSEEK_TRUNK_TENSOR_SET_VALIDATION.md).
+The verified GGUF metadata-to-reference-config bridge and 21-descriptor layer-0 gate are documented
+in the
+[`M9 metadata-to-graph report`](docs/reports/M9_DEEPSEEK_METADATA_TO_GRAPH_VALIDATION.md).
 The pinned importer and immutable full-source admission boundary are documented in the
 [`M7 checkpoint-binding report`](docs/reports/M7_DEEPSEEK_GGUF_CHECKPOINT_BINDING_VALIDATION.md).
 Current and candidate model support is kept explicit in the
@@ -332,6 +339,11 @@ portability target, not a validated platform claim.
   `fbbb5b93fb787c21338159b0af3318bb3f4d9768` now has a bounded GGUF v3 header reader and
   DeepSeek-specific packed-expert mapper. The reviewed `UD-IQ1_S` split exposes 1,328 physical
   tensors, 34,223 logical tensors and 11,008 layer/expert bundles.
+- **Verified metadata-to-graph contract:** only the exact pinned manifest/spec may retain the
+  bounded 46-value compression array and separate 43-value routed/shared SwiGLU clamp arrays.
+  It derives the native 43-layer, width-4,096, 64-head, 256-expert/top-6 configuration and checks
+  all 21 official layer-0 non-routed descriptors, storage types, consumer dimensions and encoded
+  byte counts. This validator performs no tensor allocation or payload read.
 - **Header-derived traffic floor:** the encoded routed experts total 75,547,803,648 bytes;
   a top-6 no-cache decode would request 1,770,651,648 logical expert bytes per token before
   caching/prefetch gains. This is not measured physical SSD traffic or a speed claim.
@@ -901,11 +913,11 @@ merely SSD throughput. It is:
 
 The next technical sequence remains incremental:
 
-1. derive the exact reference configuration and all layer-0 consumer dimensions directly from the
-   verified 0731 GGUF metadata, then validate the 21 real descriptors without payload access;
-2. only after that metadata-to-graph contract passes and the user explicitly approves, use the
-   completed importer to acquire the exact 138,867,160-byte layer-0 trunk plan;
-3. decode the official `tid2eid` route for a pinned input, then acquire only its six complete
+1. after explicit user authorization, use the completed bounded importer to acquire only the exact
+   138,867,160-byte layer-0 trunk ranges while preserving the model-store free-space reserve;
+2. bind and execute those 21 official objects through the now-verified metadata-derived reference
+   configuration, then decode the official `tid2eid` route for a pinned input;
+3. acquire only that route's six complete
    selected expert bundles (38,928,384 bytes for layer 0) and match the official layer output;
 4. measure useful physical-device expert-read/compute overlap with declared cache state and exact
    logical, process-visible and device bytes;

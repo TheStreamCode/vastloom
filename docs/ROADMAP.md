@@ -269,8 +269,11 @@ unbounded allocation and clean recovery from injected CUDA failures.
 - [x] Add retained typed F32/BF16 vector and scalar graph consumers plus an explicit canonical
   0731 layer-0 name adapter. The 21-object reduced artifact retains one lease and matches the
   prefill/decode oracle; the official payload remains unexecuted.
-- [ ] Derive the exact reference configuration from verified 0731 GGUF metadata and validate all
+- [x] Derive the exact reference configuration from verified 0731 GGUF metadata and validate all
   21 official layer-0 catalog descriptors against their graph consumers without reading payload.
+  The pinned metadata now supplies the 46-entry compression schedule, distinct 43-entry
+  routed/shared SwiGLU schedules and every native consumer dimension; see the
+  [metadata-to-graph validation](reports/M9_DEEPSEEK_METADATA_TO_GRAPH_VALIDATION.md).
 - [ ] Execute that probe by acquiring the bounded official trunk ranges, decoding the real
   `tid2eid` route and loading only its six selected complete expert bundles.
 - [ ] Pinned host buffers.

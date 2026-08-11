@@ -13,6 +13,10 @@ hardware, commands, measurements and limitations.
 
 ## Current report
 
+- [`M9_DEEPSEEK_METADATA_TO_GRAPH_VALIDATION.md`](M9_DEEPSEEK_METADATA_TO_GRAPH_VALIDATION.md) —
+  exact pinned 0731 GGUF metadata to native reference-config construction, bounded retention of
+  the compression and distinct routed/shared SwiGLU schedules, and zero-payload validation of all
+  21 official layer-0 non-routed descriptors against their graph consumers.
 - [`M9_DEEPSEEK_LAYER0_TRUNK_BINDING_VALIDATION.md`](M9_DEEPSEEK_LAYER0_TRUNK_BINDING_VALIDATION.md) —
   retained F32/BF16 vector consumers, an explicit 21-name canonical 0731 layer-0 adapter, one
   2,844-byte aggregate trunk lease and unchanged reduced mixed-format prefill/decode parity.

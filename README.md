@@ -118,8 +118,14 @@ model conversion.
 > two 4,096-wide FP32 rows plus their weights to the GPU, launches a toolkit-free scalar PTX
 > RMSNorm, copies the result back and compares it with the existing DeepSeek CPU reference.
 > Windows and WSL both passed at `0.000025` maximum absolute error and released all VRAM.
-> The complete 82.54 GB payload
-> has not been downloaded or executed; this synthetic gate is not a complete official DeepSeek
+> The first official payload is now local, and the checkpoint itself decided which of it to fetch.
+> DeepSeek's first three layers route by table lookup rather than by a learned gate, so the imported
+> layer-0 trunk — 21 ranges, 138,867,160 bytes — contains the `tid2eid` table that determines a
+> token's experts. Reading it through the governed rehashed range path resolves token 0 to experts
+> 35, 53, 200, 222, 245 and 254, which is the authority the importer had been waiting for: the
+> previously refused selected-expert scope then fetched exactly those six complete bundles
+> (18 ranges, 38,928,384 bytes). 82.36 GB of the checkpoint is still not downloaded, and nothing
+> has been executed from the part that is: this is not yet a complete official DeepSeek
 > layer/token path,
 > physical-NVMe performance, official-payload generation or complete CUDA inference implementation.
 

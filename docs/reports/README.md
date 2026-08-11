@@ -13,6 +13,10 @@ hardware, commands, measurements and limitations.
 
 ## Current report
 
+- [`M9_DEEPSEEK_AUTHORITATIVE_ROUTING_VALIDATION.md`](M9_DEEPSEEK_AUTHORITATIVE_ROUTING_VALIDATION.md) —
+  first official DeepSeek payload import: the layer-0 trunk, the pinned `tid2eid` table read through
+  the governed range path, one token's authoritative expert selection and the six complete bundles
+  it names; nothing executed from that payload yet.
 - [`M8_CUDA_RMSNORM_VALIDATION.md`](M8_CUDA_RMSNORM_VALIDATION.md) — first real toolkit-free CUDA
   data operation: governed packed VRAM, synchronous H2D/D2H, scalar PTX RMSNorm, CPU parity and
   transactional failure coverage on the RTX 4070 Super through Windows and WSL; still no CUDA

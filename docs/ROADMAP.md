@@ -316,8 +316,14 @@ recorded in the [M8 CUDA RMSNorm report](reports/M8_CUDA_RMSNORM_VALIDATION.md).
   with a 297,861,120-byte maximum; its importer passed dry-run only. A reduced Q8_0/F32 artifact
   retains one lease across embedding, output, norm and Hyper-Connection prefill/decode parity;
   see the [global tensor-set validation](reports/M9_DEEPSEEK_GLOBAL_TENSOR_SET_VALIDATION.md).
-- [ ] Execute that probe by acquiring the bounded official trunk ranges, decoding the real
-  `tid2eid` route and loading only its six selected complete expert bundles.
+- [x] Acquire the bounded official layer-0 trunk (21 ranges, 138,867,160 bytes) and decode the real
+  `tid2eid` route from it. Hash-routed layers select by table lookup, so the imported trunk answers
+  the routing question without executing the model: token 0 resolves to experts 35, 53, 200, 222,
+  245 and 254 under `official-tid2eid-verified`. That authority opened the selected-expert scope and
+  imported those six complete bundles (18 ranges, 38,928,384 bytes). See the
+  [authoritative routing validation](reports/M9_DEEPSEEK_AUTHORITATIVE_ROUTING_VALIDATION.md).
+- [ ] Execute that probe: feed the imported trunk and its six selected expert bundles through the
+  quantized kernels as one complete official layer and match an independent oracle.
 - [ ] Pinned host buffers.
 - [ ] Direct/overlapped NVMe reads where supported.
 - [ ] Resident-trunk and bounded streamed-trunk placement profiles.

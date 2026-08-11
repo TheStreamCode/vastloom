@@ -91,10 +91,17 @@ dequantized prefill/decode. The six global consumers now also have an exact pinn
 scope replays every immutable source span, and a reduced Q8_0/F32 fixture loads all six through one
 aggregate governed RAM buffer/lease into embedding, output, normalization and Hyper-Connection
 prefill/decode parity. The official set passed importer dry-run only. No official IQ2_XXS, MXFP4
-or global payload was read. A complete
+or global payload was read. The first official payload is now local. Hash-routed layers select experts by table lookup, so the
+imported layer-0 trunk (21 ranges, 138,867,160 bytes) answers the routing question without executing
+anything: `deepseek_v4_resolve_hash_route` reads the pinned `blk.0.ffn_gate_tid2eid` table through
+the governed rehashed range path and token 0 resolves to experts 35, 53, 200, 222, 245 and 254. That
+`official-tid2eid-verified` authority opened the previously refused selected-expert scope and
+imported those six complete bundles (18 ranges, 38,928,384 bytes). Learned-router layers remain
+unresolvable without execution and are refused. A complete
 0731 quantized layer/token
 path, physical NVMe overlap,
-official-payload generation and complete CUDA model inference remain unvalidated.
+official-payload generation and complete CUDA model inference remain unvalidated: nothing has yet
+been executed from the imported payload.
 Windows and Linux CPU paths are tested; macOS/Metal remain unvalidated. Laguna S 2.1 remains a
 reviewed compatibility target, not a validated execution path.
 

@@ -2,6 +2,17 @@
 
 ## Unreleased
 
+- Imported the first official DeepSeek V4 Flash 0731 weight payload and made the routing decision
+  that justifies it. Hash-routed layers select experts by table lookup, so `blk.0.ffn_gate_tid2eid`
+  — part of the trunk — determines the selection for a token without executing anything. The
+  bounded importer fetched the 21-range / 138,867,160-byte layer-0 trunk, the new
+  `deepseek_v4_resolve_hash_route` read that table through the governed rehashed range path, and
+  token 0 resolved to experts 35, 53, 200, 222, 245 and 254. The resulting plan reports
+  `official-tid2eid-verified`, which opened the previously refused `--scope selected-experts` and
+  imported those six complete bundles (18 ranges, 38,928,384 bytes). Learned-router layers,
+  out-of-vocabulary tokens, absent or mis-sized tables and out-of-range expert ids all fail closed.
+  Nothing has been executed from this payload, and 82.36 GB of the checkpoint remains undownloaded.
+
 - Separated environment refusals from defects across the governed test suite. A Safety Governor
   refusal caused by host memory pressure was reported as a test failure, so an unrelated process
   holding 20 GiB made four tests fail on one run and five different tests fail on the next. Every

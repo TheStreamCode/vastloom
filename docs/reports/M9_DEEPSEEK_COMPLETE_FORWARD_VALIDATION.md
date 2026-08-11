@@ -136,11 +136,27 @@ Generation read 16,015,622,144 bytes of expert payload for six tokens — about 
 close to the 1.77 GB per-token no-cache figure plus the prefill's wider working set. Every byte
 comes from NVMe on every token because no expert survives between steps.
 
+## Where the minute went
+
+2.7 GB per token is under a second on this SSD, so the cost was compute: the matvec kernels walked
+one row at a time on one core. Rows are independent, so they now split across the Governor's thread
+budget, with no reordering inside a row.
+
+| | ms per token | Output |
+|---|---:|---|
+| serial | 60,301 | `" una grande citta cosmopol"` |
+| six workers | 32,730 | `" una grande citta cosmopol"` |
+
+Identical text, 1.84× faster. The speedup is well short of six because only the packed matvecs are
+threaded: attention, normalization, RoPE, the Hyper-Connection mixing and the float paths are still
+serial, and Amdahl's law does the rest. That also says where the next gains are — and that the
+kernels themselves, not the storage hierarchy, are what stands between this and a usable model.
+
 ## Bounds
 
-- 60.3 s per generated token with scalar CPU kernels, and 2.7 GB of NVMe reads per token because no
-  expert survives between decode steps. Correct, not usable. No CUDA kernel participates in this
-  path.
+- 32.7 s per generated token with scalar CPU kernels on six threads, and 2.7 GB of NVMe reads per
+  token because no expert survives between decode steps. Correct, not usable. No CUDA kernel
+  participates in this path, and the non-matvec math is still single-threaded.
 - All 43 trunks are resident simultaneously. The project's own design — load a layer, execute it,
   release it — is not yet implemented here, so a host with less free RAM would be refused rather
   than served.

@@ -14,6 +14,13 @@
   [complete forward validation](docs/reports/M9_DEEPSEEK_COMPLETE_FORWARD_VALIDATION.md). This is one
   forward pass, not generation, and 29.4 s per token is correct rather than usable.
 
+- Packed matvec rows now split across the Governor's thread budget, taking generation from 60.3 s to
+  32.7 s per token on the reference PC with byte-identical output. Rows are independent and each is
+  still computed exactly as it would be serially, so the ggml parity fixtures are unaffected. The
+  gain falls short of the thread count because only the matvecs are threaded — attention,
+  normalization, RoPE and the Hyper-Connection paths remain serial, which is where the next
+  speedup lives.
+
 - **The complete model generates coherent text.** `"La capitale d'Italia e"` produced
   `" una grande citta cosmopol"` through all 43 layers of the official checkpoint — six tokens at
   60.3 s each, 16 GB of expert payload read from NVMe, 7.62 GB resident, free host RAM never below

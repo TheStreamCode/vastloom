@@ -21,6 +21,7 @@
 
 #include "vastloom/cli/tiny_commands.hpp"
 #include "vastloom/core/bytes.hpp"
+#include "vastloom/cuda/cuda_driver.hpp"
 #include "vastloom/hardware/hardware_probe.hpp"
 #include "vastloom/inference/gpt2_tokenizer.hpp"
 #include "vastloom/inference/deepseek_v4_gguf.hpp"
@@ -229,6 +230,8 @@ void print_help() {
         << "      Run adapter-specific deterministic end-to-end generation probes.\n\n"
         << "  doctor [--storage PATH] [--json]\n"
         << "      Detect CPU, RAM, NVIDIA VRAM and storage without allocating model memory.\n\n"
+        << "  cuda-info [--allocation-smoke SIZE] [--minimum-free-vram SIZE] [--json]\n"
+        << "      Probe the native CUDA driver; optional smoke allocation is capped and governed.\n\n"
         << "  inspect MANIFEST_OR_MODEL_HEADERS [--declared-size SIZE] [--tensor-limit N] [--json]\n"
         << "      Inspect a manifest, bounded Safetensors checkpoint or GGUF v3 header.\n\n"
         << "  verify MANIFEST [--model-root PATH] [--full] [--json]\n"
@@ -321,6 +324,113 @@ int command_doctor(const std::vector<std::string>& args) {
     auto hardware = vastloom::hardware::HardwareProbe::collect(storage);
     if (!hardware) return print_error(hardware.error(), json);
     std::cout << (json ? vastloom::hardware::to_json(hardware.value()) : vastloom::hardware::to_text(hardware.value())) << '\n';
+    return 0;
+}
+
+int command_cuda_info(const std::vector<std::string>& args) {
+    const bool json = has_flag(args, "--json");
+    if (has_flag(args, "--help")) {
+        std::cout
+            << "Usage: vastloom cuda-info [--allocation-smoke SIZE]"
+               " [--minimum-free-vram SIZE] [--json]\n"
+            << "Loads the CUDA Driver API dynamically; no CUDA toolkit is required. The optional\n"
+            << "allocation is limited to 64 MiB, reserves Governor VRAM first and preserves at\n"
+            << "least 1 GiB of live device headroom unless a larger reserve is requested.\n";
+        return 0;
+    }
+    auto valid = validate_options(args, 0U,
+                                  {"--allocation-smoke", "--minimum-free-vram"},
+                                  {"--json", "--help"});
+    if (!valid) return print_error(valid.error(), json);
+    const bool smoke_requested = option_value(args, "--allocation-smoke").has_value();
+    if (!smoke_requested && option_value(args, "--minimum-free-vram").has_value()) {
+        return print_error(vastloom::make_error(
+                               vastloom::ErrorCode::invalid_argument,
+                               "--minimum-free-vram requires --allocation-smoke"),
+                           json);
+    }
+    auto smoke_bytes = optional_bytes(args, "--allocation-smoke", 0U);
+    auto minimum_free = optional_bytes(args, "--minimum-free-vram", 1U * vastloom::GiB);
+    if (!smoke_bytes) return print_error(smoke_bytes.error(), json);
+    if (!minimum_free) return print_error(minimum_free.error(), json);
+    if (smoke_requested &&
+        (smoke_bytes.value() == 0U || smoke_bytes.value() > 64U * vastloom::MiB)) {
+        return print_error(vastloom::make_error(
+                               vastloom::ErrorCode::invalid_argument,
+                               "--allocation-smoke must be between 1 byte and 64 MiB"),
+                           json);
+    }
+
+    auto driver = vastloom::cuda::CudaDriver::load();
+    if (!driver) return print_error(driver.error(), json);
+    auto probe = driver.value().probe();
+    if (!probe) return print_error(probe.error(), json);
+
+    bool smoke_passed = false;
+    if (smoke_requested) {
+        if (probe.value().devices.empty()) {
+            return print_error(vastloom::make_error(
+                                   vastloom::ErrorCode::not_found,
+                                   "CUDA allocation smoke requires device ordinal 0"),
+                               json);
+        }
+        auto hardware = vastloom::hardware::HardwareProbe::collect(
+            std::filesystem::current_path());
+        if (!hardware) return print_error(hardware.error(), json);
+        auto policy = vastloom::safety::make_safe_runtime_policy(hardware.value());
+        if (!policy) return print_error(policy.error(), json);
+        if (policy.value().resources.vram_hard_limit == 0U) {
+            return print_error(vastloom::make_error(
+                                   vastloom::ErrorCode::resource_exhausted,
+                                   "Runtime policy exposes no safe VRAM allocation budget"),
+                               json);
+        }
+        auto process_guard = vastloom::safety::ProcessSafetyGuard::apply(policy.value());
+        if (!process_guard) return print_error(process_guard.error(), json);
+        auto safe = process_guard.value().sample_and_check();
+        if (!safe) return print_error(safe.error(), json);
+        vastloom::safety::ResourceGovernor governor(policy.value().resources);
+        auto allocation = driver.value().allocate(
+            0, smoke_bytes.value(), minimum_free.value(), governor, "cuda-info-smoke");
+        if (!allocation) return print_error(allocation.error(), json);
+        auto released = allocation.value().release();
+        if (!released) return print_error(released.error(), json);
+        const auto snapshot = governor.snapshot();
+        if (snapshot.reserved[static_cast<std::size_t>(
+                vastloom::safety::ResourceKind::vram)] != 0U) {
+            return print_error(vastloom::make_error(
+                                   vastloom::ErrorCode::integrity_error,
+                                   "CUDA smoke left a residual VRAM reservation"),
+                               json);
+        }
+        smoke_passed = true;
+    }
+
+    if (json) {
+        std::string output = vastloom::cuda::to_json(probe.value());
+        if (smoke_requested) {
+            if (output.empty() || output.back() != '}') {
+                return print_error(vastloom::make_error(
+                                       vastloom::ErrorCode::internal_error,
+                                       "CUDA JSON serialization produced an invalid object"),
+                                   true);
+            }
+            output.pop_back();
+            output += ",\"allocation_smoke\":{\"passed\":";
+            output += smoke_passed ? "true" : "false";
+            output += ",\"bytes\":" + std::to_string(smoke_bytes.value()) +
+                      ",\"minimum_free_vram_after\":" +
+                      std::to_string(minimum_free.value()) + "}}";
+        }
+        std::cout << output << '\n';
+    } else {
+        std::cout << vastloom::cuda::to_text(probe.value());
+        if (smoke_requested) {
+            std::cout << "Allocation:     PASS (" << vastloom::format_bytes(smoke_bytes.value())
+                      << ", released; live reserve "
+                      << vastloom::format_bytes(minimum_free.value()) << ")\n";
+        }
+    }
     return 0;
 }
 
@@ -1664,6 +1774,7 @@ int dispatch_cli(const std::vector<std::string>& arguments) {
             return vastloom::cli::command_self_test(args);
         }
         if (command == "doctor") return command_doctor(args);
+        if (command == "cuda-info") return command_cuda_info(args);
         if (command == "inspect") return command_inspect(args);
         if (command == "verify") return command_verify(args);
         if (command == "plan") return command_plan(args);

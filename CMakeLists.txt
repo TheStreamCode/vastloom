@@ -70,6 +70,7 @@ include(CMakePackageConfigHelpers)
 
 add_library(vastloom_core STATIC
     src/core/bytes.cpp
+    src/cuda/cuda_driver.cpp
     src/hardware/hardware_probe.cpp
     src/inference/gpt2_tokenizer.cpp
     src/inference/ggml_quantization.cpp
@@ -119,6 +120,9 @@ target_include_directories(vastloom_core
 
 target_compile_features(vastloom_core PUBLIC cxx_std_20)
 target_link_libraries(vastloom_core PUBLIC Threads::Threads)
+if(CMAKE_DL_LIBS)
+    target_link_libraries(vastloom_core PRIVATE ${CMAKE_DL_LIBS})
+endif()
 vastloom_set_project_warnings(vastloom_core)
 vastloom_enable_sanitizers(vastloom_core)
 
@@ -161,6 +165,14 @@ if(BUILD_TESTING AND VASTLOOM_BUILD_TESTS)
     vastloom_set_project_warnings(vastloom_range_artifact_test)
     vastloom_enable_sanitizers(vastloom_range_artifact_test)
     add_test(NAME vastloom_range_artifact COMMAND vastloom_range_artifact_test)
+    add_executable(vastloom_cuda_driver_test
+        tests/test_cuda_driver.cpp
+    )
+    target_link_libraries(vastloom_cuda_driver_test PRIVATE Vastloom::Core)
+    target_compile_features(vastloom_cuda_driver_test PRIVATE cxx_std_20)
+    vastloom_set_project_warnings(vastloom_cuda_driver_test)
+    vastloom_enable_sanitizers(vastloom_cuda_driver_test)
+    add_test(NAME vastloom_cuda_driver COMMAND vastloom_cuda_driver_test)
     if(VASTLOOM_DEEPSEEK_V4_IQ1S_SLICE)
         add_executable(vastloom_iq1s_slice_test tests/test_iq1s_slice.cpp)
         target_link_libraries(vastloom_iq1s_slice_test PRIVATE Vastloom::Core)
@@ -239,6 +251,13 @@ if(BUILD_TESTING AND VASTLOOM_BUILD_TESTS)
                 --vectors ${CMAKE_CURRENT_SOURCE_DIR}/examples/models/vastloom-tinychat-v1.tests.json
         )
         set_tests_properties(vastloom_cli_tiny_integration PROPERTIES TIMEOUT 60)
+        add_test(
+            NAME vastloom_cuda_cli
+            COMMAND ${Python3_EXECUTABLE}
+                ${CMAKE_CURRENT_SOURCE_DIR}/tests/test_cuda_cli.py
+                --vastloom $<TARGET_FILE:vastloom>
+        )
+        set_tests_properties(vastloom_cuda_cli PROPERTIES TIMEOUT 60)
         add_test(
             NAME vastloom_hf_importer_offline
             COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/tests/test_import_hf_model.py

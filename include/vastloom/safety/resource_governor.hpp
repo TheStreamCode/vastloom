@@ -72,6 +72,11 @@ public:
     [[nodiscard]] bool valid() const noexcept { return governor_ != nullptr && bytes_ != 0; }
     void release() noexcept;
 
+    // Keeps the bytes charged to the Governor while detaching this RAII handle. Use only when an
+    // external allocation could not be released: making the budget unavailable is safer than
+    // pretending that leaked memory is free.
+    void abandon_accounting_on_external_release_failure() noexcept;
+
 private:
     friend class ResourceGovernor;
     Reservation(ResourceGovernor* governor, ResourceKind kind, ByteCount bytes, std::string tag);

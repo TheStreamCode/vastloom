@@ -49,6 +49,12 @@ void Reservation::release() noexcept {
     }
 }
 
+void Reservation::abandon_accounting_on_external_release_failure() noexcept {
+    governor_ = nullptr;
+    bytes_ = 0;
+    tag_.clear();
+}
+
 ResourceGovernor::ResourceGovernor(ResourceLimits limits) : limits_(limits) {
     limits_.pressure_ratio = std::clamp(limits_.pressure_ratio, 0.10, 0.99);
     limits_.critical_ratio = std::clamp(limits_.critical_ratio, limits_.pressure_ratio + 0.01, 1.0);

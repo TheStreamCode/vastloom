@@ -264,6 +264,24 @@ deepseek_v4_validate_0731_gguf_layer_catalogs(
     const DeepseekV4GgufCatalogReport& report,
     const DeepseekV4ReferenceConfig& config);
 
+struct DeepseekV4ReferenceCheckpointCatalogValidation {
+    DeepseekV4ReferenceCatalogValidation layers;
+    std::size_t global_tensors{0U};
+    std::uint64_t global_bytes{0U};
+    std::size_t expert_bundles{0U};
+    std::size_t expert_tensor_slices{0U};
+    std::size_t physical_expert_tensors{0U};
+    std::size_t logical_tensors{0U};
+    std::uint64_t tensor_bytes{0U};
+};
+
+// Closes the complete pinned GGUF catalog across main-layer trunks, six global consumers and
+// every logical routed-expert slice. No tensor payload is allocated or read.
+[[nodiscard]] Result<DeepseekV4ReferenceCheckpointCatalogValidation>
+deepseek_v4_validate_0731_gguf_checkpoint_catalog(
+    const DeepseekV4GgufCatalogReport& report,
+    const DeepseekV4ReferenceConfig& config);
+
 struct DeepseekV4ReferenceGraph {
     DeepseekV4ReferenceConfig config;
     std::map<std::string, std::vector<float>, std::less<>> float_tensors;

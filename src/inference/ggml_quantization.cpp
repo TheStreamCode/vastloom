@@ -657,6 +657,13 @@ Result<std::size_t> ggml_storage_bytes(std::uint32_t ggml_type,
             block_elements = kQ8_0BlockElements;
             block_bytes = kQ8_0BlockBytes;
             break;
+        case kGgmlTypeQ4K:
+            // Layout-only support. Q4_K is needed to validate the pinned 0731 embedding and
+            // output descriptors, but supports_reference_matvec_ggml_type intentionally stays
+            // false until a parity-tested native kernel exists.
+            block_elements = kQ4KBlockElements;
+            block_bytes = kQ4KBlockBytes;
+            break;
         case kGgmlTypeQ5K:
             block_elements = kQ5KBlockElements;
             block_bytes = kQ5KBlockBytes;
@@ -664,6 +671,11 @@ Result<std::size_t> ggml_storage_bytes(std::uint32_t ggml_type,
         case kGgmlTypeQ6K:
             block_elements = kQ6KBlockElements;
             block_bytes = kQ6KBlockBytes;
+            break;
+        case kGgmlTypeIq2Xxs:
+            // Layout-only support for mixed 0731 expert metadata.
+            block_elements = kIq2XxsBlockElements;
+            block_bytes = kIq2XxsBlockBytes;
             break;
         case kGgmlTypeIq3Xxs:
             block_elements = kIq3XxsBlockElements;
@@ -680,6 +692,11 @@ Result<std::size_t> ggml_storage_bytes(std::uint32_t ggml_type,
         case kGgmlTypeBf16:
             block_elements = 1U;
             block_bytes = kBf16ElementBytes;
+            break;
+        case kGgmlTypeMxfp4:
+            // Layout-only support for mixed 0731 expert metadata.
+            block_elements = kMxfp4BlockElements;
+            block_bytes = kMxfp4BlockBytes;
             break;
         default:
             return make_error(ErrorCode::unsupported,

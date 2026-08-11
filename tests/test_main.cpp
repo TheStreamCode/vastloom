@@ -1074,13 +1074,31 @@ void test_trunk_storage_reference_kernels() {
         vastloom::inference::kGgmlTypeI32));
     CHECK(vastloom::inference::supports_reference_storage_ggml_type(
         vastloom::inference::kGgmlTypeI32));
+    CHECK(!vastloom::inference::supports_reference_matvec_ggml_type(
+        vastloom::inference::kGgmlTypeQ4K));
+    CHECK(!vastloom::inference::supports_reference_storage_ggml_type(
+        vastloom::inference::kGgmlTypeQ4K));
+    CHECK(!vastloom::inference::supports_reference_matvec_ggml_type(
+        vastloom::inference::kGgmlTypeIq2Xxs));
+    CHECK(!vastloom::inference::supports_reference_storage_ggml_type(
+        vastloom::inference::kGgmlTypeIq2Xxs));
+    CHECK(!vastloom::inference::supports_reference_matvec_ggml_type(
+        vastloom::inference::kGgmlTypeMxfp4));
+    CHECK(!vastloom::inference::supports_reference_storage_ggml_type(
+        vastloom::inference::kGgmlTypeMxfp4));
     CHECK(!vastloom::inference::supports_reference_storage_ggml_type(1024U));
     auto q8_bytes = vastloom::inference::ggml_storage_bytes(
         vastloom::inference::kGgmlTypeQ8_0, 3U, 64U);
     auto q5_bytes = vastloom::inference::ggml_storage_bytes(
         vastloom::inference::kGgmlTypeQ5K, 3U, 512U);
+    auto q4_bytes = vastloom::inference::ggml_storage_bytes(
+        vastloom::inference::kGgmlTypeQ4K, 2U, 512U);
     auto q6_bytes = vastloom::inference::ggml_storage_bytes(
         vastloom::inference::kGgmlTypeQ6K, 3U, 512U);
+    auto iq2_bytes = vastloom::inference::ggml_storage_bytes(
+        vastloom::inference::kGgmlTypeIq2Xxs, 2U, 256U);
+    auto mxfp4_bytes = vastloom::inference::ggml_storage_bytes(
+        vastloom::inference::kGgmlTypeMxfp4, 2U, 64U);
     auto bf16_bytes = vastloom::inference::ggml_storage_bytes(
         vastloom::inference::kGgmlTypeBf16, 2U, 4U);
     auto f32_bytes = vastloom::inference::ggml_storage_bytes(
@@ -1093,7 +1111,13 @@ void test_trunk_storage_reference_kernels() {
         vastloom::inference::kGgmlTypeIq3Xxs, 2U, 256U);
     CHECK(q8_bytes && q8_bytes.value() == q8.size());
     CHECK(q5_bytes && q5_bytes.value() == q5.size());
+    CHECK(q4_bytes && q4_bytes.value() ==
+                          4U * vastloom::inference::kQ4KBlockBytes);
     CHECK(q6_bytes && q6_bytes.value() == q6.size());
+    CHECK(iq2_bytes && iq2_bytes.value() ==
+                           2U * vastloom::inference::kIq2XxsBlockBytes);
+    CHECK(mxfp4_bytes && mxfp4_bytes.value() ==
+                            4U * vastloom::inference::kMxfp4BlockBytes);
     CHECK(bf16_bytes && bf16_bytes.value() == bf16.size());
     CHECK(f32_bytes && f32_bytes.value() == f32.size());
     CHECK(i32_bytes && i32_bytes.value() == i32.size());
@@ -3850,6 +3874,222 @@ void test_deepseek_v4_reference_graph(const std::filesystem::path& root) {
                     CHECK(all_layers && all_layers.value().layers == 1U &&
                           all_layers.value().tensors == 21U &&
                           all_layers.value().bytes == 2'844U);
+                    auto checkpoint_report = one_layer_report;
+                    bool checkpoint_fixture_ok = true;
+                    for (auto& tensor : checkpoint_report.catalog.tensors) {
+                        if (tensor.role !=
+                            vastloom::model::TensorRole::routed_expert) {
+                            continue;
+                        }
+                        CHECK(tensor.layer == 0U && tensor.expert.has_value());
+                        if (tensor.layer != 0U || !tensor.expert.has_value()) {
+                            checkpoint_fixture_ok = false;
+                            break;
+                        }
+                        const std::string prefix = "blk.0.";
+                        const std::string suffix = ".weight.expert." +
+                                                   std::to_string(*tensor.expert);
+                        if (tensor.name.ends_with(".w1.weight")) {
+                            tensor.name = prefix + "ffn_gate_exps" + suffix;
+                        } else if (tensor.name.ends_with(".w2.weight")) {
+                            tensor.name = prefix + "ffn_down_exps" + suffix;
+                        } else if (tensor.name.ends_with(".w3.weight")) {
+                            tensor.name = prefix + "ffn_up_exps" + suffix;
+                        } else {
+                            checkpoint_fixture_ok = false;
+                            break;
+                        }
+                    }
+                    const auto global_path =
+                        packed_path.parent_path() / "checkpoint-globals.bin";
+                    vastloom::ByteCount global_offset = 0U;
+                    const auto append_global =
+                        [&](std::string name,
+                            vastloom::model::TensorDType dtype,
+                            std::vector<std::uint64_t> shape,
+                            vastloom::model::TensorRole role,
+                            std::uint32_t ggml_type,
+                            std::size_t rows,
+                            std::size_t columns) {
+                            auto bytes = vastloom::inference::ggml_storage_bytes(
+                                ggml_type, rows, columns,
+                                vastloom::inference::QuantizedKernelLimits{
+                                    rows * columns});
+                            CHECK(bytes);
+                            if (!bytes) {
+                                checkpoint_fixture_ok = false;
+                                return;
+                            }
+                            checkpoint_report.catalog.tensors.push_back(
+                                vastloom::model::LogicalTensorDescriptor{
+                                    std::move(name), dtype, std::move(shape), role,
+                                    std::nullopt, std::nullopt, false,
+                                    vastloom::model::TensorSourceRange{
+                                        global_path, global_offset, bytes.value()},
+                                    ggml_type});
+                            global_offset += bytes.value();
+                        };
+                    const std::size_t embedding_columns =
+                        vastloom::inference::kQ8_0BlockElements;
+                    append_global(
+                        "token_embd.weight",
+                        vastloom::model::TensorDType::quantized,
+                        {embedding_columns, config.vocabulary_size},
+                        vastloom::model::TensorRole::embedding,
+                        vastloom::inference::kGgmlTypeQ8_0,
+                        config.vocabulary_size, embedding_columns);
+                    append_global(
+                        "output.weight",
+                        vastloom::model::TensorDType::quantized,
+                        {embedding_columns, config.vocabulary_size},
+                        vastloom::model::TensorRole::output_head,
+                        vastloom::inference::kGgmlTypeQ8_0,
+                        config.vocabulary_size, embedding_columns);
+                    append_global(
+                        "output_hc_base.weight",
+                        vastloom::model::TensorDType::f32,
+                        {config.hyper_multiplier},
+                        vastloom::model::TensorRole::hyper_connection,
+                        vastloom::inference::kGgmlTypeF32, 1U,
+                        config.hyper_multiplier);
+                    append_global(
+                        "output_hc_fn.weight",
+                        vastloom::model::TensorDType::f32,
+                        {config.hyper_multiplier * config.width,
+                         config.hyper_multiplier},
+                        vastloom::model::TensorRole::hyper_connection,
+                        vastloom::inference::kGgmlTypeF32,
+                        config.hyper_multiplier,
+                        config.hyper_multiplier * config.width);
+                    append_global(
+                        "output_hc_scale.weight",
+                        vastloom::model::TensorDType::f32, {1U},
+                        vastloom::model::TensorRole::hyper_connection,
+                        vastloom::inference::kGgmlTypeF32, 1U, 1U);
+                    append_global(
+                        "output_norm.weight",
+                        vastloom::model::TensorDType::f32, {config.width},
+                        vastloom::model::TensorRole::normalization,
+                        vastloom::inference::kGgmlTypeF32, 1U, config.width);
+                    auto checkpoint_finalized = checkpoint_fixture_ok
+                        ? vastloom::model::finalize_logical_tensor_catalog(
+                              checkpoint_report.catalog)
+                        : vastloom::Result<void>(vastloom::make_error(
+                              vastloom::ErrorCode::internal_error,
+                              "unable to build checkpoint closure fixture"));
+                    checkpoint_report.physical_tensors = 21U + 6U + 3U;
+                    CHECK(checkpoint_fixture_ok && checkpoint_finalized);
+                    if (checkpoint_fixture_ok && checkpoint_finalized) {
+                        auto checkpoint = vastloom::inference::
+                            deepseek_v4_validate_0731_gguf_checkpoint_catalog(
+                                checkpoint_report, one_layer_config.value());
+                        CHECK(checkpoint && checkpoint.value().layers.layers == 1U &&
+                              checkpoint.value().layers.tensors == 21U &&
+                              checkpoint.value().global_tensors == 6U &&
+                              checkpoint.value().global_bytes == global_offset &&
+                              checkpoint.value().expert_bundles ==
+                                  config.expert_count &&
+                              checkpoint.value().expert_tensor_slices ==
+                                  config.expert_count * 3U &&
+                              checkpoint.value().physical_expert_tensors == 3U &&
+                              checkpoint.value().logical_tensors == 39U &&
+                              checkpoint.value().tensor_bytes ==
+                                  checkpoint_report.catalog.tensor_bytes);
+
+                        auto wrong_global_role = checkpoint_report;
+                        const auto embedding_tensor = std::find_if(
+                            wrong_global_role.catalog.tensors.begin(),
+                            wrong_global_role.catalog.tensors.end(),
+                            [](const vastloom::model::LogicalTensorDescriptor& tensor) {
+                                return tensor.name == "token_embd.weight";
+                            });
+                        CHECK(embedding_tensor !=
+                              wrong_global_role.catalog.tensors.end());
+                        if (embedding_tensor !=
+                            wrong_global_role.catalog.tensors.end()) {
+                            embedding_tensor->role =
+                                vastloom::model::TensorRole::other;
+                            CHECK(!vastloom::inference::
+                                      deepseek_v4_validate_0731_gguf_checkpoint_catalog(
+                                          wrong_global_role,
+                                          one_layer_config.value()));
+                        }
+
+                        auto unexpected_global = checkpoint_report;
+                        const auto norm_tensor = std::find_if(
+                            unexpected_global.catalog.tensors.begin(),
+                            unexpected_global.catalog.tensors.end(),
+                            [](const vastloom::model::LogicalTensorDescriptor& tensor) {
+                                return tensor.name == "output_norm.weight";
+                            });
+                        CHECK(norm_tensor !=
+                              unexpected_global.catalog.tensors.end());
+                        if (norm_tensor !=
+                            unexpected_global.catalog.tensors.end()) {
+                            auto extra = *norm_tensor;
+                            extra.name = "unexpected_global.weight";
+                            unexpected_global.catalog.tensors.push_back(
+                                std::move(extra));
+                            CHECK(!vastloom::inference::
+                                      deepseek_v4_validate_0731_gguf_checkpoint_catalog(
+                                          unexpected_global,
+                                          one_layer_config.value()));
+                        }
+
+                        auto wrong_expert_name = checkpoint_report;
+                        const auto expert_tensor = std::find_if(
+                            wrong_expert_name.catalog.tensors.begin(),
+                            wrong_expert_name.catalog.tensors.end(),
+                            [](const vastloom::model::LogicalTensorDescriptor& tensor) {
+                                return tensor.role ==
+                                    vastloom::model::TensorRole::routed_expert;
+                            });
+                        CHECK(expert_tensor !=
+                              wrong_expert_name.catalog.tensors.end());
+                        if (expert_tensor !=
+                            wrong_expert_name.catalog.tensors.end()) {
+                            expert_tensor->name = "blk.0.invalid_expert.weight";
+                            CHECK(!vastloom::inference::
+                                      deepseek_v4_validate_0731_gguf_checkpoint_catalog(
+                                          wrong_expert_name,
+                                          one_layer_config.value()));
+                        }
+
+                        auto duplicate_expert_index = checkpoint_report;
+                        CHECK(!duplicate_expert_index.catalog.experts.empty());
+                        if (!duplicate_expert_index.catalog.experts.empty()) {
+                            auto& indices = duplicate_expert_index.catalog.experts
+                                                .front()
+                                                .tensor_indices;
+                            CHECK(indices.size() == 3U);
+                            if (indices.size() == 3U) indices[1U] = indices[0U];
+                            CHECK(!vastloom::inference::
+                                      deepseek_v4_validate_0731_gguf_checkpoint_catalog(
+                                          duplicate_expert_index,
+                                          one_layer_config.value()));
+                        }
+
+                        auto duplicate_packed_slice = checkpoint_report;
+                        CHECK(!duplicate_packed_slice.catalog.experts.empty());
+                        if (!duplicate_packed_slice.catalog.experts.empty()) {
+                            auto& slices = duplicate_packed_slice.catalog.experts
+                                               .front()
+                                               .tensor_slices;
+                            CHECK(slices.size() == 3U);
+                            if (slices.size() == 3U) slices[1U] = slices[0U];
+                            CHECK(!vastloom::inference::
+                                      deepseek_v4_validate_0731_gguf_checkpoint_catalog(
+                                          duplicate_packed_slice,
+                                          one_layer_config.value()));
+                        }
+
+                        auto wrong_physical_count = checkpoint_report;
+                        ++wrong_physical_count.physical_tensors;
+                        CHECK(!vastloom::inference::
+                                  deepseek_v4_validate_0731_gguf_checkpoint_catalog(
+                                      wrong_physical_count,
+                                      one_layer_config.value()));
+                    }
                     auto wrong_table_shape = one_layer_report;
                     const auto flattened_table = std::find_if(
                         wrong_table_shape.catalog.tensors.begin(),

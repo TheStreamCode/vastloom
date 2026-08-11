@@ -210,10 +210,13 @@ bool storage_type_matches_dtype(std::uint32_t ggml_type,
         case kGgmlTypeBf16: return dtype == model::TensorDType::bf16;
         case kGgmlTypeI32: return dtype == model::TensorDType::i32;
         case kGgmlTypeQ8_0:
+        case kGgmlTypeQ4K:
         case kGgmlTypeQ5K:
         case kGgmlTypeQ6K:
+        case kGgmlTypeIq2Xxs:
         case kGgmlTypeIq3Xxs:
-        case kGgmlTypeIq1S: return dtype == model::TensorDType::quantized;
+        case kGgmlTypeIq1S:
+        case kGgmlTypeMxfp4: return dtype == model::TensorDType::quantized;
         default: return false;
     }
 }
@@ -3018,6 +3021,406 @@ deepseek_v4_validate_0731_gguf_layer_catalogs(
         return make_error(
             ErrorCode::resource_exhausted,
             "Unable to allocate the bounded DeepSeek 0731 all-layer catalog validation");
+    }
+}
+
+Result<DeepseekV4ReferenceCheckpointCatalogValidation>
+deepseek_v4_validate_0731_gguf_checkpoint_catalog(
+    const DeepseekV4GgufCatalogReport& report,
+    const DeepseekV4ReferenceConfig& config) {
+    try {
+        auto layers = deepseek_v4_validate_0731_gguf_layer_catalogs(report, config);
+        if (!layers) return layers.error();
+        if (config.layer_count == 0U || config.expert_count == 0U ||
+            config.width == 0U || config.intermediate_width == 0U ||
+            config.vocabulary_size == 0U || config.hyper_multiplier == 0U ||
+            config.layer_count > std::numeric_limits<std::size_t>::max() /
+                                     config.expert_count) {
+            return make_error(
+                ErrorCode::invalid_argument,
+                "DeepSeek 0731 checkpoint catalog configuration is invalid");
+        }
+
+        DeepseekV4ReferenceCheckpointCatalogValidation result;
+        result.layers = layers.value();
+        const auto find_tensor = [&](std::string_view name)
+            -> const model::LogicalTensorDescriptor* {
+            const auto found = std::find_if(
+                report.catalog.tensors.begin(), report.catalog.tensors.end(),
+                [name](const model::LogicalTensorDescriptor& tensor) {
+                    return tensor.name == name;
+                });
+            return found == report.catalog.tensors.end() ? nullptr : &*found;
+        };
+        const auto validate_storage = [&](const model::LogicalTensorDescriptor& tensor,
+                                          std::size_t rows,
+                                          std::size_t storage_columns) -> Result<void> {
+            if (!tensor.ggml_type.has_value() || rows == 0U || storage_columns == 0U ||
+                rows > std::numeric_limits<std::size_t>::max() / storage_columns ||
+                !storage_type_matches_dtype(*tensor.ggml_type, tensor.dtype)) {
+                return make_error(
+                    ErrorCode::unsupported,
+                    "DeepSeek 0731 checkpoint tensor storage layout is unsupported",
+                    tensor.name);
+            }
+            const std::size_t elements = rows * storage_columns;
+            auto bytes = ggml_storage_bytes(
+                *tensor.ggml_type, rows, storage_columns,
+                QuantizedKernelLimits{elements});
+            if (!bytes) return bytes.error();
+            if (bytes.value() != tensor.source.bytes) {
+                return make_error(
+                    ErrorCode::integrity_error,
+                    "DeepSeek 0731 checkpoint tensor bytes disagree with shape/storage",
+                    tensor.name);
+            }
+            return {};
+        };
+        const auto record_global = [&](const model::LogicalTensorDescriptor& tensor)
+            -> Result<void> {
+            if (result.global_tensors == std::numeric_limits<std::size_t>::max()) {
+                return make_error(ErrorCode::resource_exhausted,
+                                  "DeepSeek 0731 global tensor count overflows");
+            }
+            auto total = checked_add(result.global_bytes, tensor.source.bytes);
+            if (!total) return total.error();
+            ++result.global_tensors;
+            result.global_bytes = total.value();
+            return {};
+        };
+        const auto validate_global_matrix = [&](std::string_view name,
+                                                std::size_t rows,
+                                                std::size_t columns,
+                                                model::TensorRole role) -> Result<void> {
+            const auto* tensor = find_tensor(name);
+            if (tensor == nullptr || tensor->layer.has_value() ||
+                tensor->expert.has_value() || tensor->role != role ||
+                tensor->shape.size() != 2U || tensor->shape[1] != rows ||
+                tensor->shape[0] < columns ||
+                tensor->shape[0] > std::numeric_limits<std::size_t>::max()) {
+                return make_error(
+                    ErrorCode::invalid_format,
+                    "DeepSeek 0731 global matrix descriptor does not match its consumer",
+                    std::string(name));
+            }
+            auto storage = validate_storage(
+                *tensor, rows, static_cast<std::size_t>(tensor->shape[0]));
+            if (!storage) return storage.error();
+            return record_global(*tensor);
+        };
+        const auto validate_global_float = [&](std::string_view name,
+                                               std::initializer_list<std::uint64_t> shape,
+                                               model::TensorRole role) -> Result<void> {
+            const auto* tensor = find_tensor(name);
+            if (tensor == nullptr || tensor->layer.has_value() ||
+                tensor->expert.has_value() || tensor->role != role ||
+                !tensor->ggml_type.has_value() ||
+                (*tensor->ggml_type != kGgmlTypeF32 &&
+                 *tensor->ggml_type != kGgmlTypeBf16) ||
+                tensor->shape.size() != shape.size() ||
+                !std::equal(tensor->shape.begin(), tensor->shape.end(),
+                            shape.begin(), shape.end())) {
+                return make_error(
+                    ErrorCode::invalid_format,
+                    "DeepSeek 0731 global float descriptor does not match its consumer",
+                    std::string(name));
+            }
+            std::size_t elements = 1U;
+            for (const auto dimension : shape) {
+                if (dimension == 0U ||
+                    dimension > std::numeric_limits<std::size_t>::max() ||
+                    elements > std::numeric_limits<std::size_t>::max() /
+                                   static_cast<std::size_t>(dimension)) {
+                    return make_error(
+                        ErrorCode::resource_exhausted,
+                        "DeepSeek 0731 global float shape overflows",
+                        std::string(name));
+                }
+                elements *= static_cast<std::size_t>(dimension);
+            }
+            auto storage = validate_storage(*tensor, 1U, elements);
+            if (!storage) return storage.error();
+            return record_global(*tensor);
+        };
+
+        auto embedding = validate_global_matrix(
+            "token_embd.weight", config.vocabulary_size, config.width,
+            model::TensorRole::embedding);
+        if (!embedding) return embedding.error();
+        auto output = validate_global_matrix(
+            "output.weight", config.vocabulary_size, config.width,
+            model::TensorRole::output_head);
+        if (!output) return output.error();
+        auto output_norm = validate_global_float(
+            "output_norm.weight", {config.width}, model::TensorRole::normalization);
+        if (!output_norm) return output_norm.error();
+        auto head_base = validate_global_float(
+            "output_hc_base.weight", {config.hyper_multiplier},
+            model::TensorRole::hyper_connection);
+        if (!head_base) return head_base.error();
+        auto head_scale = validate_global_float(
+            "output_hc_scale.weight", {1U}, model::TensorRole::hyper_connection);
+        if (!head_scale) return head_scale.error();
+        if (config.hyper_multiplier > std::numeric_limits<std::size_t>::max() /
+                                          config.width) {
+            return make_error(ErrorCode::resource_exhausted,
+                              "DeepSeek 0731 HC head width overflows");
+        }
+        auto head_fn = validate_global_matrix(
+            "output_hc_fn.weight", config.hyper_multiplier,
+            config.hyper_multiplier * config.width,
+            model::TensorRole::hyper_connection);
+        if (!head_fn) return head_fn.error();
+        const auto* head_fn_tensor = find_tensor("output_hc_fn.weight");
+        if (head_fn_tensor == nullptr ||
+            (head_fn_tensor->ggml_type != kGgmlTypeF32 &&
+             head_fn_tensor->ggml_type != kGgmlTypeBf16)) {
+            return make_error(
+                ErrorCode::invalid_format,
+                "DeepSeek 0731 HC head matrix must use bounded float storage",
+                "output_hc_fn.weight");
+        }
+
+        std::size_t actual_global_tensors = 0U;
+        for (const auto& tensor : report.catalog.tensors) {
+            if (!tensor.layer.has_value()) ++actual_global_tensors;
+        }
+        if (result.global_tensors != 6U || actual_global_tensors != 6U) {
+            return make_error(
+                ErrorCode::invalid_format,
+                "DeepSeek 0731 checkpoint does not contain exactly six global tensors",
+                std::to_string(actual_global_tensors));
+        }
+
+        const std::size_t expected_bundles =
+            config.layer_count * config.expert_count;
+        if (report.catalog.experts.size() != expected_bundles ||
+            expected_bundles > std::numeric_limits<std::size_t>::max() / 3U) {
+            return make_error(
+                ErrorCode::invalid_format,
+                "DeepSeek 0731 checkpoint expert bundle count is inconsistent",
+                std::to_string(report.catalog.experts.size()));
+        }
+        const std::size_t expected_expert_slices = expected_bundles * 3U;
+        std::vector<bool> claimed(report.catalog.tensors.size(), false);
+        std::uint64_t routed_bytes = 0U;
+        for (std::size_t layer = 0U; layer < config.layer_count; ++layer) {
+            for (std::size_t expert = 0U; expert < config.expert_count; ++expert) {
+                const std::size_t bundle_index = layer * config.expert_count + expert;
+                const auto& bundle = report.catalog.experts[bundle_index];
+                if (bundle.layer != layer || bundle.expert != expert ||
+                    bundle.speculative || bundle.tensor_indices.size() != 3U ||
+                    bundle.tensor_slices.size() != 3U || bundle.read_ranges.empty()) {
+                    return make_error(
+                        ErrorCode::invalid_format,
+                        "DeepSeek 0731 routed expert bundle identity/layout is invalid",
+                        std::to_string(bundle_index));
+                }
+                const std::string prefix = "blk." + std::to_string(layer);
+                const std::string suffix = ".weight.expert." + std::to_string(expert);
+                const std::array<std::string, 3U> expected_names{{
+                    prefix + ".ffn_down_exps" + suffix,
+                    prefix + ".ffn_gate_exps" + suffix,
+                    prefix + ".ffn_up_exps" + suffix,
+                }};
+                const std::array<std::size_t, 3U> expected_rows{{
+                    config.width, config.intermediate_width,
+                    config.intermediate_width,
+                }};
+                const std::array<std::size_t, 3U> expected_columns{{
+                    config.intermediate_width, config.width, config.width,
+                }};
+                std::array<bool, 3U> projections{};
+                std::optional<std::uint32_t> gate_up_type;
+                std::uint64_t bundle_bytes = 0U;
+                for (const auto tensor_index : bundle.tensor_indices) {
+                    if (tensor_index >= report.catalog.tensors.size() ||
+                        claimed[tensor_index]) {
+                        return make_error(
+                            ErrorCode::invalid_format,
+                            "DeepSeek 0731 routed expert tensor index is invalid or duplicated",
+                            std::to_string(tensor_index));
+                    }
+                    const auto& tensor = report.catalog.tensors[tensor_index];
+                    const auto projection = std::find(
+                        expected_names.begin(), expected_names.end(), tensor.name);
+                    if (projection == expected_names.end()) {
+                        return make_error(
+                            ErrorCode::invalid_format,
+                            "DeepSeek 0731 routed expert tensor name is not canonical",
+                            tensor.name);
+                    }
+                    const std::size_t projection_index = static_cast<std::size_t>(
+                        std::distance(expected_names.begin(), projection));
+                    const bool expected_profile_type = projection_index == 0U
+                        ? (tensor.ggml_type == kGgmlTypeIq3Xxs ||
+                           tensor.ggml_type == kGgmlTypeMxfp4)
+                        : (tensor.ggml_type == kGgmlTypeIq1S ||
+                           tensor.ggml_type == kGgmlTypeIq2Xxs);
+                    if (projections[projection_index] ||
+                        tensor.role != model::TensorRole::routed_expert ||
+                        tensor.speculative || tensor.layer != layer ||
+                        tensor.expert != expert || tensor.shape.size() != 2U ||
+                        tensor.shape[1] != expected_rows[projection_index] ||
+                        tensor.shape[0] < expected_columns[projection_index] ||
+                        tensor.shape[0] > std::numeric_limits<std::size_t>::max() ||
+                        !expected_profile_type) {
+                        return make_error(
+                            ErrorCode::invalid_format,
+                            "DeepSeek 0731 routed expert descriptor does not match its consumer",
+                            tensor.name);
+                    }
+                    auto storage = validate_storage(
+                        tensor, expected_rows[projection_index],
+                        static_cast<std::size_t>(tensor.shape[0]));
+                    if (!storage) return storage.error();
+                    if (projection_index != 0U) {
+                        if (gate_up_type.has_value() &&
+                            gate_up_type != tensor.ggml_type) {
+                            return make_error(
+                                ErrorCode::invalid_format,
+                                "DeepSeek 0731 gate/up expert storage types disagree",
+                                tensor.name);
+                        }
+                        gate_up_type = tensor.ggml_type;
+                    }
+                    auto bundle_total = checked_add(bundle_bytes, tensor.source.bytes);
+                    if (!bundle_total) return bundle_total.error();
+                    bundle_bytes = bundle_total.value();
+                    projections[projection_index] = true;
+                    claimed[tensor_index] = true;
+                    ++result.expert_tensor_slices;
+                }
+                if (!std::all_of(projections.begin(), projections.end(),
+                                 [](bool present) { return present; }) ||
+                    bundle_bytes != bundle.bytes) {
+                    return make_error(
+                        ErrorCode::integrity_error,
+                        "DeepSeek 0731 routed expert bundle byte/layout closure failed",
+                        std::to_string(bundle_index));
+                }
+                for (const auto& slice : bundle.tensor_slices) {
+                    if (slice.tensor_index >= report.catalog.tensors.size() ||
+                        std::find(bundle.tensor_indices.begin(),
+                                  bundle.tensor_indices.end(),
+                                  slice.tensor_index) == bundle.tensor_indices.end() ||
+                        slice.bytes !=
+                            report.catalog.tensors[slice.tensor_index].source.bytes ||
+                        slice.packed_offset > bundle.bytes ||
+                        slice.bytes > bundle.bytes - slice.packed_offset) {
+                        return make_error(
+                            ErrorCode::integrity_error,
+                            "DeepSeek 0731 routed expert packed slice is invalid",
+                            std::to_string(bundle_index));
+                    }
+                }
+                for (const auto tensor_index : bundle.tensor_indices) {
+                    const auto matching_slices = std::count_if(
+                        bundle.tensor_slices.begin(), bundle.tensor_slices.end(),
+                        [tensor_index](const model::ExpertTensorSlice& slice) {
+                            return slice.tensor_index == tensor_index;
+                        });
+                    if (matching_slices != 1) {
+                        return make_error(
+                            ErrorCode::integrity_error,
+                            "DeepSeek 0731 routed expert packed slices are not one-to-one",
+                            std::to_string(bundle_index));
+                    }
+                }
+                std::uint64_t read_bytes = 0U;
+                for (const auto& range : bundle.read_ranges) {
+                    auto read_total = checked_add(read_bytes, range.bytes);
+                    if (!read_total) return read_total.error();
+                    read_bytes = read_total.value();
+                }
+                if (read_bytes != bundle.bytes) {
+                    return make_error(
+                        ErrorCode::integrity_error,
+                        "DeepSeek 0731 routed expert read ranges do not close",
+                        std::to_string(bundle_index));
+                }
+                auto routed_total = checked_add(routed_bytes, bundle.bytes);
+                if (!routed_total) return routed_total.error();
+                routed_bytes = routed_total.value();
+                ++result.expert_bundles;
+            }
+        }
+
+        std::size_t actual_routed_slices = 0U;
+        for (std::size_t index = 0U; index < report.catalog.tensors.size(); ++index) {
+            if (report.catalog.tensors[index].role == model::TensorRole::routed_expert) {
+                ++actual_routed_slices;
+                if (!claimed[index]) {
+                    return make_error(
+                        ErrorCode::integrity_error,
+                        "DeepSeek 0731 routed expert tensor is outside every bundle",
+                        report.catalog.tensors[index].name);
+                }
+            } else if (claimed[index]) {
+                return make_error(
+                    ErrorCode::integrity_error,
+                    "DeepSeek 0731 non-routed tensor was claimed by an expert bundle",
+                    report.catalog.tensors[index].name);
+            }
+        }
+        if (result.expert_tensor_slices != expected_expert_slices ||
+            actual_routed_slices != expected_expert_slices ||
+            routed_bytes != report.catalog.routed_expert_bytes) {
+            return make_error(
+                ErrorCode::integrity_error,
+                "DeepSeek 0731 routed expert catalog totals do not close");
+        }
+
+        if (config.layer_count > std::numeric_limits<std::size_t>::max() / 3U) {
+            return make_error(ErrorCode::resource_exhausted,
+                              "DeepSeek 0731 physical expert count overflows");
+        }
+        result.physical_expert_tensors = config.layer_count * 3U;
+        if (result.layers.tensors > std::numeric_limits<std::size_t>::max() -
+                                        result.global_tensors ||
+            result.layers.tensors + result.global_tensors >
+                std::numeric_limits<std::size_t>::max() -
+                    result.physical_expert_tensors) {
+            return make_error(ErrorCode::resource_exhausted,
+                              "DeepSeek 0731 physical tensor closure overflows");
+        }
+        const std::size_t expected_physical_tensors =
+            result.layers.tensors + result.global_tensors +
+            result.physical_expert_tensors;
+        if (report.physical_tensors != expected_physical_tensors) {
+            return make_error(
+                ErrorCode::integrity_error,
+                "DeepSeek 0731 physical tensor partition does not close",
+                std::to_string(report.physical_tensors));
+        }
+
+        if (result.layers.tensors > std::numeric_limits<std::size_t>::max() -
+                                        result.global_tensors ||
+            result.layers.tensors + result.global_tensors >
+                std::numeric_limits<std::size_t>::max() -
+                    result.expert_tensor_slices) {
+            return make_error(ErrorCode::resource_exhausted,
+                              "DeepSeek 0731 logical tensor closure overflows");
+        }
+        result.logical_tensors = result.layers.tensors + result.global_tensors +
+                                 result.expert_tensor_slices;
+        auto always_active = checked_add(result.layers.bytes, result.global_bytes);
+        if (!always_active) return always_active.error();
+        auto tensor_bytes = checked_add(always_active.value(), routed_bytes);
+        if (!tensor_bytes) return tensor_bytes.error();
+        result.tensor_bytes = tensor_bytes.value();
+        if (result.logical_tensors != report.catalog.tensors.size() ||
+            always_active.value() != report.catalog.always_active_bytes ||
+            result.tensor_bytes != report.catalog.tensor_bytes) {
+            return make_error(
+                ErrorCode::integrity_error,
+                "DeepSeek 0731 complete logical tensor/byte partition does not close");
+        }
+        return result;
+    } catch (const std::bad_alloc&) {
+        return make_error(
+            ErrorCode::resource_exhausted,
+            "Unable to allocate the bounded DeepSeek 0731 checkpoint catalog validation");
     }
 }
 

@@ -345,7 +345,7 @@ if(BUILD_TESTING AND VASTLOOM_BUILD_TESTS)
                 TIMEOUT 3600
                 RUN_SERIAL TRUE
                 PASS_REGULAR_EXPRESSION
-                    "\"imported_manifest_verified\":true.*\"pinned_0731_checkpoint_spec_verified\":true.*\"reference_config_verified\":true.*\"layer0_reference_catalog_verified\":true.*\"all_layer_reference_catalogs_verified\":true.*\"reference_catalog_validated_layers\":43.*\"reference_catalog_validated_tensors\":1193.*\"reference_catalog_validated_bytes\":6390088008.*\"vocabulary_size\":129280.*\"compression_schedule_values\":46.*\"routed_swiglu_schedule_values\":43.*\"shared_swiglu_schedule_values\":43.*\"planned_layers\":43"
+                    "\"imported_manifest_verified\":true.*\"pinned_0731_checkpoint_spec_verified\":true.*\"reference_config_verified\":true.*\"layer0_reference_catalog_verified\":true.*\"all_layer_reference_catalogs_verified\":true.*\"checkpoint_reference_catalog_verified\":true.*\"reference_catalog_validated_layers\":43.*\"reference_catalog_validated_tensors\":1193.*\"reference_catalog_validated_bytes\":6390088008.*\"reference_catalog_global_tensors\":6.*\"reference_catalog_global_bytes\":596000788.*\"reference_catalog_expert_bundles\":11008.*\"reference_catalog_expert_tensor_slices\":33024.*\"reference_catalog_physical_expert_tensors\":129.*\"vocabulary_size\":129280.*\"compression_schedule_values\":46.*\"routed_swiglu_schedule_values\":43.*\"shared_swiglu_schedule_values\":43.*\"physical_tensors\":1328.*\"logical_tensors\":34223.*\"tensor_bytes\":82533892444.*\"always_active_bytes\":6986088796.*\"routed_expert_bytes\":75547803648.*\"planned_layers\":43"
             )
             add_test(
                 NAME vastloom_deepseek_v4_gguf_probe_plan

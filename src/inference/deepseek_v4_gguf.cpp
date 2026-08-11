@@ -1160,6 +1160,21 @@ Result<DeepseekV4GgufCatalogReport> inspect_deepseek_v4_gguf_checkpoint(
                 all_layers.value().tensors;
             report.value().reference_catalog_validated_bytes =
                 all_layers.value().bytes;
+            auto checkpoint_catalog =
+                deepseek_v4_validate_0731_gguf_checkpoint_catalog(
+                    report.value(), reference_config.value());
+            if (!checkpoint_catalog) return checkpoint_catalog.error();
+            report.value().checkpoint_reference_catalog_verified = true;
+            report.value().reference_catalog_global_tensors =
+                checkpoint_catalog.value().global_tensors;
+            report.value().reference_catalog_global_bytes =
+                checkpoint_catalog.value().global_bytes;
+            report.value().reference_catalog_expert_bundles =
+                checkpoint_catalog.value().expert_bundles;
+            report.value().reference_catalog_expert_tensor_slices =
+                checkpoint_catalog.value().expert_tensor_slices;
+            report.value().reference_catalog_physical_expert_tensors =
+                checkpoint_catalog.value().physical_expert_tensors;
         }
 
         if (!imported.value().metadata_only && imported.value().full_hash_verified &&
@@ -1197,12 +1212,24 @@ std::string to_json(const DeepseekV4GgufCatalogReport& report) {
            << (report.layer0_reference_catalog_verified ? "true" : "false")
            << ",\"all_layer_reference_catalogs_verified\":"
            << (report.all_layer_reference_catalogs_verified ? "true" : "false")
+           << ",\"checkpoint_reference_catalog_verified\":"
+           << (report.checkpoint_reference_catalog_verified ? "true" : "false")
            << ",\"reference_catalog_validated_layers\":"
            << report.reference_catalog_validated_layers
            << ",\"reference_catalog_validated_tensors\":"
            << report.reference_catalog_validated_tensors
            << ",\"reference_catalog_validated_bytes\":"
            << report.reference_catalog_validated_bytes
+           << ",\"reference_catalog_global_tensors\":"
+           << report.reference_catalog_global_tensors
+           << ",\"reference_catalog_global_bytes\":"
+           << report.reference_catalog_global_bytes
+           << ",\"reference_catalog_expert_bundles\":"
+           << report.reference_catalog_expert_bundles
+           << ",\"reference_catalog_expert_tensor_slices\":"
+           << report.reference_catalog_expert_tensor_slices
+           << ",\"reference_catalog_physical_expert_tensors\":"
+           << report.reference_catalog_physical_expert_tensors
            << ",\"imported_file_hashes_verified\":"
            << (report.imported_file_hashes_verified ? "true" : "false")
            << ",\"full_payload_present\":"
@@ -1333,6 +1360,13 @@ std::string to_text(const DeepseekV4GgufCatalogReport& report) {
            << " (" << report.reference_catalog_validated_layers << " layers, "
            << report.reference_catalog_validated_tensors << " tensors, "
            << report.reference_catalog_validated_bytes << " bytes)" << '\n'
+           << "Checkpoint catalog:  "
+           << (report.checkpoint_reference_catalog_verified ? "verified" : "unavailable")
+           << " (" << report.reference_catalog_global_tensors << " globals, "
+           << report.reference_catalog_expert_bundles << " expert bundles, "
+           << report.reference_catalog_expert_tensor_slices << " logical expert slices, "
+           << report.reference_catalog_physical_expert_tensors
+           << " physical expert tensors)" << '\n'
            << "RAM + VRAM pooling:  forbidden for one expert bundle" << '\n'
            << "Split shards:        " << report.split_shards << '\n'
            << "Physical tensors:    " << report.physical_tensors << '\n'

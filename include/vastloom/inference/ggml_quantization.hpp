@@ -12,25 +12,34 @@ namespace vastloom::inference {
 inline constexpr std::size_t kF32ElementBytes = 4U;
 inline constexpr std::size_t kQ8_0BlockElements = 32U;
 inline constexpr std::size_t kQ8_0BlockBytes = 34U;
+inline constexpr std::size_t kQ4KBlockElements = 256U;
+inline constexpr std::size_t kQ4KBlockBytes = 144U;
 inline constexpr std::size_t kQ5KBlockElements = 256U;
 inline constexpr std::size_t kQ5KBlockBytes = 176U;
 inline constexpr std::size_t kQ6KBlockElements = 256U;
 inline constexpr std::size_t kQ6KBlockBytes = 210U;
+inline constexpr std::size_t kIq2XxsBlockElements = 256U;
+inline constexpr std::size_t kIq2XxsBlockBytes = 66U;
 inline constexpr std::size_t kIq1SBlockElements = 256U;
 inline constexpr std::size_t kIq1SBlockBytes = 50U;
 inline constexpr std::size_t kIq3XxsBlockElements = 256U;
 inline constexpr std::size_t kIq3XxsBlockBytes = 98U;
 inline constexpr std::size_t kI32ElementBytes = 4U;
 inline constexpr std::size_t kBf16ElementBytes = 2U;
+inline constexpr std::size_t kMxfp4BlockElements = 32U;
+inline constexpr std::size_t kMxfp4BlockBytes = 17U;
 
 inline constexpr std::uint32_t kGgmlTypeF32 = 0U;
 inline constexpr std::uint32_t kGgmlTypeQ8_0 = 8U;
+inline constexpr std::uint32_t kGgmlTypeQ4K = 12U;
 inline constexpr std::uint32_t kGgmlTypeQ5K = 13U;
 inline constexpr std::uint32_t kGgmlTypeQ6K = 14U;
+inline constexpr std::uint32_t kGgmlTypeIq2Xxs = 16U;
 inline constexpr std::uint32_t kGgmlTypeIq3Xxs = 18U;
 inline constexpr std::uint32_t kGgmlTypeIq1S = 19U;
 inline constexpr std::uint32_t kGgmlTypeI32 = 26U;
 inline constexpr std::uint32_t kGgmlTypeBf16 = 30U;
+inline constexpr std::uint32_t kGgmlTypeMxfp4 = 39U;
 
 struct QuantizedKernelLimits {
     std::size_t max_elements{64'000'000U};
@@ -57,8 +66,9 @@ struct RoutedExpertScratch {
 // Includes non-matvec integer routing tables that have a bounded native decoder.
 [[nodiscard]] bool supports_reference_storage_ggml_type(std::uint32_t ggml_type) noexcept;
 
-// Returns the exact encoded byte count for one supported GGML matrix/storage tensor after
-// validating the shape and configured element ceiling.
+// Returns the exact encoded byte count for one known GGML layout after validating the shape and
+// configured element ceiling. A known layout does not imply that a native matvec exists; query
+// supports_reference_matvec_ggml_type before execution.
 [[nodiscard]] Result<std::size_t> ggml_storage_bytes(
     std::uint32_t ggml_type,
     std::size_t rows,

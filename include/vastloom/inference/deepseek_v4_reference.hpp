@@ -313,6 +313,13 @@ deepseek_v4_bind_0731_gguf_globals(
     const DeepseekV4LoadedGlobalTensorSet& tensors,
     const DeepseekV4ReferenceConfig& config);
 
+// The same six consumers, streamed straight from a checkpoint whose payload is present.
+[[nodiscard]] Result<DeepseekV4ReferenceGlobals>
+deepseek_v4_load_0731_gguf_globals(
+    const model::LogicalTensorCatalog& catalog,
+    const DeepseekV4ReferenceConfig& config,
+    safety::ResourceGovernor& governor);
+
 // Converts only a complete verified 0731 architecture snapshot. No tensor payload is read.
 [[nodiscard]] Result<DeepseekV4ReferenceConfig>
 deepseek_v4_reference_config_from_0731_gguf(

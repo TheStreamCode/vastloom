@@ -3985,6 +3985,122 @@ Result<DeepseekV4ReferenceLayerTrunk> deepseek_v4_build_layer_trunk(
     }
 }
 
+namespace {
+
+// One complete tensor, read under its own reservation and retained by whatever descriptor binds it.
+Result<std::pair<model::LoadedTensorTile, const model::LogicalTensorDescriptor*>>
+load_catalog_tensor_tile(const model::LogicalTensorCatalog& catalog,
+                         std::string_view name,
+                         std::optional<std::size_t> expected_layer,
+                         safety::ResourceGovernor& governor) {
+    const auto found = std::find_if(
+        catalog.tensors.begin(), catalog.tensors.end(),
+        [name](const model::LogicalTensorDescriptor& tensor) { return tensor.name == name; });
+    if (found == catalog.tensors.end() || found->expert.has_value() ||
+        found->layer.has_value() != expected_layer.has_value() ||
+        (expected_layer.has_value() && *found->layer != *expected_layer)) {
+        return make_error(ErrorCode::not_found,
+                          "DeepSeek tensor is absent from the catalog", std::string(name));
+    }
+    model::LayerTensorTile tile;
+    tile.tensor_index = static_cast<std::size_t>(std::distance(catalog.tensors.begin(), found));
+    tile.layer = found->layer.has_value() ? *found->layer : 0U;
+    tile.role = found->role;
+    tile.tensor_offset = 0U;
+    tile.source = found->source;
+    tile.final_tile = true;
+    auto residency = model::ResidencyObject::create(
+        catalog.model_id + "/tensor/" + found->name, found->source.bytes);
+    if (!residency) return residency.error();
+    model::TensorTileLoadOptions options;
+    options.max_tile_bytes = found->source.bytes;
+    options.measure_process_io = false;
+    auto loaded = model::load_tensor_tile(catalog, tile, residency.value(), governor, options);
+    if (!loaded) return loaded.error();
+    return std::pair<model::LoadedTensorTile, const model::LogicalTensorDescriptor*>(
+        loaded.take_value(), &*found);
+}
+
+}  // namespace
+
+Result<DeepseekV4ReferenceGlobals> deepseek_v4_load_0731_gguf_globals(
+    const model::LogicalTensorCatalog& catalog,
+    const DeepseekV4ReferenceConfig& config,
+    safety::ResourceGovernor& governor) {
+    if (catalog.metadata_only) {
+        return make_error(ErrorCode::unsupported,
+                          "Loading globals from a metadata-only catalog is forbidden",
+                          catalog.model_id);
+    }
+    try {
+        struct MatrixMapping {
+            std::string_view source;
+            std::string_view consumer;
+            std::size_t rows;
+            std::size_t columns;
+        };
+        const std::array<MatrixMapping, 3U> matrices{{
+            {"token_embd.weight", "embed.weight", config.vocabulary_size, config.width},
+            {"output.weight", "head.weight", config.vocabulary_size, config.width},
+            {"output_hc_fn.weight", "hc_head_fn", config.hyper_multiplier,
+             config.hyper_multiplier * config.width},
+        }};
+        struct FloatMapping {
+            std::string_view source;
+            std::string_view consumer;
+            std::size_t elements;
+        };
+        const std::array<FloatMapping, 3U> floats{{
+            {"output_norm.weight", "norm.weight", config.width},
+            {"output_hc_base.weight", "hc_head_base", config.hyper_multiplier},
+            {"output_hc_scale.weight", "hc_head_scale", 1U},
+        }};
+
+        DeepseekV4ReferenceGlobals result;
+        for (const auto& mapping : matrices) {
+            auto tile = load_catalog_tensor_tile(catalog, mapping.source, std::nullopt, governor);
+            if (!tile) return tile.error();
+            const auto* descriptor = tile.value().second;
+            if (!descriptor->ggml_type.has_value() || descriptor->shape.size() != 2U ||
+                static_cast<std::size_t>(descriptor->shape[1]) != mapping.rows) {
+                return make_error(ErrorCode::invalid_format,
+                                  "DeepSeek global matrix shape does not match its consumer",
+                                  std::string(mapping.source));
+            }
+            auto matrix = deepseek_v4_bind_packed_matrix(
+                tile.value().first, *descriptor->ggml_type, mapping.rows, mapping.columns,
+                static_cast<std::size_t>(descriptor->shape[0]));
+            if (!matrix) return matrix.error();
+            result.matrices.emplace(mapping.consumer, matrix.take_value());
+        }
+        for (const auto& mapping : floats) {
+            auto tile = load_catalog_tensor_tile(catalog, mapping.source, std::nullopt, governor);
+            if (!tile) return tile.error();
+            const auto* descriptor = tile.value().second;
+            if (!descriptor->ggml_type.has_value()) {
+                return make_error(ErrorCode::invalid_format,
+                                  "DeepSeek global vector descriptor is malformed",
+                                  std::string(mapping.source));
+            }
+            auto elements = bounded_catalog_product(descriptor->shape, descriptor->name);
+            if (!elements) return elements.error();
+            if (elements.value() != mapping.elements) {
+                return make_error(ErrorCode::invalid_format,
+                                  "DeepSeek global vector shape does not match its consumer",
+                                  std::string(mapping.source));
+            }
+            auto tensor = deepseek_v4_bind_packed_float(
+                tile.value().first, *descriptor->ggml_type, elements.value());
+            if (!tensor) return tensor.error();
+            result.float_tensors.emplace(mapping.consumer, tensor.take_value());
+        }
+        return result;
+    } catch (const std::bad_alloc&) {
+        return make_error(ErrorCode::resource_exhausted,
+                          "Unable to allocate the streamed DeepSeek globals");
+    }
+}
+
 Result<DeepseekV4ReferenceLayerTrunk> deepseek_v4_load_0731_gguf_layer_trunk(
     const model::LogicalTensorCatalog& catalog,
     const DeepseekV4ReferenceConfig& config,
@@ -3997,36 +4113,8 @@ Result<DeepseekV4ReferenceLayerTrunk> deepseek_v4_load_0731_gguf_layer_trunk(
     }
     // Each always-active tensor is read as one complete tile and retained by the descriptor it
     // produces, so the layer's residency survives exactly as long as the graph that uses it.
-    const auto load_tile = [&](std::string_view name)
-        -> Result<std::pair<model::LoadedTensorTile, const model::LogicalTensorDescriptor*>> {
-        const auto found = std::find_if(
-            catalog.tensors.begin(), catalog.tensors.end(),
-            [name](const model::LogicalTensorDescriptor& tensor) { return tensor.name == name; });
-        if (found == catalog.tensors.end() || !found->layer.has_value() ||
-            *found->layer != layer || found->expert.has_value()) {
-            return make_error(ErrorCode::not_found,
-                              "DeepSeek layer tensor is absent from the catalog",
-                              std::string(name));
-        }
-        const auto index = static_cast<std::size_t>(std::distance(catalog.tensors.begin(), found));
-        model::LayerTensorTile tile;
-        tile.tensor_index = index;
-        tile.layer = static_cast<std::uint32_t>(layer);
-        tile.role = found->role;
-        tile.tensor_offset = 0U;
-        tile.source = found->source;
-        tile.final_tile = true;
-        auto residency = model::ResidencyObject::create(
-            catalog.model_id + "/layer/" + std::to_string(layer) + "/tensor/" + found->name,
-            found->source.bytes);
-        if (!residency) return residency.error();
-        model::TensorTileLoadOptions options;
-        options.max_tile_bytes = found->source.bytes;
-        options.measure_process_io = false;
-        auto loaded = model::load_tensor_tile(catalog, tile, residency.value(), governor, options);
-        if (!loaded) return loaded.error();
-        return std::pair<model::LoadedTensorTile, const model::LogicalTensorDescriptor*>(
-            loaded.take_value(), &*found);
+    const auto load_tile = [&](std::string_view name) {
+        return load_catalog_tensor_tile(catalog, name, layer, governor);
     };
 
     DeepseekV4LayerTrunkSource binder;

@@ -1739,11 +1739,108 @@ int command_deepseek_forward(const std::vector<std::string>& args) {
     }
     if (has_flag(args, "--dry-run")) return 0;
 
-    return print_error(
-        vastloom::make_error(vastloom::ErrorCode::unsupported,
-                             "Full-depth execution is not implemented yet; --dry-run reports the "
-                             "capacity preflight only"),
-        json);
+    vastloom::safety::ResourceGovernor governor(policy.value().resources);
+    auto layer_config = config.value();
+    layer_config.layer_count = depth;
+    layer_config.hash_layer_count = std::min(layer_config.hash_layer_count, depth);
+    layer_config.mtp_layer_count = 0U;
+    layer_config.mtp_compression_ratios.clear();
+    layer_config.compression_ratios.resize(depth);
+    if (layer_config.routed_expert_swiglu_limits.size() > depth) {
+        layer_config.routed_expert_swiglu_limits.resize(depth);
+    }
+    if (layer_config.shared_expert_swiglu_limits.size() > depth) {
+        layer_config.shared_expert_swiglu_limits.resize(depth);
+    }
+
+    vastloom::inference::DeepseekV4ReferenceGraph graph;
+    graph.config = std::move(layer_config);
+    auto globals = vastloom::inference::deepseek_v4_load_0731_gguf_globals(
+        report.value().catalog, config.value(), governor);
+    if (!globals) return print_error(globals.error(), json);
+    for (auto& [name, matrix] : globals.value().matrices) {
+        graph.packed_matrices.emplace(name, std::move(matrix));
+    }
+    for (auto& [name, tensor] : globals.value().float_tensors) {
+        graph.packed_float_tensors.emplace(name, std::move(tensor));
+    }
+
+    // Each layer keeps its own bounded expert cache: the 256 bundles of layer N are a different set
+    // from layer N+1, and a shared cache would let one layer evict another's working set.
+    std::vector<std::shared_ptr<vastloom::inference::DeepseekV4BoundedExpertCache>> caches;
+    const auto load_started = std::chrono::steady_clock::now();
+    for (std::size_t layer = 0U; layer < depth; ++layer) {
+        auto safe = process_guard.value().sample_and_check();
+        if (!safe) return print_error(safe.error(), json);
+        auto trunk = vastloom::inference::deepseek_v4_load_0731_gguf_layer_trunk(
+            report.value().catalog, graph.config, layer, governor);
+        if (!trunk) return print_error(trunk.error(), json);
+        for (auto& [name, matrix] : trunk.value().matrices) {
+            graph.packed_matrices.emplace(name, std::move(matrix));
+        }
+        for (auto& [name, tensor] : trunk.value().float_tensors) {
+            graph.packed_float_tensors.emplace(name, std::move(tensor));
+        }
+        for (auto& [name, tensor] : trunk.value().integer_tensors) {
+            graph.packed_integer_tensors.emplace(name, std::move(tensor));
+        }
+        auto bindings = vastloom::inference::deepseek_v4_make_gguf_expert_bindings(
+            report.value().catalog, static_cast<std::uint32_t>(layer),
+            report.value().experts_per_layer, graph.config.width,
+            graph.config.intermediate_width);
+        if (!bindings) return print_error(bindings.error(), json);
+        vastloom::inference::DeepseekV4ExpertCacheOptions cache_options;
+        cache_options.block_prefix = "layers." + std::to_string(layer) + ".ffn";
+        cache_options.max_cached_experts = expert_cache.value();
+        cache_options.max_experts_per_request = graph.config.experts_per_token;
+        auto cache = vastloom::inference::DeepseekV4BoundedExpertCache::create(
+            bindings.take_value(), governor, cache_options);
+        if (!cache) return print_error(cache.error(), json);
+        graph.expert_providers.emplace(cache_options.block_prefix,
+                                       cache.value()->provider_binding());
+        caches.push_back(cache.take_value());
+    }
+    const auto load_elapsed = std::chrono::duration<double, std::milli>(
+        std::chrono::steady_clock::now() - load_started).count();
+
+    const std::array<std::uint32_t, 1U> token_ids{static_cast<std::uint32_t>(token.value())};
+    const auto started = std::chrono::steady_clock::now();
+    auto forward = vastloom::inference::deepseek_v4_reference_prefill(graph, token_ids);
+    if (!forward) return print_error(forward.error(), json);
+    const auto elapsed = std::chrono::duration<double, std::milli>(
+        std::chrono::steady_clock::now() - started).count();
+
+    vastloom::ByteCount expert_bytes_read = 0U;
+    std::size_t expert_misses = 0U;
+    for (const auto& cache : caches) {
+        const auto snapshot = cache->snapshot();
+        expert_bytes_read += snapshot.logical_bytes_read;
+        expert_misses += snapshot.misses;
+    }
+    const bool complete = depth == config.value().layer_count;
+
+    if (json) {
+        std::cout << "{\"ok\":true,\"complete_model\":" << (complete ? "true" : "false")
+                  << ",\"executed_layers\":" << depth
+                  << ",\"model_layers\":" << config.value().layer_count
+                  << ",\"token\":" << token.value()
+                  << ",\"next_token\":" << forward.value().greedy_token_id
+                  << ",\"logits\":" << forward.value().logits.size()
+                  << ",\"expert_bytes_read\":" << expert_bytes_read
+                  << ",\"expert_misses\":" << expert_misses
+                  << ",\"resident_bytes\":" << required
+                  << ",\"load_ms\":" << load_elapsed
+                  << ",\"forward_ms\":" << elapsed << '}' << '\n';
+    } else {
+        std::cout << "Executed layers:      " << depth << " of " << config.value().layer_count
+                  << (complete ? " (complete model)" : " (partial: not the model's output)") << '\n'
+                  << "Next token:           " << forward.value().greedy_token_id << '\n'
+                  << "Expert bytes read:    " << expert_bytes_read << " in " << expert_misses
+                  << " misses\n"
+                  << "Weight load:          " << load_elapsed << " ms\n"
+                  << "Forward:              " << elapsed << " ms\n";
+    }
+    return 0;
 }
 
 Result<void> write_olmoe_trace_atomic(const std::filesystem::path& path,

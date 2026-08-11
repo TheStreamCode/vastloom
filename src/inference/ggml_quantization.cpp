@@ -259,10 +259,12 @@ Result<void> decode_q8_0_block(
     return {};
 }
 
-void q5_k_scale_min(std::size_t index,
-                    const std::byte* encoded,
-                    std::uint8_t& scale,
-                    std::uint8_t& minimum) noexcept {
+// Q4_K/Q5_K scale unpacking follows ggml commit
+// 30bf8685ed4eb0a47f2b06229543327749904150 under its MIT license.
+void qk_scale_min(std::size_t index,
+                  const std::byte* encoded,
+                  std::uint8_t& scale,
+                  std::uint8_t& minimum) noexcept {
     const auto at = [encoded](std::size_t offset) {
         return std::to_integer<std::uint8_t>(encoded[offset]);
     };
@@ -277,6 +279,44 @@ void q5_k_scale_min(std::size_t index,
     minimum = static_cast<std::uint8_t>(
         (static_cast<std::uint32_t>(at(index + 4U)) >> 4U) |
         ((static_cast<std::uint32_t>(at(index)) >> 6U) << 4U));
+}
+
+Result<void> decode_q4_k_block(
+    const std::byte* encoded,
+    std::span<float, kQ4KBlockElements> output) {
+    const float scale = fp16_to_float(read_u16_le(encoded));
+    const float minimum = fp16_to_float(read_u16_le(encoded + 2U));
+    if (!std::isfinite(scale) || !std::isfinite(minimum)) {
+        return make_error(ErrorCode::invalid_format,
+                          "Q4_K block scale or minimum is not finite");
+    }
+
+    const std::byte* scales = encoded + 4U;
+    const std::byte* quantized = encoded + 16U;
+    std::size_t scale_index = 0U;
+    for (std::size_t group = 0U; group < 4U; ++group) {
+        std::uint8_t first_scale = 0U;
+        std::uint8_t first_minimum = 0U;
+        std::uint8_t second_scale = 0U;
+        std::uint8_t second_minimum = 0U;
+        qk_scale_min(scale_index, scales, first_scale, first_minimum);
+        qk_scale_min(scale_index + 1U, scales, second_scale, second_minimum);
+        const float d1 = scale * static_cast<float>(first_scale);
+        const float m1 = minimum * static_cast<float>(first_minimum);
+        const float d2 = scale * static_cast<float>(second_scale);
+        const float m2 = minimum * static_cast<float>(second_minimum);
+        const std::size_t base = group * 64U;
+        for (std::size_t lane = 0U; lane < 32U; ++lane) {
+            const auto value = std::to_integer<std::uint8_t>(quantized[lane]);
+            output[base + lane] =
+                d1 * static_cast<float>(value & 15U) - m1;
+            output[base + 32U + lane] =
+                d2 * static_cast<float>(value >> 4U) - m2;
+        }
+        quantized += 32U;
+        scale_index += 2U;
+    }
+    return {};
 }
 
 Result<void> decode_q5_k_block(
@@ -300,8 +340,8 @@ Result<void> decode_q5_k_block(
         std::uint8_t first_minimum = 0U;
         std::uint8_t second_scale = 0U;
         std::uint8_t second_minimum = 0U;
-        q5_k_scale_min(scale_index, scales, first_scale, first_minimum);
-        q5_k_scale_min(scale_index + 1U, scales, second_scale, second_minimum);
+        qk_scale_min(scale_index, scales, first_scale, first_minimum);
+        qk_scale_min(scale_index + 1U, scales, second_scale, second_minimum);
         const float d1 = scale * static_cast<float>(first_scale);
         const float m1 = minimum * static_cast<float>(first_minimum);
         const float d2 = scale * static_cast<float>(second_scale);
@@ -629,6 +669,7 @@ bool supports_reference_matvec_ggml_type(std::uint32_t ggml_type) noexcept {
     switch (ggml_type) {
         case kGgmlTypeF32:
         case kGgmlTypeQ8_0:
+        case kGgmlTypeQ4K:
         case kGgmlTypeQ5K:
         case kGgmlTypeQ6K:
         case kGgmlTypeIq3Xxs:
@@ -658,9 +699,6 @@ Result<std::size_t> ggml_storage_bytes(std::uint32_t ggml_type,
             block_bytes = kQ8_0BlockBytes;
             break;
         case kGgmlTypeQ4K:
-            // Layout-only support. Q4_K is needed to validate the pinned 0731 embedding and
-            // output descriptors, but supports_reference_matvec_ggml_type intentionally stays
-            // false until a parity-tested native kernel exists.
             block_elements = kQ4KBlockElements;
             block_bytes = kQ4KBlockBytes;
             break;
@@ -729,6 +767,46 @@ Result<void> matvec_q8_0_f32(std::span<const std::byte> encoded_matrix,
     return matvec_blocked<kQ8_0BlockElements, kQ8_0BlockBytes>(
         encoded_matrix, rows, columns, input, output, limits, validator,
         decode_q8_0_block);
+}
+
+Result<void> dequantize_q4_k(std::span<const std::byte> encoded,
+                             std::span<float> output,
+                             const QuantizedKernelLimits& limits) {
+    const auto validator = [](std::span<const std::byte> bytes) -> Result<void> {
+        for (std::size_t offset = 0U; offset < bytes.size(); offset += kQ4KBlockBytes) {
+            const float scale = fp16_to_float(read_u16_le(bytes.data() + offset));
+            const float minimum = fp16_to_float(read_u16_le(bytes.data() + offset + 2U));
+            if (!std::isfinite(scale) || !std::isfinite(minimum)) {
+                return make_error(ErrorCode::invalid_format,
+                                  "Q4_K block scale or minimum is not finite");
+            }
+        }
+        return {};
+    };
+    return dequantize_blocked<kQ4KBlockElements, kQ4KBlockBytes>(
+        encoded, output, limits, validator, decode_q4_k_block);
+}
+
+Result<void> matvec_q4_k_f32(std::span<const std::byte> encoded_matrix,
+                             std::size_t rows,
+                             std::size_t columns,
+                             std::span<const float> input,
+                             std::span<float> output,
+                             const QuantizedKernelLimits& limits) {
+    const auto validator = [](std::span<const std::byte> bytes) -> Result<void> {
+        for (std::size_t offset = 0U; offset < bytes.size(); offset += kQ4KBlockBytes) {
+            const float scale = fp16_to_float(read_u16_le(bytes.data() + offset));
+            const float minimum = fp16_to_float(read_u16_le(bytes.data() + offset + 2U));
+            if (!std::isfinite(scale) || !std::isfinite(minimum)) {
+                return make_error(ErrorCode::invalid_format,
+                                  "Q4_K block scale or minimum is not finite");
+            }
+        }
+        return {};
+    };
+    return matvec_blocked<kQ4KBlockElements, kQ4KBlockBytes>(
+        encoded_matrix, rows, columns, input, output, limits, validator,
+        decode_q4_k_block);
 }
 
 Result<void> dequantize_q5_k(std::span<const std::byte> encoded,
@@ -1021,6 +1099,52 @@ Result<void> decode_i32_le(std::span<const std::byte> encoded,
     return {};
 }
 
+Result<void> dequantize_ggml_row_f32(
+    std::uint32_t ggml_type,
+    std::span<const std::byte> encoded_matrix,
+    std::size_t rows,
+    std::size_t columns,
+    std::size_t row,
+    std::span<float> output,
+    const QuantizedKernelLimits& limits) {
+    if (!supports_reference_matvec_ggml_type(ggml_type)) {
+        return make_error(ErrorCode::unsupported,
+                          "GGML storage type has no reference row decoder");
+    }
+    if (row >= rows || output.size() != columns) {
+        return make_error(ErrorCode::invalid_argument,
+                          "GGML row index or output span has the wrong size");
+    }
+    auto total_bytes = ggml_storage_bytes(ggml_type, rows, columns, limits);
+    if (!total_bytes) return total_bytes.error();
+    if (encoded_matrix.size() != total_bytes.value()) {
+        return make_error(ErrorCode::invalid_format,
+                          "GGML matrix bytes do not match the row descriptor");
+    }
+    auto row_bytes = ggml_storage_bytes(
+        ggml_type, 1U, columns, QuantizedKernelLimits{columns});
+    if (!row_bytes) return row_bytes.error();
+    if (row > std::numeric_limits<std::size_t>::max() / row_bytes.value()) {
+        return make_error(ErrorCode::resource_exhausted,
+                          "GGML row byte offset overflows");
+    }
+    const auto encoded_row = encoded_matrix.subspan(row * row_bytes.value(),
+                                                     row_bytes.value());
+    switch (ggml_type) {
+        case kGgmlTypeF32: return dequantize_f32_le(encoded_row, output, limits);
+        case kGgmlTypeQ8_0: return dequantize_q8_0(encoded_row, output, limits);
+        case kGgmlTypeQ4K: return dequantize_q4_k(encoded_row, output, limits);
+        case kGgmlTypeQ5K: return dequantize_q5_k(encoded_row, output, limits);
+        case kGgmlTypeQ6K: return dequantize_q6_k(encoded_row, output, limits);
+        case kGgmlTypeIq3Xxs: return dequantize_iq3_xxs(encoded_row, output, limits);
+        case kGgmlTypeIq1S: return dequantize_iq1_s(encoded_row, output, limits);
+        case kGgmlTypeBf16: return dequantize_bf16(encoded_row, output, limits);
+        default:
+            return make_error(ErrorCode::unsupported,
+                              "GGML storage type has no reference row decoder");
+    }
+}
+
 Result<void> matvec_ggml_f32_transactional(
     std::uint32_t ggml_type,
     std::span<const std::byte> encoded_matrix,
@@ -1054,6 +1178,10 @@ Result<void> matvec_ggml_f32_transactional(
             break;
         case kGgmlTypeQ8_0:
             status = matvec_q8_0_f32(
+                encoded_matrix, rows, columns, input, scratch, limits);
+            break;
+        case kGgmlTypeQ4K:
+            status = matvec_q4_k_f32(
                 encoded_matrix, rows, columns, input, scratch, limits);
             break;
         case kGgmlTypeQ5K:

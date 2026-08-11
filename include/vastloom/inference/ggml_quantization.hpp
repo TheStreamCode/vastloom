@@ -81,6 +81,21 @@ struct RoutedExpertScratch {
     std::span<float> output,
     const QuantizedKernelLimits& limits = {});
 
+// Decodes complete little-endian GGML Q4_K blocks into caller-owned FP32 storage.
+[[nodiscard]] Result<void> dequantize_q4_k(
+    std::span<const std::byte> encoded,
+    std::span<float> output,
+    const QuantizedKernelLimits& limits = {});
+
+// Reference matrix-vector product for consecutive GGML Q4_K rows.
+[[nodiscard]] Result<void> matvec_q4_k_f32(
+    std::span<const std::byte> encoded_matrix,
+    std::size_t rows,
+    std::size_t columns,
+    std::span<const float> input,
+    std::span<float> output,
+    const QuantizedKernelLimits& limits = {});
+
 // Reference matrix-vector product for consecutive GGML Q8_0 rows.
 [[nodiscard]] Result<void> matvec_q8_0_f32(
     std::span<const std::byte> encoded_matrix,
@@ -184,6 +199,18 @@ struct RoutedExpertScratch {
 [[nodiscard]] Result<void> decode_i32_le(
     std::span<const std::byte> encoded,
     std::span<std::int32_t> output,
+    const QuantizedKernelLimits& limits = {});
+
+// Decodes exactly one physical row from a complete supported GGML matrix. The caller supplies
+// storage-width output, so large embedding tables can be accessed without materializing every
+// row. Matrix byte arithmetic remains subject to the explicit element ceiling.
+[[nodiscard]] Result<void> dequantize_ggml_row_f32(
+    std::uint32_t ggml_type,
+    std::span<const std::byte> encoded_matrix,
+    std::size_t rows,
+    std::size_t columns,
+    std::size_t row,
+    std::span<float> output,
     const QuantizedKernelLimits& limits = {});
 
 // Dispatches a supported GGML storage type into caller-owned scratch and publishes

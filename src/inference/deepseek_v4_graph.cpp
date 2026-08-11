@@ -25,6 +25,9 @@ namespace vastloom::inference {
 namespace {
 
 constexpr std::size_t kMaximumGraphElements = 64U * 1024U * 1024U;
+// Packed weights are not materialized as FP32 graph tensors. This ceiling admits the pinned
+// 129,280 x 4,096 Q4_K embedding/head while still rejecting unbounded descriptors.
+constexpr std::size_t kMaximumPackedMatrixElements = 1U * 1024U * 1024U * 1024U;
 constexpr std::size_t kMaximumPackedFloatElements = 1U * 1024U * 1024U;
 constexpr std::size_t kMaximumReferenceTokens = 4096U;
 constexpr std::size_t kMaximumReferenceLayers = 16U;
@@ -73,7 +76,7 @@ Result<DeepseekV4PackedMatrix> bind_resident_matrix(
     }
     auto required = ggml_storage_bytes(
         ggml_type, rows, storage_columns,
-        QuantizedKernelLimits{kMaximumGraphElements});
+        QuantizedKernelLimits{kMaximumPackedMatrixElements});
     if (!required) return required.error();
     if (available_bytes != required.value()) {
         return make_error(ErrorCode::integrity_error,
@@ -171,6 +174,25 @@ Result<std::size_t> bounded_product(std::initializer_list<std::size_t> factors,
     if (result > kMaximumGraphElements) {
         return make_error(ErrorCode::resource_exhausted,
                           "DeepSeek reference graph exceeds its element limit",
+                          std::move(context));
+    }
+    return result;
+}
+
+Result<std::size_t> bounded_packed_product(
+    std::initializer_list<std::size_t> factors,
+    std::string context) {
+    std::size_t result = 1U;
+    for (const auto factor : factors) {
+        if (factor == 0U || result > std::numeric_limits<std::size_t>::max() / factor) {
+            return make_error(ErrorCode::resource_exhausted,
+                              "DeepSeek packed matrix shape overflows", std::move(context));
+        }
+        result *= factor;
+    }
+    if (result > kMaximumPackedMatrixElements) {
+        return make_error(ErrorCode::resource_exhausted,
+                          "DeepSeek packed matrix exceeds its element limit",
                           std::move(context));
     }
     return result;
@@ -508,8 +530,8 @@ Result<std::vector<float>> linear_packed_matrix(
     if (!input_count) return input_count.error();
     auto output_count = bounded_product({rows, output_width}, std::string(context) + " output");
     if (!output_count) return output_count.error();
-    auto storage_count = bounded_product({matrix.rows, matrix.storage_columns},
-                                         std::string(name) + " storage shape");
+    auto storage_count = bounded_packed_product(
+        {matrix.rows, matrix.storage_columns}, std::string(name) + " storage shape");
     if (!storage_count) return storage_count.error();
     auto payload = deepseek_v4_packed_matrix_payload(matrix, name);
     if (!payload) return payload.error();
@@ -525,7 +547,7 @@ Result<std::vector<float>> linear_packed_matrix(
     std::vector<float> row_output(output_width);
     std::vector<float> output(output_count.value());
     QuantizedKernelLimits limits;
-    limits.max_elements = kMaximumGraphElements;
+    limits.max_elements = storage_count.value();
     for (std::size_t row = 0U; row < rows; ++row) {
         std::fill(padded_input.begin(), padded_input.end(), 0.0F);
         std::copy_n(input.begin() + static_cast<std::ptrdiff_t>(row * input_width),
@@ -541,6 +563,78 @@ Result<std::vector<float>> linear_packed_matrix(
                   output.begin() + static_cast<std::ptrdiff_t>(row * output_width));
     }
     finite = finite_values(output, context);
+    if (!finite) return finite.error();
+    return output;
+}
+
+Result<std::vector<float>> embedding_rows(
+    const DeepseekV4ReferenceGraph& graph,
+    std::span<const std::uint32_t> token_ids) {
+    const auto& config = graph.config;
+    auto output_count = bounded_product(
+        {token_ids.size(), config.width}, "DeepSeek embedding output");
+    if (!output_count) return output_count.error();
+
+    const auto packed = graph.packed_matrices.find("embed.weight");
+    if (packed == graph.packed_matrices.end()) {
+        auto embedding = float_tensor(
+            graph, "embed.weight", {config.vocabulary_size, config.width});
+        if (!embedding) return embedding.error();
+        std::vector<float> output(output_count.value());
+        for (std::size_t token = 0U; token < token_ids.size(); ++token) {
+            std::copy_n(
+                embedding.value().values().begin() + static_cast<std::ptrdiff_t>(
+                    static_cast<std::size_t>(token_ids[token]) * config.width),
+                config.width,
+                output.begin() + static_cast<std::ptrdiff_t>(token * config.width));
+        }
+        return output;
+    }
+
+    const auto& matrix = packed->second;
+    if (!supports_reference_matvec_ggml_type(matrix.ggml_type)) {
+        return make_error(ErrorCode::unsupported,
+                          "DeepSeek packed embedding type has no reference decoder",
+                          "embed.weight");
+    }
+    if (matrix.rows != config.vocabulary_size ||
+        matrix.logical_columns != config.width ||
+        matrix.storage_columns < matrix.logical_columns ||
+        matrix.storage_columns > kMaximumGraphElements) {
+        return make_error(ErrorCode::invalid_format,
+                          "DeepSeek packed embedding descriptor does not match the graph",
+                          "embed.weight");
+    }
+    auto storage_count = bounded_packed_product(
+        {matrix.rows, matrix.storage_columns}, "embed.weight storage shape");
+    if (!storage_count) return storage_count.error();
+    auto payload = deepseek_v4_packed_matrix_payload(matrix, "embed.weight");
+    if (!payload) return payload.error();
+
+    QuantizedKernelLimits limits{storage_count.value()};
+    auto required = ggml_storage_bytes(
+        matrix.ggml_type, matrix.rows, matrix.storage_columns, limits);
+    if (!required) return required.error();
+    if (payload.value().size() != required.value()) {
+        return make_error(ErrorCode::integrity_error,
+                          "DeepSeek packed embedding byte count does not match",
+                          "embed.weight");
+    }
+
+    std::vector<float> decoded_row(matrix.storage_columns);
+    std::vector<float> output(output_count.value());
+    for (std::size_t token = 0U; token < token_ids.size(); ++token) {
+        auto decoded = dequantize_ggml_row_f32(
+            matrix.ggml_type, payload.value(), matrix.rows, matrix.storage_columns,
+            token_ids[token], decoded_row, limits);
+        if (!decoded) {
+            return make_error(decoded.error().code, decoded.error().message,
+                              "embed.weight: " + decoded.error().context);
+        }
+        std::copy_n(decoded_row.begin(), config.width,
+                    output.begin() + static_cast<std::ptrdiff_t>(token * config.width));
+    }
+    auto finite = finite_values(output, "embed.weight");
     if (!finite) return finite.error();
     return output;
 }
@@ -3506,8 +3600,7 @@ Result<DeepseekV4ReferenceForwardResult> deepseek_v4_reference_prefill(
         working_state.layers.resize(config.layer_count);
         working_state.mtp_layers.resize(config.mtp_layer_count);
     }
-    auto embedding = float_tensor(graph, "embed.weight",
-                                  {config.vocabulary_size, config.width});
+    auto embedding = embedding_rows(graph, token_ids);
     if (!embedding) return embedding.error();
     auto hidden_count = bounded_product(
         {token_count, config.hyper_multiplier, config.width}, "DeepSeek hidden state");
@@ -3515,8 +3608,8 @@ Result<DeepseekV4ReferenceForwardResult> deepseek_v4_reference_prefill(
     std::vector<float> hidden(hidden_count.value());
     for (std::size_t token = 0U; token < token_count; ++token) {
         for (std::size_t copy = 0U; copy < config.hyper_multiplier; ++copy) {
-            std::copy_n(embedding.value().values().begin() +
-                            static_cast<std::ptrdiff_t>(token_ids[token] * config.width),
+            std::copy_n(embedding.value().begin() +
+                            static_cast<std::ptrdiff_t>(token * config.width),
                         config.width,
                         hidden.begin() + static_cast<std::ptrdiff_t>(
                             (token * config.hyper_multiplier + copy) * config.width));
@@ -3543,19 +3636,11 @@ Result<DeepseekV4ReferenceForwardResult> deepseek_v4_reference_prefill(
 
     if (config.mtp_layer_count != 0U) {
         const std::string mtp_base = "mtp.0";
-        std::vector<float> embedded(token_count * config.width);
-        for (std::size_t token = 0U; token < token_count; ++token) {
-            std::copy_n(embedding.value().values().begin() +
-                            static_cast<std::ptrdiff_t>(token_ids[token] * config.width),
-                        config.width,
-                        embedded.begin() +
-                            static_cast<std::ptrdiff_t>(token * config.width));
-        }
         auto embedding_norm_weight = float_tensor(graph, mtp_base + ".enorm.weight",
                                                   {config.width});
         if (!embedding_norm_weight) return embedding_norm_weight.error();
         auto normalized_embedding = deepseek_v4_rms_norm(
-            embedded, embedding_norm_weight.value(), token_count, config.width,
+            embedding.value(), embedding_norm_weight.value(), token_count, config.width,
             config.norm_epsilon);
         if (!normalized_embedding) return normalized_embedding.error();
         auto hidden_norm_weight = float_tensor(graph, mtp_base + ".hnorm.weight",
@@ -3625,13 +3710,9 @@ Result<DeepseekV4ReferenceForwardResult> deepseek_v4_reference_decode(
     auto budget = validate_state_budget(config, start_position + 1U);
     if (!budget) return budget.error();
     DeepseekV4ReferenceState working_state = state;
-    auto embedding = float_tensor(graph, "embed.weight",
-                                  {config.vocabulary_size, config.width});
+    auto embedding = embedding_rows(graph, token_ids);
     if (!embedding) return embedding.error();
-    std::vector<float> embedded(config.width);
-    std::copy_n(embedding.value().values().begin() +
-                    static_cast<std::ptrdiff_t>(token_id * config.width),
-                config.width, embedded.begin());
+    std::vector<float> embedded = embedding.take_value();
     auto hidden_count = bounded_product(
         {config.hyper_multiplier, config.width}, "DeepSeek incremental hidden state");
     if (!hidden_count) return hidden_count.error();

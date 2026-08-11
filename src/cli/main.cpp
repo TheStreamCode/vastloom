@@ -1703,6 +1703,9 @@ int command_deepseek_forward(const std::vector<std::string>& args) {
     const auto required = trunk_bytes + global_bytes + expert_bytes;
     const auto budget = policy.value().resources.ram_hard_limit;
 
+    // Planning works from metadata alone; executing does not. Say which of the two this store
+    // supports rather than letting a green preflight imply a runnable model.
+    const bool payload_present = !report.value().catalog.metadata_only;
     if (json) {
         std::cout << "{\"ok\":" << (required <= budget ? "true" : "false")
                   << ",\"preflight\":{\"layers\":" << depth
@@ -1714,6 +1717,7 @@ int command_deepseek_forward(const std::vector<std::string>& args) {
                   << ",\"ram_budget_bytes\":" << budget
                   << ",\"system_headroom_bytes\":"
                   << policy.value().resources.minimum_system_ram_available
+                  << ",\"payload_present\":" << (payload_present ? "true" : "false")
                   << ",\"fits\":" << (required <= budget ? "true" : "false") << "}}" << '\n';
     } else {
         std::cout << "DeepSeek forward preflight\n"
@@ -1727,6 +1731,8 @@ int command_deepseek_forward(const std::vector<std::string>& args) {
                   << "Safe RAM budget:      " << budget << " bytes\n"
                   << "Host headroom kept:   "
                   << policy.value().resources.minimum_system_ram_available << " bytes\n"
+                  << "Weight payload:       "
+                  << (payload_present ? "present" : "absent (planning only)") << '\n'
                   << "Verdict:              " << (required <= budget ? "fits" : "REFUSED") << '\n';
     }
     if (required > budget) {

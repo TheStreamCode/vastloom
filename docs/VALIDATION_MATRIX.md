@@ -73,6 +73,23 @@ python tools/fetch_deepseek_test_slices.py                   # dry run
 python tools/fetch_deepseek_test_slices.py --allow-download  # 6,488,064 bytes
 ```
 
+## Executing against real weights
+
+Two commands run the official graph, and both keep depth explicit because a partial pass must never
+read as the model's answer:
+
+- `deepseek-layer-probe` executes one layer from imported range artifacts and reports
+  `complete_model: false` with `executed_layers` and `model_layers`.
+- `deepseek-forward` executes to `--layers N` straight from a complete checkpoint. Its preflight
+  sums the exact resident cost from the catalog and compares it against the live safe RAM budget
+  *before* allocating; `--dry-run` stops there. The budget is
+  `min(half of physical RAM, free RAM − 8 GiB)`, recomputed per run, so the same command that fits
+  on an idle host is refused on a loaded one — by design.
+
+Neither command can grow without a reservation: trunk tiles, globals and expert bundles all pass
+through the Governor, each layer holds its own bounded expert cache, and the process guard is
+sampled at every layer boundary.
+
 ## What CI does not cover
 
 The GitHub matrix builds and tests six configurations, and all of them run the always-on layer

@@ -2,6 +2,16 @@
 
 ## Unreleased
 
+- Added `deepseek-forward`, which runs the real graph to a chosen depth straight from a complete
+  checkpoint, and refuses in advance what will not fit. Its preflight sums the exact resident cost
+  from the catalog — layer trunks, globals and the expert-cache ceiling — and compares it against the
+  live safe RAM budget before allocating anything. On the reference PC a full 43-layer pass needs
+  7,056,343,388 bytes against an 8,053,104,640-byte budget while 8 GiB of host RAM stays
+  untouchable. Layer trunks and globals stream one complete tile per tensor under their own
+  reservations, each layer keeps its own bounded expert cache so one layer cannot evict another's
+  working set, and the process guard is sampled at every layer boundary. `--layers` keeps depth
+  explicit, and the output states whether the pass was the complete model or a partial one.
+
 - Executed the first real DeepSeek layer from official payload. `deepseek-layer-probe` relocates the
   verified catalog onto the imported artifacts, loads trunk and globals through their governed
   reservations and runs one complete layer with the checkpoint's own router selecting the experts.

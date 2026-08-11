@@ -11,7 +11,14 @@
   `official-tid2eid-verified`, which opened the previously refused `--scope selected-experts` and
   imported those six complete bundles (18 ranges, 38,928,384 bytes). Learned-router layers,
   out-of-vocabulary tokens, absent or mis-sized tables and out-of-range expert ids all fail closed.
-  Nothing has been executed from this payload, and 82.36 GB of the checkpoint remains undownloaded.
+  82.36 GB of the checkpoint remains undownloaded.
+
+- Proved the imported trunk is consumable by the native graph. `deepseek-gguf-range-bind
+  --load-tensor-set` rereads all 21 official ranges into one governed RAM buffer, rehashes every
+  packed subspan and maps them onto their declared consumers: 11 matrices, 9 vectors and the routing
+  table, 138,867,160 resident bytes in 371 ms on the reference PC. Two opt-in tests
+  (`VASTLOOM_DEEPSEEK_V4_TRUNK_ARTIFACT`) pin both the route and this consumer contract. The layer
+  is bound, not executed.
 
 - Separated environment refusals from defects across the governed test suite. A Safety Governor
   refusal caused by host memory pressure was reported as a test failure, so an unrelated process

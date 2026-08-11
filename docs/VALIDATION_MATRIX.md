@@ -13,8 +13,11 @@ the machine for it to run at all.
 | Layer | What runs | Where |
 |---|---|---|
 | Always-on | 13 tests with inputs committed to the repository | every local build and every CI job |
-| Opt-in model tests | 11 tests gated behind `VASTLOOM_*` CMake paths | only where the operator supplies the inputs |
+| Opt-in model tests | 13 tests gated behind `VASTLOOM_*` CMake paths | only where the operator supplies the inputs |
 | Live GPU test | the real CUDA kernel inside `vastloom_cuda_cli` | only on a host with an NVIDIA driver and enough free RAM |
+
+Two of the opt-in tests consume official DeepSeek weight payload, which exists only after an
+explicitly authorised import. They are the only tests that touch real model weights.
 
 A test that is not configured is silently absent from `ctest`, not reported as skipped. A passing
 `ctest` run therefore means "everything configured on this machine passed", never "every claim in
@@ -59,6 +62,8 @@ obtained. Sizes are the bytes that must exist locally, not the size of the publi
 | `vastloom_deepseek_v4_iq1s_slice` | `VASTLOOM_DEEPSEEK_V4_IQ1S_SLICE` | 1,638,400-byte gate slice | `tools/fetch_deepseek_test_slices.py` |
 | `vastloom_deepseek_v4_iq3xxs_slice` | `VASTLOOM_DEEPSEEK_V4_IQ3XXS_SLICE` | 3,211,264-byte down slice | `tools/fetch_deepseek_test_slices.py` |
 | `vastloom_deepseek_v4_real_expert` | the three slice variables together | 6,488,064 bytes total | `tools/fetch_deepseek_test_slices.py` |
+| `vastloom_deepseek_v4_authoritative_route` | `VASTLOOM_DEEPSEEK_V4_TRUNK_ARTIFACT` | imported layer-0 trunk (138,867,160 bytes) | `tools/import_hf_ranges.py --scope trunk --allow-range-download` |
+| `vastloom_deepseek_v4_trunk_payload_load` | same | same | same |
 
 The slice helper is explicit-authority: it prints what it would fetch and downloads nothing until
 `--allow-download` is passed, then verifies every range against its pinned length and SHA-256.

@@ -334,10 +334,17 @@ recorded in the [M8 CUDA RMSNorm report](reports/M8_CUDA_RMSNORM_VALIDATION.md).
   the predicted no-cache figure — 129,280 logits in 29.4 s with 7.17 GB resident and the host's
   8 GiB floor untouched. See the
   [complete forward validation](reports/M9_DEEPSEEK_COMPLETE_FORWARD_VALIDATION.md).
-- [ ] Generate more than one token: KV cache reuse across steps, a tokenizer that reads the GGUF
-  vocabulary instead of `tokenizer.json`, and the chat template wired to the full-depth path.
-- [ ] Release each layer after executing it instead of holding all 43 trunks resident, so a host
-  with less free RAM is served rather than refused.
+- [x] Accept text prompts. The checkpoint's vocabulary is identical to the pinned tokenizer —
+  129,280 tokens index for index, 127,741 merges — so `--prompt` encodes through the implementation
+  already validated against Hugging Face, and `--chat` applies the checkpoint's template.
+  `"La capitale d'Italia e"` runs all 43 layers and predicts `" una"`.
+- [x] Release each layer's experts when the next layer asks for its own, so expert residency is
+  bounded by two layers rather than by prompt length: the same six-token prompt fell from a 13.6 GB
+  expert working set to 632 MB.
+- [x] Generate more than one token through the reference decode loop, reusing KV state across steps.
+- [ ] Load and release layer trunks the same way. All 43 are held resident, so the pass needs
+  6.39 GB of trunk and a host with less free RAM is refused rather than served — the single largest
+  remaining obstacle to running on ordinary machines, and the project's founding idea.
 - [ ] Pinned host buffers.
 - [ ] Direct/overlapped NVMe reads where supported.
 - [ ] Resident-trunk and bounded streamed-trunk placement profiles.

@@ -29,6 +29,11 @@ constexpr std::array<std::uint32_t, 256U> kIq3XxsGrid{
 #include "iq3xxs_grid.inc"
 };
 
+// Doubled E2M1 values used by GGML MXFP4. The scale decoder below supplies the
+// matching one-half factor. Pinned to the same ggml revision as the IQ tables.
+constexpr std::array<std::int8_t, 16U> kMxfp4Values{
+    0, 1, 2, 3, 4, 6, 8, 12, 0, -1, -2, -3, -4, -6, -8, -12};
+
 consteval std::uint64_t iq1_s_grid_fingerprint() {
     std::uint64_t hash = UINT64_C(14695981039346656037);
     for (const std::uint64_t value : kIq1SGrid) {
@@ -90,6 +95,16 @@ float fp16_to_float(std::uint16_t value) noexcept {
         bits |= (exponent + 112U) << 23U;
         bits |= mantissa << 13U;
     }
+    return std::bit_cast<float>(bits);
+}
+
+float e8m0_to_float_half(std::uint8_t value) noexcept {
+    // This is the exact scalar bit construction used by the pinned GGML MXFP4
+    // decoder. Values 0 and 1 map to the two smallest half-scaled powers;
+    // all other byte values map to a normalized exponent with no mantissa.
+    const std::uint32_t bits = value < 2U
+                                   ? UINT32_C(0x00200000) << value
+                                   : static_cast<std::uint32_t>(value - 1U) << 23U;
     return std::bit_cast<float>(bits);
 }
 
@@ -283,6 +298,36 @@ Result<void> decode_iq3_xxs_block(
                     local_scale * static_cast<float>(second) * second_sign;
             }
         }
+    }
+    return {};
+}
+
+Result<void> decode_mxfp4_block(
+    const std::byte* encoded,
+    std::span<float, kMxfp4BlockElements> output) {
+    const float scale = e8m0_to_float_half(
+        std::to_integer<std::uint8_t>(encoded[0]));
+    for (std::size_t index = 0U; index < kMxfp4BlockElements / 2U; ++index) {
+        const auto packed = std::to_integer<std::uint8_t>(encoded[1U + index]);
+        const float low = static_cast<float>(kMxfp4Values[packed & 15U]) * scale;
+        const float high = static_cast<float>(kMxfp4Values[packed >> 4U]) * scale;
+        if (!std::isfinite(low) || !std::isfinite(high)) {
+            return make_error(ErrorCode::invalid_format,
+                              "MXFP4 block produces a non-finite value");
+        }
+        output[index] = low;
+        output[index + kMxfp4BlockElements / 2U] = high;
+    }
+    return {};
+}
+
+Result<void> validate_mxfp4_blocks(std::span<const std::byte> encoded) {
+    std::array<float, kMxfp4BlockElements> decoded{};
+    for (std::size_t offset = 0U; offset < encoded.size(); offset += kMxfp4BlockBytes) {
+        auto status = decode_mxfp4_block(
+            encoded.data() + offset,
+            std::span<float, kMxfp4BlockElements>(decoded));
+        if (!status) return status.error();
     }
     return {};
 }
@@ -727,6 +772,7 @@ bool supports_reference_matvec_ggml_type(std::uint32_t ggml_type) noexcept {
         case kGgmlTypeIq2Xxs:
         case kGgmlTypeIq3Xxs:
         case kGgmlTypeIq1S:
+        case kGgmlTypeMxfp4:
         case kGgmlTypeBf16: return true;
         default: return false;
     }
@@ -784,7 +830,6 @@ Result<std::size_t> ggml_storage_bytes(std::uint32_t ggml_type,
             block_bytes = kBf16ElementBytes;
             break;
         case kGgmlTypeMxfp4:
-            // Layout-only support for mixed 0731 expert metadata.
             block_elements = kMxfp4BlockElements;
             block_bytes = kMxfp4BlockBytes;
             break;
@@ -1117,6 +1162,24 @@ Result<void> matvec_iq3_xxs_f32(std::span<const std::byte> encoded_matrix,
     return {};
 }
 
+Result<void> dequantize_mxfp4(std::span<const std::byte> encoded,
+                              std::span<float> output,
+                              const QuantizedKernelLimits& limits) {
+    return dequantize_blocked<kMxfp4BlockElements, kMxfp4BlockBytes>(
+        encoded, output, limits, validate_mxfp4_blocks, decode_mxfp4_block);
+}
+
+Result<void> matvec_mxfp4_f32(std::span<const std::byte> encoded_matrix,
+                              std::size_t rows,
+                              std::size_t columns,
+                              std::span<const float> input,
+                              std::span<float> output,
+                              const QuantizedKernelLimits& limits) {
+    return matvec_blocked<kMxfp4BlockElements, kMxfp4BlockBytes>(
+        encoded_matrix, rows, columns, input, output, limits,
+        validate_mxfp4_blocks, decode_mxfp4_block);
+}
+
 Result<void> dequantize_bf16(std::span<const std::byte> encoded,
                              std::span<float> output,
                              const QuantizedKernelLimits& limits) {
@@ -1215,6 +1278,7 @@ Result<void> dequantize_ggml_row_f32(
         case kGgmlTypeIq2Xxs: return dequantize_iq2_xxs(encoded_row, output, limits);
         case kGgmlTypeIq3Xxs: return dequantize_iq3_xxs(encoded_row, output, limits);
         case kGgmlTypeIq1S: return dequantize_iq1_s(encoded_row, output, limits);
+        case kGgmlTypeMxfp4: return dequantize_mxfp4(encoded_row, output, limits);
         case kGgmlTypeBf16: return dequantize_bf16(encoded_row, output, limits);
         default:
             return make_error(ErrorCode::unsupported,
@@ -1279,6 +1343,10 @@ Result<void> matvec_ggml_f32_transactional(
             break;
         case kGgmlTypeIq1S:
             status = matvec_iq1_s_f32(
+                encoded_matrix, rows, columns, input, scratch, limits);
+            break;
+        case kGgmlTypeMxfp4:
+            status = matvec_mxfp4_f32(
                 encoded_matrix, rows, columns, input, scratch, limits);
             break;
         case kGgmlTypeBf16:

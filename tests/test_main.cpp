@@ -1113,6 +1113,7 @@ void test_trunk_storage_reference_kernels() {
              vastloom::inference::kGgmlTypeIq2Xxs,
              vastloom::inference::kGgmlTypeIq3Xxs,
              vastloom::inference::kGgmlTypeIq1S,
+             vastloom::inference::kGgmlTypeMxfp4,
              vastloom::inference::kGgmlTypeBf16}) {
         CHECK(vastloom::inference::supports_reference_matvec_ggml_type(type));
         CHECK(vastloom::inference::supports_reference_storage_ggml_type(type));
@@ -1122,10 +1123,6 @@ void test_trunk_storage_reference_kernels() {
         vastloom::inference::kGgmlTypeI32));
     CHECK(vastloom::inference::supports_reference_storage_ggml_type(
         vastloom::inference::kGgmlTypeI32));
-    CHECK(!vastloom::inference::supports_reference_matvec_ggml_type(
-        vastloom::inference::kGgmlTypeMxfp4));
-    CHECK(!vastloom::inference::supports_reference_storage_ggml_type(
-        vastloom::inference::kGgmlTypeMxfp4));
     CHECK(!vastloom::inference::supports_reference_storage_ggml_type(1024U));
     auto q8_bytes = vastloom::inference::ggml_storage_bytes(
         vastloom::inference::kGgmlTypeQ8_0, 3U, 64U);
@@ -1513,6 +1510,103 @@ void test_iq3_xxs_reference_kernel() {
     CHECK(decoded == unchanged);
     input[0] = std::numeric_limits<float>::quiet_NaN();
     CHECK(!vastloom::inference::matvec_iq3_xxs_f32(encoded, 3U, 512U, input, output));
+}
+
+void test_mxfp4_reference_kernel() {
+    constexpr std::array<std::uint8_t, 6U> exponents{
+        128U, 127U, 0U, 1U, 120U, 136U};
+    std::vector<std::byte> encoded(
+        exponents.size() * vastloom::inference::kMxfp4BlockBytes);
+    for (std::size_t block = 0U; block < exponents.size(); ++block) {
+        const std::size_t base = block * vastloom::inference::kMxfp4BlockBytes;
+        encoded[base] = static_cast<std::byte>(exponents[block]);
+        for (std::size_t index = 0U;
+             index < vastloom::inference::kMxfp4BlockElements / 2U; ++index) {
+            encoded[base + 1U + index] = static_cast<std::byte>(
+                (block * 37U + index * 53U + 11U) & 0xffU);
+        }
+    }
+
+    std::vector<float> decoded(
+        exponents.size() * vastloom::inference::kMxfp4BlockElements);
+    auto status = vastloom::inference::dequantize_mxfp4(encoded, decoded);
+    CHECK(status);
+    std::uint64_t hash = UINT64_C(14695981039346656037);
+    for (const float value : decoded) {
+        const std::uint32_t bits = std::bit_cast<std::uint32_t>(value);
+        for (unsigned shift = 0U; shift < 32U; shift += 8U) {
+            hash ^= static_cast<std::uint8_t>((bits >> shift) & 0xffU);
+            hash *= UINT64_C(1099511628211);
+        }
+    }
+    CHECK(hash == UINT64_C(0x53a1edd1080feb82));
+    CHECK(decoded[0] == -3.0F && decoded[7] == -8.0F &&
+          decoded[15] == 8.0F && decoded[16] == 0.0F &&
+          decoded[31] == 2.0F && decoded[32] == 0.0F &&
+          decoded[63] == 2.0F &&
+          std::bit_cast<std::uint32_t>(decoded[64]) == UINT32_C(0x00c00000) &&
+          std::bit_cast<std::uint32_t>(decoded[95]) == UINT32_C(0x01400000) &&
+          std::bit_cast<std::uint32_t>(decoded[96]) == UINT32_C(0x80800000) &&
+          std::bit_cast<std::uint32_t>(decoded[127]) == UINT32_C(0x80400000) &&
+          decoded[160] == 1024.0F && decoded[191] == -1536.0F);
+
+    std::vector<float> input(64U);
+    for (std::size_t column = 0U; column < input.size(); ++column) {
+        const int centered = static_cast<int>(column % 29U) - 14;
+        input[column] = static_cast<float>(centered) * 0.03125F +
+                        static_cast<float>(column % 3U) * 0.0078125F;
+    }
+    std::array<float, 3U> output{};
+    auto multiplied = vastloom::inference::matvec_mxfp4_f32(
+        encoded, 3U, 64U, input, output);
+    CHECK(multiplied);
+    CHECK(output[0] == 13.18359375F);
+    CHECK(std::bit_cast<std::uint32_t>(output[1]) == UINT32_C(0x01372000));
+    CHECK(output[2] == -213.97833251953125F);
+
+    std::vector<float> row(64U);
+    CHECK(vastloom::inference::dequantize_ggml_row_f32(
+        vastloom::inference::kGgmlTypeMxfp4, encoded, 3U, 64U, 1U, row));
+    CHECK(std::equal(row.begin(), row.end(), decoded.begin() + 64));
+
+    std::array<float, 3U> scratch{};
+    std::array<float, 3U> published{17.0F, 17.0F, 17.0F};
+    CHECK(vastloom::inference::matvec_ggml_f32_transactional(
+        vastloom::inference::kGgmlTypeMxfp4, encoded, 3U, 64U, input,
+        scratch, published));
+    CHECK(published == output);
+
+    auto truncated = encoded;
+    truncated.pop_back();
+    CHECK(!vastloom::inference::dequantize_mxfp4(truncated, decoded));
+    CHECK(!vastloom::inference::dequantize_mxfp4(encoded, std::span<float>{}));
+    vastloom::inference::QuantizedKernelLimits small_limits;
+    small_limits.max_elements = 32U;
+    CHECK(!vastloom::inference::dequantize_mxfp4(encoded, decoded, small_limits));
+    CHECK(!vastloom::inference::matvec_mxfp4_f32(encoded, 3U, 31U, input, output));
+    CHECK(!vastloom::inference::matvec_mxfp4_f32(truncated, 3U, 64U, input, output));
+    CHECK(!vastloom::inference::dequantize_ggml_row_f32(
+        vastloom::inference::kGgmlTypeMxfp4, encoded, 3U, 64U, 3U, row));
+
+    auto overflowing = encoded;
+    overflowing[4U * vastloom::inference::kMxfp4BlockBytes] = std::byte{0xfdU};
+    overflowing[4U * vastloom::inference::kMxfp4BlockBytes + 1U] = std::byte{0x77U};
+    auto unchanged = decoded;
+    CHECK(!vastloom::inference::dequantize_mxfp4(overflowing, decoded));
+    CHECK(decoded == unchanged);
+    const auto unchanged_row = row;
+    CHECK(!vastloom::inference::dequantize_ggml_row_f32(
+        vastloom::inference::kGgmlTypeMxfp4, overflowing, 3U, 64U, 2U, row));
+    CHECK(row == unchanged_row);
+    std::fill(published.begin(), published.end(), 17.0F);
+    CHECK(!vastloom::inference::matvec_ggml_f32_transactional(
+        vastloom::inference::kGgmlTypeMxfp4, overflowing, 3U, 64U, input,
+        scratch, published));
+    CHECK(std::all_of(published.begin(), published.end(),
+                      [](float value) { return value == 17.0F; }));
+    input[0] = std::numeric_limits<float>::quiet_NaN();
+    CHECK(!vastloom::inference::matvec_mxfp4_f32(
+        encoded, 3U, 64U, input, output));
 }
 
 void test_quantized_routed_expert_contract() {
@@ -3350,6 +3444,23 @@ void test_deepseek_v4_reference_graph(const std::filesystem::path& root) {
         }
         return encoded;
     };
+    const auto make_mxfp4 = [](std::size_t rows, std::size_t salt) {
+        std::vector<std::byte> encoded(
+            rows * vastloom::inference::kMxfp4BlockBytes);
+        for (std::size_t row = 0U; row < rows; ++row) {
+            const std::size_t base =
+                row * vastloom::inference::kMxfp4BlockBytes;
+            encoded[base] = static_cast<std::byte>(
+                120U + ((salt + row) % 9U));
+            for (std::size_t index = 0U;
+                 index < vastloom::inference::kMxfp4BlockElements / 2U;
+                 ++index) {
+                encoded[base + 1U + index] = static_cast<std::byte>(
+                    (salt * 29U + row * 37U + index * 53U + 11U) & 0xffU);
+            }
+        }
+        return encoded;
+    };
     const auto make_iq3_xxs = [](std::size_t rows, std::size_t salt) {
         std::vector<std::byte> encoded(
             rows * vastloom::inference::kIq3XxsBlockBytes);
@@ -3670,6 +3781,88 @@ void test_deepseek_v4_reference_graph(const std::filesystem::path& root) {
             }
             CHECK(!vastloom::inference::deepseek_v4_reference_prefill(
                 corrupt_iq2, token_ids));
+        }
+
+        // Exercise the official profile's alternate MXFP4 down projections. Every routed W2
+        // is replaced, so every selected expert must cross the new kernel. The float graph is
+        // built by decoding the exact packed bytes before graph execution.
+        auto mxfp4_graph = packed_graph;
+        auto mxfp4_oracle = quantized_oracle;
+        bool mxfp4_graph_ok = true;
+        for (std::size_t expert = 0U; expert < config.expert_count; ++expert) {
+            const std::string name =
+                "layers.0.ffn.experts." + std::to_string(expert) +
+                ".w2.weight";
+            const auto spec = std::find_if(
+                layer_matrices.begin(), layer_matrices.end(),
+                [&name](const MatrixSpec& candidate) {
+                    return candidate.name == name;
+                });
+            CHECK(spec != layer_matrices.end());
+            if (spec == layer_matrices.end()) {
+                mxfp4_graph_ok = false;
+                break;
+            }
+            auto encoded = make_mxfp4(spec->rows, expert + 1U);
+            std::vector<float> padded(
+                spec->rows * vastloom::inference::kMxfp4BlockElements);
+            auto decoded = vastloom::inference::dequantize_mxfp4(
+                encoded, padded);
+            CHECK(decoded);
+            if (!decoded) {
+                mxfp4_graph_ok = false;
+                break;
+            }
+            std::vector<float> logical(spec->rows * spec->columns);
+            for (std::size_t row = 0U; row < spec->rows; ++row) {
+                std::copy_n(
+                    padded.begin() + static_cast<std::ptrdiff_t>(
+                        row * vastloom::inference::kMxfp4BlockElements),
+                    spec->columns,
+                    logical.begin() + static_cast<std::ptrdiff_t>(
+                        row * spec->columns));
+            }
+            mxfp4_oracle.float_tensors[name] = std::move(logical);
+            mxfp4_graph.packed_matrices[name] =
+                vastloom::inference::DeepseekV4PackedMatrix{
+                    vastloom::inference::kGgmlTypeMxfp4,
+                    spec->rows, spec->columns,
+                    vastloom::inference::kMxfp4BlockElements,
+                    std::move(encoded)};
+        }
+        if (mxfp4_graph_ok) {
+            vastloom::inference::DeepseekV4ReferenceState mxfp4_oracle_state;
+            vastloom::inference::DeepseekV4ReferenceState mxfp4_state;
+            auto expected_mxfp4 = vastloom::inference::deepseek_v4_reference_prefill(
+                mxfp4_oracle, token_ids, &mxfp4_oracle_state);
+            auto actual_mxfp4 = vastloom::inference::deepseek_v4_reference_prefill(
+                mxfp4_graph, token_ids, &mxfp4_state);
+            CHECK(expected_mxfp4 && actual_mxfp4);
+            if (expected_mxfp4 && actual_mxfp4) {
+                compare_packed_forward(actual_mxfp4.value(),
+                                       expected_mxfp4.value());
+                auto expected_mxfp4_decode =
+                    vastloom::inference::deepseek_v4_reference_decode(
+                        mxfp4_oracle, 10U, mxfp4_oracle_state);
+                auto actual_mxfp4_decode =
+                    vastloom::inference::deepseek_v4_reference_decode(
+                        mxfp4_graph, 10U, mxfp4_state);
+                CHECK(expected_mxfp4_decode && actual_mxfp4_decode);
+                if (expected_mxfp4_decode && actual_mxfp4_decode) {
+                    compare_packed_forward(actual_mxfp4_decode.value(),
+                                           expected_mxfp4_decode.value());
+                }
+            }
+            auto corrupt_mxfp4 = mxfp4_graph;
+            for (auto& entry : corrupt_mxfp4.packed_matrices) {
+                auto& matrix = entry.second;
+                if (matrix.ggml_type == vastloom::inference::kGgmlTypeMxfp4) {
+                    matrix.encoded[0] = std::byte{0xfdU};
+                    matrix.encoded[1] = std::byte{0x77U};
+                }
+            }
+            CHECK(!vastloom::inference::deepseek_v4_reference_prefill(
+                corrupt_mxfp4, token_ids));
         }
 
         // Persist the exact packed fixture, load trunk tensors as complete bounded tiles and
@@ -6151,6 +6344,7 @@ int main() {
     test_iq1_s_reference_kernel();
     test_iq2_xxs_reference_kernel();
     test_iq3_xxs_reference_kernel();
+    test_mxfp4_reference_kernel();
     test_quantized_routed_expert_contract();
     test_logical_tensor_catalog();
     test_deepseek_v4_gguf_expert_bindings();

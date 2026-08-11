@@ -19,7 +19,12 @@ namespace vastloom::model {
 class LoadedExpert;
 class LoadedTensorTile;
 class ResidentByteBuffer;
+struct LogicalTensorCatalog;
 }  // namespace vastloom::model
+
+namespace vastloom::safety {
+class ResourceGovernor;
+}  // namespace vastloom::safety
 
 namespace vastloom::safety {
 class ProcessSafetyGuard;
@@ -211,6 +216,11 @@ struct DeepseekV4ExpertProviderBinding {
     const model::LoadedTensorTile& tile,
     std::size_t elements);
 
+[[nodiscard]] Result<DeepseekV4PackedFloatTensor> deepseek_v4_bind_packed_float(
+    const model::LoadedTensorTile& tile,
+    std::uint32_t ggml_type,
+    std::size_t elements);
+
 [[nodiscard]] Result<DeepseekV4PackedIntegerTensor> deepseek_v4_bind_packed_i32(
     const model::LoadedExpert& expert,
     std::size_t catalog_tensor_index,
@@ -245,10 +255,25 @@ struct DeepseekV4ExpertProviderBinding {
 // detached binding set; callers decide when to publish it into a reference graph.
 struct DeepseekV4ReferenceLayerTrunk {
     std::size_t layer{0U};
+    std::size_t tensor_count{0U};
     std::map<std::string, DeepseekV4PackedMatrix, std::less<>> matrices;
     std::map<std::string, DeepseekV4PackedIntegerTensor, std::less<>> integer_tensors;
     std::map<std::string, DeepseekV4PackedFloatTensor, std::less<>> float_tensors;
 };
+
+// Where a layer's always-active tensors come from. One implementation reads a verified trunk tensor
+// set held in a single artifact buffer; another streams each tensor straight out of the checkpoint.
+// The layout that maps them onto graph consumers is identical either way.
+struct DeepseekV4LayerTrunkSource {
+    std::function<Result<DeepseekV4PackedMatrix>(std::string_view, std::size_t)> matrix;
+    std::function<Result<DeepseekV4PackedFloatTensor>(std::string_view)> vector;
+    std::function<Result<DeepseekV4PackedIntegerTensor>(std::string_view, std::size_t)> table;
+};
+
+[[nodiscard]] Result<DeepseekV4ReferenceLayerTrunk> deepseek_v4_build_layer_trunk(
+    const DeepseekV4LayerTrunkSource& source,
+    const DeepseekV4ReferenceConfig& config,
+    std::size_t layer);
 
 [[nodiscard]] Result<DeepseekV4ReferenceLayerTrunk>
 deepseek_v4_bind_0731_gguf_layer0_trunk(
@@ -265,6 +290,16 @@ deepseek_v4_bind_0731_gguf_layer_trunk(
     const DeepseekV4LoadedTrunkTensorSet& tensors,
     const DeepseekV4ReferenceConfig& config,
     std::size_t layer);
+
+// Streams one layer's always-active tensors straight from a checkpoint whose payload is present,
+// one complete tile per tensor under its own governed reservation. This is the path a full-depth
+// forward pass uses: no intermediate artifact, and only the layers actually reached are resident.
+[[nodiscard]] Result<DeepseekV4ReferenceLayerTrunk>
+deepseek_v4_load_0731_gguf_layer_trunk(
+    const model::LogicalTensorCatalog& catalog,
+    const DeepseekV4ReferenceConfig& config,
+    std::size_t layer,
+    safety::ResourceGovernor& governor);
 
 struct DeepseekV4ReferenceGlobals {
     std::map<std::string, DeepseekV4PackedMatrix, std::less<>> matrices;

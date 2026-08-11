@@ -279,6 +279,10 @@ void print_help() {
         << "      Plan the exact six checkpoint-global tensors; never fetch or execute them.\n\n"
         << "  range-artifact-inspect ARTIFACT_DIRECTORY [--no-verify] [--json]\n"
         << "      Validate a bounded immutable range artifact; never promotes it to execution.\n\n"
+        << "  deepseek-forward MODEL_DIRECTORY [--layers N] [--token ID] [--expert-cache N]"
+           " [--dry-run] [--json]\n"
+        << "      Report exactly what a forward pass to that depth would make resident and whether\n"
+        << "      it fits the safe RAM budget, before allocating anything.\n\n"
         << "  deepseek-layer-probe MODEL_DIRECTORY TRUNK_ARTIFACT EXPERT_ARTIFACT GLOBAL_ARTIFACT"
            " [--token ID] [--json]\n"
         << "      Execute one real layer from imported payload. This is one layer of 43, not the\n"
@@ -1615,6 +1619,133 @@ int command_deepseek_layer_probe(const std::vector<std::string>& args) {
     return 0;
 }
 
+// Runs the real graph to a chosen depth, streaming each layer's always-active tensors out of the
+// complete checkpoint.
+//
+// Depth is explicit and capacity is checked before anything is allocated. The Safety Governor would
+// refuse an oversized load anyway, but it would do so partway through, after minutes of reading; a
+// preflight that compares the exact resident total against the live budget refuses in advance and
+// says by how much. Nothing here can grow without a reservation: trunk tensors, globals and expert
+// bundles all pass through the Governor, the host keeps its 8 GiB headroom, and the process guard is
+// sampled at every layer boundary.
+int command_deepseek_forward(const std::vector<std::string>& args) {
+    const bool json = has_flag(args, "--json");
+    auto valid = validate_options(
+        args, 1U, {"--token", "--layers", "--context", "--batch-size", "--expert-cache"},
+        {"--json", "--dry-run"});
+    if (!valid) return print_error(valid.error(), json);
+    if (args.empty() || vastloom::util::starts_with(args.front(), "--")) {
+        return print_error(
+            vastloom::make_error(vastloom::ErrorCode::invalid_argument,
+                                 "deepseek-forward requires one imported checkpoint directory"),
+            json);
+    }
+    auto token = optional_size(args, "--token", 0U);
+    auto requested_layers = optional_size(args, "--layers", 1U);
+    auto context = optional_size(args, "--context", 4'096U);
+    auto batch_size = optional_size(args, "--batch-size", 1U);
+    auto expert_cache = optional_size(args, "--expert-cache", 8U);
+    if (!token) return print_error(token.error(), json);
+    if (!requested_layers) return print_error(requested_layers.error(), json);
+    if (!context) return print_error(context.error(), json);
+    if (!batch_size) return print_error(batch_size.error(), json);
+    if (!expert_cache) return print_error(expert_cache.error(), json);
+    if (token.value() > std::numeric_limits<std::uint32_t>::max() ||
+        requested_layers.value() == 0U || requested_layers.value() > 128U ||
+        context.value() == 0U || context.value() > 1'048'576U ||
+        batch_size.value() == 0U || batch_size.value() > 8U ||
+        expert_cache.value() == 0U || expert_cache.value() > 64U) {
+        return print_error(
+            vastloom::make_error(vastloom::ErrorCode::invalid_argument,
+                                 "DeepSeek forward bounds are invalid"),
+            json);
+    }
+
+    const auto checkpoint_root = cli_path(args.front());
+    auto hardware = vastloom::hardware::HardwareProbe::collect(checkpoint_root);
+    if (!hardware) return print_error(hardware.error(), json);
+    auto policy = vastloom::safety::make_safe_runtime_policy(hardware.value());
+    if (!policy) return print_error(policy.error(), json);
+    auto process_guard = vastloom::safety::ProcessSafetyGuard::apply(policy.value());
+    if (!process_guard) return print_error(process_guard.error(), json);
+
+    vastloom::inference::DeepseekV4GgufCheckpointInspectOptions inspect_options;
+    inspect_options.verify_hashes = false;
+    inspect_options.context_tokens = static_cast<std::uint32_t>(context.value());
+    inspect_options.batch_size = static_cast<std::uint32_t>(batch_size.value());
+    inspect_options.safe_ram_cap_bytes = policy.value().resources.host_memory_hard_limit;
+    inspect_options.safe_vram_cap_bytes = policy.value().resources.vram_hard_limit;
+    const auto& spec = vastloom::inference::pinned_deepseek_v4_flash_0731_iq1s_checkpoint();
+    auto report = vastloom::inference::inspect_deepseek_v4_gguf_checkpoint(
+        checkpoint_root, spec, inspect_options);
+    if (!report) return print_error(report.error(), json);
+    auto config = vastloom::inference::deepseek_v4_reference_config_from_0731_gguf(report.value());
+    if (!config) return print_error(config.error(), json);
+    const std::size_t depth = std::min<std::size_t>(requested_layers.value(),
+                                                    config.value().layer_count);
+
+    // Exact resident cost of what is about to be loaded, from the catalog rather than an estimate.
+    vastloom::ByteCount trunk_bytes = 0U;
+    vastloom::ByteCount global_bytes = 0U;
+    vastloom::ByteCount largest_expert = 0U;
+    for (const auto& tensor : report.value().catalog.tensors) {
+        if (tensor.role == vastloom::model::TensorRole::routed_expert) continue;
+        if (!tensor.layer.has_value()) {
+            global_bytes += tensor.source.bytes;
+        } else if (*tensor.layer < depth) {
+            trunk_bytes += tensor.source.bytes;
+        }
+    }
+    for (const auto& bundle : report.value().catalog.experts) {
+        largest_expert = std::max(largest_expert, bundle.bytes);
+    }
+    const auto expert_bytes = largest_expert * expert_cache.value();
+    const auto required = trunk_bytes + global_bytes + expert_bytes;
+    const auto budget = policy.value().resources.ram_hard_limit;
+
+    if (json) {
+        std::cout << "{\"ok\":" << (required <= budget ? "true" : "false")
+                  << ",\"preflight\":{\"layers\":" << depth
+                  << ",\"model_layers\":" << config.value().layer_count
+                  << ",\"trunk_bytes\":" << trunk_bytes
+                  << ",\"global_bytes\":" << global_bytes
+                  << ",\"expert_cache_bytes\":" << expert_bytes
+                  << ",\"required_bytes\":" << required
+                  << ",\"ram_budget_bytes\":" << budget
+                  << ",\"system_headroom_bytes\":"
+                  << policy.value().resources.minimum_system_ram_available
+                  << ",\"fits\":" << (required <= budget ? "true" : "false") << "}}" << '\n';
+    } else {
+        std::cout << "DeepSeek forward preflight\n"
+                  << "Layers:               " << depth << " of " << config.value().layer_count
+                  << '\n'
+                  << "Layer trunks:         " << trunk_bytes << " bytes\n"
+                  << "Globals:              " << global_bytes << " bytes\n"
+                  << "Expert cache ceiling: " << expert_bytes << " bytes ("
+                  << expert_cache.value() << " bundles)\n"
+                  << "Required:             " << required << " bytes\n"
+                  << "Safe RAM budget:      " << budget << " bytes\n"
+                  << "Host headroom kept:   "
+                  << policy.value().resources.minimum_system_ram_available << " bytes\n"
+                  << "Verdict:              " << (required <= budget ? "fits" : "REFUSED") << '\n';
+    }
+    if (required > budget) {
+        return print_error(
+            vastloom::make_error(
+                vastloom::ErrorCode::resource_exhausted,
+                "This depth does not fit the safe RAM budget; reduce --layers or free memory",
+                std::to_string(required) + " required, " + std::to_string(budget) + " available"),
+            json);
+    }
+    if (has_flag(args, "--dry-run")) return 0;
+
+    return print_error(
+        vastloom::make_error(vastloom::ErrorCode::unsupported,
+                             "Full-depth execution is not implemented yet; --dry-run reports the "
+                             "capacity preflight only"),
+        json);
+}
+
 Result<void> write_olmoe_trace_atomic(const std::filesystem::path& path,
                                       const std::vector<vastloom::inference::ExpertTraceEvent>& events) {
     if (path.empty()) return vastloom::make_error(vastloom::ErrorCode::invalid_argument, "OLMoE trace path is empty");
@@ -2293,6 +2424,7 @@ int dispatch_cli(const std::vector<std::string>& arguments) {
         if (command == "range-artifact-inspect") return command_range_artifact_inspect(args);
         if (command == "deepseek-gguf-range-bind") return command_deepseek_gguf_range_bind(args);
         if (command == "deepseek-layer-probe") return command_deepseek_layer_probe(args);
+        if (command == "deepseek-forward") return command_deepseek_forward(args);
         if (command == "deepseek-gguf-global-bind") return command_deepseek_gguf_global_bind(args);
         if (command == "moe-logits") return command_moe_logits(args);
         if (command == "heartbeat-write") return command_heartbeat_write(args);

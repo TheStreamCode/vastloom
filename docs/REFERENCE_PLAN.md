@@ -119,7 +119,9 @@ name/shape adapter. With four separately governed expert bundles, complete reduc
 matches its oracle and releases the aggregate lease cleanly. The exact pinned GGUF metadata now
 derives the native reference configuration and validates the 21 real layer-0 descriptors without
 payload access. That contract includes both official SwiGLU clamp schedules instead of applying a
-single fixture scalar to routed and shared experts. The next gate requires explicit user
+single fixture scalar to routed and shared experts. The same fail-closed pass now validates all
+1,193 main-layer non-routed descriptors and 6,390,088,008 encoded bytes across the three official
+consumer-layout classes, still without tensor allocation or payload reads. The next gate requires explicit user
 authorization to acquire the exact 138,867,160-byte trunk ranges, execute the real `tid2eid`
 route for a pinned input and fetch only its six selected complete experts.
 

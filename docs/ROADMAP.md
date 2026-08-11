@@ -274,6 +274,10 @@ unbounded allocation and clean recovery from injected CUDA failures.
   The pinned metadata now supplies the 46-entry compression schedule, distinct 43-entry
   routed/shared SwiGLU schedules and every native consumer dimension; see the
   [metadata-to-graph validation](reports/M9_DEEPSEEK_METADATA_TO_GRAPH_VALIDATION.md).
+- [x] Extend the zero-payload consumer contract across all 43 official main layers. The
+  uncompressed/hash, 4:1 compressor/indexer and 128:1 compressor layouts validate all 1,193
+  non-routed descriptors and 6,390,088,008 encoded bytes against native consumers; see the
+  [all-layer catalog validation](reports/M9_DEEPSEEK_ALL_LAYER_CATALOG_VALIDATION.md).
 - [ ] Execute that probe by acquiring the bounded official trunk ranges, decoding the real
   `tid2eid` route and loading only its six selected complete expert bundles.
 - [ ] Pinned host buffers.

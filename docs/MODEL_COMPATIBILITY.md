@@ -14,7 +14,7 @@ or matching tensor dimensions is never enough to enable execution automatically.
 | OLMoE-1B-7B-0924-Instruct | Pinned shards, top-k routes, expert streaming and I/O telemetry | Validated CPU expert streaming |
 | `deepseek-ai/DeepSeek-V4-Flash` preview at `60d8d707...` | Header catalog, tokenizer, reduced main+MTP prefill and five incremental cache steps | Reduced FP32 reference execution only |
 | `deepseek-ai/DeepSeek-V4-Flash-0731` at `7872f01b...` | Public metadata/config reviewed on 2026-08-10 | Not imported, inspected or executed by Vastloom yet |
-| `unsloth/DeepSeek-V4-Flash-0731-GGUF` at `fbbb5b93...` | Pinned atomic importer, verified metadata binding, exact metadata-derived native config and 21-descriptor layer-0 consumer contract, 43 bounded layer-trunk plans, exact layer-0 trunk+top-6 range planning, bounded immutable partial-artifact import with a real trunk dry-run, native closed-world range verification/exact trunk binding, aggregate governed tensor-set loading, all trunk storage types covered by scalar references, one router-first governed reduced Q8_0/IQ1_S/IQ3_XXS layer, and canonical synchronous/asynchronous cache-to-kernel parity on one real expert | The complete reduced packed trunk catalog reaches the synthetic graph through one artifact buffer; one separate extracted official expert also executes. The checkpoint-shaped official-payload path remains non-executing, its expert IDs are not yet authoritative and no official range payload was downloaded; complete shards, official layer/token and generation remain unvalidated |
+| `unsloth/DeepSeek-V4-Flash-0731-GGUF` at `fbbb5b93...` | Pinned atomic importer, verified metadata binding, exact metadata-derived native config and all-layer 1,193-descriptor consumer contract, 43 bounded layer-trunk plans, exact layer-0 trunk+top-6 range planning, bounded immutable partial-artifact import with a real trunk dry-run, native closed-world range verification/exact trunk binding, aggregate governed tensor-set loading, all trunk storage types covered by scalar references, one router-first governed reduced Q8_0/IQ1_S/IQ3_XXS layer, and canonical synchronous/asynchronous cache-to-kernel parity on one real expert | The complete reduced packed trunk catalog reaches the synthetic graph through one artifact buffer; one separate extracted official expert also executes. The checkpoint-shaped official-payload path remains non-executing, its expert IDs are not yet authoritative and no official range payload was downloaded; complete shards, official layer/token and generation remain unvalidated |
 | `unsloth/Laguna-S-2.1` at `1a646907...` | Public config, custom-code and shard metadata reviewed on 2026-08-10 | Adapter and execution not implemented |
 | Kimi K3-class profiles | Public-roadmap capacity/traffic study only | Not a reference-PC execution target unless one exact complete expert passes the single-tier gate |
 
@@ -92,9 +92,10 @@ adapter maps the official `blk.0.*` names to exact graph consumers and validates
 F32/BF16 vector decode is bounded to 4 MiB of transient FP32 scratch. The complete reduced
 mixed-format prefill/decode graph still matches its oracle. The exact pinned GGUF metadata now
 derives the native 43-layer configuration, including the 46-entry compression schedule and
-separate 43-entry routed/shared SwiGLU clamp schedules. A buffer-free gate validates all 21 real
-layer-0 descriptors, types, consumer dimensions and encoded byte counts against that config. No
-official range was downloaded, and the profile's execution status is unchanged.
+separate 43-entry routed/shared SwiGLU clamp schedules. A buffer-free gate validates every real
+main-layer trunk layout: 1,193 descriptors and 6,390,088,008 encoded bytes across 43 layers match
+their native uncompressed/hash, 4:1 compressor/indexer or 128:1 compressor consumers. No official
+range was downloaded, and the profile's execution status is unchanged.
 
 The layer catalog uses F32, Q8_0, Q5_K, Q6_K, I32 and BF16. Bounded scalar handling now covers all
 1,193 tensors and all 6,390,088,008 encoded layer-trunk bytes: floating matrix formats have exact

@@ -339,6 +339,20 @@ trunk binder. It verifies exactly 11 matrices, nine F32/BF16 vectors and one I32
 including logical dimensions, GGML storage type and recomputed encoded byte count. It allocates no
 tensor buffer and reads no payload; it is a metadata-to-consumer contract, not execution.
 
+The all-layer validator extends that same contract over every main block. It derives the expected
+layout from the verified layer index, hash-layer count and compression ratio:
+
+- layers 0–1 contain 21 common/hash objects;
+- 4:1 layers contain 31 objects, adding attention compression and learned-indexer consumers;
+- 128:1 layers contain 25 objects, adding attention compression without the indexer;
+- hash layers require an exact two-dimensional I32 `top-k × vocabulary` table, while learned
+  layers require the expert-probability bias.
+
+Every canonical name, role, layer, matrix row/logical-column contract, float shape, GGML storage
+type and recomputed byte count is checked. Unexpected non-routed tensors fail the complete layer.
+The real headers validate 43 layers, 1,193 descriptors and 6,390,088,008 encoded bytes, matching
+the independently built layer planner totals without payload allocation or reads.
+
 Every non-routed `blk.N.*` descriptor now retains its checked layer identity. The shared layer
 planner walks catalog order, excludes routed-expert bundles and splits each immutable tensor range
 at a 64 MiB ceiling. On the real 0731 metadata this produces complete plans for 43/43 layers:

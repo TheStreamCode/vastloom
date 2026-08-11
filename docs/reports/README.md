@@ -13,6 +13,10 @@ hardware, commands, measurements and limitations.
 
 ## Current report
 
+- [`M9_DEEPSEEK_ALL_LAYER_CATALOG_VALIDATION.md`](M9_DEEPSEEK_ALL_LAYER_CATALOG_VALIDATION.md) —
+  zero-payload validation of all 43 official main-layer layouts, 1,193 non-routed descriptors and
+  6,390,088,008 encoded bytes against native uncompressed/hash, 4:1 compressor/indexer and 128:1
+  compressor consumers.
 - [`M9_DEEPSEEK_METADATA_TO_GRAPH_VALIDATION.md`](M9_DEEPSEEK_METADATA_TO_GRAPH_VALIDATION.md) —
   exact pinned 0731 GGUF metadata to native reference-config construction, bounded retention of
   the compression and distinct routed/shared SwiGLU schedules, and zero-payload validation of all

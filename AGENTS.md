@@ -63,8 +63,10 @@ expert alone cannot prove useful overlap. The mixed-format layer uses reduced sy
 the real 4,096/2,048 expert is not yet composed with official trunk payload. The exact pinned
 0731 GGUF metadata now derives the native 43-layer reference configuration, including separate
 43-value routed/shared SwiGLU clamp schedules and the 46-value compression schedule. A
-buffer-free validator maps all 21 official layer-0 non-routed descriptors to exact graph-consumer
-dimensions and encoded storage sizes. No official trunk tensor was loaded. A complete 0731
+buffer-free validator maps all 1,193 official non-routed layer descriptors across 43 layers to
+exact graph-consumer dimensions and encoded storage sizes: 21-object uncompressed/hash layouts,
+31-object 4:1 compressor/indexer layouts and 25-object 128:1 compressor layouts total
+6,390,088,008 bytes. No official trunk tensor was loaded. A complete 0731
 quantized layer/token path, physical NVMe overlap, generation and CUDA remain unvalidated.
 Windows and Linux CPU paths are tested; macOS/Metal remain unvalidated. Laguna S 2.1 remains a
 reviewed compatibility target, not a validated execution path.

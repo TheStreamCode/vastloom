@@ -86,7 +86,9 @@ model conversion.
 > decode still match the independent oracle. The exact verified 0731 metadata now directly
 > constructs the native 43-layer reference configuration, retains the 46-value compression and
 > separate 43-value routed/shared SwiGLU schedules, and validates every official layer-0 trunk
-> descriptor against its graph consumer without reading payload. The complete 82.54 GB payload
+> descriptor against its graph consumer without reading payload. That contract now extends over
+> all 43 main layers: 1,193 non-routed descriptors and 6,390,088,008 encoded bytes match the native
+> uncompressed/hash, 4:1 compressor/indexer and 128:1 compressor consumers. The complete 82.54 GB payload
 > has not been downloaded or executed; this synthetic gate is not a complete official DeepSeek
 > layer/token path,
 > physical-NVMe performance, generation or CUDA implementation.
@@ -178,6 +180,8 @@ The complete reduced artifact tensor-set transaction and graph parity gate are d
 The verified GGUF metadata-to-reference-config bridge and 21-descriptor layer-0 gate are documented
 in the
 [`M9 metadata-to-graph report`](docs/reports/M9_DEEPSEEK_METADATA_TO_GRAPH_VALIDATION.md).
+The complete 43-layer/1,193-descriptor metadata-to-consumer contract is documented in the
+[`M9 all-layer catalog report`](docs/reports/M9_DEEPSEEK_ALL_LAYER_CATALOG_VALIDATION.md).
 The pinned importer and immutable full-source admission boundary are documented in the
 [`M7 checkpoint-binding report`](docs/reports/M7_DEEPSEEK_GGUF_CHECKPOINT_BINDING_VALIDATION.md).
 Current and candidate model support is kept explicit in the
@@ -342,8 +346,10 @@ portability target, not a validated platform claim.
 - **Verified metadata-to-graph contract:** only the exact pinned manifest/spec may retain the
   bounded 46-value compression array and separate 43-value routed/shared SwiGLU clamp arrays.
   It derives the native 43-layer, width-4,096, 64-head, 256-expert/top-6 configuration and checks
-  all 21 official layer-0 non-routed descriptors, storage types, consumer dimensions and encoded
-  byte counts. This validator performs no tensor allocation or payload read.
+  all 1,193 official non-routed layer descriptors, storage types, consumer dimensions and
+  6,390,088,008 encoded bytes. The exact layouts are 21 objects for uncompressed/hash layers,
+  31 for 4:1 compressor/indexer layers and 25 for 128:1 compressor layers. This validator performs
+  no tensor allocation or payload read.
 - **Header-derived traffic floor:** the encoded routed experts total 75,547,803,648 bytes;
   a top-6 no-cache decode would request 1,770,651,648 logical expert bytes per token before
   caching/prefetch gains. This is not measured physical SSD traffic or a speed claim.

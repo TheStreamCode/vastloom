@@ -248,10 +248,12 @@ The 0731 GGUF reader adds a metadata-only safety boundary:
   atomically published under a short stable artifact name to preserve Windows path safety;
 - `deepseek-gguf-checkpoint` rejects raw files, wrong revisions, missing/extra manifest entries,
   wrong paths/sizes/hashes, corruption and header snapshots presented as complete payloads;
-- the reference configuration and layer-0 consumer gate are exposed only after the entire pinned
+- the reference configuration and consumer gates are exposed only after the entire pinned
   checkpoint spec matches. They validate exact architecture values, both SwiGLU schedules and all
-  21 non-routed descriptor shapes/types/encoded byte counts without allocating or reading tensor
-  payload. These booleans do not authorize execution;
+  1,193 non-routed descriptors / 6,390,088,008 encoded bytes across 43 layers without allocating
+  or reading tensor payload. Missing, unexpected, wrong-layer, wrong-role, wrong-shape,
+  unsupported-storage and byte-count mismatches fail closed. These booleans do not authorize
+  execution;
 - a header-prefix path cannot be used as an executable tensor source. Full source paths are
   exposed only for a complete immutable import after every full-file SHA-256 succeeds and one
   expert bundle fits wholly in safe RAM or wholly in safe VRAM. `--no-verify` forces metadata-only

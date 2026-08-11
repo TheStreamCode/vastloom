@@ -32,7 +32,10 @@ constexpr std::size_t kMaximumGraphElements = 64U * 1024U * 1024U;
 constexpr std::size_t kMaximumPackedMatrixElements = 1U * 1024U * 1024U * 1024U;
 constexpr std::size_t kMaximumPackedFloatElements = 1U * 1024U * 1024U;
 constexpr std::size_t kMaximumReferenceTokens = kDeepseekV4ReferenceMaxTokens;
-constexpr std::size_t kMaximumReferenceLayers = 16U;
+// Sized for the real checkpoint rather than the reduced fixtures: DeepSeek V4 Flash 0731 has 43
+// main layers plus one MTP block. The bound stays well below anything that could exhaust memory on
+// its own - depth is separately gated by the Governor and by deepseek-forward's preflight.
+constexpr std::size_t kMaximumReferenceLayers = 64U;
 
 Result<void> execution_checkpoint(
     const DeepseekV4ReferenceExecutionControl* control) {
@@ -3946,7 +3949,7 @@ Result<DeepseekV4ReferenceLayerTrunk> deepseek_v4_build_layer_trunk(
                                     config.query_lora_rank);
                 if (!bound) return bound.error();
                 bound = bind_matrix(prefix + ".indexer.proj.weight",
-                                    consumer_prefix + ".attn.weights_proj.weight",
+                                    indexer + ".weights_proj.weight",
                                     config.index_head_count, config.width);
                 if (!bound) return bound.error();
                 bound = bind_matrix(prefix + ".indexer_compressor_kv.weight",

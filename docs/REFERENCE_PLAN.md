@@ -143,6 +143,13 @@ It exceeds both the importer's 256 MiB default selected-payload cap and the load
 64 MiB per-range defaults, so a future transfer/load requires explicit verified limits as well as
 explicit user authorization; the unchanged absolute caps and live Governor still apply.
 
+A separate reduced-graph gate now composes transactional prefill/incremental state into a bounded
+autoregressive lifecycle. It matches eight greedy tokens from the freshly regenerated pinned
+preview graph, has portable seeded top-k output and checks cancellation/timeout before each layer,
+head, MTP and state commit. Its expert-byte totals come only from observed cache/provider events.
+This validates control flow around an assembled graph; it neither authorizes an official artifact
+nor removes the layer-0 payload gate below.
+
 The next payload gate requires explicit user authorization to acquire the exact 138,867,160-byte
 trunk ranges, execute the real `tid2eid` route for a pinned input and fetch only its six selected
 complete expert bundles. The 596,000,788-byte official global set may be acquired separately only

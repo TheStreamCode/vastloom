@@ -162,6 +162,9 @@ Safetensors payload and complete official-payload layer/token remain unvalidated
 - [x] Checkpoint-compatible tokenizer and basic system/user/assistant chat template.
 - [ ] Thinking/tool-call encoding and completion parsing.
 - [x] Transactional raw/compressed incremental KV/state path with five-step official parity.
+- [x] Bounded autoregressive reference generation with exact eight-token greedy parity, portable
+  seeded top-k sampling, explicit finish reasons, per-layer cancellation/timeout checkpoints and
+  observed expert-cache telemetry. This is reduced-fixture execution, not official GGUF generation.
 - [x] Native single-block MTP reference path with official logit/route/index parity.
 - [x] Reduced quality fixture runner.
 - [ ] Full-checkpoint probe and regression corpus.
@@ -175,6 +178,8 @@ checkpoint-compatible component equations, not speculative decoding or full-chec
 execution.
 The cache-state slice is recorded in the
 [M7 incremental validation report](reports/M7_DEEPSEEK_INCREMENTAL_VALIDATION.md).
+The bounded token lifecycle is recorded in the
+[M9 reference-generation report](reports/M9_DEEPSEEK_REFERENCE_GENERATION_VALIDATION.md).
 The model-independent tensor/expert binding is recorded in the
 [M7 logical catalog report](reports/M7_LOGICAL_TENSOR_CATALOG_VALIDATION.md).
 The separate official 0731 GGUF header binding is recorded in the

@@ -104,10 +104,15 @@ model conversion.
 > aggregate Governor-backed buffer and retains exactly one lease across embedding, output,
 > normalization and Hyper-Connection prefill/decode parity. The official range set passed a
 > no-network dry-run only; none of its payload was downloaded or executed.
+> The reduced graph now also has a bounded native autoregressive lifecycle. Its eight greedy
+> tokens match a freshly regenerated hash-pinned official `model.py` oracle exactly; seeded top-k
+> sampling is portable across the tested standard libraries. Per-layer checkpoints enforce
+> timeout, cancellation and `ProcessSafetyGuard` sampling without publishing partial cache state,
+> while observed cache hit/miss and logical expert bytes are aggregated across generation.
 > The complete 82.54 GB payload
 > has not been downloaded or executed; this synthetic gate is not a complete official DeepSeek
 > layer/token path,
-> physical-NVMe performance, generation or CUDA implementation.
+> physical-NVMe performance, official-payload generation or CUDA implementation.
 
 ## Why Vastloom exists
 
@@ -208,6 +213,8 @@ The alternate packed down-projection execution slice is documented in the
 [`M9 MXFP4 expert-kernel report`](docs/reports/M9_DEEPSEEK_MXFP4_EXPERT_KERNEL_VALIDATION.md).
 The complete governed six-global plan, artifact and consumer boundary is documented in the
 [`M9 global tensor-set report`](docs/reports/M9_DEEPSEEK_GLOBAL_TENSOR_SET_VALIDATION.md).
+The bounded token-level prefill/decode loop and trusted greedy/seeded vectors are documented in
+the [`M9 reference-generation report`](docs/reports/M9_DEEPSEEK_REFERENCE_GENERATION_VALIDATION.md).
 The pinned importer and immutable full-source admission boundary are documented in the
 [`M7 checkpoint-binding report`](docs/reports/M7_DEEPSEEK_GGUF_CHECKPOINT_BINDING_VALIDATION.md).
 Current and candidate model support is kept explicit in the
@@ -348,6 +355,11 @@ portability target, not a validated platform claim.
   routes and indices while exercising the circular raw window, independent attention/indexer
   caches and a newly completed overlapping 4:1 compressed entry. State publication is
   transactional and total cache size is rejected before allocation when over budget.
+- **Bounded reference generation:** the native driver now composes prefill and incremental state
+  into an eight-token greedy continuation that exactly matches a freshly regenerated pinned
+  `model.py` oracle. Seeded top-k sampling uses portable `mt19937_64` bits; stop/context/max-token,
+  timeout and cancellation finish reasons are explicit. Checkpoints run between layers and before
+  state publication, and generation telemetry sums only observed expert-cache accesses.
 - **Large-download interlock:** a full import of at least 20 GiB requires the additional
   `--allow-large-download` flag after storage headroom has been reviewed.
 - **Honest boundary:** the full-checkpoint inspector still reports
@@ -363,8 +375,9 @@ portability target, not a validated platform claim.
   fixed numerical compute turn. A controlled reduced fixture proves a positive read-service/
   compute intersection without changing the oracle, and the real expert passes the same async
   boundary. This is scheduling correctness, not a physical-device speed result.
-  A verified complete official-payload layer/token consumer, target-verified speculative
-  generation, useful official-payload overlap and CUDA remain future gates.
+  A verified complete official-payload layer/token consumer, official-payload generation,
+  target-verified speculative generation, useful official-payload overlap and CUDA remain future
+  gates.
 - **Official 0731 GGUF catalog:** the separate Unsloth revision
   `fbbb5b93fb787c21338159b0af3318bb3f4d9768` now has a bounded GGUF v3 header reader and
   DeepSeek-specific packed-expert mapper. The reviewed `UD-IQ1_S` split exposes 1,328 physical
@@ -925,8 +938,9 @@ the floating matrix types have transactional reference matvecs. A reduced first 
 file-backed Q8_0/I32 storage while retaining the Governor leases for complete trunk tensors and
 expert bundles. A router-first two-entry RAM cache now loads only the unique experts selected for
 each one-token step, reports hits/misses/evictions/logical bytes and refuses an oversized
-multi-token union before I/O. Official-payload DeepSeek execution and generation are not
-implemented.
+multi-token union before I/O. The reduced graph now also has a bounded autoregressive driver with
+trusted greedy/seeded token parity and transactional per-layer cancellation. Official-payload
+DeepSeek execution and generation are not implemented.
 
 The exact layer-0 range plan adds 138,867,160 trunk bytes and six 6,488,064-byte expert bundles:
 177,795,544 logical bytes in 39 ranges. It is a metadata result, not a download or device-traffic
@@ -986,24 +1000,25 @@ merely SSD throughput. It is:
 
 > **How few bytes must be fetched from NVMe for each accepted token?**
 
-The next technical sequence remains incremental:
+The retained six-global binder and reduced reference-generation lifecycle are complete. The next
+technical sequence remains incremental:
 
-1. complete the retained six-global governed binder;
-2. after explicit user authorization, use the completed bounded importer to acquire only the exact
+1. after explicit user authorization, use the completed bounded importer to acquire only the exact
    138,867,160-byte layer-0 trunk ranges while preserving the model-store free-space reserve;
-3. bind and execute those 21 official objects through the now-verified metadata-derived reference
+2. bind and execute those 21 official objects through the now-verified metadata-derived reference
    configuration, then decode the official `tid2eid` route for a pinned input;
-4. acquire only that route's six complete
+3. acquire only that route's six complete
    selected expert bundles (38,928,384 bytes for layer 0) and match the official layer output;
-5. measure useful physical-device expert-read/compute overlap with declared cache state and exact
+4. measure useful physical-device expert-read/compute overlap with declared cache state and exact
    logical, process-visible and device bytes;
-6. only after explicit approval and a fresh capacity check, import and fully hash complete pinned
+5. only after explicit approval and a fresh capacity check, import and fully hash complete pinned
    shards when a later gate actually requires them;
-7. connect a target-verified MTP decoding loop, then add CUDA dense, attention, router and packed
+6. connect tokenizer/chat framing and target-verified MTP speculative acceptance to the bounded
+   generation lifecycle, then add CUDA dense, attention, router and packed
    expert kernels;
-8. explicit VRAM/RAM/NVMe placement with pinned buffers and direct/overlapped I/O;
-9. adaptive placement, predictive routing and speculative expert deduplication;
-10. OpenAI-compatible local server and coding-agent integration.
+7. explicit VRAM/RAM/NVMe placement with pinned buffers and direct/overlapped I/O;
+8. adaptive placement, predictive routing and speculative expert deduplication;
+9. OpenAI-compatible local server and coding-agent integration.
 
 Detailed acceptance gates are in [`docs/ROADMAP.md`](docs/ROADMAP.md).
 The reference-PC working-set rule is defined in

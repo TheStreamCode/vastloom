@@ -642,6 +642,33 @@ verified gate/up/down ranges (6,488,064 bytes)
   -> lease release -> RAM eviction -> zero reservations
 ```
 
+## DeepSeek reference generation lifecycle
+
+The reduced DeepSeek graph now has a bounded native autoregressive driver. It composes prompt-token
+prefill, authoritative main-model sampling and transactional incremental cache updates without
+giving MTP proposals control over the generated token. Greedy output matches eight independently
+regenerated tokens from the hash-pinned preview graph; seeded top-k sampling uses raw PRNG bits so
+the committed sequence is identical across the tested standard libraries.
+
+```text
+bounded token IDs
+  -> prefill checkpoint -> each main layer -> head -> MTP -> state commit
+  -> greedy or seeded top-k selection
+  -> stop/context/maximum-token decision
+  -> incremental checkpoint chain
+  -> token publication + observed cache telemetry
+```
+
+Cancellation, timeout, process-safety and callback failures are checked before graph work, every
+main layer, the head, MTP and state publication. A failed checkpoint leaves the caller's previous
+incremental state unchanged. Limits cap reference context/new-token counts at 4,096 and stop-token
+IDs at 64. Reported expert traffic is summed only from actual provider/cache accesses; a resident
+fixture graph cannot invent SSD bytes.
+
+This lifecycle consumes an already assembled reduced graph. It is not wired to the official
+43-layer payload, native tokenizer/chat CLI, speculative MTP acceptance, physical NVMe I/O or
+CUDA, and therefore is not an official DeepSeek generation path.
+
 ## TinyTransformer adapter boundary
 
 The alpha.2 adapter defines:

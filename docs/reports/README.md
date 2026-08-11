@@ -13,6 +13,10 @@ hardware, commands, measurements and limitations.
 
 ## Current report
 
+- [`M9_DEEPSEEK_REFERENCE_GENERATION_VALIDATION.md`](M9_DEEPSEEK_REFERENCE_GENERATION_VALIDATION.md) —
+  exact eight-token greedy parity with a freshly regenerated pinned preview graph, portable seeded
+  top-k sampling, transactional per-layer safety checkpoints and exact generation-level
+  expert-cache telemetry on the reduced graph; no official GGUF payload was executed.
 - [`M9_DEEPSEEK_GLOBAL_TENSOR_SET_VALIDATION.md`](M9_DEEPSEEK_GLOBAL_TENSOR_SET_VALIDATION.md) —
   exact 596,000,788-byte six-global plan from verified official metadata, dedicated immutable
   range-artifact scope, one aggregate governed fixture buffer/lease and embedding/head/norm/
@@ -146,9 +150,10 @@ hardware, commands, measurements and limitations.
 - [`M9_ASYNC_EXPERT_LOAD_VALIDATION.md`](M9_ASYNC_EXPERT_LOAD_VALIDATION.md) — fixed workers,
   bounded queues, pre-enqueue reservations, exclusive transfers and shutdown cancellation.
 
-M6 is complete for its reduced float correctness gate. M7 now includes MTP, reduced incremental
-state and one complete real quantized expert, while full-shard/layer/token DeepSeek execution,
-optimized packed kernels, speculative verification and CUDA remain M7/M8 work. The preceding
+M6 is complete for its reduced float correctness gate. M7/M9 now include MTP, reduced incremental
+state, a bounded exact-sequence reference-generation lifecycle and one complete real quantized
+expert, while full-shard/layer/token official-payload DeepSeek execution and generation,
+optimized packed kernels, speculative verification and CUDA remain future work. The preceding
 completed storage milestone is M5:
 
 - [`M5_DEVICE_IO_CACHE_BYPASS_VALIDATION.md`](M5_DEVICE_IO_CACHE_BYPASS_VALIDATION.md) —

@@ -12,14 +12,16 @@ metadata/header inspector plus a closed-world non-executing partial-range trunk 
 tokenizer/basic chat framing and bounded equation-level reference operators. A deterministic
 two-layer DeepSeek float prefill plus one checkpoint-shaped
 MTP block now match the pinned preview graph for prefill and five incremental raw/compressed
-cache steps. Verified headers populate a universal tensor/expert catalog, and a buffer-free
+cache steps. A bounded autoregressive reference driver also matches eight trusted greedy tokens
+and a portable seeded sequence, with per-layer cancellation/timeout checkpoints and exact observed
+expert-cache telemetry. Verified headers populate a universal tensor/expert catalog, and a buffer-free
 governed state machine validates legal NVMe/RAM/VRAM reservation transitions. Synchronous and
 bounded asynchronous fixture paths now load canonical ranges into governed packed RAM buffers
 with exact tensor slices and exclusive transfer leases. The router-first reduced fixture now
 submits all selected misses through a bounded batch, acquires each expert at its deterministic
 compute turn and records positive controlled read-service/CPU-compute overlap without changing
 the oracle result. Only one batch may own a cache and abandoned loads are drained and counted as
-wasted prefetch. Speculative generation and CUDA do not exist yet. The newer
+wasted prefetch. Speculative decoding and CUDA do not exist yet. The newer
 official 0731 Unsloth `UD-IQ1_S` GGUF profile now has a bounded v3/split-header reader and a
 metadata-only packed-expert catalog: 1,328 physical tensors map to 11,008 logical expert bundles.
 A bounded scalar IQ1_S dequantization/matvec oracle matches pinned ggml output on one exact real
@@ -85,7 +87,7 @@ prefill/decode parity. The official set passed importer dry-run only. No officia
 or global payload was read. A complete
 0731 quantized layer/token
 path, physical NVMe overlap,
-generation and CUDA remain unvalidated.
+official-payload generation and CUDA remain unvalidated.
 Windows and Linux CPU paths are tested; macOS/Metal remain unvalidated. Laguna S 2.1 remains a
 reviewed compatibility target, not a validated execution path.
 

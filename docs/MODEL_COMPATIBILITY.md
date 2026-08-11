@@ -12,9 +12,9 @@ or matching tensor dimensions is never enough to enable execution automatically.
 | Synthetic TinyTransformer | Native loader, tokenizer, KV cache, generation and CLI vectors | Validated CPU execution |
 | SmolLM2-135M-Instruct | Pinned Safetensors, tokenizer/chat and Transformers parity | Validated dense CPU execution |
 | OLMoE-1B-7B-0924-Instruct | Pinned shards, top-k routes, expert streaming and I/O telemetry | Validated CPU expert streaming |
-| `deepseek-ai/DeepSeek-V4-Flash` preview at `60d8d707...` | Header catalog, tokenizer, reduced main+MTP prefill and five incremental cache steps | Reduced FP32 reference execution only |
+| `deepseek-ai/DeepSeek-V4-Flash` preview at `60d8d707...` | Header catalog, tokenizer, reduced main+MTP prefill, five incremental cache steps and exact eight-token greedy/portable seeded generation | Reduced FP32 reference execution only |
 | `deepseek-ai/DeepSeek-V4-Flash-0731` at `7872f01b...` | Public metadata/config reviewed on 2026-08-10 | Not imported, inspected or executed by Vastloom yet |
-| `unsloth/DeepSeek-V4-Flash-0731-GGUF` at `fbbb5b93...` | Pinned atomic importer, verified metadata binding, exact metadata-derived native config, all-layer 1,193-descriptor consumer contract and full 1,328-physical/34,223-logical checkpoint-catalog closure; 43 bounded layer-trunk plans, exact layer-0 trunk+top-6 range planning, exact six-global planning, bounded immutable partial-artifact import with real trunk/global dry-runs, native closed-world range verification/exact trunk and global binding, aggregate governed tensor-set loading, all trunk storage types plus Q4_K globals covered by scalar references, one router-first governed reduced Q8_0/IQ1_S/IQ3_XXS layer, reduced packed global prefill/decode parity, alternate reduced IQ2_XXS/IQ3_XXS and IQ1_S/MXFP4 expert parity, and canonical synchronous/asynchronous cache-to-kernel parity on one real expert | The complete reduced packed trunk and six-global catalogs reach the synthetic graph through aggregate artifact buffers; one separate extracted official expert also executes. Q4_K, IQ2_XXS and MXFP4 have pinned scalar kernels and bounded row lookup. The checkpoint-shaped official-payload path remains non-executing, its expert IDs are not yet authoritative and no official trunk/global payload was downloaded; complete shards, official layer/token and generation remain unvalidated |
+| `unsloth/DeepSeek-V4-Flash-0731-GGUF` at `fbbb5b93...` | Pinned atomic importer, verified metadata binding, exact metadata-derived native config, all-layer 1,193-descriptor consumer contract and full 1,328-physical/34,223-logical checkpoint-catalog closure; 43 bounded layer-trunk plans, exact layer-0 trunk+top-6 range planning, exact six-global planning, bounded immutable partial-artifact import with real trunk/global dry-runs, native closed-world range verification/exact trunk and global binding, aggregate governed tensor-set loading, all trunk storage types plus Q4_K globals covered by scalar references, one router-first governed reduced Q8_0/IQ1_S/IQ3_XXS layer, reduced packed global prefill/decode and bounded generation-lifecycle parity, alternate reduced IQ2_XXS/IQ3_XXS and IQ1_S/MXFP4 expert parity, and canonical synchronous/asynchronous cache-to-kernel parity on one real expert | The complete reduced packed trunk and six-global catalogs reach the synthetic graph through aggregate artifact buffers; one separate extracted official expert also executes. Q4_K, IQ2_XXS and MXFP4 have pinned scalar kernels and bounded row lookup. The checkpoint-shaped official-payload path remains non-executing, its expert IDs are not yet authoritative and no official trunk/global payload was downloaded; complete shards, official layer/token and official-payload generation remain unvalidated |
 | `unsloth/Laguna-S-2.1` at `1a646907...` | Public config, custom-code and shard metadata reviewed on 2026-08-10 | Adapter and execution not implemented |
 | Kimi K3-class profiles | Public-roadmap capacity/traffic study only | Not a reference-PC execution target unless one exact complete expert passes the single-tier gate |
 
@@ -143,6 +143,12 @@ ownership behavior. With only one real expert it cannot prove useful overlap. Th
 independently SHA-256 pinned extracted test artifacts, not a substitute for importing and
 verifying the complete source shard. No complete official-payload layer, routed token or
 generation path has executed.
+
+The reduced assembled graph now also runs a bounded token lifecycle: eight greedy tokens match a
+fresh hash-pinned preview-model regeneration, portable seeded top-k sampling is deterministic,
+per-layer cancellation/timeout is transactional and generation telemetry reports only observed
+expert-cache access. That control-flow result does not use the official 0731 payload, tokenizer or
+43-layer graph and therefore does not change the non-executing official-payload status above.
 
 ### Laguna S 2.1
 

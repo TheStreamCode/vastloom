@@ -433,6 +433,11 @@ integration remains required before long-running large-model inference.
 - bounded prompt, sampling and timeout options;
 - bounded asynchronous short/out-of-range reads;
 - seeded generation reproducibility;
+- DeepSeek reference generation caps for context, new tokens, timeout, top-k and stop-token sets;
+- per-layer/head/MTP cancellation, timeout and process-safety checkpoints with transactional
+  prefill/decode state publication and callback-exception containment;
+- clean partial DeepSeek reference results on cancellation/timeout plus exact aggregation of only
+  observed cache requests, misses and logical bytes;
 - valid-Unicode JSON serialization for arbitrary sampled byte sequences;
 - end-to-end CLI validation, direct/manifest loading modes and JSON error behavior.
 - exact OLMoE tokenizer, top-logit, greedy-token, expert-route and routing-weight parity

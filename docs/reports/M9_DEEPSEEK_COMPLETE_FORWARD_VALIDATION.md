@@ -146,17 +146,41 @@ budget, with no reordering inside a row.
 |---|---:|---|
 | serial | 60,301 | `" una grande citta cosmopol"` |
 | six workers | 32,730 | `" una grande citta cosmopol"` |
+| twelve workers | 25,891 | `" una grande citta cosmopol"` |
 
-Identical text, 1.84× faster. The speedup is well short of six because only the packed matvecs are
-threaded: attention, normalization, RoPE, the Hyper-Connection mixing and the float paths are still
-serial, and Amdahl's law does the rest. That also says where the next gains are — and that the
-kernels themselves, not the storage hierarchy, are what stands between this and a usable model.
+Identical text throughout: threading changed speed and nothing else. Twelve threads give 2.33×, and
+the step from six to twelve is only 1.26× — roughly 40% of the run is still serial, which is where
+the next gain is. Only the packed matvecs are threaded; attention, normalization, RoPE and the
+Hyper-Connection mixing are not.
+
+The thread count itself came from the runtime policy, which capped inference at six regardless of
+the machine. That ceiling predated any threaded kernel; it is now half the logical processors, which
+leaves the host as much CPU as the model takes.
+
+## Starting the model
+
+Execution requires every checkpoint file to match its pinned SHA-256 — 357.6 s for this profile.
+Paying that before each prompt made the model unusable no matter how fast it generated, so a
+completed verification now leaves a receipt recording each file's size and last-write time beside
+the confirmed hash. When both still match, the hash is not recomputed.
+
+| | First run | Second run |
+|---|---:|---:|
+| checkpoint verification | 357.6 s | 0.4 s |
+
+End to end, the same six-token generation went from roughly 500 s to 176.6 s: 0.4 s to verify,
+3.4 s to load weights and 171.8 s to generate.
+
+The receipt trusts filesystem metadata, which is weaker than rehashing. Any mismatch, a missing or
+malformed receipt, or a changed manifest forces the full pass again, and the receipt is written only
+after every file passes.
 
 ## Bounds
 
-- 32.7 s per generated token with scalar CPU kernels on six threads, and 2.7 GB of NVMe reads per
-  token because no expert survives between decode steps. Correct, not usable. No CUDA kernel
-  participates in this path, and the non-matvec math is still single-threaded.
+- 26–29 s per generated token with scalar CPU kernels on twelve threads, and 2.7 GB of NVMe reads
+  per token because no expert survives between decode steps. Faster, still not usable. No CUDA
+  kernel participates in this path, and roughly 40% of the run — attention, normalization, RoPE,
+  Hyper-Connection mixing — is still single-threaded.
 - All 43 trunks are resident simultaneously. The project's own design — load a layer, execute it,
   release it — is not yet implemented here, so a host with less free RAM would be refused rather
   than served.
@@ -165,7 +189,7 @@ kernels themselves, not the storage hierarchy, are what stands between this and 
   but no external oracle has confirmed token 20 for this input.
 - The chat template is applied on request, but there is no interactive session: one prompt, one
   response, one process.
-- Every layer is read from NVMe on every invocation, and the full 82.54 GB hash verification adds
-  338 s before any of it. Neither is optimised or cached between runs.
+- Every layer is read from NVMe on every invocation. The hash verification is now cached between
+  runs; the weight loading is not.
 - All 43 trunks stay resident, so the pass needs 6.39 GB before it starts and a host with less free
   RAM is refused rather than served. Experts are released as the graph advances; trunks are not.

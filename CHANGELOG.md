@@ -2,6 +2,17 @@
 
 ## Unreleased
 
+- The model answered a question. With the checkpoint's chat template applied,
+  `"Qual e la capitale d'Italia?"` produced `"La capitale d'Italia è **R Roma**."` and stopped on its
+  own stop token rather than running out of budget — correct answer, correct Italian, assistant-style
+  formatting, at 12,180 ms per token over 43 layers.
+
+  Worth recording because the same model looks wrong without the template: `"La capitale d'Italia e"`
+  continues as `" una grande citta cosmopol"`, which is a perfectly good completion of a sentence
+  fragment and no answer at all. The distinction between completing text and answering a question is
+  the template, not the weights. The stray `R` is the ~1.5-bit quantization showing through on a
+  token the model was otherwise certain of.
+
 - The accelerator evicts its least recently used matrix instead of refusing the next one, and a
   full-depth token went from 30,280 to 11,639 ms. It had been filling VRAM and then declining
   everything else for the rest of the run — 6,962 of 12,007 matvecs — on the implicit theory that a

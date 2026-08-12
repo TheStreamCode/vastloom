@@ -2457,6 +2457,16 @@ int command_deepseek_forward(const std::vector<std::string>& args) {
                       // one. The second number is I/O the streaming window did not have to pay.
                       << ",\"trunk_reloads\":" << window.reloads
                       << ",\"gpu_evicted\":" << gpu_stats.evicted
+                      << ",\"gpu_declined_by_type\":{";
+        {
+            bool first_type = true;
+            for (const auto& [ggml_type, count] : gpu_stats.declined_by_type) {
+                if (!first_type) std::cout << ',';
+                first_type = false;
+                std::cout << '"' << ggml_type << "\":" << count;
+            }
+        }
+        std::cout << "}"
                       << ",\"gpu_kernel_ms\":" << gpu_stats.kernel_ms
                       << ",\"load_ms\":" << load_elapsed
                       << ",\"generate_ms\":" << generate_elapsed

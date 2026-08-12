@@ -19,6 +19,9 @@ constexpr std::size_t kIq1SBlockElements = 256U;
 constexpr std::uint32_t kGgmlTypeIq3Xxs = 18U;
 constexpr ByteCount kIq3XxsBlockBytes = 98U;
 constexpr std::size_t kIq3XxsBlockElements = 256U;
+// Dense formats have no block structure; one element is its own block.
+constexpr std::uint32_t kGgmlTypeF32 = 0U;
+constexpr std::uint32_t kGgmlTypeBf16 = 30U;
 
 struct Layout {
     ByteCount block_bytes{0U};
@@ -29,6 +32,8 @@ std::optional<Layout> layout_for(std::uint32_t ggml_type) {
     if (ggml_type == kGgmlTypeQ8_0) return Layout{kQ8BlockBytes, kQ8BlockElements};
     if (ggml_type == kGgmlTypeIq1S) return Layout{kIq1SBlockBytes, kIq1SBlockElements};
     if (ggml_type == kGgmlTypeIq3Xxs) return Layout{kIq3XxsBlockBytes, kIq3XxsBlockElements};
+    if (ggml_type == kGgmlTypeF32) return Layout{4U, 1U};
+    if (ggml_type == kGgmlTypeBf16) return Layout{2U, 1U};
     return std::nullopt;
 }
 
@@ -76,7 +81,15 @@ Result<std::unique_ptr<CudaMatvecAccelerator>> CudaMatvecAccelerator::create(
 Result<CudaMatvecAccelerator::Resident*> CudaMatvecAccelerator::ensure_resident(
     const inference::DeepseekV4PackedMatrix& matrix) {
     const auto layout = layout_for(matrix.ggml_type);
-    if (!layout.has_value() || matrix.rows == 0U || matrix.storage_columns == 0U ||
+    if (!layout.has_value()) {
+        try {
+            ++stats_.declined_by_type[matrix.ggml_type];
+        } catch (const std::bad_alloc&) {
+            // Losing a statistic is not a reason to fail a forward pass.
+        }
+        return nullptr;
+    }
+    if (matrix.rows == 0U || matrix.storage_columns == 0U ||
         matrix.storage_columns % layout->block_elements != 0U) {
         return nullptr;
     }
@@ -207,6 +220,13 @@ Result<bool> CudaMatvecAccelerator::matvec(
                     live.allocation, 0U, live.grid_offset, live.input_offset, live.output_offset,
                     live.rows, live.blocks_per_row, std::as_bytes(input),
                     std::as_writable_bytes(output));
+            case kGgmlTypeF32:
+            case kGgmlTypeBf16:
+                // blocks_per_row is the column count for these: one element per block.
+                return driver_.matvec_dense_with_transfer(
+                    live.allocation, 0U, live.input_offset, live.output_offset, live.rows,
+                    live.blocks_per_row, live.ggml_type == kGgmlTypeF32 ? 4U : 2U,
+                    std::as_bytes(input), std::as_writable_bytes(output));
             default:
                 return driver_.matvec_q8_0_with_transfer(
                     live.allocation, 0U, live.input_offset, live.output_offset, live.rows,

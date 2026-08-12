@@ -29,6 +29,9 @@ struct CudaMatvecAcceleratorStats {
     std::size_t accelerated{0U};
     std::size_t declined{0U};
     std::size_t evicted{0U};
+    // Declines that happened because the storage type has no device kernel, counted per type, so
+    // the next kernel is chosen from what the model actually asks for rather than from guesswork.
+    std::map<std::uint32_t, std::size_t> declined_by_type;
     std::size_t resident_matrices{0U};
     ByteCount resident_bytes{0U};
     ByteCount uploaded_bytes{0U};

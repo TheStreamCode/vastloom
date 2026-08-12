@@ -351,7 +351,12 @@ IQ1_BLOCK_DONE:
 IQ1_DONE:
     ret;
 }
+)ptx";
 
+// The module continues here only because MSVC caps a single string literal at 16,380 characters.
+// The two halves are concatenated before the JIT ever sees them; the split point carries no
+// meaning beyond that limit.
+constexpr std::string_view kQuantizedMatvecPtx = R"ptx(
 // One thread per output row of a ggml IQ3_XXS matrix. Each 98-byte block covers 256 weights: an
 // FP16 scale, 64 grid indices, and eight 32-bit fields holding a group scale plus four 7-bit sign
 // patterns. Each index selects one of 256 entries of four packed uint8 magnitudes; the eighth sign
@@ -538,7 +543,137 @@ IQ3_BLOCK_DONE:
 IQ3_DONE:
     ret;
 }
+
+// One thread per output row of a dense little-endian FP32 matrix. No decoding, so this is the
+// simplest kernel in the set - and by the telemetry the third most requested, because the graph's
+// unquantized weights are large and expensive on the CPU precisely because nothing compresses them.
+.visible .entry vastloom_matvec_f32_f32(
+    .param .u64 matrix_param,
+    .param .u64 input_param,
+    .param .u64 output_param,
+    .param .u32 rows_param,
+    .param .u32 columns_param
+)
+{
+    .reg .pred %p<4>;
+    .reg .b32 %r<12>;
+    .reg .b64 %rd<12>;
+    .reg .f32 %f<8>;
+    .reg .f64 %fd<6>;
+
+    ld.param.u64 %rd0, [matrix_param];
+    ld.param.u64 %rd1, [input_param];
+    ld.param.u64 %rd2, [output_param];
+    ld.param.u32 %r0, [rows_param];
+    ld.param.u32 %r1, [columns_param];
+    mov.u32 %r2, %ntid.x;
+    mov.u32 %r3, %ctaid.x;
+    mov.u32 %r4, %tid.x;
+    mad.lo.u32 %r5, %r3, %r2, %r4;
+    setp.ge.u32 %p0, %r5, %r0;
+    @%p0 bra F32_DONE;
+
+    mul.lo.u32 %r6, %r5, %r1;
+    mul.wide.u32 %rd3, %r6, 4;
+    add.u64 %rd4, %rd0, %rd3;
+    mov.u64 %rd5, %rd1;
+    mov.f64 %fd0, 0d0000000000000000;
+    mov.u32 %r7, 0;
+
+F32_LOOP:
+    setp.ge.u32 %p1, %r7, %r1;
+    @%p1 bra F32_LOOP_DONE;
+    ld.global.f32 %f0, [%rd4];
+    ld.global.f32 %f1, [%rd5];
+    cvt.f64.f32 %fd1, %f0;
+    cvt.f64.f32 %fd2, %f1;
+    mul.rn.f64 %fd3, %fd1, %fd2;
+    add.rn.f64 %fd0, %fd0, %fd3;
+    add.u64 %rd4, %rd4, 4;
+    add.u64 %rd5, %rd5, 4;
+    add.u32 %r7, %r7, 1;
+    bra F32_LOOP;
+
+F32_LOOP_DONE:
+    cvt.rn.f32.f64 %f2, %fd0;
+    mul.wide.u32 %rd6, %r5, 4;
+    add.u64 %rd7, %rd2, %rd6;
+    st.global.f32 [%rd7], %f2;
+
+F32_DONE:
+    ret;
+}
+
+// One thread per output row of a dense little-endian BF16 matrix. A BF16 value is the top half of
+// the FP32 with the same value, so widening is a shift rather than a conversion.
+.visible .entry vastloom_matvec_bf16_f32(
+    .param .u64 matrix_param,
+    .param .u64 input_param,
+    .param .u64 output_param,
+    .param .u32 rows_param,
+    .param .u32 columns_param
+)
+{
+    .reg .pred %p<4>;
+    .reg .b16 %rs<4>;
+    .reg .b32 %r<12>;
+    .reg .b64 %rd<12>;
+    .reg .f32 %f<8>;
+    .reg .f64 %fd<6>;
+
+    ld.param.u64 %rd0, [matrix_param];
+    ld.param.u64 %rd1, [input_param];
+    ld.param.u64 %rd2, [output_param];
+    ld.param.u32 %r0, [rows_param];
+    ld.param.u32 %r1, [columns_param];
+    mov.u32 %r2, %ntid.x;
+    mov.u32 %r3, %ctaid.x;
+    mov.u32 %r4, %tid.x;
+    mad.lo.u32 %r5, %r3, %r2, %r4;
+    setp.ge.u32 %p0, %r5, %r0;
+    @%p0 bra BF16_DONE;
+
+    mul.lo.u32 %r6, %r5, %r1;
+    mul.wide.u32 %rd3, %r6, 2;
+    add.u64 %rd4, %rd0, %rd3;
+    mov.u64 %rd5, %rd1;
+    mov.f64 %fd0, 0d0000000000000000;
+    mov.u32 %r7, 0;
+
+BF16_LOOP:
+    setp.ge.u32 %p1, %r7, %r1;
+    @%p1 bra BF16_LOOP_DONE;
+    ld.global.u16 %rs0, [%rd4];
+    cvt.u32.u16 %r8, %rs0;
+    shl.b32 %r9, %r8, 16;
+    mov.b32 %f0, %r9;
+    ld.global.f32 %f1, [%rd5];
+    cvt.f64.f32 %fd1, %f0;
+    cvt.f64.f32 %fd2, %f1;
+    mul.rn.f64 %fd3, %fd1, %fd2;
+    add.rn.f64 %fd0, %fd0, %fd3;
+    add.u64 %rd4, %rd4, 2;
+    add.u64 %rd5, %rd5, 4;
+    add.u32 %r7, %r7, 1;
+    bra BF16_LOOP;
+
+BF16_LOOP_DONE:
+    cvt.rn.f32.f64 %f2, %fd0;
+    mul.wide.u32 %rd6, %r5, 4;
+    add.u64 %rd7, %rd2, %rd6;
+    st.global.f32 [%rd7], %f2;
+
+BF16_DONE:
+    ret;
+}
 )ptx";
+
+// The whole module, assembled once. Returned by reference so the JIT gets a stable pointer.
+const std::string& module_ptx() {
+    static const std::string text =
+        std::string(kRmsNormPtx) + std::string(kQuantizedMatvecPtx);
+    return text;
+}
 
 void quarantine_backend(std::shared_ptr<CudaDriverBackend> backend) noexcept {
     // A failed external release may leave a live device allocation/context. Keep the driver
@@ -904,7 +1039,7 @@ public:
         void* jit_option_values[] = {
             reinterpret_cast<void*>(static_cast<std::uintptr_t>(jit_error_log.size())),
             jit_error_log.data()};
-        status = module_load_data_(&module, kRmsNormPtx.data(), 2U, jit_options,
+        status = module_load_data_(&module, module_ptx().c_str(), 2U, jit_options,
                                    jit_option_values);
         if (status != kCudaSuccess) {
             static_cast<void>(pop_context_locked(context));
@@ -1121,6 +1256,94 @@ public:
         return {};
     }
 
+    [[nodiscard]] Result<void> matvec_dense_with_transfer(
+        const CudaBackendAllocation& allocation,
+        ByteCount matrix_offset,
+        ByteCount input_offset,
+        ByteCount output_offset,
+        std::size_t row_count,
+        std::size_t columns,
+        ByteCount element_bytes,
+        std::span<const std::byte> input,
+        std::span<std::byte> output) override {
+        std::scoped_lock lock(mutex_);
+        if (element_bytes != 2U && element_bytes != 4U) {
+            return make_error(ErrorCode::invalid_argument,
+                              "CUDA dense matvec supports only BF16 and FP32 elements");
+        }
+        if (row_count == 0U || columns == 0U ||
+            row_count > std::numeric_limits<std::uint32_t>::max() ||
+            columns > std::numeric_limits<std::uint32_t>::max() ||
+            columns > std::numeric_limits<ByteCount>::max() / row_count) {
+            return make_error(ErrorCode::invalid_argument,
+                              "CUDA dense matvec launch dimensions are invalid");
+        }
+        const ByteCount elements = static_cast<ByteCount>(row_count) * columns;
+        if (elements > std::numeric_limits<ByteCount>::max() / element_bytes ||
+            columns > std::numeric_limits<ByteCount>::max() / sizeof(float) ||
+            row_count > std::numeric_limits<ByteCount>::max() / sizeof(float)) {
+            return make_error(ErrorCode::resource_exhausted,
+                              "CUDA dense matvec byte count overflows");
+        }
+        const ByteCount matrix_bytes = elements * element_bytes;
+        const ByteCount input_bytes = static_cast<ByteCount>(columns) * sizeof(float);
+        const ByteCount output_bytes = static_cast<ByteCount>(row_count) * sizeof(float);
+        if (input.size() != input_bytes || output.size() != output_bytes) {
+            return make_error(ErrorCode::invalid_argument,
+                              "CUDA dense matvec host spans do not match its shape");
+        }
+        for (const auto& [offset, bytes] :
+             {std::pair{matrix_offset, matrix_bytes}, std::pair{input_offset, input_bytes},
+              std::pair{output_offset, output_bytes}}) {
+            auto range = validate_allocation_range(allocation, offset, bytes);
+            if (!range) return range.error();
+        }
+        if (input_offset % alignof(float) != 0U || output_offset % alignof(float) != 0U ||
+            matrix_offset % element_bytes != 0U) {
+            return make_error(ErrorCode::invalid_argument,
+                              "CUDA dense matvec ranges are misaligned");
+        }
+
+        auto* context = reinterpret_cast<CuContext>(allocation.context);
+        CuResult status = context_push_(context);
+        if (status != kCudaSuccess) return cuda_error("cuCtxPushCurrent_v2", status);
+        auto module = cached_module_locked(context, allocation.device_ordinal);
+        if (!module) {
+            static_cast<void>(pop_context_locked(context));
+            return module.error();
+        }
+        CuFunction function = nullptr;
+        status = module_get_function_(
+            &function, module.value(),
+            element_bytes == 4U ? "vastloom_matvec_f32_f32" : "vastloom_matvec_bf16_f32");
+        if (status != kCudaSuccess) {
+            static_cast<void>(pop_context_locked(context));
+            return cuda_error("cuModuleGetFunction", status);
+        }
+        status = copy_host_to_device_(allocation.device_pointer + input_offset, input.data(),
+                                      input.size());
+        if (status == kCudaSuccess) {
+            CuDevicePointer matrix_pointer = allocation.device_pointer + matrix_offset;
+            CuDevicePointer input_pointer = allocation.device_pointer + input_offset;
+            CuDevicePointer output_pointer = allocation.device_pointer + output_offset;
+            auto rows = static_cast<std::uint32_t>(row_count);
+            auto width = static_cast<std::uint32_t>(columns);
+            void* parameters[] = {&matrix_pointer, &input_pointer, &output_pointer, &rows, &width};
+            constexpr std::uint32_t kThreadsPerBlock = 128U;
+            const std::uint32_t grid = (rows + kThreadsPerBlock - 1U) / kThreadsPerBlock;
+            status = launch_kernel_(function, grid, 1U, 1U, kThreadsPerBlock, 1U, 1U, 0U, nullptr,
+                                    parameters, nullptr);
+        }
+        if (status == kCudaSuccess) {
+            status = copy_device_to_host_(output.data(), allocation.device_pointer + output_offset,
+                                          output.size());
+        }
+        auto popped = pop_context_locked(context);
+        if (status != kCudaSuccess) return cuda_error("CUDA dense matvec transfer/launch", status);
+        if (!popped) return popped.error();
+        return {};
+    }
+
     [[nodiscard]] Result<void> matvec_q8_0_with_transfer(
         const CudaBackendAllocation& allocation,
         ByteCount matrix_offset,
@@ -1314,7 +1537,7 @@ private:
         void* jit_option_values[] = {
             reinterpret_cast<void*>(static_cast<std::uintptr_t>(jit_error_log.size())),
             jit_error_log.data()};
-        const CuResult status = module_load_data_(&module, kRmsNormPtx.data(), 2U, jit_options,
+        const CuResult status = module_load_data_(&module, module_ptx().c_str(), 2U, jit_options,
                                                   jit_option_values);
         if (status != kCudaSuccess) {
             static_cast<void>(primary_context_release_(device.value()));
@@ -1872,6 +2095,37 @@ Result<void> CudaDriver::matvec_iq3_xxs_with_transfer(
     } catch (...) {
         return make_error(ErrorCode::internal_error,
                           "CUDA backend threw an unknown IQ3_XXS matvec exception");
+    }
+}
+
+Result<void> CudaDriver::matvec_dense_with_transfer(
+    CudaAllocation& allocation,
+    ByteCount matrix_offset,
+    ByteCount input_offset,
+    ByteCount output_offset,
+    std::size_t row_count,
+    std::size_t columns,
+    ByteCount element_bytes,
+    std::span<const std::byte> input,
+    std::span<std::byte> output) const {
+    if (!allocation.valid() || allocation.backend_.get() != backend_.get()) {
+        return make_error(ErrorCode::invalid_argument,
+                          "CUDA allocation does not belong to this driver");
+    }
+    if (row_count == 0U || columns == 0U || input.empty() || output.empty()) {
+        return make_error(ErrorCode::invalid_argument,
+                          "CUDA dense matvec transfer parameters are invalid");
+    }
+    try {
+        return backend_->matvec_dense_with_transfer(allocation.allocation_, matrix_offset,
+                                                    input_offset, output_offset, row_count,
+                                                    columns, element_bytes, input, output);
+    } catch (const std::exception& exception) {
+        return make_error(ErrorCode::internal_error,
+                          "CUDA backend threw during dense matvec", exception.what());
+    } catch (...) {
+        return make_error(ErrorCode::internal_error,
+                          "CUDA backend threw an unknown dense matvec exception");
     }
 }
 

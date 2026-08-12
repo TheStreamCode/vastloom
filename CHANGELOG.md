@@ -2,6 +2,15 @@
 
 ## Unreleased
 
+- Layer trunks are streamed through a bounded two-layer window instead of all staying resident, and
+  a full-depth pass now needs 2.12 GB of host RAM rather than 7.62 GB. The floor stops scaling with
+  depth: a deeper model no longer demands a bigger machine, and a machine with spare memory spends
+  it on speed instead of on admission. It pays a second time through the accelerator, whose ceiling
+  is derived from what the preflight leaves unspent — 1.80 GB before, 6.06 GB after — which took
+  matvecs on the GPU from 1,490 to 4,617 and a token from 42,466 to 30,123 ms, with the same
+  `" una grande"` and the same expert traffic. At 16 layers, where VRAM was never scarce, the same
+  window is 33% slower: the reloads buy nothing when memory is not the binding constraint.
+
 - Every storage type on the routed expert path now has a CUDA kernel, and a 16-layer generation
   dropped from 13,300 to 2,374 ms per token — 5.60× — producing the same text (`" guaranteedlyahi"`)
   and reading the same 3,963,551,744 bytes of expert payload as the CPU path. IQ3_XXS carried most of

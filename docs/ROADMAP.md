@@ -371,11 +371,15 @@ recorded in the [M8 CUDA RMSNorm report](reports/M8_CUDA_RMSNORM_VALIDATION.md).
 - [ ] Then the rest of the layer — attention, normalization, RoPE, Hyper-Connection — after which
   keeping activations resident on the device stops being an optimisation and becomes the only
   sensible design, because nothing would need to return to the host between operations.
-- [ ] Load and release layer trunks the way experts now are. All 43 are held resident, so the pass
-  needs 6.39 GB of trunk and a host with less free RAM is refused rather than served — the largest
-  remaining obstacle to running on ordinary machines, and the project's founding idea. This is now
-  also what caps the GPU: device allocations carry host commit charge, so VRAM residency has to be
-  spent out of the same headroom the weights leave behind, and at full depth there is almost none.
+- [x] Load and release layer trunks the way experts are. A bounded two-layer window took a
+  full-depth pass from 7.62 GB of host RAM to 2.12 GB, and because the accelerator's ceiling is
+  derived from what the preflight leaves unspent, that memory went straight to the device: 1.80 GB
+  to 6.06 GB, 1,490 matvecs accelerated to 4,617, 42,466 ms per token to 30,123, identical output.
+  The floor no longer scales with depth, which is the project's founding idea made operational.
+- [ ] Keep streamed trunks on the device between tokens. The window reloads each layer from NVMe on
+  every token even when the accelerator already holds those weights in VRAM, because the provider
+  materialises the payload before anything asks whether it is needed. A descriptor that knows the
+  accelerator holds it could skip the read entirely.
 - [ ] Count the expert loader's own read buffers in the preflight. At 32 layers it approves and the
   loader then fails on `bad_alloc`, which should have been an up-front refusal with a correct figure.
 - [ ] Pinned host buffers.

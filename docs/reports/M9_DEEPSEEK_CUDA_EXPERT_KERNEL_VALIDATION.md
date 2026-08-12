@@ -171,6 +171,36 @@ them as the graph walks layers, the way expert caches already work — is the ro
 reduces the host floor rather than relocating it, and the per-tensor buffers this path already uses
 mean nothing structural stands in the way.
 
+### Streaming them works, and pays twice
+
+Two layers resident instead of 43, reloaded as the graph advances:
+
+| 43 layers | All trunks resident | Two-layer window |
+|---|---:|---:|
+| Host RAM required | 7.62 GB | **2.12 GB** |
+| Accelerator ceiling | 1.80 GB | **6.06 GB** |
+| Matvecs on the GPU | 1,490 | **4,617** |
+| ms per token | 42,466 | **30,123** |
+
+Same `" una grande"`, same `complete_model: true`, same expert traffic. The memory is as much the
+result as the speed: the floor no longer scales with depth, so a deeper model does not demand a
+bigger machine, and a machine with spare memory spends it on speed instead of on admission.
+
+Three things had to move together, and the middle one is the interesting one.
+
+The preflight charges the window rather than the depth, or it would refuse passes that now fit. The
+accelerator's ceiling is derived from what the preflight leaves unspent, so freeing host RAM hands
+it directly to the device — that is the second payment, and it is where most of the speed came from.
+And the reserve for what the preflight does not model went from 1 GiB to 3: with trunks streamed, a
+ceiling computed from the leftover claims nearly all the remaining commit and starves the very
+reloads that created the room. The first attempt died in the tile loader for exactly that reason.
+
+The ceiling is saturated again at 6.06 GB, so this is not the end of the gain.
+
+A cost worth stating: at 16 layers, where VRAM was never scarce, streaming is 33% *slower* —
+3,148 ms per token against 2,374 — because the reloads buy nothing there. The window helps only when
+memory is the binding constraint, which at full depth it is.
+
 ## Bounds
 
 - The 5.60× figure is measured at 16 layers, where VRAM residency is not constrained. The same

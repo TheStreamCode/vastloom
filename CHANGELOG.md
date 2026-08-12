@@ -2,6 +2,32 @@
 
 ## Unreleased
 
+- **A busy host no longer switches the GPU off entirely.** The accelerator's ceiling is what the RAM
+  limit leaves after the pass's own requirement and a 3 GiB reserve for allocations the preflight
+  does not model, and on a loaded machine that subtraction reaches zero: a full-depth token cost
+  55,788 ms against 8,405 with an idle device beside it. When the full reserve would leave nothing,
+  a gigabyte is now held back instead and a gigabyte of ceiling granted.
+
+  The reserve was measurable all along and nobody had measured it. `--json` now reports
+  `peak_commit_bytes`, and on a 43-layer pass the process peaked at 5.12 GB against 2.56 charged and
+  2.33 held by the accelerator — so the unmodelled part is **0.23 GB**, a thirteenth of the three
+  gigabytes held back for it. The arithmetic closing to within a rounding error also confirms the
+  1:1 host commit charge for VRAM that the ceiling is premised on.
+
+  A gigabyte and no more, because more buys nothing. On one prompt a 512 MiB ceiling cost 22,781 ms
+  per token and a 1.41 GB one 20,682 — a 9% spread, inside the noise — and six earlier runs between
+  1.05 and 2.34 GB showed no trend. Only zero is different. This removes a cliff rather than
+  climbing a slope, and claims the least commit that does so.
+
+  Exercised rather than reasoned about: the tight path was provoked deliberately by lengthening the
+  prompt until the requirement pushed the headroom below zero. At the resulting 1.41 GB ceiling the
+  pass peaked at 4.27 GB against a 6.15 GB budget, and the 3.74 GB it charged was itself 0.78 GB
+  more than it touched, so the safety margin survives twice over.
+
+  One correction to how this was arrived at: the constant was first raised on a comparison between
+  two different prompt lengths, whose prefill costs are not comparable. The same-prompt measurement
+  contradicted it, and the constant went back down.
+
 - The accelerator now evicts what will not be asked for again before what will. Recency cannot rank
   these matrices: the forward pass touches every one of them exactly once per token, so
   least-recently-used *is* arrival order and evicts what is needed soonest — the textbook

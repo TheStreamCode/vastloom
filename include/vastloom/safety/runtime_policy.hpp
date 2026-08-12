@@ -21,6 +21,14 @@ struct RuntimePolicy {
     bool lower_process_priority{true};
 };
 
+// The largest commit this process has ever held, which is what a preflight is trying to predict.
+//
+// The accelerator's ceiling is what the RAM limit leaves after the pass's own requirement and a flat
+// reserve for allocations the preflight does not model. That reserve is a guess, and a guess sized
+// too large costs the GPU entirely on a busy host. This is how to replace it with arithmetic:
+// compare the peak against what was charged, and the difference is what is missing.
+[[nodiscard]] Result<ByteCount> process_peak_commit_bytes();
+
 [[nodiscard]] Result<RuntimePolicy> make_safe_runtime_policy(const hardware::HardwareSnapshot& hardware);
 [[nodiscard]] std::string to_json(const RuntimePolicy& policy);
 [[nodiscard]] std::string to_text(const RuntimePolicy& policy);

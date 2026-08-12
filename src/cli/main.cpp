@@ -2612,10 +2612,36 @@ int command_deepseek_forward(const std::vector<std::string>& args) {
             // trunks streamed the ceiling would otherwise claim nearly all the remaining commit and
             // starve the very reloads that made the room.
             constexpr vastloom::ByteCount kUnmodelledHostHeadroom = 3U * vastloom::GiB;
-            const vastloom::ByteCount host_headroom =
+            vastloom::ByteCount host_headroom =
                 budget > required + kUnmodelledHostHeadroom
                     ? budget - required - kUnmodelledHostHeadroom
                     : 0U;
+            // Do not let a generous reserve become a cliff.
+            //
+            // Zero here is not a smaller GPU, it is no GPU: a full-depth token costs 55,788 ms
+            // instead of 8,405, sixfold, with an idle device beside it. And the reserve turns out
+            // to be far larger than what it stands in for. Measured on a 43-layer pass, the process
+            // peaked at 5.12 GB against 2.56 charged and 2.33 held by the accelerator, so the part
+            // nobody models is 0.23 GB - a thirteenth of the three gigabytes held back for it.
+            //
+            // So when the full reserve would switch the device off, fall back to a gigabyte - still
+            // four times the measured need - and grant a gigabyte of ceiling, no more.
+            //
+            // No more, because more buys nothing. On one prompt a 512 MiB ceiling cost 22,781 ms
+            // per token and a 1.41 GB one 20,682, a 9% spread inside the run-to-run noise, and six
+            // earlier runs between 1.05 and 2.34 GB showed no trend either. Only zero is different,
+            // and it is very different: 55,788 against 8,405 on the same prompt. This removes a
+            // cliff rather than climbing a slope, so it claims the least commit that does so.
+            //
+            // Safe with room to spare: at a 1.41 GB ceiling the pass peaked at 4.27 GB against a
+            // 6.15 GB budget, and the 3.74 GB it charged was itself 0.78 GB more than it touched.
+            constexpr vastloom::ByteCount kMinimumUsefulCeiling = 1U * vastloom::GiB;
+            constexpr vastloom::ByteCount kMeasuredUnmodelledFloor = 1U * vastloom::GiB;
+            if (host_headroom < kMinimumUsefulCeiling &&
+                budget > required + kMeasuredUnmodelledFloor) {
+                host_headroom = std::min<vastloom::ByteCount>(
+                    kMinimumUsefulCeiling, budget - required - kMeasuredUnmodelledFloor);
+            }
             accelerator_options.maximum_resident_bytes = std::min<vastloom::ByteCount>(
                 policy.value().resources.vram_hard_limit, host_headroom);
             gpu_resident_limit = accelerator_options.maximum_resident_bytes;
@@ -2878,6 +2904,10 @@ int command_deepseek_forward(const std::vector<std::string>& args) {
         const auto& stats = generated.value().stats;
         vastloom::cuda::CudaMatvecAcceleratorStats gpu_stats;
         if (accelerator != nullptr) gpu_stats = accelerator->stats();
+        vastloom::ByteCount peak_commit = 0U;
+        if (auto peak = vastloom::safety::process_peak_commit_bytes()) {
+            peak_commit = peak.value();
+        }
         if (json) {
             std::cout << "{\"ok\":true,\"complete_model\":" << (complete ? "true" : "false")
                       << ",\"executed_layers\":" << depth
@@ -2907,6 +2937,11 @@ int command_deepseek_forward(const std::vector<std::string>& args) {
                       << ",\"expert_compute_ms\":" << stats.expert_compute_ms
                       << ",\"forward_passes\":" << stats.forward_passes
                       << ",\"resident_bytes\":" << required
+                      // What the process actually peaked at, against what the preflight charged.
+                      // The gap between them, less the accelerator's own resident bytes, is the
+                      // part no one is modelling - and a flat reserve stands in for it today at the
+                      // cost of the whole GPU on a busy host.
+                      << ",\"peak_commit_bytes\":" << peak_commit
                       << ",\"gpu_matvecs\":" << gpu_stats.accelerated
                       << ",\"gpu_declined\":" << gpu_stats.declined
                       << ",\"gpu_resident_bytes\":" << gpu_stats.resident_bytes

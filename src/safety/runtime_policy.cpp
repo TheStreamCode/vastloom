@@ -54,6 +54,38 @@ Result<ByteCount> current_commit_bytes() {
 #endif
 }
 
+}  // namespace
+
+Result<ByteCount> process_peak_commit_bytes() {
+#if defined(_WIN32)
+    PROCESS_MEMORY_COUNTERS_EX counters{};
+    counters.cb = sizeof(counters);
+    if (GetProcessMemoryInfo(GetCurrentProcess(),
+                             reinterpret_cast<PROCESS_MEMORY_COUNTERS*>(&counters),
+                             sizeof(counters)) == 0) {
+        return make_error(ErrorCode::internal_error, "Unable to query peak process memory");
+    }
+    return static_cast<ByteCount>(counters.PeakPagefileUsage);
+#else
+    // VmHWM is the peak resident set, the closest counterpart to what the Windows path reports.
+    std::ifstream input("/proc/self/status");
+    std::string key;
+    ByteCount kibibytes = 0;
+    std::string unit;
+    while (input >> key) {
+        if (key == "VmHWM:") {
+            if (!(input >> kibibytes >> unit)) break;
+            return kibibytes * KiB;
+        }
+        std::string rest;
+        std::getline(input, rest);
+    }
+    return make_error(ErrorCode::internal_error, "Unable to query peak process resident memory");
+#endif
+}
+
+namespace {
+
 Result<ByteCount> current_available_ram() {
 #if defined(_WIN32)
     MEMORYSTATUSEX status{};

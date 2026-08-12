@@ -244,6 +244,22 @@ public:
         return {};
     }
 
+    // The fake backend has no IQ1_S kernel; the contract only needs it to refuse cleanly.
+    [[nodiscard]] vastloom::Result<void> matvec_iq1_s_with_transfer(
+        const vastloom::cuda::CudaBackendAllocation&,
+        vastloom::ByteCount,
+        vastloom::ByteCount,
+        vastloom::ByteCount,
+        vastloom::ByteCount,
+        std::size_t,
+        std::size_t,
+        std::span<const std::byte>,
+        std::span<std::byte>) override {
+        ++launch_calls;
+        return vastloom::make_error(vastloom::ErrorCode::unsupported,
+                                    "fake CUDA backend has no IQ1_S kernel");
+    }
+
     [[nodiscard]] vastloom::Result<void> matvec_q8_0_with_transfer(
         const vastloom::cuda::CudaBackendAllocation& allocation,
         vastloom::ByteCount matrix_offset,

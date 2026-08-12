@@ -202,6 +202,28 @@ Result<std::span<const std::byte>> packed_payload(
     return std::span<const std::byte>(encoded);
 }
 
+// FNV-1a, used only to fold a tensor's stable coordinates into one 64-bit name. Never zero, because
+// zero is the descriptor's "no identity" value.
+std::uint64_t fold_identity(std::uint64_t seed, std::uint64_t value) {
+    std::uint64_t hash = seed;
+    for (unsigned shift = 0U; shift < 64U; shift += 8U) {
+        hash ^= (value >> shift) & 0xffU;
+        hash *= UINT64_C(1099511628211);
+    }
+    return hash;
+}
+
+std::uint64_t name_identity(std::string_view name, std::uint64_t offset, std::uint64_t bytes) {
+    std::uint64_t hash = UINT64_C(14695981039346656037);
+    for (const char character : name) {
+        hash ^= static_cast<unsigned char>(character);
+        hash *= UINT64_C(1099511628211);
+    }
+    hash = fold_identity(hash, offset);
+    hash = fold_identity(hash, bytes);
+    return hash | 1ULL;
+}
+
 Result<DeepseekV4PackedMatrix> bind_resident_matrix(
     std::shared_ptr<const model::ResidentByteBuffer> resident,
     std::size_t offset,
@@ -209,7 +231,8 @@ Result<DeepseekV4PackedMatrix> bind_resident_matrix(
     std::uint32_t ggml_type,
     std::size_t rows,
     std::size_t logical_columns,
-    std::size_t storage_columns) {
+    std::size_t storage_columns,
+    std::uint64_t cache_identity) {
     if (resident == nullptr || logical_columns == 0U ||
         logical_columns > storage_columns) {
         return make_error(ErrorCode::invalid_argument,
@@ -236,6 +259,7 @@ Result<DeepseekV4PackedMatrix> bind_resident_matrix(
     matrix.resident = std::move(resident);
     matrix.resident_offset = offset;
     matrix.resident_bytes = available_bytes;
+    matrix.cache_identity = cache_identity;
     return matrix;
 }
 
@@ -2609,8 +2633,11 @@ Result<DeepseekV4PackedMatrix> deepseek_v4_bind_packed_matrix(
         return make_error(ErrorCode::invalid_argument,
                           "DeepSeek matrix binding requires one complete tensor tile");
     }
+    // A tensor's shard and byte range name it uniquely and outlive any particular residency.
     return bind_resident_matrix(tile.retain_buffer(), 0U, tile.bytes().size(),
-                                ggml_type, rows, logical_columns, storage_columns);
+                                ggml_type, rows, logical_columns, storage_columns,
+                                name_identity(identity.source.shard.generic_string(),
+                                              identity.source.offset, identity.source.bytes));
 }
 
 Result<DeepseekV4PackedMatrix> deepseek_v4_bind_packed_matrix(
@@ -2619,7 +2646,8 @@ Result<DeepseekV4PackedMatrix> deepseek_v4_bind_packed_matrix(
     std::uint32_t ggml_type,
     std::size_t rows,
     std::size_t logical_columns,
-    std::size_t storage_columns) {
+    std::size_t storage_columns,
+    std::uint64_t cache_identity) {
     const auto found = std::find_if(
         expert.tensor_slices().begin(), expert.tensor_slices().end(),
         [catalog_tensor_index](const model::ExpertTensorSlice& slice) {
@@ -2632,7 +2660,7 @@ Result<DeepseekV4PackedMatrix> deepseek_v4_bind_packed_matrix(
     return bind_resident_matrix(
         expert.retain_buffer(), static_cast<std::size_t>(found->packed_offset),
         static_cast<std::size_t>(found->bytes), ggml_type, rows,
-        logical_columns, storage_columns);
+        logical_columns, storage_columns, cache_identity);
 }
 
 Result<DeepseekV4PackedIntegerTensor> deepseek_v4_bind_packed_i32(
@@ -2704,7 +2732,8 @@ Result<DeepseekV4PackedMatrix> deepseek_v4_bind_packed_matrix(
         tensors.retain_buffer(), static_cast<std::size_t>(tensor->packed_offset),
         static_cast<std::size_t>(tensor->bytes), *tensor->ggml_type,
         static_cast<std::size_t>(tensor->shape[1]), logical_columns,
-        static_cast<std::size_t>(tensor->shape[0]));
+        static_cast<std::size_t>(tensor->shape[0]),
+        name_identity(tensor->name, tensor->packed_offset, tensor->bytes));
 }
 
 Result<DeepseekV4PackedIntegerTensor> deepseek_v4_bind_packed_i32(
@@ -2784,7 +2813,8 @@ Result<DeepseekV4PackedMatrix> deepseek_v4_bind_packed_matrix(
         tensors.retain_buffer(), static_cast<std::size_t>(tensor->packed_offset),
         static_cast<std::size_t>(tensor->bytes), *tensor->ggml_type,
         static_cast<std::size_t>(tensor->shape[1]), logical_columns,
-        static_cast<std::size_t>(tensor->shape[0]));
+        static_cast<std::size_t>(tensor->shape[0]),
+        name_identity(tensor->name, tensor->packed_offset, tensor->bytes));
 }
 
 Result<DeepseekV4PackedFloatTensor> deepseek_v4_bind_packed_float(

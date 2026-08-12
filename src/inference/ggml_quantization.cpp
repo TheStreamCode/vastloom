@@ -911,6 +911,10 @@ Result<std::vector<std::byte>> quantize_q8_0_reference(
     return encoded;
 }
 
+std::span<const std::uint64_t> iq1_s_grid_table() noexcept {
+    return std::span<const std::uint64_t>(kIq1SGrid);
+}
+
 bool supports_reference_matvec_ggml_type(std::uint32_t ggml_type) noexcept {
     switch (ggml_type) {
         case kGgmlTypeF32:

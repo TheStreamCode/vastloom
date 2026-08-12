@@ -65,6 +65,10 @@ struct RoutedExpertScratch {
     std::size_t storage_columns,
     const QuantizedKernelLimits& limits = {});
 
+// The 2,048-entry IQ1_S grid, each entry eight packed int8 values. Device kernels need it in their
+// own memory; exposing the reference table keeps them from carrying a second copy that could drift.
+[[nodiscard]] std::span<const std::uint64_t> iq1_s_grid_table() noexcept;
+
 // True only for storage formats with a bounded scalar reference matvec below.
 [[nodiscard]] bool supports_reference_matvec_ggml_type(std::uint32_t ggml_type) noexcept;
 

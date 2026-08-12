@@ -358,16 +358,19 @@ int command_cuda_info(const std::vector<std::string>& args) {
     }
     auto valid = validate_options(args, 0U,
                                   {"--allocation-smoke", "--minimum-free-vram"},
-                                  {"--json", "--help", "--rmsnorm-smoke", "--matvec-smoke"});
+                                  {"--json", "--help", "--rmsnorm-smoke", "--matvec-smoke",
+                                   "--iq1s-smoke"});
     if (!valid) return print_error(valid.error(), json);
     const bool allocation_smoke_requested =
         option_value(args, "--allocation-smoke").has_value();
     const bool rmsnorm_smoke_requested = has_flag(args, "--rmsnorm-smoke");
     const bool matvec_smoke_requested = has_flag(args, "--matvec-smoke");
-    if ((allocation_smoke_requested || rmsnorm_smoke_requested) && matvec_smoke_requested) {
+    const bool iq1s_smoke_requested = has_flag(args, "--iq1s-smoke");
+    if ((allocation_smoke_requested || rmsnorm_smoke_requested) &&
+        (matvec_smoke_requested || iq1s_smoke_requested)) {
         return print_error(
             vastloom::make_error(vastloom::ErrorCode::invalid_argument,
-                                 "--matvec-smoke runs on its own"),
+                                 "--matvec-smoke and --iq1s-smoke run on their own"),
             json);
     }
     if (allocation_smoke_requested && rmsnorm_smoke_requested) {
@@ -376,8 +379,8 @@ int command_cuda_info(const std::vector<std::string>& args) {
                                "--allocation-smoke and --rmsnorm-smoke are mutually exclusive"),
                            json);
     }
-    const bool operation_requested =
-        allocation_smoke_requested || rmsnorm_smoke_requested || matvec_smoke_requested;
+    const bool operation_requested = allocation_smoke_requested || rmsnorm_smoke_requested ||
+                                     matvec_smoke_requested || iq1s_smoke_requested;
     if (!operation_requested && option_value(args, "--minimum-free-vram").has_value()) {
         return print_error(vastloom::make_error(
                                vastloom::ErrorCode::invalid_argument,
@@ -409,6 +412,10 @@ int command_cuda_info(const std::vector<std::string>& args) {
     double matvec_max_abs_error = 0.0;
     double matvec_kernel_ms = 0.0;
     double matvec_cpu_ms = 0.0;
+    bool iq1s_smoke_passed = false;
+    double iq1s_max_abs_error = 0.0;
+    double iq1s_kernel_ms = 0.0;
+    double iq1s_cpu_ms = 0.0;
     std::size_t matvec_rows_executed = 0U;
     std::size_t matvec_columns_executed = 0U;
     ByteCount matvec_device_bytes = 0U;
@@ -594,6 +601,120 @@ int command_cuda_info(const std::vector<std::string>& args) {
             matvec_device_bytes = matrix_bytes + input_bytes + output_bytes;
             matvec_smoke_passed = true;
         }
+        if (iq1s_smoke_requested) {
+            // The expert quantization, which telemetry says carries most of the arithmetic. Its
+            // grid must be resident on the device, so it shares the allocation with the matrix.
+            constexpr std::size_t iq1s_rows = 2'048U;
+            constexpr std::size_t iq1s_columns = 4'096U;
+            constexpr std::size_t iq1s_block_elements = 256U;
+            constexpr std::size_t iq1s_block_bytes = 50U;
+            // The kernel accumulates in f64 like the reference, so agreement should be to the last
+            // bit of the f32 result. This leaves room for one rounding step, not for a different
+            // summation order.
+            constexpr double iq1s_tolerance = 1.0e-3;
+            const std::size_t iq1s_blocks_per_row = iq1s_columns / iq1s_block_elements;
+            const ByteCount iq1s_matrix_bytes =
+                static_cast<ByteCount>(iq1s_rows) * iq1s_blocks_per_row * iq1s_block_bytes;
+            const auto grid = vastloom::inference::iq1_s_grid_table();
+            const ByteCount grid_bytes = grid.size_bytes();
+            const ByteCount iq1s_input_bytes =
+                static_cast<ByteCount>(iq1s_columns) * sizeof(float);
+            const ByteCount iq1s_output_bytes = static_cast<ByteCount>(iq1s_rows) * sizeof(float);
+
+            auto caller_host = governor.try_reserve(
+                vastloom::safety::ResourceKind::scratch,
+                iq1s_matrix_bytes + iq1s_input_bytes + 2U * iq1s_output_bytes,
+                "cuda-iq1s-smoke-host");
+            if (!caller_host) return print_error(caller_host.error(), json);
+
+            // Deterministic encoded bytes: every field is exercised, including the sign bit and
+            // the per-group scale, without needing a quantizer for this format.
+            std::vector<std::byte> encoded(static_cast<std::size_t>(iq1s_matrix_bytes));
+            for (std::size_t index = 0U; index < encoded.size(); ++index) {
+                encoded[index] = static_cast<std::byte>((index * 37U + 11U) % 251U);
+            }
+            for (std::size_t block = 0U; block * iq1s_block_bytes < encoded.size(); ++block) {
+                // Scales must be finite - the byte pattern above could spell NaN - but they must
+                // not be tidy. An earlier version of this gate pinned every scale to 0.25, which
+                // combined with a k/256 input to make every product exactly representable; f32 and
+                // f64 accumulation then agreed to the bit and the gate passed a kernel that was
+                // accumulating in the wrong precision. Vary the exponent and fill the mantissa so
+                // the arithmetic is as awkward as a real expert's.
+                const auto exponent = static_cast<std::uint16_t>(0x0CU + (block % 5U));
+                const auto mantissa = static_cast<std::uint16_t>((block * 7'919U + 13U) & 0x03FFU);
+                const auto scale_bits =
+                    static_cast<std::uint16_t>((exponent << 10U) | mantissa);
+                std::memcpy(encoded.data() + block * iq1s_block_bytes, &scale_bits,
+                            sizeof(scale_bits));
+            }
+            std::vector<float> iq1s_input(iq1s_columns);
+            for (std::size_t index = 0U; index < iq1s_input.size(); ++index) {
+                // Non-dyadic by construction, for the same reason.
+                const auto scrambled =
+                    static_cast<std::uint32_t>((index * 2'654'435'761ULL + 97ULL) % 1'000'003ULL);
+                iq1s_input[index] =
+                    static_cast<float>(scrambled) / 1'000'003.0F - 0.5F;
+            }
+
+            std::vector<float> iq1s_expected(iq1s_rows);
+            vastloom::inference::QuantizedKernelLimits iq1s_limits;
+            iq1s_limits.max_elements = iq1s_rows * iq1s_columns;
+            iq1s_limits.max_threads = policy.value().cpu_threads;
+            const auto iq1s_cpu_started = std::chrono::steady_clock::now();
+            auto iq1s_cpu = vastloom::inference::matvec_iq1_s_f32(
+                encoded, iq1s_rows, iq1s_columns, iq1s_input, iq1s_expected, iq1s_limits);
+            iq1s_cpu_ms = std::chrono::duration<double, std::milli>(
+                std::chrono::steady_clock::now() - iq1s_cpu_started).count();
+            if (!iq1s_cpu) return print_error(iq1s_cpu.error(), json);
+
+            const ByteCount grid_offset = iq1s_matrix_bytes;
+            const ByteCount iq1s_input_offset = grid_offset + grid_bytes;
+            const ByteCount iq1s_output_offset = iq1s_input_offset + iq1s_input_bytes;
+            auto iq1s_device = driver.value().allocate(
+                0, iq1s_output_offset + iq1s_output_bytes, minimum_free.value(), governor,
+                "cuda-matvec-iq1-s-smoke");
+            if (!iq1s_device) return print_error(iq1s_device.error(), json);
+            auto iq1s_allocation = iq1s_device.take_value();
+            auto copied = driver.value().copy_from_host(iq1s_allocation, 0U, encoded);
+            if (!copied) return print_error(copied.error(), json);
+            copied = driver.value().copy_from_host(
+                iq1s_allocation, grid_offset, std::as_bytes(grid));
+            if (!copied) return print_error(copied.error(), json);
+
+            std::vector<float> iq1s_actual(iq1s_rows);
+            const auto iq1s_started = std::chrono::steady_clock::now();
+            auto iq1s_launched = driver.value().matvec_iq1_s_with_transfer(
+                iq1s_allocation, 0U, grid_offset, iq1s_input_offset, iq1s_output_offset,
+                iq1s_rows, iq1s_blocks_per_row,
+                std::as_bytes(std::span<const float>(iq1s_input)),
+                std::as_writable_bytes(std::span<float>(iq1s_actual)));
+            if (!iq1s_launched) return print_error(iq1s_launched.error(), json);
+            iq1s_kernel_ms = std::chrono::duration<double, std::milli>(
+                std::chrono::steady_clock::now() - iq1s_started).count();
+            auto iq1s_released = iq1s_allocation.release();
+            if (!iq1s_released) return print_error(iq1s_released.error(), json);
+
+            for (std::size_t index = 0U; index < iq1s_actual.size(); ++index) {
+                if (!std::isfinite(iq1s_actual[index])) {
+                    return print_error(vastloom::make_error(
+                                           vastloom::ErrorCode::integrity_error,
+                                           "CUDA IQ1_S matvec produced a non-finite value"),
+                                       json);
+                }
+                iq1s_max_abs_error = std::max(
+                    iq1s_max_abs_error,
+                    std::abs(static_cast<double>(iq1s_actual[index]) -
+                             static_cast<double>(iq1s_expected[index])));
+            }
+            if (iq1s_max_abs_error > iq1s_tolerance) {
+                return print_error(vastloom::make_error(
+                                       vastloom::ErrorCode::integrity_error,
+                                       "CUDA IQ1_S matvec does not match the CPU reference",
+                                       std::to_string(iq1s_max_abs_error)),
+                                   json);
+            }
+            iq1s_smoke_passed = true;
+        }
         const auto snapshot = governor.snapshot();
         if (snapshot.reserved[static_cast<std::size_t>(
                 vastloom::safety::ResourceKind::vram)] != 0U) {
@@ -620,6 +741,13 @@ int command_cuda_info(const std::vector<std::string>& args) {
                 output += ",\"bytes\":" + std::to_string(smoke_bytes.value()) +
                           ",\"minimum_free_vram_after\":" +
                           std::to_string(minimum_free.value()) + "}}";
+            } else if (iq1s_smoke_requested) {
+                output += ",\"matvec_iq1_s_smoke\":{\"passed\":";
+                output += iq1s_smoke_passed ? "true" : "false";
+                output += ",\"rows\":2048,\"columns\":4096,\"max_abs_error\":" +
+                          std::to_string(iq1s_max_abs_error) +
+                          ",\"kernel_ms\":" + std::to_string(iq1s_kernel_ms) +
+                          ",\"cpu_ms\":" + std::to_string(iq1s_cpu_ms) + "}}";
             } else if (matvec_smoke_requested) {
                 output += ",\"matvec_q8_0_smoke\":{\"passed\":";
                 output += matvec_smoke_passed ? "true" : "false";
@@ -658,6 +786,10 @@ int command_cuda_info(const std::vector<std::string>& args) {
             std::cout << "RMSNorm:        PASS (" << rmsnorm_stats.row_count << "x"
                       << rmsnorm_stats.width << ", max abs error "
                       << rmsnorm_max_abs_error << ", released)\n";
+        } else if (iq1s_smoke_requested) {
+            std::cout << "IQ1_S matvec:   " << (iq1s_smoke_passed ? "PASS" : "FAIL")
+                      << " (2048x4096, max abs error " << iq1s_max_abs_error << ", GPU "
+                      << iq1s_kernel_ms << " ms vs CPU " << iq1s_cpu_ms << " ms, released)\n";
         } else if (matvec_smoke_requested) {
             std::cout << "Q8_0 matvec:    PASS (" << matvec_rows_executed << "x"
                       << matvec_columns_executed << ", max abs error " << matvec_max_abs_error
@@ -1966,7 +2098,10 @@ int command_deepseek_forward(const std::vector<std::string>& args) {
             accelerator_options.minimum_free_vram_after = 1U * vastloom::GiB;
             accelerator_options.maximum_resident_bytes =
                 policy.value().resources.vram_hard_limit;
-            accelerator_options.maximum_matrices = 4U * config.value().layer_count + 16U;
+            // Attention contributes a handful of matrices per layer, but every routed expert is
+            // two more, and a decode step may select different experts each token. Let VRAM be the
+            // limit rather than a count sized for attention alone.
+            accelerator_options.maximum_matrices = 8'192U;
             auto created = vastloom::cuda::CudaMatvecAccelerator::create(
                 cuda_driver.take_value(), governor, accelerator_options);
             if (created) {

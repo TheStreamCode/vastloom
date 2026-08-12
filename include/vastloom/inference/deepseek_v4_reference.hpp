@@ -121,6 +121,14 @@ struct DeepseekV4PackedMatrix {
     std::shared_ptr<const model::ResidentByteBuffer> resident;
     std::size_t resident_offset{0U};
     std::size_t resident_bytes{0U};
+    // Stable name for these exact weights, independent of where they currently live in memory.
+    //
+    // An accelerator that keeps a device-side copy needs to know when two descriptors mean the same
+    // matrix. The host address cannot answer that: expert buffers are released as the forward pass
+    // advances, and the allocator reuses their addresses, so an address-keyed cache silently serves
+    // one expert's weights under another's name. Zero means no identity was supplied, which callers
+    // must read as "do not cache" rather than "cache by address".
+    std::uint64_t cache_identity{0U};
 };
 
 // Returns the exact encoded view owned by this descriptor. The matrix must outlive the returned
@@ -214,7 +222,11 @@ struct DeepseekV4ExpertProviderBinding {
     std::uint32_t ggml_type,
     std::size_t rows,
     std::size_t logical_columns,
-    std::size_t storage_columns);
+    std::size_t storage_columns,
+    // Expert buffers are released and reallocated as the pass advances, so the caller - which knows
+    // the layer and expert this bundle came from - must supply the identity. Leaving it zero is a
+    // valid choice that costs acceleration, never correctness.
+    std::uint64_t cache_identity = 0U);
 
 [[nodiscard]] Result<DeepseekV4PackedIntegerTensor> deepseek_v4_bind_packed_i32(
     const model::LoadedTensorTile& tile,

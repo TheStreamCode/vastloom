@@ -63,10 +63,12 @@ private:
     struct Resident {
         CudaAllocation allocation;
         ByteCount matrix_bytes{0U};
+        ByteCount grid_offset{0U};
         ByteCount input_offset{0U};
         ByteCount output_offset{0U};
         std::size_t rows{0U};
         std::size_t blocks_per_row{0U};
+        std::uint32_t ggml_type{0U};
     };
 
     CudaMatvecAccelerator(CudaDriver driver,
@@ -76,7 +78,9 @@ private:
     CudaDriver driver_;
     safety::ResourceGovernor* governor_{nullptr};
     CudaMatvecAcceleratorOptions options_;
-    std::map<std::pair<const void*, ByteCount>, Resident> resident_;
+    // Keyed on the descriptor's stable identity, never on a host address: see the note on
+    // DeepseekV4PackedMatrix::cache_identity for what address-keying did to the model's output.
+    std::map<std::uint64_t, Resident> resident_;
     CudaMatvecAcceleratorStats stats_;
 };
 

@@ -73,9 +73,21 @@ Result<DeepseekV4ResolvedExpert> bind_loaded_expert(
     expert.load_service_started_at = telemetry.service_started_at;
     expert.load_completed_at = telemetry.completed_at;
     for (const auto& matrix : binding.matrices) {
+        // Layer, expert and catalog tensor identify these weights for as long as the checkpoint
+        // exists, which is what a device-side cache needs. The host address does not: this bundle's
+        // buffer is released once the layer is done, and the next expert may land on it.
+        std::uint64_t identity = UINT64_C(14695981039346656037);
+        for (const std::uint64_t part : {static_cast<std::uint64_t>(binding.bundle.layer),
+                                         static_cast<std::uint64_t>(binding.bundle.expert),
+                                         static_cast<std::uint64_t>(matrix.catalog_tensor_index)}) {
+            for (unsigned shift = 0U; shift < 64U; shift += 8U) {
+                identity ^= (part >> shift) & 0xffU;
+                identity *= UINT64_C(1099511628211);
+            }
+        }
         auto packed = deepseek_v4_bind_packed_matrix(
             loaded, matrix.catalog_tensor_index, matrix.ggml_type,
-            matrix.rows, matrix.logical_columns, matrix.storage_columns);
+            matrix.rows, matrix.logical_columns, matrix.storage_columns, identity | 1ULL);
         if (!packed) return packed.error();
         switch (matrix.weight) {
             case DeepseekV4ExpertWeight::w1:

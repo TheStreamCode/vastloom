@@ -2262,7 +2262,8 @@ int command_deepseek_forward(const std::vector<std::string>& args) {
             report.value().catalog, graph.config, layer, governor);
         if (!trunk) return print_error(trunk.error(), json);
         // Uploading these trunk matrices here, rather than on their first use, was tried and made
-        // the model slower: see the note on eager adoption in the CUDA expert kernel report.
+        // the model 25% slower at full depth: it spends VRAM in load order, before the routed
+        // experts that do most of the arithmetic can ask for any. See the CUDA expert kernel report.
         for (auto& [name, matrix] : trunk.value().matrices) {
             graph.packed_matrices.emplace(name, std::move(matrix));
         }

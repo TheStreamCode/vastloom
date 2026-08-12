@@ -158,15 +158,18 @@ before the routed experts have asked for anything, and the experts do most of th
 residency lets whoever actually runs claim the space; eager residency gives it to whoever loads
 first.
 
-**It frees no host memory anyway.** All of a layer's trunk tensors share one buffer — the trunk
-loader hands out offsets into a single `retain_buffer()`. Releasing a matrix's reference does
-nothing while any sibling still holds one, and there is always a sibling: Q5_K, Q6_K and BF16 have
-no device kernel, so at least one tensor per layer is declined and keeps the whole 149 MB alive.
+**What it frees in RAM it spends again in commit charge.** The host copy really is released —
+`deepseek_v4_load_0731_gguf_layer_trunk` reads each always-active tensor as its own tile, so buffers
+are per-tensor and dropping one matrix's reference frees that matrix. But the VRAM it moves into
+costs host commit charge of its own, at roughly one to one on this platform: raising the residency
+ceiling to include the trunk bytes made a 43-layer pass fail in the expert loader with `bad_alloc`,
+where the same run with the conservative ceiling completed. Relocating a byte from RAM to VRAM is
+not the same as not needing it.
 
-Making this work would need per-tensor buffers, or kernels for every remaining trunk type, and it
-would still be spending host commit charge to save host RAM. Streaming the trunks — loading and
-releasing them as the graph walks layers, the way expert caches already work — reduces the host
-floor directly instead of relocating it, and is the route worth taking.
+That is the constraint to design against, and it is why streaming the trunks — loading and releasing
+them as the graph walks layers, the way expert caches already work — is the route worth taking. It
+reduces the host floor rather than relocating it, and the per-tensor buffers this path already uses
+mean nothing structural stands in the way.
 
 ## Bounds
 

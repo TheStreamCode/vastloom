@@ -6398,7 +6398,8 @@ void test_model_store_and_runtime_policy(const std::filesystem::path& root) {
     CHECK(policy && policy.value().resources.ram_hard_limit == 12U * vastloom::GiB);
     if (policy) {
         CHECK(policy.value().resources.host_memory_hard_limit == 12U * vastloom::GiB);
-        CHECK(policy.value().cpu_threads == 6U);
+        // Half of 24 logical processors, which leaves the host as much CPU as inference takes.
+        CHECK(policy.value().cpu_threads == 12U);
         CHECK(policy.value().io_workers == 2U && policy.value().max_queued_io == 4U);
         CHECK(policy.value().max_io_request_bytes == 64U * vastloom::MiB);
         CHECK(policy.value().storage_reserve_bytes == 300U * vastloom::GiB);

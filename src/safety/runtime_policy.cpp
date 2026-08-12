@@ -107,7 +107,10 @@ Result<RuntimePolicy> make_safe_runtime_policy(const hardware::HardwareSnapshot&
             percentage(hardware.gpus.front().total_vram_bytes, 0.80),
             hardware.gpus.front().free_vram_bytes - 1U * GiB);
     }
-    policy.cpu_threads = std::clamp(hardware.cpu.logical_cores, 1U, 6U);
+    // Half the logical processors, capped. The old fixed ceiling of six predated any threaded
+    // kernel and left a 24-thread machine using a quarter of itself for inference; half still
+    // leaves the host as much CPU as the model takes, which is what keeps it usable during a run.
+    policy.cpu_threads = std::clamp(hardware.cpu.logical_cores / 2U, 1U, 12U);
     policy.io_workers = 2U;
     policy.max_queued_io = 4U;
     policy.max_io_request_bytes = 64U * MiB;

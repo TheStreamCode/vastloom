@@ -342,8 +342,16 @@ recorded in the [M8 CUDA RMSNorm report](reports/M8_CUDA_RMSNORM_VALIDATION.md).
   bounded by two layers rather than by prompt length: the same six-token prompt fell from a 13.6 GB
   expert working set to 632 MB.
 - [x] Generate more than one token through the reference decode loop, reusing KV state across steps.
-- [ ] Load and release layer trunks the same way. All 43 are held resident, so the pass needs
-  6.39 GB of trunk and a host with less free RAM is refused rather than served — the single largest
+- [x] Pay the checkpoint verification once instead of before every prompt: a receipt of each file's
+  size, timestamp and confirmed hash takes startup from 357.6 s to 0.4 s, and any mismatch forces
+  the full pass again.
+- [x] Thread the packed matvecs and give inference half the machine rather than a fixed six workers:
+  60.3 s per token to 26 s, byte-identical output, workers drawn from a pool created once.
+- [ ] Quantized CUDA kernels — Q8_0 for the large attention projections, IQ1_S/IQ3_XXS for the
+  routed experts, then attention itself. The measurements say arithmetic is what stands between
+  26 s per token and an interactive model; NVMe supplies its 2.7 GB per token in under a second.
+- [ ] Load and release layer trunks the way experts now are. All 43 are held resident, so the pass
+  needs 6.39 GB of trunk and a host with less free RAM is refused rather than served — the largest
   remaining obstacle to running on ordinary machines, and the project's founding idea.
 - [ ] Pinned host buffers.
 - [ ] Direct/overlapped NVMe reads where supported.

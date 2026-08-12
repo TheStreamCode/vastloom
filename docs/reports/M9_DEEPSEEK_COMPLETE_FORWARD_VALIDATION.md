@@ -153,6 +153,11 @@ the step from six to twelve is only 1.26× — roughly 40% of the run is still s
 the next gain is. Only the packed matvecs are threaded; attention, normalization, RoPE and the
 Hyper-Connection mixing are not.
 
+Workers are now drawn from a pool created once rather than spawned per matvec, of which a generation
+issues tens of thousands. That halved the test suite, from about 110 s to 50 s. On full-model
+generation it mostly steadied the measurement: 25,891 and 28,641 ms per token before, 25,921 and
+26,859 after. The remaining spread is the machine, not the model.
+
 The thread count itself came from the runtime policy, which capped inference at six regardless of
 the machine. That ceiling predated any threaded kernel; it is now half the logical processors, which
 leaves the host as much CPU as the model takes.
@@ -181,9 +186,6 @@ after every file passes.
   per token because no expert survives between decode steps. Faster, still not usable. No CUDA
   kernel participates in this path, and roughly 40% of the run — attention, normalization, RoPE,
   Hyper-Connection mixing — is still single-threaded.
-- All 43 trunks are resident simultaneously. The project's own design — load a layer, execute it,
-  release it — is not yet implemented here, so a host with less free RAM would be refused rather
-  than served.
 - The result is not compared against an independent implementation of the full model. It is
   internally consistent and deterministic, and its expert traffic matches the metadata prediction,
   but no external oracle has confirmed token 20 for this input.
@@ -193,3 +195,21 @@ after every file passes.
   runs; the weight loading is not.
 - All 43 trunks stay resident, so the pass needs 6.39 GB before it starts and a host with less free
   RAM is refused rather than served. Experts are released as the graph advances; trunks are not.
+
+## What would make it interactive
+
+At 26 s per token the model answers but cannot hold a conversation. The measurements point at one
+thing: arithmetic. NVMe supplies 2.7 GB per token in under a second, so the memory hierarchy is not
+the constraint, and the remaining serial fraction is worth at most another 1.6× even if perfectly
+parallelised.
+
+The order of magnitude has to come from the kernels. Two routes, with a constraint worth stating:
+
+- **CUDA.** The driver, the Governor-backed allocator and one scalar RMSNorm kernel already run on
+  the reference RTX 4070 Super. What is missing is the quantized matvec family — Q8_0 for the three
+  large attention projections, IQ1_S and IQ3_XXS for the routed experts — and attention itself. A
+  GPU kernel is allowed a declared numerical tolerance, exactly as the RMSNorm gate carries `3e-5`.
+- **CPU SIMD** would give perhaps 4–8× on the same kernels, but it reorders accumulation, and these
+  kernels are validated bit-for-bit against pinned ggml output. That parity is what makes the
+  results trustworthy at all, so vectorising the reference path would trade the guarantee for the
+  speed. A separate, explicitly-toleranced fast path is the honest way to do it.

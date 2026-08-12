@@ -22,6 +22,9 @@ constexpr std::size_t kIq3XxsBlockElements = 256U;
 // Dense formats have no block structure; one element is its own block.
 constexpr std::uint32_t kGgmlTypeF32 = 0U;
 constexpr std::uint32_t kGgmlTypeBf16 = 30U;
+constexpr std::uint32_t kGgmlTypeIq2Xxs = 16U;
+constexpr ByteCount kIq2XxsBlockBytes = 66U;
+constexpr std::size_t kIq2XxsBlockElements = 256U;
 
 struct Layout {
     ByteCount block_bytes{0U};
@@ -32,6 +35,7 @@ std::optional<Layout> layout_for(std::uint32_t ggml_type) {
     if (ggml_type == kGgmlTypeQ8_0) return Layout{kQ8BlockBytes, kQ8BlockElements};
     if (ggml_type == kGgmlTypeIq1S) return Layout{kIq1SBlockBytes, kIq1SBlockElements};
     if (ggml_type == kGgmlTypeIq3Xxs) return Layout{kIq3XxsBlockBytes, kIq3XxsBlockElements};
+    if (ggml_type == kGgmlTypeIq2Xxs) return Layout{kIq2XxsBlockBytes, kIq2XxsBlockElements};
     if (ggml_type == kGgmlTypeF32) return Layout{4U, 1U};
     if (ggml_type == kGgmlTypeBf16) return Layout{2U, 1U};
     return std::nullopt;
@@ -41,6 +45,7 @@ std::optional<Layout> layout_for(std::uint32_t ggml_type) {
 std::span<const std::byte> grid_for(std::uint32_t ggml_type) {
     if (ggml_type == kGgmlTypeIq1S) return std::as_bytes(inference::iq1_s_grid_table());
     if (ggml_type == kGgmlTypeIq3Xxs) return std::as_bytes(inference::iq3_xxs_grid_table());
+    if (ggml_type == kGgmlTypeIq2Xxs) return std::as_bytes(inference::iq2_xxs_grid_table());
     return {};
 }
 
@@ -119,7 +124,13 @@ Result<CudaMatvecAccelerator::Resident*> CudaMatvecAccelerator::ensure_resident(
     // kernel needs no second pointer to manage.
     const auto grid = grid_for(matrix.ggml_type);
     const auto grid_bytes = static_cast<ByteCount>(grid.size());
-    const ByteCount total = matrix_bytes + grid_bytes + input_bytes + output_bytes;
+    // The grid is read with 64-bit loads, which fault on a misaligned address. Block strides of 50
+    // and 66 bytes leave the matrix ending wherever they please, so the grid starts at the next
+    // multiple of eight rather than immediately after it.
+    constexpr ByteCount kGridAlignment = 8U;
+    const ByteCount grid_offset =
+        (matrix_bytes + kGridAlignment - 1U) / kGridAlignment * kGridAlignment;
+    const ByteCount total = grid_offset + grid_bytes + input_bytes + output_bytes;
     if (total > options_.maximum_resident_bytes) return nullptr;
 
     // Make room by releasing the least recently used matrices rather than refusing this one.
@@ -157,9 +168,9 @@ Result<CudaMatvecAccelerator::Resident*> CudaMatvecAccelerator::ensure_resident(
     resident.total_bytes = total;
     resident.last_used = ++clock_;
     resident.matrix_bytes = matrix_bytes;
-    resident.grid_offset = matrix_bytes;
-    resident.input_offset = matrix_bytes + grid_bytes;
-    resident.output_offset = matrix_bytes + grid_bytes + input_bytes;
+    resident.grid_offset = grid_offset;
+    resident.input_offset = grid_offset + grid_bytes;
+    resident.output_offset = grid_offset + grid_bytes + input_bytes;
     resident.rows = matrix.rows;
     resident.blocks_per_row = blocks_per_row;
     resident.ggml_type = matrix.ggml_type;
@@ -217,6 +228,11 @@ Result<bool> CudaMatvecAccelerator::matvec(
                     std::as_writable_bytes(output));
             case kGgmlTypeIq3Xxs:
                 return driver_.matvec_iq3_xxs_with_transfer(
+                    live.allocation, 0U, live.grid_offset, live.input_offset, live.output_offset,
+                    live.rows, live.blocks_per_row, std::as_bytes(input),
+                    std::as_writable_bytes(output));
+            case kGgmlTypeIq2Xxs:
+                return driver_.matvec_iq2_xxs_with_transfer(
                     live.allocation, 0U, live.grid_offset, live.input_offset, live.output_offset,
                     live.rows, live.blocks_per_row, std::as_bytes(input),
                     std::as_writable_bytes(output));

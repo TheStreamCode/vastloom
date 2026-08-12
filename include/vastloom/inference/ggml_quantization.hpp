@@ -73,6 +73,9 @@ struct RoutedExpertScratch {
 // block's own sign field. Exposed for the same reason as the IQ1_S table above.
 [[nodiscard]] std::span<const std::uint32_t> iq3_xxs_grid_table() noexcept;
 
+// The 256-entry IQ2_XXS grid, each entry eight packed uint8 magnitudes.
+[[nodiscard]] std::span<const std::uint64_t> iq2_xxs_grid_table() noexcept;
+
 // True only for storage formats with a bounded scalar reference matvec below.
 [[nodiscard]] bool supports_reference_matvec_ggml_type(std::uint32_t ggml_type) noexcept;
 

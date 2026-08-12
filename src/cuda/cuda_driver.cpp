@@ -666,6 +666,151 @@ BF16_LOOP_DONE:
 BF16_DONE:
     ret;
 }
+
+// One thread per output row of a ggml IQ2_XXS matrix. Each 66-byte block covers 256 weights: an
+// FP16 scale, then eight groups of four grid indices plus a 32-bit field holding a group scale and
+// four 7-bit sign patterns. Each index selects one of 256 entries of eight packed uint8 magnitudes,
+// and the eighth sign bit is the parity of the other seven.
+//
+// Unlike IQ3_XXS this writes its columns in order, so the input pointer only moves forward.
+.visible .entry vastloom_matvec_iq2_xxs_f32(
+    .param .u64 matrix_param,
+    .param .u64 grid_param,
+    .param .u64 input_param,
+    .param .u64 output_param,
+    .param .u32 rows_param,
+    .param .u32 blocks_param
+)
+{
+    .reg .pred %p<8>;
+    .reg .b16 %rs<4>;
+    .reg .b32 %r<40>;
+    .reg .b64 %rd<24>;
+    .reg .f32 %f<20>;
+    .reg .f64 %fd<6>;
+
+    ld.param.u64 %rd0, [matrix_param];
+    ld.param.u64 %rd1, [grid_param];
+    ld.param.u64 %rd2, [input_param];
+    ld.param.u64 %rd3, [output_param];
+    ld.param.u32 %r0, [rows_param];
+    ld.param.u32 %r1, [blocks_param];
+    mov.u32 %r2, %ntid.x;
+    mov.u32 %r3, %ctaid.x;
+    mov.u32 %r4, %tid.x;
+    mad.lo.u32 %r5, %r3, %r2, %r4;
+    setp.ge.u32 %p0, %r5, %r0;
+    @%p0 bra IQ2_DONE;
+
+    // Byte offset of this row: row * blocks_per_row * 66.
+    mul.lo.u32 %r6, %r5, %r1;
+    mul.wide.u32 %rd4, %r6, 66;
+    add.u64 %rd5, %rd0, %rd4;
+    mov.f64 %fd0, 0d0000000000000000;
+    mov.u32 %r7, 0;
+    mov.u64 %rd6, %rd2;
+
+IQ2_BLOCK_LOOP:
+    setp.ge.u32 %p1, %r7, %r1;
+    @%p1 bra IQ2_BLOCK_DONE;
+    ld.global.u16 %rs0, [%rd5];
+    cvt.f32.f16 %f1, %rs0;
+    mov.u32 %r8, 0;
+
+IQ2_GROUP_LOOP:
+    setp.ge.u32 %p2, %r8, 8;
+    @%p2 bra IQ2_GROUP_DONE;
+    // This group's eight bytes start at block + 2 + 8 * group; the aux word is its second half.
+    mul.wide.u32 %rd7, %r8, 8;
+    add.u64 %rd8, %rd5, 2;
+    add.u64 %rd8, %rd8, %rd7;
+    // aux assembled from bytes: a 66-byte stride puts this word on a 2-mod-4 address.
+    ld.global.u8 %r9, [%rd8+4];
+    ld.global.u8 %r27, [%rd8+5];
+    shl.b32 %r27, %r27, 8;
+    or.b32 %r9, %r9, %r27;
+    ld.global.u8 %r27, [%rd8+6];
+    shl.b32 %r27, %r27, 16;
+    or.b32 %r9, %r9, %r27;
+    ld.global.u8 %r27, [%rd8+7];
+    shl.b32 %r27, %r27, 24;
+    or.b32 %r9, %r9, %r27;
+    // local_scale = scale * (0.5 + (float)(aux >> 28)) * 0.25, left to right as the reference does.
+    shr.u32 %r10, %r9, 28;
+    cvt.rn.f32.u32 %f2, %r10;
+    mov.f32 %f3, 0f3F000000;
+    add.rn.f32 %f4, %f3, %f2;
+    mul.rn.f32 %f5, %f1, %f4;
+    mov.f32 %f14, 0f3E800000;
+    mul.rn.f32 %f6, %f5, %f14;
+    mov.u32 %r11, 0;
+
+IQ2_SUB_LOOP:
+    setp.ge.u32 %p3, %r11, 4;
+    @%p3 bra IQ2_SUB_DONE;
+    cvt.u64.u32 %rd9, %r11;
+    add.u64 %rd10, %rd8, %rd9;
+    ld.global.u8 %r12, [%rd10];
+    mul.wide.u32 %rd11, %r12, 8;
+    add.u64 %rd12, %rd1, %rd11;
+    ld.global.u64 %rd13, [%rd12];
+    // signs = s | ((popc(s) & 1) << 7), where s = (aux >> (7 * sub)) & 127
+    mul.lo.u32 %r13, %r11, 7;
+    shr.u32 %r14, %r9, %r13;
+    and.b32 %r14, %r14, 127;
+    popc.b32 %r15, %r14;
+    and.b32 %r15, %r15, 1;
+    shl.b32 %r15, %r15, 7;
+    or.b32 %r16, %r14, %r15;
+    mov.u32 %r17, 0;
+
+IQ2_LANE_LOOP:
+    setp.ge.u32 %p4, %r17, 8;
+    @%p4 bra IQ2_LANE_DONE;
+    cvt.u32.u64 %r18, %rd13;
+    and.b32 %r18, %r18, 255;
+    cvt.rn.f32.u32 %f7, %r18;
+    mov.u32 %r19, 1;
+    shl.b32 %r19, %r19, %r17;
+    and.b32 %r19, %r19, %r16;
+    setp.ne.u32 %p5, %r19, 0;
+    mov.f32 %f8, 0f3F800000;
+    mov.f32 %f9, 0fBF800000;
+    selp.f32 %f10, %f9, %f8, %p5;
+    mul.rn.f32 %f11, %f6, %f7;
+    mul.rn.f32 %f12, %f11, %f10;
+    ld.global.f32 %f13, [%rd6];
+    cvt.f64.f32 %fd1, %f12;
+    cvt.f64.f32 %fd2, %f13;
+    mul.rn.f64 %fd3, %fd1, %fd2;
+    add.rn.f64 %fd0, %fd0, %fd3;
+    shr.u64 %rd13, %rd13, 8;
+    add.u64 %rd6, %rd6, 4;
+    add.u32 %r17, %r17, 1;
+    bra IQ2_LANE_LOOP;
+
+IQ2_LANE_DONE:
+    add.u32 %r11, %r11, 1;
+    bra IQ2_SUB_LOOP;
+
+IQ2_SUB_DONE:
+    add.u32 %r8, %r8, 1;
+    bra IQ2_GROUP_LOOP;
+
+IQ2_GROUP_DONE:
+    add.u64 %rd5, %rd5, 66;
+    add.u32 %r7, %r7, 1;
+    bra IQ2_BLOCK_LOOP;
+
+IQ2_BLOCK_DONE:
+    cvt.rn.f32.f64 %f15, %fd0;
+    mul.wide.u32 %rd14, %r5, 4;
+    add.u64 %rd15, %rd3, %rd14;
+    st.global.f32 [%rd15], %f15;
+
+IQ2_DONE:
+    ret;
+}
 )ptx";
 
 // The whole module, assembled once. Returned by reference so the JIT gets a stable pointer.
@@ -1251,6 +1396,96 @@ public:
         auto popped = pop_context_locked(context);
         if (status != kCudaSuccess) {
             return cuda_error("CUDA IQ3_XXS matvec transfer/launch", status);
+        }
+        if (!popped) return popped.error();
+        return {};
+    }
+
+    [[nodiscard]] Result<void> matvec_iq2_xxs_with_transfer(
+        const CudaBackendAllocation& allocation,
+        ByteCount matrix_offset,
+        ByteCount grid_offset,
+        ByteCount input_offset,
+        ByteCount output_offset,
+        std::size_t row_count,
+        std::size_t blocks_per_row,
+        std::span<const std::byte> input,
+        std::span<std::byte> output) override {
+        std::scoped_lock lock(mutex_);
+        constexpr ByteCount kBlockBytes = 66U;
+        constexpr ByteCount kBlockElements = 256U;
+        constexpr ByteCount kGridBytes = 256U * sizeof(std::uint64_t);
+        if (row_count == 0U || blocks_per_row == 0U ||
+            row_count > std::numeric_limits<std::uint32_t>::max() ||
+            blocks_per_row > std::numeric_limits<std::uint32_t>::max() ||
+            blocks_per_row > std::numeric_limits<ByteCount>::max() / row_count) {
+            return make_error(ErrorCode::invalid_argument,
+                              "CUDA IQ2_XXS matvec launch dimensions are invalid");
+        }
+        const ByteCount blocks = static_cast<ByteCount>(row_count) * blocks_per_row;
+        if (blocks > std::numeric_limits<ByteCount>::max() / kBlockBytes ||
+            blocks_per_row > std::numeric_limits<ByteCount>::max() / kBlockElements ||
+            row_count > std::numeric_limits<ByteCount>::max() / sizeof(float)) {
+            return make_error(ErrorCode::resource_exhausted,
+                              "CUDA IQ2_XXS matvec byte count overflows");
+        }
+        const ByteCount matrix_bytes = blocks * kBlockBytes;
+        const ByteCount input_bytes =
+            static_cast<ByteCount>(blocks_per_row) * kBlockElements * sizeof(float);
+        const ByteCount output_bytes = static_cast<ByteCount>(row_count) * sizeof(float);
+        if (input.size() != input_bytes || output.size() != output_bytes) {
+            return make_error(ErrorCode::invalid_argument,
+                              "CUDA IQ2_XXS matvec host spans do not match its shape");
+        }
+        for (const auto& [offset, bytes] :
+             {std::pair{matrix_offset, matrix_bytes}, std::pair{grid_offset, kGridBytes},
+              std::pair{input_offset, input_bytes}, std::pair{output_offset, output_bytes}}) {
+            auto range = validate_allocation_range(allocation, offset, bytes);
+            if (!range) return range.error();
+        }
+        if (input_offset % alignof(float) != 0U || output_offset % alignof(float) != 0U ||
+            grid_offset % alignof(std::uint64_t) != 0U) {
+            return make_error(ErrorCode::invalid_argument,
+                              "CUDA IQ2_XXS matvec ranges are misaligned");
+        }
+
+        auto* context = reinterpret_cast<CuContext>(allocation.context);
+        CuResult status = context_push_(context);
+        if (status != kCudaSuccess) return cuda_error("cuCtxPushCurrent_v2", status);
+        auto module = cached_module_locked(context, allocation.device_ordinal);
+        if (!module) {
+            static_cast<void>(pop_context_locked(context));
+            return module.error();
+        }
+        CuFunction function = nullptr;
+        status = module_get_function_(&function, module.value(), "vastloom_matvec_iq2_xxs_f32");
+        if (status != kCudaSuccess) {
+            static_cast<void>(pop_context_locked(context));
+            return cuda_error("cuModuleGetFunction", status);
+        }
+        status = copy_host_to_device_(allocation.device_pointer + input_offset, input.data(),
+                                      input.size());
+        if (status == kCudaSuccess) {
+            CuDevicePointer matrix_pointer = allocation.device_pointer + matrix_offset;
+            CuDevicePointer grid_pointer = allocation.device_pointer + grid_offset;
+            CuDevicePointer input_pointer = allocation.device_pointer + input_offset;
+            CuDevicePointer output_pointer = allocation.device_pointer + output_offset;
+            auto rows = static_cast<std::uint32_t>(row_count);
+            auto row_blocks = static_cast<std::uint32_t>(blocks_per_row);
+            void* parameters[] = {&matrix_pointer, &grid_pointer, &input_pointer, &output_pointer,
+                                  &rows, &row_blocks};
+            constexpr std::uint32_t kThreadsPerBlock = 128U;
+            const std::uint32_t grid = (rows + kThreadsPerBlock - 1U) / kThreadsPerBlock;
+            status = launch_kernel_(function, grid, 1U, 1U, kThreadsPerBlock, 1U, 1U, 0U, nullptr,
+                                    parameters, nullptr);
+        }
+        if (status == kCudaSuccess) {
+            status = copy_device_to_host_(output.data(), allocation.device_pointer + output_offset,
+                                          output.size());
+        }
+        auto popped = pop_context_locked(context);
+        if (status != kCudaSuccess) {
+            return cuda_error("CUDA IQ2_XXS matvec transfer/launch", status);
         }
         if (!popped) return popped.error();
         return {};
@@ -2095,6 +2330,37 @@ Result<void> CudaDriver::matvec_iq3_xxs_with_transfer(
     } catch (...) {
         return make_error(ErrorCode::internal_error,
                           "CUDA backend threw an unknown IQ3_XXS matvec exception");
+    }
+}
+
+Result<void> CudaDriver::matvec_iq2_xxs_with_transfer(
+    CudaAllocation& allocation,
+    ByteCount matrix_offset,
+    ByteCount grid_offset,
+    ByteCount input_offset,
+    ByteCount output_offset,
+    std::size_t row_count,
+    std::size_t blocks_per_row,
+    std::span<const std::byte> input,
+    std::span<std::byte> output) const {
+    if (!allocation.valid() || allocation.backend_.get() != backend_.get()) {
+        return make_error(ErrorCode::invalid_argument,
+                          "CUDA allocation does not belong to this driver");
+    }
+    if (row_count == 0U || blocks_per_row == 0U || input.empty() || output.empty()) {
+        return make_error(ErrorCode::invalid_argument,
+                          "CUDA IQ2_XXS matvec transfer parameters are invalid");
+    }
+    try {
+        return backend_->matvec_iq2_xxs_with_transfer(allocation.allocation_, matrix_offset,
+                                                      grid_offset, input_offset, output_offset,
+                                                      row_count, blocks_per_row, input, output);
+    } catch (const std::exception& exception) {
+        return make_error(ErrorCode::internal_error,
+                          "CUDA backend threw during IQ2_XXS matvec", exception.what());
+    } catch (...) {
+        return make_error(ErrorCode::internal_error,
+                          "CUDA backend threw an unknown IQ2_XXS matvec exception");
     }
 }
 

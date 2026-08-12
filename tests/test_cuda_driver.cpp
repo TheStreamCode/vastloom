@@ -260,6 +260,21 @@ public:
                                     "fake CUDA backend has no IQ1_S kernel");
     }
 
+    [[nodiscard]] vastloom::Result<void> matvec_iq2_xxs_with_transfer(
+        const vastloom::cuda::CudaBackendAllocation&,
+        vastloom::ByteCount,
+        vastloom::ByteCount,
+        vastloom::ByteCount,
+        vastloom::ByteCount,
+        std::size_t,
+        std::size_t,
+        std::span<const std::byte>,
+        std::span<std::byte>) override {
+        ++launch_calls;
+        return vastloom::make_error(vastloom::ErrorCode::unsupported,
+                                    "fake CUDA backend has no IQ2_XXS kernel");
+    }
+
     [[nodiscard]] vastloom::Result<void> matvec_dense_with_transfer(
         const vastloom::cuda::CudaBackendAllocation&,
         vastloom::ByteCount,

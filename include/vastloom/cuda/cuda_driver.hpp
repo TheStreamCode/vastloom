@@ -89,6 +89,17 @@ public:
         std::size_t blocks_per_row,
         std::span<const std::byte> input,
         std::span<std::byte> output) = 0;
+    // IQ2_XXS carries a 256-entry 64-bit grid, placed in the allocation the same way.
+    [[nodiscard]] virtual Result<void> matvec_iq2_xxs_with_transfer(
+        const CudaBackendAllocation& allocation,
+        ByteCount matrix_offset,
+        ByteCount grid_offset,
+        ByteCount input_offset,
+        ByteCount output_offset,
+        std::size_t row_count,
+        std::size_t blocks_per_row,
+        std::span<const std::byte> input,
+        std::span<std::byte> output) = 0;
     // Dense little-endian rows with no block structure: 4 bytes per element for FP32, 2 for BF16.
     [[nodiscard]] virtual Result<void> matvec_dense_with_transfer(
         const CudaBackendAllocation& allocation,
@@ -195,6 +206,16 @@ public:
         std::size_t row_count,
         std::size_t blocks_per_row) const;
     [[nodiscard]] Result<void> matvec_iq1_s_with_transfer(
+        CudaAllocation& allocation,
+        ByteCount matrix_offset,
+        ByteCount grid_offset,
+        ByteCount input_offset,
+        ByteCount output_offset,
+        std::size_t row_count,
+        std::size_t blocks_per_row,
+        std::span<const std::byte> input,
+        std::span<std::byte> output) const;
+    [[nodiscard]] Result<void> matvec_iq2_xxs_with_transfer(
         CudaAllocation& allocation,
         ByteCount matrix_offset,
         ByteCount grid_offset,

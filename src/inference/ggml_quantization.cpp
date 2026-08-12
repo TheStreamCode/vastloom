@@ -919,6 +919,10 @@ std::span<const std::uint32_t> iq3_xxs_grid_table() noexcept {
     return std::span<const std::uint32_t>(kIq3XxsGrid);
 }
 
+std::span<const std::uint64_t> iq2_xxs_grid_table() noexcept {
+    return std::span<const std::uint64_t>(kIq2XxsGrid);
+}
+
 bool supports_reference_matvec_ggml_type(std::uint32_t ggml_type) noexcept {
     switch (ggml_type) {
         case kGgmlTypeF32:

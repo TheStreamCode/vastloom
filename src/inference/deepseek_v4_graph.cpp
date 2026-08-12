@@ -2373,8 +2373,16 @@ Result<std::vector<float>> final_logits(const DeepseekV4ReferenceGraph& graph,
             static_cast<std::ptrdiff_t>((token_count - 1U) * config.width),
         config.width);
     if (normalized_out != nullptr) {
+        // Before the normalization rather than after it. RMS normalization fixes the norm by
+        // construction, so a vector sampled after it cannot show a magnitude that collapsed or
+        // exploded on the way down - measuring there reports 19.72 at every depth whatever the
+        // model did, which is a fact about the norm and not about the model.
+        const std::size_t offset = (token_count - 1U) * config.width;
         try {
-            normalized_out->assign(final_hidden.begin(), final_hidden.end());
+            normalized_out->assign(reduced.value().begin() +
+                                       static_cast<std::ptrdiff_t>(offset),
+                                   reduced.value().begin() +
+                                       static_cast<std::ptrdiff_t>(offset + config.width));
         } catch (const std::bad_alloc&) {
             return make_error(ErrorCode::resource_exhausted,
                               "Unable to retain the final hidden state");

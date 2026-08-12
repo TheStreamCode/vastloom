@@ -2,6 +2,36 @@
 
 ## Unreleased
 
+- **The hidden state explodes with depth: RMS 6.8 at one layer, 4,064 at forty-three.**
+
+  | layers | RMS | mean | min | max |
+  |---:|---:|---:|---:|---:|
+  | 1 | 6.82 | 0.05 | −25.9 | 21.5 |
+  | 8 | 13.42 | 0.25 | −79.4 | 53.2 |
+  | 24 | 79.81 | −0.62 | −288.9 | 254.0 |
+  | 43 | **4,064.32** | −81.91 | −31,054 | 25,746 |
+
+  Six hundred fold, and accelerating: about 1.10 per layer over the first eight, 1.12 through
+  twenty-four, 1.23 through forty-three. A compounding per-layer factor slightly above one is what
+  that curve is, and the final normalization then hides it — which is why the logits look merely
+  wrong rather than obviously broken, and why forty-three layers of it produce a direction dominated
+  by whichever components grew fastest.
+
+  The suspect is the Hyper-Connection post step, whose weights are `2 * sigmoid(...)` and therefore
+  range up to two. Applied where the reference does something else, that multiplies the residual by
+  roughly 1.1 to 1.2 every layer, which is exactly the measured shape.
+
+- **The first version of this measurement could not have found it**, and that is the third time this
+  milestone has built a gate that cannot fail. `--dump-hidden` sampled the hidden state *after* the
+  final RMS normalization, which fixes the norm by construction: it reported 19.72 at every depth,
+  and that number is a fact about normalization rather than about the model. Sampling before it took
+  the same four runs and showed a factor of six hundred.
+
+  The pattern to watch for: a quantity that reports the same value however the thing under test
+  behaves. Dyadic parity gates could not separate f32 from f64 and passed two wrong kernels; a cost
+  breakdown obtained by subtraction charged the trunk for everything unattributed and redirected a
+  milestone; and this reported a constant because a normalization had just imposed one.
+
 - **The forward-pass defect reproduces on a single token**, which turns the debugging loop from a
   twelve-token generation into one forward pass. Given nothing but the beginning-of-sequence token,
   the two engines agree on almost nothing:

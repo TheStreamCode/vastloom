@@ -366,8 +366,25 @@ deepseek_v4_validate_0731_gguf_checkpoint_catalog(
     const DeepseekV4GgufCatalogReport& report,
     const DeepseekV4ReferenceConfig& config);
 
+// Optional device-side matvec. The graph knows nothing about CUDA; it asks whether a given packed
+// matrix can be multiplied elsewhere, and falls back to the CPU kernel whenever the answer is no.
+// An accelerator that declines must leave the output untouched.
+class DeepseekV4MatvecAccelerator {
+public:
+    DeepseekV4MatvecAccelerator() = default;
+    DeepseekV4MatvecAccelerator(const DeepseekV4MatvecAccelerator&) = delete;
+    DeepseekV4MatvecAccelerator& operator=(const DeepseekV4MatvecAccelerator&) = delete;
+    virtual ~DeepseekV4MatvecAccelerator() = default;
+
+    [[nodiscard]] virtual Result<bool> matvec(
+        const DeepseekV4PackedMatrix& matrix,
+        std::span<const float> input,
+        std::span<float> output) = 0;
+};
+
 struct DeepseekV4ReferenceGraph {
     DeepseekV4ReferenceConfig config;
+    DeepseekV4MatvecAccelerator* accelerator{nullptr};
     std::map<std::string, std::vector<float>, std::less<>> float_tensors;
     std::map<std::string, std::vector<std::uint32_t>, std::less<>> integer_tensors;
     std::map<std::string, DeepseekV4PackedMatrix, std::less<>> packed_matrices;

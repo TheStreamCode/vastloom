@@ -25,6 +25,7 @@
 #include "vastloom/cuda/cuda_rms_norm.hpp"
 #include "vastloom/hardware/hardware_probe.hpp"
 #include "vastloom/inference/gpt2_tokenizer.hpp"
+#include "vastloom/cuda/cuda_matvec_accelerator.hpp"
 #include "vastloom/inference/deepseek_v4_expert_provider.hpp"
 #include "vastloom/inference/deepseek_v4_gguf.hpp"
 #include "vastloom/inference/deepseek_v4_range_artifact.hpp"
@@ -1766,7 +1767,7 @@ int command_deepseek_forward(const std::vector<std::string>& args) {
         args, 1U,
         {"--token", "--layers", "--context", "--batch-size", "--expert-cache", "--prompt",
          "--tokenizer", "--max-tokens"},
-        {"--json", "--dry-run", "--chat"});
+        {"--json", "--dry-run", "--chat", "--cpu-only"});
     if (!valid) return print_error(valid.error(), json);
     if (args.empty() || vastloom::util::starts_with(args.front(), "--")) {
         return print_error(
@@ -1953,6 +1954,28 @@ int command_deepseek_forward(const std::vector<std::string>& args) {
 
     vastloom::inference::DeepseekV4ReferenceGraph graph;
     graph.config = std::move(layer_config);
+
+    // A GPU is optional. When one is present the Q8_0 matrices - the large attention projections -
+    // run there and stay resident in VRAM; everything else keeps using the CPU reference. If the
+    // driver is missing or the device refuses, the pass runs exactly as before.
+    std::unique_ptr<vastloom::cuda::CudaMatvecAccelerator> accelerator;
+    if (!has_flag(args, "--cpu-only")) {
+        auto cuda_driver = vastloom::cuda::CudaDriver::load();
+        if (cuda_driver) {
+            vastloom::cuda::CudaMatvecAcceleratorOptions accelerator_options;
+            accelerator_options.minimum_free_vram_after = 1U * vastloom::GiB;
+            accelerator_options.maximum_resident_bytes =
+                policy.value().resources.vram_hard_limit;
+            accelerator_options.maximum_matrices = 4U * config.value().layer_count + 16U;
+            auto created = vastloom::cuda::CudaMatvecAccelerator::create(
+                cuda_driver.take_value(), governor, accelerator_options);
+            if (created) {
+                accelerator = created.take_value();
+                graph.accelerator = accelerator.get();
+            }
+        }
+    }
+
     auto globals = vastloom::inference::deepseek_v4_load_0731_gguf_globals(
         report.value().catalog, config.value(), governor);
     if (!globals) return print_error(globals.error(), json);
@@ -2045,6 +2068,8 @@ int command_deepseek_forward(const std::vector<std::string>& args) {
             if (decoded) text = decoded.take_value();
         }
         const auto& stats = generated.value().stats;
+        vastloom::cuda::CudaMatvecAcceleratorStats gpu_stats;
+        if (accelerator != nullptr) gpu_stats = accelerator->stats();
         if (json) {
             std::cout << "{\"ok\":true,\"complete_model\":" << (complete ? "true" : "false")
                       << ",\"executed_layers\":" << depth
@@ -2057,6 +2082,10 @@ int command_deepseek_forward(const std::vector<std::string>& args) {
                       << "\",\"expert_bytes_read\":" << stats.logical_expert_bytes_read
                       << ",\"forward_passes\":" << stats.forward_passes
                       << ",\"resident_bytes\":" << required
+                      << ",\"gpu_matvecs\":" << gpu_stats.accelerated
+                      << ",\"gpu_declined\":" << gpu_stats.declined
+                      << ",\"gpu_resident_bytes\":" << gpu_stats.resident_bytes
+                      << ",\"gpu_kernel_ms\":" << gpu_stats.kernel_ms
                       << ",\"load_ms\":" << load_elapsed
                       << ",\"generate_ms\":" << generate_elapsed
                       << ",\"ms_per_token\":"
@@ -2071,6 +2100,9 @@ int command_deepseek_forward(const std::vector<std::string>& args) {
                       << stats.generated_tokens << " tokens ("
                       << vastloom::inference::to_string(generated.value().finish_reason) << ")\n"
                       << "Output:               " << text << '\n'
+                      << "GPU matvecs:          " << gpu_stats.accelerated << " accelerated, "
+                      << gpu_stats.declined << " on CPU ("
+                      << vastloom::format_bytes(gpu_stats.resident_bytes) << " resident)\n"
                       << "Expert bytes read:    " << stats.logical_expert_bytes_read << '\n'
                       << "Weight load:          " << load_elapsed << " ms\n"
                       << "Generation:           " << generate_elapsed << " ms";

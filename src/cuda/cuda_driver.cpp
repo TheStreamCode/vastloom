@@ -253,6 +253,9 @@ public:
     DynamicCudaBackend& operator=(const DynamicCudaBackend&) = delete;
 
     ~DynamicCudaBackend() override {
+        // The cached module holds its own context reference, so unloading here is safe and
+        // releases that reference too.
+        release_cached_module_locked();
 #if defined(_WIN32)
         if (library_handle_ != nullptr) FreeLibrary(library_handle_);
 #elif defined(__linux__)
@@ -660,30 +663,17 @@ public:
         auto* context = reinterpret_cast<CuContext>(allocation.context);
         CuResult status = context_push_(context);
         if (status != kCudaSuccess) return cuda_error("cuCtxPushCurrent_v2", status);
-        CuModule module = nullptr;
-        std::array<char, kMaximumJitLogBytes> jit_error_log{};
-        int jit_options[] = {kJitErrorLogBufferSizeBytes, kJitErrorLogBuffer};
-        void* jit_option_values[] = {
-            reinterpret_cast<void*>(static_cast<std::uintptr_t>(jit_error_log.size())),
-            jit_error_log.data()};
-        status = module_load_data_(&module, kRmsNormPtx.data(), 2U, jit_options,
-                                   jit_option_values);
-        if (status != kCudaSuccess) {
+        // JIT-compiling the PTX costs milliseconds, which dwarfs the kernel itself when a
+        // generation issues thousands of matvecs. The module is cached per context and unloaded
+        // when the backend is destroyed.
+        auto module = cached_module_locked(context, allocation.device_ordinal);
+        if (!module) {
             static_cast<void>(pop_context_locked(context));
-            auto error = cuda_error("cuModuleLoadDataEx", status);
-            if (jit_error_log.front() != '\0') {
-                const auto log_end = std::find(jit_error_log.begin(), jit_error_log.end(), '\0');
-                error.context += ", JIT log: ";
-                error.context.append(
-                    jit_error_log.data(),
-                    static_cast<std::size_t>(std::distance(jit_error_log.begin(), log_end)));
-            }
-            return error;
+            return module.error();
         }
         CuFunction function = nullptr;
-        status = module_get_function_(&function, module, "vastloom_matvec_q8_0_f32");
+        status = module_get_function_(&function, module.value(), "vastloom_matvec_q8_0_f32");
         if (status != kCudaSuccess) {
-            static_cast<void>(module_unload_(module));
             static_cast<void>(pop_context_locked(context));
             return cuda_error("cuModuleGetFunction", status);
         }
@@ -699,16 +689,75 @@ public:
         status = launch_kernel_(function, grid, 1U, 1U, kThreadsPerBlock, 1U, 1U, 0U, nullptr,
                                 parameters, nullptr);
         if (status == kCudaSuccess) status = context_synchronize_();
-        const CuResult unload_status = module_unload_(module);
         auto popped = pop_context_locked(context);
         if (status != kCudaSuccess) return cuda_error("CUDA Q8_0 matvec launch/synchronize", status);
-        if (unload_status != kCudaSuccess) return cuda_error("cuModuleUnload", unload_status);
         if (!popped) return popped.error();
         return {};
     }
 
 private:
     DynamicCudaBackend() = default;
+
+    // Loads the kernel module once per context. The caller must already hold the lock and have
+    // pushed the context.
+    //
+    // The primary context is reference counted, so caching a module means holding a reference of
+    // our own: without it the last allocation's release would destroy the context and leave the
+    // cached module dangling.
+    [[nodiscard]] Result<CuModule> cached_module_locked(CuContext context, int device_ordinal) {
+        if (cached_module_ != nullptr && cached_module_context_ == context) {
+            return cached_module_;
+        }
+        release_cached_module_locked();
+        auto device = get_device_locked(device_ordinal);
+        if (!device) return device.error();
+        CuContext retained = nullptr;
+        const CuResult retain_status = primary_context_retain_(&retained, device.value());
+        if (retain_status != kCudaSuccess) {
+            return cuda_error("cuDevicePrimaryCtxRetain", retain_status);
+        }
+        if (retained != context) {
+            static_cast<void>(primary_context_release_(device.value()));
+            return make_error(ErrorCode::internal_error,
+                              "CUDA primary context changed while caching the kernel module");
+        }
+        CuModule module = nullptr;
+        std::array<char, kMaximumJitLogBytes> jit_error_log{};
+        int jit_options[] = {kJitErrorLogBufferSizeBytes, kJitErrorLogBuffer};
+        void* jit_option_values[] = {
+            reinterpret_cast<void*>(static_cast<std::uintptr_t>(jit_error_log.size())),
+            jit_error_log.data()};
+        const CuResult status = module_load_data_(&module, kRmsNormPtx.data(), 2U, jit_options,
+                                                  jit_option_values);
+        if (status != kCudaSuccess) {
+            static_cast<void>(primary_context_release_(device.value()));
+            auto error = cuda_error("cuModuleLoadDataEx", status);
+            if (jit_error_log.front() != '\0') {
+                const auto log_end = std::find(jit_error_log.begin(), jit_error_log.end(), '\0');
+                error.context += ", JIT log: ";
+                error.context.append(
+                    jit_error_log.data(),
+                    static_cast<std::size_t>(std::distance(jit_error_log.begin(), log_end)));
+            }
+            return error;
+        }
+        cached_module_ = module;
+        cached_module_context_ = context;
+        cached_module_device_ = device.value();
+        cached_module_device_valid_ = true;
+        return module;
+    }
+
+    void release_cached_module_locked() noexcept {
+        if (cached_module_ == nullptr) return;
+        if (module_unload_ != nullptr) static_cast<void>(module_unload_(cached_module_));
+        if (cached_module_device_valid_ && primary_context_release_ != nullptr) {
+            static_cast<void>(primary_context_release_(cached_module_device_));
+        }
+        cached_module_ = nullptr;
+        cached_module_context_ = nullptr;
+        cached_module_device_valid_ = false;
+    }
 
     template <typename Function>
     [[nodiscard]] Result<void> load_symbol(Function& target,
@@ -864,6 +913,10 @@ private:
 #endif
     std::string library_name_;
     mutable std::mutex mutex_;
+    CuModule cached_module_{nullptr};
+    CuContext cached_module_context_{nullptr};
+    CuDevice cached_module_device_{};
+    bool cached_module_device_valid_{false};
     bool initialized_{false};
     CuInit init_{nullptr};
     CuDriverGetVersion driver_get_version_{nullptr};

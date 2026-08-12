@@ -656,7 +656,8 @@ Result<std::vector<float>> linear_packed_matrix(
     std::size_t input_width,
     std::size_t output_width,
     std::string_view context,
-    unsigned cpu_threads = 1U) {
+    unsigned cpu_threads = 1U,
+    DeepseekV4MatvecAccelerator* accelerator = nullptr) {
     if (!supports_reference_matvec_ggml_type(matrix.ggml_type)) {
         return make_error(ErrorCode::unsupported,
                           "DeepSeek packed matrix type has no reference matvec",
@@ -695,12 +696,25 @@ Result<std::vector<float>> linear_packed_matrix(
         std::fill(padded_input.begin(), padded_input.end(), 0.0F);
         std::copy_n(input.begin() + static_cast<std::ptrdiff_t>(row * input_width),
                     input_width, padded_input.begin());
-        auto multiplied = matvec_ggml_f32_transactional(
-            matrix.ggml_type, payload.value(), matrix.rows, matrix.storage_columns,
-            padded_input, scratch, row_output, limits);
-        if (!multiplied) {
-            return make_error(multiplied.error().code, multiplied.error().message,
-                              std::string(name) + ": " + multiplied.error().context);
+        // Offer the row to the accelerator first. A refusal is not an error - most matrices have no
+        // device kernel yet - so anything it declines runs on the CPU path unchanged.
+        bool accelerated = false;
+        if (accelerator != nullptr) {
+            auto offered = accelerator->matvec(matrix, padded_input, row_output);
+            if (!offered) {
+                return make_error(offered.error().code, offered.error().message,
+                                  std::string(name) + ": " + offered.error().context);
+            }
+            accelerated = offered.value();
+        }
+        if (!accelerated) {
+            auto multiplied = matvec_ggml_f32_transactional(
+                matrix.ggml_type, payload.value(), matrix.rows, matrix.storage_columns,
+                padded_input, scratch, row_output, limits);
+            if (!multiplied) {
+                return make_error(multiplied.error().code, multiplied.error().message,
+                                  std::string(name) + ": " + multiplied.error().context);
+            }
         }
         std::copy(row_output.begin(), row_output.end(),
                   output.begin() + static_cast<std::ptrdiff_t>(row * output_width));
@@ -793,7 +807,7 @@ Result<std::vector<float>> linear_tensor(const DeepseekV4ReferenceGraph& graph,
     if (packed != graph.packed_matrices.end()) {
         return linear_packed_matrix(packed->second, name, input, rows,
                                     input_width, output_width, context,
-                                    graph.config.cpu_threads);
+                                    graph.config.cpu_threads, graph.accelerator);
     }
     auto weight = float_tensor(graph, name, {output_width, input_width});
     if (!weight) return weight.error();
@@ -1677,7 +1691,7 @@ Result<std::vector<float>> execute_expert(const DeepseekV4ReferenceGraph& graph,
             return linear_packed_matrix(*matrix, name, values, tokens,
                                         input_columns, output_rows,
                                         base + std::string(suffix),
-                                        graph.config.cpu_threads);
+                                        graph.config.cpu_threads, graph.accelerator);
         }
         return linear_tensor(graph, name, values, tokens, input_columns,
                              output_rows, base + std::string(suffix));

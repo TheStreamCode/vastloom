@@ -2,6 +2,33 @@
 
 ## Unreleased
 
+- **Removing the GPU makes a token four times slower, so the accelerator stays.** The advice under
+  consideration was to drop the hybrid GPU decode and invest in a CPU path, on the sound argument
+  that batch-1 decode with 1-2.3 GB of resident VRAM makes the device a PCIe streaming accelerator
+  rather than a place where weights live. Measured on this code:
+
+  | | s/token | effective bandwidth |
+  |---|---:|---:|
+  | llama.cpp, CPU | **0.55** | **14.4 GB/s** |
+  | here, hybrid GPU | 6.88 | 1.16 GB/s |
+  | here, `--cpu-only` | 28.5 | 0.28 GB/s |
+
+  Expert compute goes from 15,706 ms to 235,897 when those matvecs fall back — fifteen times — and
+  that is the whole difference.
+
+  The useful number is the third row against the first: **our CPU kernels are 51x behind llama.cpp's
+  on the same device.** That gap is too large for anything but what the advice itself described —
+  SIMD-friendly weight repacking, AVX512 quantized kernels, a fused MoE — so the diagnosis of what
+  llama.cpp does right survives even though its conclusion does not.
+
+  Neither the device nor the memory hierarchy is the lever. The kernels are, on both sides: the GPU
+  starts 17x off its own bandwidth, the CPU roughly 51x off llama.cpp's. The GPU has the shorter
+  road because it is already four times ahead.
+
+  A prediction was written before the run, as usual, and it was wrong: rough parity was expected on
+  the grounds that 1.16 GB/s is nowhere near any bandwidth limit, so the device should not matter.
+  It matters because our two kernel sets are not equally bad.
+
 - **A token moves 8.00 GB of weights, so 1.8 tokens per second needs 14.4 GB/s. We deliver 1.16.**
   That is roughly 3% of what a dual-channel desktop memory bus hands over, and it reframes every
   performance question this milestone has asked.

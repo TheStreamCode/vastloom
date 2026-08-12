@@ -2,6 +2,15 @@
 
 ## Unreleased
 
+- Added the first quantized CUDA kernel: a Q8_0 matvec in hand-written PTX, loaded through the same
+  toolkit-free driver path as the RMSNorm gate. On the reference RTX 4070 Super a 4096×4096 matvec
+  runs in 0.5735 ms against 3.0305 ms for the twelve-threaded CPU kernel — 5.28× — with a maximum
+  absolute error of 3.8147e-06 against a 2e-2 gate. Blocks accumulate in the reference's order but in
+  FP32 rather than FP64, so this is a tolerance gate, not a parity gate. The kernel is deliberately
+  naive: one thread per row, no coalescing, no warp reduction, matrix copied per call. Nothing is
+  wired into the graph yet, so the model does not run faster because of it — this establishes the
+  kernel and its numerics. `cuda-info --matvec-smoke` reports both timings.
+
 - The complete DeepSeek V4 Flash 0731 model executed a forward pass on the reference PC: all 43
   layers, the checkpoint's own routers, 258 expert bundles and 1,770,651,648 bytes of expert payload
   — exactly the `no_cache_expert_bytes_per_token` figure derived from metadata at an earlier

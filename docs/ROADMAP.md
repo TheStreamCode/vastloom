@@ -347,9 +347,13 @@ recorded in the [M8 CUDA RMSNorm report](reports/M8_CUDA_RMSNORM_VALIDATION.md).
   the full pass again.
 - [x] Thread the packed matvecs and give inference half the machine rather than a fixed six workers:
   60.3 s per token to 26 s, byte-identical output, workers drawn from a pool created once.
-- [ ] Quantized CUDA kernels — Q8_0 for the large attention projections, IQ1_S/IQ3_XXS for the
-  routed experts, then attention itself. The measurements say arithmetic is what stands between
-  26 s per token and an interactive model; NVMe supplies its 2.7 GB per token in under a second.
+- [x] First quantized CUDA kernel: Q8_0 matvec in hand-written PTX, 0.5735 ms against 3.0305 ms for
+  the twelve-threaded CPU kernel at 4096×4096, max error 3.8147e-06. Naive on purpose — one thread
+  per row, no coalescing, matrix copied per call — so the headroom above 5.28× is large.
+- [ ] IQ1_S and IQ3_XXS kernels for the routed experts, which are the larger share of per-layer
+  arithmetic, then attention itself.
+- [ ] Wire the GPU kernels into the graph and keep weights resident in VRAM across calls, rather
+  than copying a matrix per launch. Until this lands the kernels do not make the model faster.
 - [ ] Load and release layer trunks the way experts now are. All 43 are held resident, so the pass
   needs 6.39 GB of trunk and a host with less free RAM is refused rather than served — the largest
   remaining obstacle to running on ordinary machines, and the project's founding idea.

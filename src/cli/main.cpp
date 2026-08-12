@@ -2016,7 +2016,7 @@ int command_deepseek_forward(const std::vector<std::string>& args) {
     const bool json = has_flag(args, "--json");
     auto valid = validate_options(
         args, 1U,
-        {"--token", "--layers", "--context", "--batch-size", "--expert-cache", "--prompt",
+        {"--token", "--layers", "--context", "--batch-size", "--expert-cache", "--trunk-window", "--prompt",
          "--tokenizer", "--max-tokens"},
         {"--json", "--dry-run", "--chat", "--cpu-only"});
     if (!valid) return print_error(valid.error(), json);
@@ -2146,7 +2146,13 @@ int command_deepseek_forward(const std::vector<std::string>& args) {
     // its RAM: the floor stops scaling with the model and starts scaling with one layer. Charged as
     // the window's capacity plus one spare layer, and against the largest layer rather than the
     // average, because a refusal that comes too late is worse than one that comes too early.
-    constexpr std::size_t kTrunkWindowCapacity = 2U;
+    // How many layer trunks stay resident. Two is enough to execute, but reloading each layer on
+    // every token is itself expensive, and holding more trades host RAM - and therefore the
+    // accelerator's ceiling - against that I/O. Which side wins depends on the machine, so it is a
+    // knob rather than a constant.
+    auto trunk_window = optional_size(args, "--trunk-window", 2U);
+    if (!trunk_window) return print_error(trunk_window.error(), json);
+    const std::size_t kTrunkWindowCapacity = std::max<std::size_t>(1U, trunk_window.value());
     const auto average_trunk = depth == 0U ? 0U : trunk_bytes / depth;
     const auto resident_trunk_bytes =
         std::min(trunk_bytes, average_trunk * (kTrunkWindowCapacity + 1U) * 2U);
@@ -2445,6 +2451,10 @@ int command_deepseek_forward(const std::vector<std::string>& args) {
                       << vastloom::inference::to_string(generated.value().finish_reason)
                       << "\",\"text\":\"" << vastloom::util::json_escape(text)
                       << "\",\"expert_bytes_read\":" << stats.logical_expert_bytes_read
+                      // Where a token's time actually goes: reading experts off NVMe against
+                      // multiplying by them. Optimising the wrong one of these is easy to do blind.
+                      << ",\"expert_load_ms\":" << stats.expert_load_service_ms
+                      << ",\"expert_compute_ms\":" << stats.expert_compute_ms
                       << ",\"forward_passes\":" << stats.forward_passes
                       << ",\"resident_bytes\":" << required
                       << ",\"gpu_matvecs\":" << gpu_stats.accelerated

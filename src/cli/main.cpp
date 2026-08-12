@@ -2361,7 +2361,7 @@ int command_deepseek_forward(const std::vector<std::string>& args) {
     auto valid = validate_options(
         args, 1U,
         {"--token", "--layers", "--context", "--batch-size", "--expert-cache", "--trunk-window", "--prompt",
-         "--tokenizer", "--max-tokens", "--continue-ids"},
+         "--tokenizer", "--max-tokens", "--continue-ids", "--gpu-limit"},
         {"--json", "--dry-run", "--chat", "--cpu-only"});
     if (!valid) return print_error(valid.error(), json);
     if (args.empty() || vastloom::util::starts_with(args.front(), "--")) {
@@ -2644,6 +2644,19 @@ int command_deepseek_forward(const std::vector<std::string>& args) {
             }
             accelerator_options.maximum_resident_bytes = std::min<vastloom::ByteCount>(
                 policy.value().resources.vram_hard_limit, host_headroom);
+            // An explicit ceiling, for comparing two runs rather than two machine states.
+            //
+            // The derived ceiling moves with whatever else the host is doing - it varied between
+            // 1.05 and 2.34 GB across one afternoon - and it is the single largest influence on the
+            // time per token, so an A/B that does not hold it fixed measures the machine. Only ever
+            // lowers: the Governor's limit still bounds it, and this cannot raise it.
+            if (option_value(args, "--gpu-limit").has_value()) {
+                auto mebibytes = optional_size(args, "--gpu-limit", 0U);
+                if (!mebibytes) return print_error(mebibytes.error(), json);
+                accelerator_options.maximum_resident_bytes = std::min<vastloom::ByteCount>(
+                    accelerator_options.maximum_resident_bytes,
+                    static_cast<vastloom::ByteCount>(mebibytes.value()) * vastloom::MiB);
+            }
             gpu_resident_limit = accelerator_options.maximum_resident_bytes;
             // A ceiling of zero means the GPU is present and unusable, which costs about fourfold
             // and otherwise looks like the model simply being slow. The Governor is right to refuse

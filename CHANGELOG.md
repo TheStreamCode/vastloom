@@ -2,6 +2,12 @@
 
 ## Unreleased
 
+- `deepseek-forward --gpu-limit N` pins the accelerator's ceiling to N mebibytes, so an A/B compares
+  two runs rather than two machine states. The derived ceiling moves with whatever else the host is
+  doing — it varied between 1.05 and 2.34 GB across one afternoon — and it is the largest single
+  influence on the time per token, which invalidated three comparisons here before it was noticed.
+  It only ever lowers: the Governor's limit still bounds it.
+
 - **A busy host no longer switches the GPU off entirely.** The accelerator's ceiling is what the RAM
   limit leaves after the pass's own requirement and a 3 GiB reserve for allocations the preflight
   does not model, and on a loaded machine that subtraction reaches zero: a full-depth token cost
@@ -37,12 +43,25 @@
   uploads per pass were evicting the trunk, and `trunk_reloads` sat at exactly 473 — 43 layers times
   11 passes, every layer re-read on every pass — whether the ceiling was 1 GB or 6.
 
-  **This change is not yet measured.** The reference machine currently gives the accelerator a
-  ceiling of zero, so the code does not execute at all: a 43-layer pass falls to CPU and costs
-  55,788 ms per token against 8,768 with a 2 GB ceiling. The measurement needs about 15 GiB of
-  available host memory; the numbers to watch are `trunk_reloads` against 473 and
-  `trunk_bytes_read` against 65.3 GB. Correctness is checked — 28/28, output unchanged — but no
-  speed is claimed and the hypothesis may still be wrong.
+  **Measured, and it changes nothing.** At a ceiling pinned to 1 GiB the run returns `trunk_reloads`
+  473, `trunk_bytes_read` 65.3 GB and `trunk_device_hits` 7,095 — the same three numbers as every
+  other configuration tried, whether the victim is chosen by recency or by recurrence, whether the
+  window streams layers or single matrices, and at every ceiling between 1.05 and 2.34 GB.
+
+  The arithmetic says why, and it is not a bad choice of victim. A pass wants about 9 GB — 6.39 of
+  trunk plus 2.5 of experts — against a cache this host cannot take past 2.3. At that ratio
+  everything is evicted before it is next needed no matter which order it leaves in. 473 is exactly
+  43 layers times 11 passes: every layer is re-read on every pass, always. Cache policy is closed as
+  a lever until the ceiling approaches the working set, which needs host commit this machine does
+  not have.
+
+  The change is kept because it is right by construction — a routed expert genuinely will not be
+  asked for again and an always-active matrix genuinely will — and because the pathology it removes
+  returns the moment a ceiling can hold the trunk. It is credited with no gain.
+
+  One number is worth suspicion rather than trust: `trunk_device_hits` is 7,095 in every run ever
+  measured here. A count that does not move when the cache policy, the cache size and the fetch
+  granularity all change is not measuring what the cache retains between passes.
 
 - A GPU with no host budget now says so. The accelerator's ceiling is what the RAM limit leaves
   after the pass's own requirement and a 3 GiB reserve for what the preflight does not model, and

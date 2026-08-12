@@ -2210,6 +2210,7 @@ int command_deepseek_forward(const std::vector<std::string>& args) {
     // run there and stay resident in VRAM; everything else keeps using the CPU reference. If the
     // driver is missing or the device refuses, the pass runs exactly as before.
     std::unique_ptr<vastloom::cuda::CudaMatvecAccelerator> accelerator;
+    vastloom::ByteCount gpu_resident_limit = 0U;
     if (!has_flag(args, "--cpu-only")) {
         auto cuda_driver = vastloom::cuda::CudaDriver::load();
         if (cuda_driver) {
@@ -2228,6 +2229,7 @@ int command_deepseek_forward(const std::vector<std::string>& args) {
                     : 0U;
             accelerator_options.maximum_resident_bytes = std::min<vastloom::ByteCount>(
                 policy.value().resources.vram_hard_limit, host_headroom);
+            gpu_resident_limit = accelerator_options.maximum_resident_bytes;
             // Attention contributes a handful of matrices per layer, but every routed expert is
             // two more, and a decode step may select different experts each token. Let VRAM be the
             // limit rather than a count sized for attention alone.
@@ -2353,6 +2355,9 @@ int command_deepseek_forward(const std::vector<std::string>& args) {
                       << ",\"gpu_matvecs\":" << gpu_stats.accelerated
                       << ",\"gpu_declined\":" << gpu_stats.declined
                       << ",\"gpu_resident_bytes\":" << gpu_stats.resident_bytes
+                      // What the accelerator was allowed to hold, so a run that declines most of
+                      // its matvecs shows whether it ran out of room or out of supported types.
+                      << ",\"gpu_resident_limit\":" << gpu_resident_limit
                       << ",\"gpu_kernel_ms\":" << gpu_stats.kernel_ms
                       << ",\"load_ms\":" << load_elapsed
                       << ",\"generate_ms\":" << generate_elapsed

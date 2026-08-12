@@ -128,20 +128,16 @@ Result<bool> CudaMatvecAccelerator::matvec(
         stats_.resident_matrices = resident_.size();
     }
 
+    // Upload, launch and download in one driver entry: three separate calls each push and pop the
+    // context and synchronize, which costs more than the kernel itself at this call rate.
     auto& live = entry->second;
-    auto copied_input = driver_.copy_from_host(
-        live.allocation, live.input_offset, std::as_bytes(input));
-    if (!copied_input) return copied_input.error();
     const auto started = std::chrono::steady_clock::now();
-    auto launched = driver_.launch_matvec_q8_0(
+    auto executed = driver_.matvec_q8_0_with_transfer(
         live.allocation, 0U, live.input_offset, live.output_offset, live.rows,
-        live.blocks_per_row);
-    if (!launched) return launched.error();
+        live.blocks_per_row, std::as_bytes(input), std::as_writable_bytes(output));
+    if (!executed) return executed.error();
     stats_.kernel_ms += std::chrono::duration<double, std::milli>(
         std::chrono::steady_clock::now() - started).count();
-    auto copied_output = driver_.copy_to_host(
-        live.allocation, live.output_offset, std::as_writable_bytes(output));
-    if (!copied_output) return copied_output.error();
     ++stats_.accelerated;
     return true;
 }

@@ -74,6 +74,18 @@ public:
         ByteCount output_offset,
         std::size_t row_count,
         std::size_t blocks_per_row) = 0;
+    // Upload, launch and download inside one context push. Called thousands of times per generated
+    // token, where three separate entries cost more in round trips than the kernel does in
+    // arithmetic.
+    [[nodiscard]] virtual Result<void> matvec_q8_0_with_transfer(
+        const CudaBackendAllocation& allocation,
+        ByteCount matrix_offset,
+        ByteCount input_offset,
+        ByteCount output_offset,
+        std::size_t row_count,
+        std::size_t blocks_per_row,
+        std::span<const std::byte> input,
+        std::span<std::byte> output) = 0;
 };
 
 class CudaAllocation {
@@ -148,6 +160,15 @@ public:
         ByteCount output_offset,
         std::size_t row_count,
         std::size_t blocks_per_row) const;
+    [[nodiscard]] Result<void> matvec_q8_0_with_transfer(
+        CudaAllocation& allocation,
+        ByteCount matrix_offset,
+        ByteCount input_offset,
+        ByteCount output_offset,
+        std::size_t row_count,
+        std::size_t blocks_per_row,
+        std::span<const std::byte> input,
+        std::span<std::byte> output) const;
 
 private:
     explicit CudaDriver(std::shared_ptr<CudaDriverBackend> backend);

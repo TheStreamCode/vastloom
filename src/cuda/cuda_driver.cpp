@@ -607,6 +607,65 @@ public:
         return {};
     }
 
+    [[nodiscard]] Result<void> matvec_q8_0_with_transfer(
+        const CudaBackendAllocation& allocation,
+        ByteCount matrix_offset,
+        ByteCount input_offset,
+        ByteCount output_offset,
+        std::size_t row_count,
+        std::size_t blocks_per_row,
+        std::span<const std::byte> input,
+        std::span<std::byte> output) override {
+        std::scoped_lock lock(mutex_);
+        auto input_range = validate_allocation_range(allocation, input_offset, input.size());
+        if (!input_range) return input_range.error();
+        auto output_range = validate_allocation_range(allocation, output_offset, output.size());
+        if (!output_range) return output_range.error();
+        auto prepared = validate_matvec_q8_0_locked(allocation, matrix_offset, input_offset,
+                                                    output_offset, row_count, blocks_per_row);
+        if (!prepared) return prepared.error();
+
+        auto* context = reinterpret_cast<CuContext>(allocation.context);
+        CuResult status = context_push_(context);
+        if (status != kCudaSuccess) return cuda_error("cuCtxPushCurrent_v2", status);
+        auto module = cached_module_locked(context, allocation.device_ordinal);
+        if (!module) {
+            static_cast<void>(pop_context_locked(context));
+            return module.error();
+        }
+        CuFunction function = nullptr;
+        status = module_get_function_(&function, module.value(), "vastloom_matvec_q8_0_f32");
+        if (status != kCudaSuccess) {
+            static_cast<void>(pop_context_locked(context));
+            return cuda_error("cuModuleGetFunction", status);
+        }
+        status = copy_host_to_device_(allocation.device_pointer + input_offset, input.data(),
+                                      input.size());
+        if (status == kCudaSuccess) {
+            CuDevicePointer matrix_pointer = allocation.device_pointer + matrix_offset;
+            CuDevicePointer input_pointer = allocation.device_pointer + input_offset;
+            CuDevicePointer output_pointer = allocation.device_pointer + output_offset;
+            auto rows = static_cast<std::uint32_t>(row_count);
+            auto row_blocks = static_cast<std::uint32_t>(blocks_per_row);
+            void* parameters[] = {&matrix_pointer, &input_pointer, &output_pointer, &rows,
+                                  &row_blocks};
+            constexpr std::uint32_t kThreadsPerBlock = 128U;
+            const std::uint32_t grid = (rows + kThreadsPerBlock - 1U) / kThreadsPerBlock;
+            status = launch_kernel_(function, grid, 1U, 1U, kThreadsPerBlock, 1U, 1U, 0U, nullptr,
+                                    parameters, nullptr);
+        }
+        // One synchronize covers the launch; the device-to-host copy is ordered after it on the
+        // null stream, so the download needs no separate barrier.
+        if (status == kCudaSuccess) {
+            status = copy_device_to_host_(output.data(), allocation.device_pointer + output_offset,
+                                          output.size());
+        }
+        auto popped = pop_context_locked(context);
+        if (status != kCudaSuccess) return cuda_error("CUDA Q8_0 matvec transfer/launch", status);
+        if (!popped) return popped.error();
+        return {};
+    }
+
     [[nodiscard]] Result<void> launch_matvec_q8_0(
         const CudaBackendAllocation& allocation,
         ByteCount matrix_offset,
@@ -615,6 +674,56 @@ public:
         std::size_t row_count,
         std::size_t blocks_per_row) override {
         std::scoped_lock lock(mutex_);
+        auto prepared = validate_matvec_q8_0_locked(allocation, matrix_offset, input_offset,
+                                                    output_offset, row_count, blocks_per_row);
+        if (!prepared) return prepared.error();
+
+        auto* context = reinterpret_cast<CuContext>(allocation.context);
+        CuResult status = context_push_(context);
+        if (status != kCudaSuccess) return cuda_error("cuCtxPushCurrent_v2", status);
+        // JIT-compiling the PTX costs milliseconds, which dwarfs the kernel itself when a
+        // generation issues thousands of matvecs. The module is cached per context and unloaded
+        // when the backend is destroyed.
+        auto module = cached_module_locked(context, allocation.device_ordinal);
+        if (!module) {
+            static_cast<void>(pop_context_locked(context));
+            return module.error();
+        }
+        CuFunction function = nullptr;
+        status = module_get_function_(&function, module.value(), "vastloom_matvec_q8_0_f32");
+        if (status != kCudaSuccess) {
+            static_cast<void>(pop_context_locked(context));
+            return cuda_error("cuModuleGetFunction", status);
+        }
+        CuDevicePointer matrix_pointer = allocation.device_pointer + matrix_offset;
+        CuDevicePointer input_pointer = allocation.device_pointer + input_offset;
+        CuDevicePointer output_pointer = allocation.device_pointer + output_offset;
+        auto rows = static_cast<std::uint32_t>(row_count);
+        auto row_blocks = static_cast<std::uint32_t>(blocks_per_row);
+        void* parameters[] = {&matrix_pointer, &input_pointer, &output_pointer, &rows,
+                              &row_blocks};
+        constexpr std::uint32_t kThreadsPerBlock = 128U;
+        const std::uint32_t grid = (rows + kThreadsPerBlock - 1U) / kThreadsPerBlock;
+        status = launch_kernel_(function, grid, 1U, 1U, kThreadsPerBlock, 1U, 1U, 0U, nullptr,
+                                parameters, nullptr);
+        if (status == kCudaSuccess) status = context_synchronize_();
+        auto popped = pop_context_locked(context);
+        if (status != kCudaSuccess) return cuda_error("CUDA Q8_0 matvec launch/synchronize", status);
+        if (!popped) return popped.error();
+        return {};
+    }
+
+private:
+    DynamicCudaBackend() = default;
+
+    // Shared bounds check for both Q8_0 entry points. The caller must already hold the lock.
+    [[nodiscard]] Result<void> validate_matvec_q8_0_locked(
+        const CudaBackendAllocation& allocation,
+        ByteCount matrix_offset,
+        ByteCount input_offset,
+        ByteCount output_offset,
+        std::size_t row_count,
+        std::size_t blocks_per_row) const {
         constexpr ByteCount kBlockBytes = 34U;
         constexpr ByteCount kBlockElements = 32U;
         if (row_count == 0U || blocks_per_row == 0U ||
@@ -659,44 +768,8 @@ public:
             return make_error(ErrorCode::invalid_argument,
                               "CUDA Q8_0 matvec ranges must not overlap");
         }
-
-        auto* context = reinterpret_cast<CuContext>(allocation.context);
-        CuResult status = context_push_(context);
-        if (status != kCudaSuccess) return cuda_error("cuCtxPushCurrent_v2", status);
-        // JIT-compiling the PTX costs milliseconds, which dwarfs the kernel itself when a
-        // generation issues thousands of matvecs. The module is cached per context and unloaded
-        // when the backend is destroyed.
-        auto module = cached_module_locked(context, allocation.device_ordinal);
-        if (!module) {
-            static_cast<void>(pop_context_locked(context));
-            return module.error();
-        }
-        CuFunction function = nullptr;
-        status = module_get_function_(&function, module.value(), "vastloom_matvec_q8_0_f32");
-        if (status != kCudaSuccess) {
-            static_cast<void>(pop_context_locked(context));
-            return cuda_error("cuModuleGetFunction", status);
-        }
-        CuDevicePointer matrix_pointer = allocation.device_pointer + matrix_offset;
-        CuDevicePointer input_pointer = allocation.device_pointer + input_offset;
-        CuDevicePointer output_pointer = allocation.device_pointer + output_offset;
-        auto rows = static_cast<std::uint32_t>(row_count);
-        auto row_blocks = static_cast<std::uint32_t>(blocks_per_row);
-        void* parameters[] = {&matrix_pointer, &input_pointer, &output_pointer, &rows,
-                              &row_blocks};
-        constexpr std::uint32_t kThreadsPerBlock = 128U;
-        const std::uint32_t grid = (rows + kThreadsPerBlock - 1U) / kThreadsPerBlock;
-        status = launch_kernel_(function, grid, 1U, 1U, kThreadsPerBlock, 1U, 1U, 0U, nullptr,
-                                parameters, nullptr);
-        if (status == kCudaSuccess) status = context_synchronize_();
-        auto popped = pop_context_locked(context);
-        if (status != kCudaSuccess) return cuda_error("CUDA Q8_0 matvec launch/synchronize", status);
-        if (!popped) return popped.error();
         return {};
     }
-
-private:
-    DynamicCudaBackend() = default;
 
     // Loads the kernel module once per context. The caller must already hold the lock and have
     // pushed the context.
@@ -1223,6 +1296,36 @@ Result<void> CudaDriver::launch_rms_norm(
     } catch (...) {
         return make_error(ErrorCode::internal_error,
                           "CUDA backend threw an unknown RMSNorm exception");
+    }
+}
+
+Result<void> CudaDriver::matvec_q8_0_with_transfer(
+    CudaAllocation& allocation,
+    ByteCount matrix_offset,
+    ByteCount input_offset,
+    ByteCount output_offset,
+    std::size_t row_count,
+    std::size_t blocks_per_row,
+    std::span<const std::byte> input,
+    std::span<std::byte> output) const {
+    if (!allocation.valid() || allocation.backend_.get() != backend_.get()) {
+        return make_error(ErrorCode::invalid_argument,
+                          "CUDA allocation does not belong to this driver");
+    }
+    if (row_count == 0U || blocks_per_row == 0U || input.empty() || output.empty()) {
+        return make_error(ErrorCode::invalid_argument,
+                          "CUDA Q8_0 matvec transfer parameters are invalid");
+    }
+    try {
+        return backend_->matvec_q8_0_with_transfer(allocation.allocation_, matrix_offset,
+                                                   input_offset, output_offset, row_count,
+                                                   blocks_per_row, input, output);
+    } catch (const std::exception& exception) {
+        return make_error(ErrorCode::internal_error,
+                          "CUDA backend threw during Q8_0 matvec transfer", exception.what());
+    } catch (...) {
+        return make_error(ErrorCode::internal_error,
+                          "CUDA backend threw an unknown Q8_0 matvec transfer exception");
     }
 }
 

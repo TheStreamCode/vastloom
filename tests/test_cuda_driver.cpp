@@ -244,6 +244,23 @@ public:
         return {};
     }
 
+    [[nodiscard]] vastloom::Result<void> matvec_q8_0_with_transfer(
+        const vastloom::cuda::CudaBackendAllocation& allocation,
+        vastloom::ByteCount matrix_offset,
+        vastloom::ByteCount input_offset,
+        vastloom::ByteCount output_offset,
+        std::size_t row_count,
+        std::size_t blocks_per_row,
+        std::span<const std::byte> input,
+        std::span<std::byte> output) override {
+        auto uploaded = copy_from_host(allocation, input_offset, input);
+        if (!uploaded) return uploaded.error();
+        auto launched = launch_matvec_q8_0(allocation, matrix_offset, input_offset, output_offset,
+                                           row_count, blocks_per_row);
+        if (!launched) return launched.error();
+        return copy_to_host(allocation, output_offset, output);
+    }
+
     // Deterministic stand-in for the Q8_0 kernel: same block layout, same accumulation order, so
     // the surrounding contract can be exercised without a GPU.
     [[nodiscard]] vastloom::Result<void> launch_matvec_q8_0(

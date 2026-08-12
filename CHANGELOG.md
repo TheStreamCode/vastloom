@@ -2,6 +2,20 @@
 
 ## Unreleased
 
+- Added the IQ2_XXS kernel, which the decline breakdown had ranked first. Declines at 43 layers fall
+  from 5,089 to 2,749 and a token from about 13,226 to 11,739-11,954 ms, with zero absolute error
+  against the reference. The two runs land within 1.8% of each other, tighter than anything else
+  measured, so this clears the noise floor.
+
+  The gain is smaller than the decline count implied, and the standalone gate says why: IQ2_XXS
+  costs 2.05 ms on twelve CPU threads against IQ1_S''s 8.03 for the same shape, so it wins 2.3x on
+  the device rather than 9x. Decline counts rank what to write next; they do not predict what each
+  is worth.
+
+  Grids now start on an eight-byte boundary rather than immediately after the weights. They are read
+  with 64-bit loads, and block strides of 50 and 66 bytes end a matrix wherever they please - latent
+  for IQ1_S, and it would have fired on the first shape whose byte count was not a multiple of eight.
+
 - The model answered a question. With the checkpoint's chat template applied,
   `"Qual e la capitale d'Italia?"` produced `"La capitale d'Italia è **R Roma**."` and stopped on its
   own stop token rather than running out of budget — correct answer, correct Italian, assistant-style

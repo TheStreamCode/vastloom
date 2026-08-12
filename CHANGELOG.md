@@ -2,6 +2,40 @@
 
 ## Unreleased
 
+- **The forward pass was reading the Hyper-Connection mixing matrix transposed, and the model now
+  answers `"La capitale d'Italia è **Roma**."`** The stray `R` that this changelog spent a milestone
+  attributing to 1.5-bit quantization was one index expression.
+
+  `deepseek_v4_hc_post` summed `combination[destination][source]` where the layout is
+  `[source][destination]`. The Sinkhorn normalization ends with a pass over sources, so
+  `Σ_src comb[dst][src] = 1` and that direction is a convex combination of the residual streams,
+  which preserves magnitude. Summing the transpose sums a direction nothing normalized: slightly
+  more than one, every layer, forty-three times.
+
+  Verified against llama.cpp on the same checkpoint and the same tokens. All eight strongest logits
+  now match in the same order, with differences of 0.01 to 0.06 — the f64-versus-f32 accumulation
+  gap between two independent implementations, not a defect:
+
+  | | here | llama.cpp |
+  |---|---|---|
+  | top 1–8 | 5, 201, 372, 1897, 7249, 13989, 6201, 271 | 5, 201, 372, 1897, 7249, 13989, 6201, 271 |
+
+  The hidden state at forty-three layers fell from RMS 4,064 to 1,010, and the generated token that
+  had been wrong is now 6091 `oma` — the one the reference scored nineteen points above ours.
+
+- **The M6 operator fixture carried the same transposition**, which is why the defect survived a
+  milestone. `tools/reference_deepseek_v4_operators.py` describes itself as generating vectors "from
+  the pinned equations": it is a re-implementation written by this project, not the model's own code,
+  and it indexed `combination[destination][source]` exactly as the C++ did. Two implementations
+  agreeing proves nothing when one was written from the other's reading of the equations.
+
+  Both are corrected and the fixture regenerated. The test failing was the correct outcome and the
+  reason for changing it is external: llama.cpp, which shares no author with either.
+
+  This is the fourth time this milestone that a check could not fail — after dyadic parity values
+  that could not separate f32 from f64, a cost breakdown obtained by subtraction, and a hidden-state
+  measurement taken after the normalization that fixes it.
+
 - **The hidden state explodes with depth: RMS 6.8 at one layer, 4,064 at forty-three.**
 
   | layers | RMS | mean | min | max |

@@ -163,8 +163,16 @@ def hc_post(sublayer: list[float], residual: list[float], post: list[float], com
         for destination in range(multiplier):
             for column in range(width):
                 value = post[token * multiplier + destination] * sublayer[token * width + column]
+                # combination is stored [source][destination]. The Sinkhorn softmax runs over the
+                # inner index and its last normalization is over sources, so this is the direction
+                # that sums to one; the transpose sums a direction nothing normalized and multiplies
+                # the residual a little more each layer.
+                #
+                # This file carried the same error as the C++ it was written to check, which is why
+                # the two agreed for a milestone. Two implementations agreeing proves nothing when
+                # one was written from the other's reading of the equations.
                 value += sum(
-                    combination[(token * multiplier + destination) * multiplier + source]
+                    combination[(token * multiplier + source) * multiplier + destination]
                     * residual[(token * multiplier + source) * width + column]
                     for source in range(multiplier)
                 )

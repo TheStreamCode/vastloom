@@ -587,9 +587,16 @@ Result<std::vector<float>> deepseek_v4_hc_post(
             for (std::size_t column = 0U; column < width; ++column) {
                 double value = static_cast<double>(split.post[token * split.multiplier + destination]) *
                                static_cast<double>(sublayer[token * width + column]);
+                // combination is stored [source][destination]: the Sinkhorn softmax runs over the
+                // inner index and the last normalization it applies is over sources, so summing
+                // over `source` for a fixed `destination` is the direction that sums to one.
+                //
+                // Reading the transpose sums the other direction, which nothing normalized, so each
+                // layer multiplied the residual by slightly more than one. Over forty-three layers
+                // that took the hidden state from 6.82 to 4,064 and the final normalization hid it.
                 for (std::size_t source = 0U; source < split.multiplier; ++source) {
                     value += static_cast<double>(split.combination[
-                                 (token * split.multiplier + destination) * split.multiplier + source]) *
+                                 (token * split.multiplier + source) * split.multiplier + destination]) *
                              static_cast<double>(residual[(token * split.multiplier + source) * width + column]);
                 }
                 output[(token * split.multiplier + destination) * width + column] = static_cast<float>(value);

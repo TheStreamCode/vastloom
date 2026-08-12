@@ -52,7 +52,11 @@ def main() -> int:
         ("--json", "--json"),
         ("--allocation-smoke", "--json"),
         ("--allocation-smoke", "0", "--json"),
-        ("--allocation-smoke", "65MiB", "--json"),
+        # Above the argument's ceiling, which is a sanity bound rather than the safety mechanism:
+        # every byte still passes the Governor. The bound was raised from 64 MiB so the smoke could
+        # measure how much device memory the platform actually parts with, and what it costs in host
+        # commit; this case pins that out-of-range arguments are still refused, not the number.
+        ("--allocation-smoke", "25GiB", "--json"),
         ("--rmsnorm-smoke", "--rmsnorm-smoke", "--json"),
         ("--allocation-smoke", "1MiB", "--rmsnorm-smoke", "--json"),
         ("--minimum-free-vram", "1GiB", "--json"),

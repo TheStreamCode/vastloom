@@ -403,11 +403,15 @@ int command_cuda_info(const std::vector<std::string>& args) {
     auto minimum_free = optional_bytes(args, "--minimum-free-vram", 1U * vastloom::GiB);
     if (!smoke_bytes) return print_error(smoke_bytes.error(), json);
     if (!minimum_free) return print_error(minimum_free.error(), json);
+    // The ceiling is a sanity bound on the argument, not the safety mechanism: every byte still
+    // passes the Governor, which refuses in advance anything the host cannot afford. It was 64 MiB,
+    // which made the smoke unable to answer the question it is now needed for - how much device
+    // memory this platform will actually part with, and what that costs in host commit.
     if (allocation_smoke_requested &&
-        (smoke_bytes.value() == 0U || smoke_bytes.value() > 64U * vastloom::MiB)) {
+        (smoke_bytes.value() == 0U || smoke_bytes.value() > 24U * vastloom::GiB)) {
         return print_error(vastloom::make_error(
                                vastloom::ErrorCode::invalid_argument,
-                               "--allocation-smoke must be between 1 byte and 64 MiB"),
+                               "--allocation-smoke must be between 1 byte and 24 GiB"),
                            json);
     }
 
@@ -417,6 +421,8 @@ int command_cuda_info(const std::vector<std::string>& args) {
     if (!probe) return print_error(probe.error(), json);
 
     bool allocation_smoke_passed = false;
+    vastloom::ByteCount smoke_commit_before = 0U;
+    vastloom::ByteCount smoke_commit_after = 0U;
     bool rmsnorm_smoke_passed = false;
     double rmsnorm_max_abs_error = 0.0;
     vastloom::cuda::CudaRmsNormStats rmsnorm_stats;
@@ -471,9 +477,19 @@ int command_cuda_info(const std::vector<std::string>& args) {
         if (!safe) return print_error(safe.error(), json);
         vastloom::safety::ResourceGovernor governor(policy.value().resources);
         if (allocation_smoke_requested) {
+            // Host commit either side of a device allocation, because on Windows the two are
+            // believed to move together roughly one for one - and that belief is what caps the
+            // accelerator's ceiling and keeps the 6.39 GB trunk from ever being resident. Measured
+            // rather than assumed: the difference between the two samples is the coupling.
+            const auto commit_before = vastloom::safety::process_peak_commit_bytes();
             auto allocation = driver.value().allocate(
                 0, smoke_bytes.value(), minimum_free.value(), governor, "cuda-info-smoke");
             if (!allocation) return print_error(allocation.error(), json);
+            const auto commit_after = vastloom::safety::process_peak_commit_bytes();
+            if (commit_before && commit_after) {
+                smoke_commit_before = commit_before.value();
+                smoke_commit_after = commit_after.value();
+            }
             auto released = allocation.value().release();
             if (!released) return print_error(released.error(), json);
             allocation_smoke_passed = true;
@@ -1168,7 +1184,9 @@ int command_cuda_info(const std::vector<std::string>& args) {
                 output += allocation_smoke_passed ? "true" : "false";
                 output += ",\"bytes\":" + std::to_string(smoke_bytes.value()) +
                           ",\"minimum_free_vram_after\":" +
-                          std::to_string(minimum_free.value()) + "}}";
+                          std::to_string(minimum_free.value()) +
+                          ",\"host_commit_before\":" + std::to_string(smoke_commit_before) +
+                          ",\"host_commit_after\":" + std::to_string(smoke_commit_after) + "}}";
             } else if (iq1s_smoke_requested) {
                 output += ",\"matvec_iq1_s_smoke\":{\"passed\":";
                 output += iq1s_smoke_passed ? "true" : "false";

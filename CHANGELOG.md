@@ -2,6 +2,34 @@
 
 ## Unreleased
 
+- **VRAM costs host commit one for one, measured rather than assumed — and six gigabytes of it are
+  available.** The belief that a device allocation carries an equal host commit charge on Windows
+  has capped the accelerator's ceiling since this milestone began. `cuda-info --allocation-smoke`
+  now reports host commit either side of the allocation:
+
+  | device allocation | host commit delta | marginal ratio |
+  |---:|---:|---:|
+  | 1 GB | 1.25 GB | 1.25 |
+  | 2 GB | 2.25 GB | 1.13 |
+  | 4 GB | 4.26 GB | 1.06 |
+  | 6 GB | 6.26 GB | 1.04 |
+
+  A fixed 0.25 GB for the CUDA context, and a marginal cost converging on 1.00. The coupling is
+  real.
+
+  The more useful half: **six gigabytes allocate**. Neither Windows nor the driver refuses them, so
+  the engine's 1–2.3 GB ceiling is its own arithmetic — `budget − required − 3 GiB` — where that
+  3 GiB reserve was measured earlier to stand in for 0.23 GB of unmodelled allocation.
+
+  What follows is a host-memory condition rather than a code change. The 6.39 GB trunk can be
+  resident when the machine has roughly 22 GiB free; at 17 GiB the ceiling lands near 3.2 GB and it
+  cannot. Residency is worth having: it would take PCIe traffic from 8.54 GB per pass to 2.37 and
+  the reuse factor from 1.03 to about four.
+
+  The smoke's argument ceiling went from 64 MiB to 24 GiB to make this measurable. It is a sanity
+  bound on the argument, not the safety mechanism — the Governor still refuses in advance anything
+  the host cannot afford, and did so at 8 GB.
+
 - **Interleaving the Q8_0 weight layout for coalescing was 21% slower, and the reason ties it to a
   different problem.** One thread per output row against row-major storage puts consecutive threads
   a whole row apart, so a warp issues thirty-two separate memory transactions. Storing block *b* of

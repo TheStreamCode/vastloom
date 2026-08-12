@@ -271,11 +271,35 @@ together are worth less than those two decisions.
 
 ## Where a token goes now
 
+**The table below was wrong and is kept for the record; the corrected one follows.** Its trunk figure
+came from subtraction — every millisecond not otherwise attributed was charged to trunk reloading —
+and subtraction cannot distinguish reading from computing. It sent a milestone's worth of work after
+an I/O cost that was mostly page-cache hits.
+
 | | ms | share |
 |---|---:|---:|
 | trunk reloads | ~3,708 | 50% |
 | GPU kernels | 2,450 | 33% |
 | expert I/O | 1,283 | 17% |
+
+Measured directly instead, over a 75,769 ms generation:
+
+| | ms | share |
+|---|---:|---:|
+| GPU kernels | 23,724 | 31% |
+| expert loading | 15,014 | 20% |
+| expert compute | 13,601 | 18% |
+| everything else, trunk reads included | 23,430 | 31% |
+
+What bounds the trunk's share is a change that hit its prediction and bought nothing: retaining a
+fixed set of eight layers instead of the most recent two cut reloads from 473 to 393 and traffic from
+65.3 GB to 54.5, exactly as predicted, and moved the clock 1.9% — inside the noise. Ten point eight
+fewer gigabytes for no measurable time puts trunk reading near 7.7 GB/s, which is page-cache speed,
+not NVMe speed. The same page cache that made direct I/O three times slower had been serving the
+trunk all along.
+
+The distinction that matters for what to do next: expert bytes are 26.1 GB read once each and are
+real device traffic, while trunk bytes are the same 6.39 GB re-read eleven times and mostly are not.
 
 Trunk reloading is the largest single cost and is pure repetition: 47 reloads per token, about 7 GB,
 the same bytes every time. Serving payload-free descriptors for device-resident matrices is

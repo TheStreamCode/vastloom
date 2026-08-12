@@ -7,6 +7,7 @@
 #include <cstdlib>
 #include <filesystem>
 #include <fstream>
+#include <iomanip>
 #include <iostream>
 #include <initializer_list>
 #include <limits>
@@ -3043,6 +3044,27 @@ int command_deepseek_forward(const std::vector<std::string>& args) {
         expert_misses += snapshot.misses;
     }
 
+    // The eight strongest candidates and their exact logits.
+    //
+    // A greedy token on its own cannot say whether a disagreement with another implementation is a
+    // defect or the last bit of arithmetic: two logits a hair apart are decided by accumulation
+    // order, and this reference sums in double where ggml sums in float. The margin is what tells
+    // those apart, so report it rather than the winner alone.
+    std::vector<std::pair<float, std::uint32_t>> ranked;
+    {
+        const auto& logits = forward.value().logits;
+        ranked.reserve(logits.size());
+        for (std::size_t index = 0U; index < logits.size(); ++index) {
+            ranked.emplace_back(logits[index], static_cast<std::uint32_t>(index));
+        }
+        const std::size_t wanted = std::min<std::size_t>(8U, ranked.size());
+        std::partial_sort(ranked.begin(), ranked.begin() + static_cast<std::ptrdiff_t>(wanted),
+                          ranked.end(), [](const auto& left, const auto& right) {
+                              return left.first > right.first;
+                          });
+        ranked.resize(wanted);
+    }
+
     if (json) {
         std::cout << "{\"ok\":true,\"complete_model\":" << (complete ? "true" : "false")
                   << ",\"executed_layers\":" << depth
@@ -3050,7 +3072,17 @@ int command_deepseek_forward(const std::vector<std::string>& args) {
                   << ",\"prompt_tokens\":" << token_ids.size()
                   << ",\"next_token\":" << forward.value().greedy_token_id
                   << ",\"next_text\":\"" << vastloom::util::json_escape(next_text)
-                  << "\",\"logits\":" << forward.value().logits.size()
+                  << "\",\"top_logits\":[";
+        {
+            bool first_rank = true;
+            for (const auto& [value, id] : ranked) {
+                if (!first_rank) std::cout << ',';
+                first_rank = false;
+                std::cout << "{\"id\":" << id << ",\"logit\":"
+                          << std::setprecision(9) << value << '}';
+            }
+        }
+        std::cout << "],\"logits\":" << forward.value().logits.size()
                   << ",\"expert_bytes_read\":" << expert_bytes_read
                   << ",\"expert_misses\":" << expert_misses
                   << ",\"resident_bytes\":" << required

@@ -11,13 +11,26 @@
   only one left standing was the forward pass, which no internal test could indict because every
   internal test shares it.
 
-  The disagreement is narrow. Eight generated tokens match exactly, including the `R` itself; the
-  ninth differs, `oma` (6091) where we produce ` Roma` (38710). A forward pass that were broadly
-  wrong would not agree for eight tokens, so this is a near-tie decided differently — and whether
-  that is a defect or a precision difference is not yet known. Our matvecs accumulate in `double`
-  by design, ggml's in `float`; on two logits close enough together, more precision and different
-  precision look the same from outside. The next measurement is the gap between the top two logits
-  at that position: wide means a bug, narrow means arithmetic.
+  Eight generated tokens match exactly, including the `R` itself; the ninth differs, `oma` (6091)
+  where we produce ` Roma` (38710). That looked like a near-tie decided differently — our matvecs
+  accumulate in `double` by design and ggml's in `float` — so the logits were measured on both
+  sides at that exact position, through a one-shot probe linked against llama.cpp's own library.
+
+  | | llama.cpp | here |
+  |---|---:|---:|
+  | strongest | **6091 `oma`, 39.51** | 38710 ` Roma`, 24.83 |
+  | margin over second | **17.20** | 1.85 |
+  | logit of 38710 | 17.71 | 24.83 (chosen) |
+
+  Not a tie, and not arithmetic. The reference is overwhelming — 39.5 with a seventeen-point gap —
+  and puts our choice 21.8 below its own. We rank its answer sixth.
+
+  The useful part is the shape rather than the ranking: our strongest logit is 24.8 where theirs is
+  39.5, so our distribution is flat where theirs is sharp. A rounding difference cannot flatten a
+  distribution. That points at the final hidden state being attenuated or misdirected rather than at
+  any single expert or quantization path, which puts the output Hyper-Connection mixing, the final
+  normalization and the LM head at the top of the list. Eight tokens agreed because those calls were
+  not close either.
 
   Two things are independently confirmed by the same run: the tokenizer and chat template are exact
   — llama.cpp turns the templated prompt into the identical twelve ids — and llama.cpp supports both

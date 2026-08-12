@@ -376,10 +376,18 @@ recorded in the [M8 CUDA RMSNorm report](reports/M8_CUDA_RMSNORM_VALIDATION.md).
   derived from what the preflight leaves unspent, that memory went straight to the device: 1.80 GB
   to 6.06 GB, 1,490 matvecs accelerated to 4,617, 42,466 ms per token to 30,123, identical output.
   The floor no longer scales with depth, which is the project's founding idea made operational.
-- [ ] Keep streamed trunks on the device between tokens. The window reloads each layer from NVMe on
-  every token even when the accelerator already holds those weights in VRAM, because the provider
-  materialises the payload before anything asks whether it is needed. A descriptor that knows the
-  accelerator holds it could skip the read entirely.
+- [x] Evict rather than refuse. The accelerator filled VRAM and then declined every later matrix for
+  the rest of the run, sending 6,962 of 12,007 matvecs to the CPU to avoid transfers that cost a
+  seventh of the work they were avoiding. Least-recently-used eviction: 11,639 ms per token from
+  30,280, output unchanged.
+- [x] Dense FP32 and BF16 kernels, picked by counting declines per storage type. The assumption was
+  Q5_K; the measurement put FP32 third and BF16 fifth, both far cheaper to write. Declines 3,432 to
+  2,375.
+- [ ] Kernels for IQ2_XXS (1,092 declines), Q5_K (882), Q6_K (315) and MXFP4 (84) — all that now
+  keeps work off the device.
+- [ ] Cut per-token I/O, which is roughly half the remaining cost: 4.54 GB of experts plus 6.39 GB of
+  trunk reloads. No expert bundle survives between decode steps, and the window reloads a whole
+  149 MB layer whenever any single matrix of it is missing from VRAM.
 - [ ] Count the expert loader's own read buffers in the preflight. At 32 layers it approves and the
   loader then fails on `bad_alloc`, which should have been an up-front refusal with a correct figure.
 - [ ] Pinned host buffers.

@@ -2,6 +2,21 @@
 
 ## Unreleased
 
+- The accelerator evicts its least recently used matrix instead of refusing the next one, and a
+  full-depth token went from 30,280 to 11,639 ms. It had been filling VRAM and then declining
+  everything else for the rest of the run — 6,962 of 12,007 matvecs — on the implicit theory that a
+  transfer is expensive. The arithmetic says otherwise: a routed expert costs about 0.29 ms to
+  upload and 0.88 ms to multiply against roughly 8 ms on twelve CPU threads, so re-uploading it on
+  every single use still wins about sevenfold. Refusing work to avoid a transfer that costs a
+  seventh of the work is a bad trade. Pinning trunk matrices was the same mistake in reverse and was
+  reverted: no matrix deserves permanent space.
+
+- Added dense FP32 and BF16 matvec kernels, chosen by counting declines per storage type rather than
+  by assumption. The expected next kernel was Q5_K; the measured ranking put FP32 third and BF16
+  fifth, and both are far simpler — FP32 needs no decoding, BF16 is a 16-bit shift. Declines fell
+  from 3,432 to 2,375 and both types left the table. No speed is claimed: repeated runs of identical
+  code span 11,639 to 14,955 ms per token on this host, and the change does not clear that.
+
 - Layer trunks are streamed through a bounded two-layer window instead of all staying resident, and
   a full-depth pass now needs 2.12 GB of host RAM rather than 7.62 GB. The floor stops scaling with
   depth: a deeper model no longer demands a bigger machine, and a machine with spare memory spends

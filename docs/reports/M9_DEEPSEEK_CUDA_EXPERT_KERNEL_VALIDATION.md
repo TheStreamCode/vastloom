@@ -201,6 +201,58 @@ A cost worth stating: at 16 layers, where VRAM was never scarce, streaming is 33
 3,148 ms per token against 2,374 — because the reloads buy nothing there. The window helps only when
 memory is the binding constraint, which at full depth it is.
 
+## Refusing work to avoid a transfer
+
+The accelerator filled its VRAM and then declined everything else for the rest of the run: whatever
+arrived first held the space forever. At 43 layers that sent 6,962 of 12,007 matvecs to the CPU.
+
+The policy was never supported by its own arithmetic. A routed expert costs about 0.29 ms to upload
+across PCIe and 0.88 ms to multiply, against roughly 8 ms on twelve CPU threads. Re-uploading a
+matrix every single time it is used still wins about sevenfold. Refusing work to avoid a transfer
+that costs a seventh of the work is a bad trade in every direction, and the residency cache had been
+built as if VRAM were precious and PCIe were expensive, when the measurement says the CPU is what is
+expensive.
+
+| 43 layers | Refuse when full | Evict least recently used |
+|---|---:|---:|
+| Matvecs on the GPU | 5,045 | **8,575** |
+| Declined | 6,962 | **3,432** |
+| ms per token | 30,280 | **11,639** |
+
+2.6×, with the output unchanged. This is also why pinning trunk matrices was a mistake twice over:
+it reserved space permanently on a reuse argument, when the correct answer was that no matrix
+deserves permanent space.
+
+## Choosing the next kernel by counting, not guessing
+
+With space no longer the constraint, the remaining declines are storage types with no device kernel.
+Counting them per type contradicted the obvious plan — Q5_K first, because the shared expert is
+large and every token uses it:
+
+| Type | Declined matvecs |
+|---|---:|
+| IQ2_XXS | 1,092 |
+| Q5_K | 882 |
+| **F32** | **756** |
+| Q6_K | 315 |
+| **BF16** | **301** |
+| MXFP4 | 84 |
+
+Two of the top five are the simplest kernels in the set: FP32 needs no decoding at all, BF16 is a
+16-bit shift. They were written together, and both types left the table — declines fell to 2,375.
+Ranking by what the model actually asks for put a day of K-quant work behind an hour of dense work.
+
+## Measurement noise
+
+Repeated runs of identical code at 43 layers span 11,642 to 13,916 ms per token on this host, median
+12,960 over three runs — about ±9%. The matvec counts are identical across those runs (9,632
+accelerated, 2,375 declined), so the model's behaviour is deterministic and only the machine varies.
+Anything smaller than that spread is not a result, which is why the dense kernels carry no speed
+claim while 30,280 to 11,639 does.
+
+Full-depth generation across this work, against the 48,970 ms CPU baseline measured the same day:
+**3.8×** at the median.
+
 ## Bounds
 
 - The 5.60× figure is measured at 16 layers, where VRAM residency is not constrained. The same

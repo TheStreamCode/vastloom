@@ -126,6 +126,14 @@ model conversion.
 > model being practical: a minute per token needs the CUDA path and resident experts before anyone
 > would want to use it.
 >
+> **A full-depth token went from 48,970 ms to a median of 12,960 in one day of work** — 3.8×, over
+> three runs spanning 11,642 to 13,916 — with the output byte-identical at every step. Four changes, each measured: quantized CUDA kernels for the routed
+> path, layer trunks streamed through a bounded window instead of all held resident (host RAM 7.62 GB
+> to 2.12 GB, which is also what freed the memory the GPU needed), least-recently-used eviction in
+> place of refusing work when VRAM filled, and dense kernels chosen by counting which storage types
+> the model was actually being refused on. The two largest gains both came from correcting a policy
+> that had never been checked against its own arithmetic.
+>
 > **Every quantization on the routed path now runs on the GPU.** Q8_0 for attention, IQ1_S for the
 > experts' gate and up, IQ3_XXS for their down projection, all in hand-written PTX through the same
 > toolkit-free driver. A 16-layer generation went from 13,300 to 2,374 ms per token — 5.60× — and

@@ -2623,9 +2623,17 @@ int command_deepseek_forward(const std::vector<std::string>& args) {
     // model runs on a given machine and how much is left for the accelerator - which on this
     // hardware is the difference between 90% of matvecs declined and 28%. Two layers are kept
     // because the graph asks for one while the previous one's matrices may still be in flight.
+    // The unit is one layer, and a measurement says it should stay that way.
+    //
+    // Reading only the matrices actually missing looks obviously right - a layer is 149 MB and a
+    // matrix is about 5 - and it is not. The device holds roughly half the matrices but barely a
+    // fifteenth of the bytes, because small matrices are what fit: a paired run cut trunk traffic
+    // by 7%, not the predicted 70%, and paid 7,029 governed reads where 473 sequential ones had
+    // done. 19% slower. The whole-layer read stays until the device holds bytes rather than counts.
     struct TrunkWindow {
-        // What a matrix is, without its bytes. Enough for the accelerator to recognise weights it
-        // already holds, which is what lets a resident layer skip its NVMe read entirely.
+        // Where a matrix comes from and what shape it has, without its bytes. Enough for the
+        // accelerator to recognise weights it already holds, which is what lets a resident matrix
+        // skip its NVMe read entirely.
         struct Descriptor {
             std::size_t layer{0U};
             vastloom::inference::DeepseekV4PackedMatrix shape;
@@ -2639,6 +2647,7 @@ int command_deepseek_forward(const std::vector<std::string>& args) {
         std::map<std::size_t, vastloom::inference::DeepseekV4ReferenceLayerTrunk> live;
         std::vector<std::size_t> order;
         std::map<std::string, Descriptor, std::less<>> index;
+        std::uint64_t bytes_read{0U};
         std::size_t reloads{0U};
         std::size_t device_hits{0U};
 
@@ -2647,12 +2656,6 @@ int command_deepseek_forward(const std::vector<std::string>& args) {
             const auto found = index.find(name);
             if (found == index.end()) return nullptr;
             // Already on the device: hand back the shape without its bytes and read nothing.
-            //
-            // This is where most of a token went. Trunk weights never change, yet the window
-            // re-read whole layers 47 times per token - about 7 GB of identical bytes, more than
-            // twice the expert traffic - to rebuild a host copy nothing then looked at, because
-            // the matvec path keys on identity and only touches host bytes for rows the
-            // accelerator declines.
             //
             // Safe despite residency being evictable: the caller multiplies by this matrix
             // immediately and nothing else is uploaded in between, so it cannot be evicted before
@@ -2669,6 +2672,12 @@ int command_deepseek_forward(const std::vector<std::string>& args) {
                 if (!trunk) return trunk.error();
                 ++reloads;
                 try {
+                    for (const auto& [matrix_name, matrix] : trunk.value().matrices) {
+                        (void)matrix_name;
+                        bytes_read += matrix.resident != nullptr
+                                          ? static_cast<std::uint64_t>(matrix.resident_bytes)
+                                          : static_cast<std::uint64_t>(matrix.encoded.size());
+                    }
                     live.emplace(layer, trunk.take_value());
                     order.push_back(layer);
                 } catch (const std::bad_alloc&) {
@@ -2700,37 +2709,70 @@ int command_deepseek_forward(const std::vector<std::string>& args) {
     for (std::size_t layer = 0U; layer < depth; ++layer) {
         auto safe = process_guard.value().sample_and_check();
         if (!safe) return print_error(safe.error(), json);
-        auto trunk = vastloom::inference::deepseek_v4_load_0731_gguf_layer_trunk(
-            report.value().catalog, graph.config, layer, governor);
-        if (!trunk) return print_error(trunk.error(), json);
-        // Matrices are recorded by name and released; the window reloads the ones each layer needs
-        // when the graph reaches it. Normalization vectors and routing tables stay resident - they
-        // are small, and they are what the graph consults to decide shapes.
-        for (const auto& [name, matrix] : trunk.value().matrices) {
-            // Keep shape, type and identity; drop the bytes. This is what a later token hands back
-            // when the accelerator already holds the weights, so nothing is re-read from NVMe.
-            TrunkWindow::Descriptor descriptor;
-            descriptor.layer = layer;
-            descriptor.shape.ggml_type = matrix.ggml_type;
-            descriptor.shape.rows = matrix.rows;
-            descriptor.shape.logical_columns = matrix.logical_columns;
-            descriptor.shape.storage_columns = matrix.storage_columns;
-            descriptor.shape.cache_identity = matrix.cache_identity;
+        // Matrices are indexed from metadata and never read here; the window fetches each one when
+        // the graph first asks for it. Normalization vectors, router biases and routing tables are
+        // loaded and stay resident - they are what the graph consults to decide shapes and routes,
+        // and together they are a rounding error against the matrices.
+        //
+        // Describing rather than loading is what removes the startup pass over all 6.39 GB of trunk
+        // weights, which existed only to learn shapes the catalog already knew.
+        auto mappings = vastloom::inference::deepseek_v4_layer_trunk_mappings(graph.config, layer);
+        if (!mappings) return print_error(mappings.error(), json);
+        for (const auto& mapping : mappings.value()) {
+            using Kind = vastloom::inference::DeepseekV4TrunkTensorMapping::Kind;
             try {
-                window.index.emplace(name, std::move(descriptor));
-                graph.provided_matrix_names.insert(name);
+                if (mapping.kind == Kind::matrix) {
+                    // Shape, type and identity; no bytes. This is what a token hands back when the
+                    // accelerator already holds the weights, so nothing is read from NVMe.
+                    auto shape = vastloom::inference::deepseek_v4_describe_0731_gguf_trunk_matrix(
+                        report.value().catalog, mapping.source, layer, mapping.elements);
+                    if (!shape) return print_error(shape.error(), json);
+                    if (shape.value().rows != mapping.rows) {
+                        return print_error(
+                            vastloom::make_error(
+                                vastloom::ErrorCode::invalid_format,
+                                "DeepSeek 0731 trunk matrix shape does not match its consumer",
+                                mapping.source),
+                            json);
+                    }
+                    TrunkWindow::Descriptor descriptor;
+                    descriptor.layer = layer;
+                    descriptor.shape = shape.take_value();
+                    window.index.emplace(mapping.consumer, std::move(descriptor));
+                    graph.provided_matrix_names.insert(mapping.consumer);
+                } else if (mapping.kind == Kind::vector) {
+                    auto tensor = vastloom::inference::deepseek_v4_load_0731_gguf_trunk_vector(
+                        report.value().catalog, mapping.source, layer, governor);
+                    if (!tensor) return print_error(tensor.error(), json);
+                    if (tensor.value().elements != mapping.elements) {
+                        return print_error(
+                            vastloom::make_error(
+                                vastloom::ErrorCode::invalid_format,
+                                "DeepSeek 0731 trunk float shape does not match its consumer",
+                                mapping.source),
+                            json);
+                    }
+                    graph.packed_float_tensors.emplace(mapping.consumer, tensor.take_value());
+                } else {
+                    auto table = vastloom::inference::deepseek_v4_load_0731_gguf_trunk_table(
+                        report.value().catalog, mapping.source, layer, mapping.elements, governor);
+                    if (!table) return print_error(table.error(), json);
+                    if (table.value().elements != mapping.elements) {
+                        return print_error(
+                            vastloom::make_error(
+                                vastloom::ErrorCode::invalid_format,
+                                "DeepSeek 0731 hash routing table shape does not match its consumer",
+                                mapping.source),
+                            json);
+                    }
+                    graph.packed_integer_tensors.emplace(mapping.consumer, table.take_value());
+                }
             } catch (const std::bad_alloc&) {
                 return print_error(vastloom::make_error(
                                        vastloom::ErrorCode::resource_exhausted,
                                        "Unable to index a streamed layer trunk"),
                                    json);
             }
-        }
-        for (auto& [name, tensor] : trunk.value().float_tensors) {
-            graph.packed_float_tensors.emplace(name, std::move(tensor));
-        }
-        for (auto& [name, tensor] : trunk.value().integer_tensors) {
-            graph.packed_integer_tensors.emplace(name, std::move(tensor));
         }
         auto bindings = vastloom::inference::deepseek_v4_make_gguf_expert_bindings(
             report.value().catalog, static_cast<std::uint32_t>(layer),
@@ -2824,6 +2866,11 @@ int command_deepseek_forward(const std::vector<std::string>& args) {
                       // one. The second number is I/O the streaming window did not have to pay.
                       << ",\"trunk_reloads\":" << window.reloads
                       << ",\"trunk_device_hits\":" << window.device_hits
+                      // Bytes the window actually read, which is what a change to its granularity
+                      // has to move. Reload counts alone cannot say whether one is better than
+                      // another: 7,029 reads of one matrix and 473 of a whole layer differ by a
+                      // factor of fifteen in count and by 7% in traffic.
+                      << ",\"trunk_bytes_read\":" << window.bytes_read
                       << ",\"gpu_evicted\":" << gpu_stats.evicted
                       << ",\"gpu_declined_by_type\":{";
         {

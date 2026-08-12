@@ -3898,13 +3898,10 @@ Result<std::string> retarget_layer_name(std::string_view layer0_name, std::size_
 
 }  // namespace
 
-Result<DeepseekV4ReferenceLayerTrunk> deepseek_v4_build_layer_trunk(
-    const DeepseekV4LayerTrunkSource& source_binder,
+Result<std::vector<DeepseekV4TrunkTensorMapping>> deepseek_v4_layer_trunk_mappings(
     const DeepseekV4ReferenceConfig& config,
     std::size_t layer) {
-    if (layer >= config.layer_count || config.compression_ratios.size() != config.layer_count ||
-        source_binder.matrix == nullptr || source_binder.vector == nullptr ||
-        source_binder.table == nullptr) {
+    if (layer >= config.layer_count || config.compression_ratios.size() != config.layer_count) {
         return make_error(ErrorCode::invalid_argument,
                           "DeepSeek 0731 layer trunk binding names a layer outside the checkpoint",
                           std::to_string(layer));
@@ -3913,34 +3910,16 @@ Result<DeepseekV4ReferenceLayerTrunk> deepseek_v4_build_layer_trunk(
         auto layout = make_layer0_trunk_layout(config);
         if (!layout) return layout.error();
 
-        DeepseekV4ReferenceLayerTrunk result;
-        result.layer = layer;
-        std::size_t consumed = 0U;
-        const auto bind_matrix = [&](std::string_view source, std::string_view consumer,
-                                     std::size_t rows, std::size_t columns) -> Result<void> {
-            auto matrix = source_binder.matrix(source, columns);
-            if (!matrix) return matrix.error();
-            if (matrix.value().rows != rows) {
-                return make_error(ErrorCode::invalid_format,
-                                  "DeepSeek 0731 trunk matrix shape does not match its consumer",
-                                  std::string(source));
-            }
-            result.matrices.emplace(std::string(consumer), matrix.take_value());
-            ++consumed;
-            return {};
+        std::vector<DeepseekV4TrunkTensorMapping> result;
+        const auto add_matrix = [&result](std::string source, std::string consumer,
+                                          std::size_t rows, std::size_t columns) {
+            result.push_back({DeepseekV4TrunkTensorMapping::Kind::matrix, std::move(source),
+                              std::move(consumer), rows, columns});
         };
-        const auto bind_float = [&](std::string_view source, std::string_view consumer,
-                                    std::size_t elements) -> Result<void> {
-            auto tensor = source_binder.vector(source);
-            if (!tensor) return tensor.error();
-            if (tensor.value().elements != elements) {
-                return make_error(ErrorCode::invalid_format,
-                                  "DeepSeek 0731 trunk float shape does not match its consumer",
-                                  std::string(source));
-            }
-            result.float_tensors.emplace(std::string(consumer), tensor.take_value());
-            ++consumed;
-            return {};
+        const auto add_vector = [&result](std::string source, std::string consumer,
+                                          std::size_t elements) {
+            result.push_back({DeepseekV4TrunkTensorMapping::Kind::vector, std::move(source),
+                              std::move(consumer), 0U, elements});
         };
 
         for (const auto& mapping : layout.value().matrices) {
@@ -3948,39 +3927,27 @@ Result<DeepseekV4ReferenceLayerTrunk> deepseek_v4_build_layer_trunk(
             if (!source) return source.error();
             auto consumer = retarget_layer_name(mapping.consumer, layer);
             if (!consumer) return consumer.error();
-            auto bound = bind_matrix(source.value(), consumer.value(), mapping.rows,
-                                     mapping.columns);
-            if (!bound) return bound.error();
+            add_matrix(source.take_value(), consumer.take_value(), mapping.rows, mapping.columns);
         }
         for (const auto& mapping : layout.value().floats) {
             auto source = retarget_layer_name(mapping.source, layer);
             if (!source) return source.error();
             auto consumer = retarget_layer_name(mapping.consumer, layer);
             if (!consumer) return consumer.error();
-            auto bound = bind_float(source.value(), consumer.value(), mapping.elements);
-            if (!bound) return bound.error();
+            add_vector(source.take_value(), consumer.take_value(), mapping.elements);
         }
 
         const std::string prefix = "blk." + std::to_string(layer);
         const std::string consumer_prefix = "layers." + std::to_string(layer);
         if (layer < config.hash_layer_count) {
-            auto table = source_binder.table(prefix + ".ffn_gate_tid2eid.weight",
-                                             layout.value().routing_table_elements);
-            if (!table) return table.error();
-            if (table.value().elements != layout.value().routing_table_elements) {
-                return make_error(
-                    ErrorCode::invalid_format,
-                    "DeepSeek 0731 hash routing table shape does not match its consumer",
-                    prefix + ".ffn_gate_tid2eid.weight");
-            }
-            result.integer_tensors.emplace(consumer_prefix + ".ffn.gate.tid2eid",
-                                           table.take_value());
-            ++consumed;
+            result.push_back({DeepseekV4TrunkTensorMapping::Kind::table,
+                              prefix + ".ffn_gate_tid2eid.weight",
+                              consumer_prefix + ".ffn.gate.tid2eid", 0U,
+                              layout.value().routing_table_elements});
         } else {
             // Learned-router layers carry a per-expert bias instead of a lookup table.
-            auto bound = bind_float(prefix + ".exp_probs_b.bias",
-                                    consumer_prefix + ".ffn.gate.bias", config.expert_count);
-            if (!bound) return bound.error();
+            add_vector(prefix + ".exp_probs_b.bias", consumer_prefix + ".ffn.gate.bias",
+                       config.expert_count);
         }
 
         const std::size_t ratio = config.compression_ratios[layer];
@@ -3995,23 +3962,17 @@ Result<DeepseekV4ReferenceLayerTrunk> deepseek_v4_build_layer_trunk(
                 {coefficient, config.head_width}, "DeepSeek 0731 attention compressor width");
             if (!projected_width) return projected_width.error();
             const std::string compressor = consumer_prefix + ".attn.compressor";
-            auto bound = bind_matrix(prefix + ".attn_compressor_kv.weight",
-                                     compressor + ".wkv.weight", projected_width.value(),
-                                     config.width);
-            if (!bound) return bound.error();
-            bound = bind_matrix(prefix + ".attn_compressor_gate.weight",
-                                compressor + ".wgate.weight", projected_width.value(),
-                                config.width);
-            if (!bound) return bound.error();
+            add_matrix(prefix + ".attn_compressor_kv.weight", compressor + ".wkv.weight",
+                       projected_width.value(), config.width);
+            add_matrix(prefix + ".attn_compressor_gate.weight", compressor + ".wgate.weight",
+                       projected_width.value(), config.width);
             auto ape_elements = bounded_product(
                 {ratio, projected_width.value()}, "DeepSeek 0731 compressor APE");
             if (!ape_elements) return ape_elements.error();
-            bound = bind_float(prefix + ".attn_compressor_ape.weight", compressor + ".ape",
-                               ape_elements.value());
-            if (!bound) return bound.error();
-            bound = bind_float(prefix + ".attn_compressor_norm.weight",
-                               compressor + ".norm.weight", config.head_width);
-            if (!bound) return bound.error();
+            add_vector(prefix + ".attn_compressor_ape.weight", compressor + ".ape",
+                       ape_elements.value());
+            add_vector(prefix + ".attn_compressor_norm.weight", compressor + ".norm.weight",
+                       config.head_width);
 
             if (ratio == 4U) {
                 auto index_width = bounded_product(
@@ -4022,33 +3983,88 @@ Result<DeepseekV4ReferenceLayerTrunk> deepseek_v4_build_layer_trunk(
                     {2U, config.index_head_width}, "DeepSeek 0731 indexer compressor width");
                 if (!index_projected_width) return index_projected_width.error();
                 const std::string indexer = consumer_prefix + ".attn.indexer";
-                bound = bind_matrix(prefix + ".indexer.attn_q_b.weight",
-                                    indexer + ".wq_b.weight", index_width.value(),
-                                    config.query_lora_rank);
-                if (!bound) return bound.error();
-                bound = bind_matrix(prefix + ".indexer.proj.weight",
-                                    indexer + ".weights_proj.weight",
-                                    config.index_head_count, config.width);
-                if (!bound) return bound.error();
-                bound = bind_matrix(prefix + ".indexer_compressor_kv.weight",
-                                    indexer + ".compressor.wkv.weight",
-                                    index_projected_width.value(), config.width);
-                if (!bound) return bound.error();
-                bound = bind_matrix(prefix + ".indexer_compressor_gate.weight",
-                                    indexer + ".compressor.wgate.weight",
-                                    index_projected_width.value(), config.width);
-                if (!bound) return bound.error();
+                add_matrix(prefix + ".indexer.attn_q_b.weight", indexer + ".wq_b.weight",
+                           index_width.value(), config.query_lora_rank);
+                add_matrix(prefix + ".indexer.proj.weight", indexer + ".weights_proj.weight",
+                           config.index_head_count, config.width);
+                add_matrix(prefix + ".indexer_compressor_kv.weight",
+                           indexer + ".compressor.wkv.weight", index_projected_width.value(),
+                           config.width);
+                add_matrix(prefix + ".indexer_compressor_gate.weight",
+                           indexer + ".compressor.wgate.weight", index_projected_width.value(),
+                           config.width);
                 auto index_ape_elements = bounded_product(
                     {ratio, index_projected_width.value()}, "DeepSeek 0731 indexer APE");
                 if (!index_ape_elements) return index_ape_elements.error();
-                bound = bind_float(prefix + ".indexer_compressor_ape.weight",
-                                   indexer + ".compressor.ape", index_ape_elements.value());
-                if (!bound) return bound.error();
-                bound = bind_float(prefix + ".indexer_compressor_norm.weight",
-                                   indexer + ".compressor.norm.weight",
-                                   config.index_head_width);
-                if (!bound) return bound.error();
+                add_vector(prefix + ".indexer_compressor_ape.weight", indexer + ".compressor.ape",
+                           index_ape_elements.value());
+                add_vector(prefix + ".indexer_compressor_norm.weight",
+                           indexer + ".compressor.norm.weight", config.index_head_width);
             }
+        }
+        return result;
+    } catch (const std::bad_alloc&) {
+        return make_error(ErrorCode::resource_exhausted,
+                          "Unable to allocate the bounded DeepSeek 0731 layer trunk binding");
+    }
+}
+
+Result<DeepseekV4ReferenceLayerTrunk> deepseek_v4_build_layer_trunk(
+    const DeepseekV4LayerTrunkSource& source_binder,
+    const DeepseekV4ReferenceConfig& config,
+    std::size_t layer) {
+    if (source_binder.matrix == nullptr || source_binder.vector == nullptr ||
+        source_binder.table == nullptr) {
+        return make_error(ErrorCode::invalid_argument,
+                          "DeepSeek 0731 layer trunk binding names a layer outside the checkpoint",
+                          std::to_string(layer));
+    }
+    auto mappings = deepseek_v4_layer_trunk_mappings(config, layer);
+    if (!mappings) return mappings.error();
+    try {
+        DeepseekV4ReferenceLayerTrunk result;
+        result.layer = layer;
+        std::size_t consumed = 0U;
+        for (const auto& mapping : mappings.value()) {
+            switch (mapping.kind) {
+                case DeepseekV4TrunkTensorMapping::Kind::matrix: {
+                    auto matrix = source_binder.matrix(mapping.source, mapping.elements);
+                    if (!matrix) return matrix.error();
+                    if (matrix.value().rows != mapping.rows) {
+                        return make_error(
+                            ErrorCode::invalid_format,
+                            "DeepSeek 0731 trunk matrix shape does not match its consumer",
+                            mapping.source);
+                    }
+                    result.matrices.emplace(mapping.consumer, matrix.take_value());
+                    break;
+                }
+                case DeepseekV4TrunkTensorMapping::Kind::vector: {
+                    auto tensor = source_binder.vector(mapping.source);
+                    if (!tensor) return tensor.error();
+                    if (tensor.value().elements != mapping.elements) {
+                        return make_error(
+                            ErrorCode::invalid_format,
+                            "DeepSeek 0731 trunk float shape does not match its consumer",
+                            mapping.source);
+                    }
+                    result.float_tensors.emplace(mapping.consumer, tensor.take_value());
+                    break;
+                }
+                case DeepseekV4TrunkTensorMapping::Kind::table: {
+                    auto table = source_binder.table(mapping.source, mapping.elements);
+                    if (!table) return table.error();
+                    if (table.value().elements != mapping.elements) {
+                        return make_error(
+                            ErrorCode::invalid_format,
+                            "DeepSeek 0731 hash routing table shape does not match its consumer",
+                            mapping.source);
+                    }
+                    result.integer_tensors.emplace(mapping.consumer, table.take_value());
+                    break;
+                }
+            }
+            ++consumed;
         }
 
         const std::size_t bound = result.matrices.size() + result.float_tensors.size() +
@@ -4234,6 +4250,104 @@ Result<DeepseekV4ReferenceLayerTrunk> deepseek_v4_load_0731_gguf_layer_trunk(
         return deepseek_v4_bind_packed_i32(tile.value().first, elements);
     };
     return deepseek_v4_build_layer_trunk(binder, config, layer);
+}
+
+namespace {
+
+// The catalog entry for one of a layer's always-active tensors, found without reading it.
+Result<const model::LogicalTensorDescriptor*> find_layer_matrix_descriptor(
+    const model::LogicalTensorCatalog& catalog,
+    std::string_view name,
+    std::size_t layer) {
+    const auto found = std::find_if(
+        catalog.tensors.begin(), catalog.tensors.end(),
+        [name](const model::LogicalTensorDescriptor& tensor) { return tensor.name == name; });
+    if (found == catalog.tensors.end() || found->expert.has_value() ||
+        !found->layer.has_value() || static_cast<std::size_t>(*found->layer) != layer) {
+        return make_error(ErrorCode::not_found,
+                          "DeepSeek tensor is absent from the catalog", std::string(name));
+    }
+    if (!found->ggml_type.has_value() || found->shape.size() != 2U) {
+        return make_error(ErrorCode::invalid_format,
+                          "DeepSeek layer matrix descriptor is malformed", found->name);
+    }
+    return &*found;
+}
+
+}  // namespace
+
+Result<DeepseekV4PackedMatrix> deepseek_v4_describe_0731_gguf_trunk_matrix(
+    const model::LogicalTensorCatalog& catalog,
+    std::string_view source,
+    std::size_t layer,
+    std::size_t logical_columns) {
+    auto descriptor = find_layer_matrix_descriptor(catalog, source, layer);
+    if (!descriptor) return descriptor.error();
+    const auto* tensor = descriptor.value();
+    const auto rows = static_cast<std::size_t>(tensor->shape[1]);
+    const auto storage_columns = static_cast<std::size_t>(tensor->shape[0]);
+    if (logical_columns == 0U || logical_columns > storage_columns) {
+        return make_error(ErrorCode::invalid_argument,
+                          "DeepSeek resident matrix binding is invalid");
+    }
+    // The same integrity check the loading path applies, made here so a catalog that disagrees with
+    // its own payload is refused before a token depends on it rather than during one.
+    auto required = ggml_storage_bytes(*tensor->ggml_type, rows, storage_columns,
+                                       QuantizedKernelLimits{kMaximumPackedMatrixElements});
+    if (!required) return required.error();
+    if (tensor->source.bytes != required.value()) {
+        return make_error(ErrorCode::integrity_error,
+                          "DeepSeek resident matrix byte count does not match its descriptor");
+    }
+    DeepseekV4PackedMatrix matrix;
+    matrix.ggml_type = *tensor->ggml_type;
+    matrix.rows = rows;
+    matrix.logical_columns = logical_columns;
+    matrix.storage_columns = storage_columns;
+    // Identical to what the loaded matrix carries: a tensor's shard and byte range name it uniquely
+    // and outlive any particular residency, so a described matrix and a loaded one compare equal.
+    matrix.cache_identity = name_identity(tensor->source.shard.generic_string(),
+                                          tensor->source.offset, tensor->source.bytes);
+    return matrix;
+}
+
+Result<DeepseekV4PackedFloatTensor> deepseek_v4_load_0731_gguf_trunk_vector(
+    const model::LogicalTensorCatalog& catalog,
+    std::string_view source,
+    std::size_t layer,
+    safety::ResourceGovernor& governor) {
+    if (catalog.metadata_only) {
+        return make_error(ErrorCode::unsupported,
+                          "Loading a layer trunk from a metadata-only catalog is forbidden",
+                          catalog.model_id);
+    }
+    auto tile = load_catalog_tensor_tile(catalog, source, layer, governor);
+    if (!tile) return tile.error();
+    const auto* descriptor = tile.value().second;
+    if (!descriptor->ggml_type.has_value()) {
+        return make_error(ErrorCode::invalid_format,
+                          "DeepSeek layer vector descriptor is malformed", descriptor->name);
+    }
+    auto elements = bounded_catalog_product(descriptor->shape, descriptor->name);
+    if (!elements) return elements.error();
+    return deepseek_v4_bind_packed_float(tile.value().first, *descriptor->ggml_type,
+                                         elements.value());
+}
+
+Result<DeepseekV4PackedIntegerTensor> deepseek_v4_load_0731_gguf_trunk_table(
+    const model::LogicalTensorCatalog& catalog,
+    std::string_view source,
+    std::size_t layer,
+    std::size_t elements,
+    safety::ResourceGovernor& governor) {
+    if (catalog.metadata_only) {
+        return make_error(ErrorCode::unsupported,
+                          "Loading a layer trunk from a metadata-only catalog is forbidden",
+                          catalog.model_id);
+    }
+    auto tile = load_catalog_tensor_tile(catalog, source, layer, governor);
+    if (!tile) return tile.error();
+    return deepseek_v4_bind_packed_i32(tile.value().first, elements);
 }
 
 Result<DeepseekV4ReferenceLayerTrunk> deepseek_v4_bind_0731_gguf_layer_trunk(

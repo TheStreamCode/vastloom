@@ -385,9 +385,17 @@ recorded in the [M8 CUDA RMSNorm report](reports/M8_CUDA_RMSNORM_VALIDATION.md).
   2,375.
 - [ ] Kernels for IQ2_XXS (1,092 declines), Q5_K (882), Q6_K (315) and MXFP4 (84) — all that now
   keeps work off the device.
-- [ ] Cut per-token I/O, which is roughly half the remaining cost: 4.54 GB of experts plus 6.39 GB of
-  trunk reloads. No expert bundle survives between decode steps, and the window reloads a whole
-  149 MB layer whenever any single matrix of it is missing from VRAM.
+- [x] Establish why per-token trunk I/O cannot be cut by reading less. Streaming one matrix instead
+  of one layer read exactly the same 65.3 GB and cost 19% more, because the device holds half the
+  matrices and a fifteenth of the bytes: what is missing is the trunk. Rejected with numbers; the
+  lever is which matrices are resident, not how finely they are fetched.
+- [ ] Cut per-token I/O by making VRAM residency follow bytes rather than recency. The forward pass
+  scans layers cyclically and touches each trunk matrix exactly once per pass, so `last_used` order
+  is arrival order and least-recently-used evicts precisely what is needed soonest — the textbook
+  pathological case. Under a fixed byte budget every trunk matrix has the same reuse probability, so
+  the value of holding one is exactly its size. Evicting the smallest rather than the oldest is the
+  untried experiment; pinning by arrival order was tried and was 25% slower, which is a different
+  policy and not evidence against this one.
 - [ ] Count the expert loader's own read buffers in the preflight. At 32 layers it approves and the
   loader then fails on `bad_alloc`, which should have been an up-front refusal with a correct figure.
 - [ ] Pinned host buffers.

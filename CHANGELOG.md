@@ -2,6 +2,42 @@
 
 ## Unreleased
 
+- Streaming one trunk matrix at a time instead of one layer at a time was implemented, measured and
+  rejected. It is the obvious optimisation — a layer is 138 MB and a matrix about 5, and the window
+  was re-reading the whole layer whenever any single matrix of it was absent from the device — and
+  it saved **nothing**. Three paired runs on one machine state:
+
+  | | ms/token | load_ms | trunk bytes read | reloads |
+  |---|---:|---:|---:|---:|
+  | whole layer | 8,337 | 1,555 | 65.3 GB | 473 |
+  | one matrix | 9,951 | 83 | **65.3 GB** | 7,029 |
+  | layer, metadata index | 8,979 / 8,768 | 79 / 95 | 65.3 GB | 473 |
+
+  Identical bytes, to three significant figures, and 19% slower. The prediction had been 7 GB per
+  token falling to 2.2, and it was wrong for a reason worth keeping: the device served 7,095 matrix
+  requests without a read in *both* configurations — the same number — because what fits in VRAM is
+  whatever is small. Roughly half the matrices are resident and they carry about a fifteenth of the
+  bytes, so "read only what is missing" reads essentially the whole trunk anyway, in 7,029 governed
+  reads of 10 MB where 473 sequential reads of 138 MB had done. Decline counts do not predict value;
+  neither do hit counts. Bytes do, and nothing was counting them, which is why `trunk_bytes_read`
+  now exists.
+
+- The startup pass no longer reads 6.39 GB of trunk weights to learn shapes the catalog already
+  knows: `load_ms` falls from 1,555 to 79. The mapping from a graph consumer to its checkpoint
+  tensor used to exist only as control flow inside the binder loop, so the only way to learn one
+  matrix's shape was to load all of them; it is data now, and both the binder and the index walk the
+  same list.
+
+  No speed is claimed. At ten tokens the total wall clock is unchanged or marginally worse, because
+  that startup read was not waste — it was prefetch, warming the page cache that the first forward
+  pass then read from. The same effect that made direct I/O three times slower. The cost moves later
+  rather than disappearing, and amortises as a generation lengthens.
+
+- Measured again that the accelerator's residency ceiling is not the binding constraint at these
+  sizes: across four runs it varied between 1.05 and 2.06 GB with live host memory, and the time per
+  token did not follow it. The ceiling mattered when it was the difference between 90% of matvecs
+  declined and 28%; with every storage type now having a kernel, it no longer is.
+
 - The UD-IQ2_XXS checkpoint is imported and pinned but does not yet run: one layer of forty-three
   stores its gate and up projections as **IQ2_S**, a format this project has in no form — no device
   kernel and, more importantly, no reference decoder. Two tensors out of 129 keep the model from

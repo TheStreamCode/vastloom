@@ -287,6 +287,28 @@ struct DeepseekV4LayerTrunkSource {
     std::function<Result<DeepseekV4PackedIntegerTensor>(std::string_view, std::size_t)> table;
 };
 
+// One always-active tensor: the checkpoint object it comes from, the consumer that binds it and the
+// shape that consumer requires.
+//
+// This used to exist only as control flow inside the binder loop, which meant the sole way to obtain
+// one matrix was to bind all of them. A window that streams trunks pays that as a whole-layer read
+// for a single missing matrix, so the mapping is data now and both callers walk the same list.
+struct DeepseekV4TrunkTensorMapping {
+    enum class Kind : std::uint8_t { matrix, vector, table };
+
+    Kind kind{Kind::matrix};
+    std::string source;
+    std::string consumer;
+    // Matrices: output rows and logical input columns. Vectors and tables: elements only.
+    std::size_t rows{0U};
+    std::size_t elements{0U};
+};
+
+// Every always-active tensor of one layer, in binding order, derived from metadata alone.
+[[nodiscard]] Result<std::vector<DeepseekV4TrunkTensorMapping>> deepseek_v4_layer_trunk_mappings(
+    const DeepseekV4ReferenceConfig& config,
+    std::size_t layer);
+
 [[nodiscard]] Result<DeepseekV4ReferenceLayerTrunk> deepseek_v4_build_layer_trunk(
     const DeepseekV4LayerTrunkSource& source,
     const DeepseekV4ReferenceConfig& config,
@@ -316,6 +338,31 @@ deepseek_v4_load_0731_gguf_layer_trunk(
     const model::LogicalTensorCatalog& catalog,
     const DeepseekV4ReferenceConfig& config,
     std::size_t layer,
+    safety::ResourceGovernor& governor);
+
+// One always-active matrix's shape, type and stable identity from metadata alone, without reading a
+// byte of it. Enough to index a layer and to recognise weights an accelerator already holds, which
+// is what lets a pass start without reading the model to learn its own shape.
+[[nodiscard]] Result<DeepseekV4PackedMatrix> deepseek_v4_describe_0731_gguf_trunk_matrix(
+    const model::LogicalTensorCatalog& catalog,
+    std::string_view source,
+    std::size_t layer,
+    std::size_t logical_columns);
+
+// A layer's small always-active tensors: normalization vectors, router biases and the hash routing
+// table. These stay resident for the whole pass - they are what the graph consults to decide shapes
+// and routes, and together they are a rounding error against the matrices.
+[[nodiscard]] Result<DeepseekV4PackedFloatTensor> deepseek_v4_load_0731_gguf_trunk_vector(
+    const model::LogicalTensorCatalog& catalog,
+    std::string_view source,
+    std::size_t layer,
+    safety::ResourceGovernor& governor);
+
+[[nodiscard]] Result<DeepseekV4PackedIntegerTensor> deepseek_v4_load_0731_gguf_trunk_table(
+    const model::LogicalTensorCatalog& catalog,
+    std::string_view source,
+    std::size_t layer,
+    std::size_t elements,
     safety::ResourceGovernor& governor);
 
 struct DeepseekV4ReferenceGlobals {

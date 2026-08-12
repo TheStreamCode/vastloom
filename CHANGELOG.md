@@ -2,6 +2,38 @@
 
 ## Unreleased
 
+- **Routed experts share nothing, so there is no base to factor out of them.** The idea was that an
+  expert might be a shared component plus a small individual part, in which case the shared part
+  could stay resident and only the parts would stream — and the saving would grow with precision,
+  making a high-precision checkpoint affordable on a machine that cannot hold it. It is a question
+  about weights rather than about inference, so `deepseek-expert-redundancy` answers it without a
+  correct forward pass and without downloading anything.
+
+  | | storage | mean pairwise cosine | residual after the mean |
+  |---|---|---:|---:|
+  | layer 0 | IQ1_S | 0.00049 | 0.9371 |
+  | layer 0 | IQ2_XXS | 0.00091 | 0.9367 |
+  | layer 20 | IQ2_XXS | 0.00172 | 0.9361 |
+  | *sixteen independent vectors* | | *0* | *0.9375* |
+
+  Orthogonal, and the arithmetic settles it: the mean of N independent vectors carries 1/N of the
+  energy, leaving 1 − 1/N behind. At N=16 that predicts 0.9375 and the measurement says 0.936. The
+  6% that looked shared is the statistical residue of averaging sixteen unrelated things, not
+  structure. The largest cosine found in any pair was 0.0059.
+
+  The obvious objection — that 1.5-bit quantization might have destroyed a correlation the original
+  weights have — is why the second and third rows exist: a different codebook at 2.06 bits and a
+  different depth give the same answer.
+
+  This closes expert deduplication, and with it the hope of making an FP8-class checkpoint cheap by
+  compressing what it repeats. It repeats nothing. Which is also the healthy result: a mixture whose
+  experts had overlapped would have been wasting its capacity. The levers that remain are amortizing
+  one expert read across several tokens, and kernels that are currently seventeen times off the
+  memory bandwidth.
+
+  Cost of finding out: one afternoon and no download, against the 300 GB and the Safetensors
+  execution path the other answer would have justified.
+
 - **An external oracle exists at last, and it disagrees with us.** llama.cpp built from source against
   the same 82.54 GB checkpoint, given the same twelve prompt tokens, greedy, answers
   `"La capitale d'Italia è **Roma**."` This project answers `"La capitale d'Italia è **R Roma**."`

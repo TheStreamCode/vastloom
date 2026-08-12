@@ -281,6 +281,10 @@ void print_help() {
         << "      Plan the exact six checkpoint-global tensors; never fetch or execute them.\n\n"
         << "  range-artifact-inspect ARTIFACT_DIRECTORY [--no-verify] [--json]\n"
         << "      Validate a bounded immutable range artifact; never promotes it to execution.\n\n"
+        << "  deepseek-expert-redundancy MODEL_DIRECTORY [--layer N] [--experts N] [--rows N]"
+           " [--json]\n"
+        << "      Measure whether one layer's routed experts share a component worth factoring"
+           " out.\n\n"
         << "  deepseek-forward MODEL_DIRECTORY [--layers N] [--token ID] [--expert-cache N]"
            " [--dry-run] [--json]\n"
         << "      Report exactly what a forward pass to that depth would make resident and whether\n"
@@ -2357,6 +2361,218 @@ int command_deepseek_layer_probe(const std::vector<std::string>& args) {
 // says by how much. Nothing here can grow without a reservation: trunk tensors, globals and expert
 // bundles all pass through the Governor, the host keeps its 8 GiB headroom, and the process guard is
 // sampled at every layer boundary.
+// Asks whether the routed experts of one layer share a common component worth factoring out.
+//
+// The reason to ask: a token reads six experts of two hundred and fifty-six per layer, and that
+// traffic is what sets the cost of any higher-precision checkpoint. If an expert were a shared base
+// plus a small individual part, the base could stay resident and only the parts would stream - and
+// the saving would grow with precision, because a two-bit expert is already near its entropy while
+// an eight-bit one carries its redundancy intact.
+//
+// It is a question about the weights, not about inference, so it is answerable without a correct
+// forward pass and without downloading anything. The answer is a correlation: experts that share
+// structure have large off-diagonal cosines, experts that do not have cosines near zero, and the
+// second answer closes the whole direction.
+int command_deepseek_expert_redundancy(const std::vector<std::string>& args) {
+    const bool json = has_flag(args, "--json");
+    auto valid = validate_options(
+        args, 1U, {"--layer", "--experts", "--rows", "--context", "--batch-size"}, {"--json"});
+    if (!valid) return print_error(valid.error(), json);
+    if (args.empty() || vastloom::util::starts_with(args.front(), "--")) {
+        return print_error(
+            vastloom::make_error(vastloom::ErrorCode::invalid_argument,
+                                 "deepseek-expert-redundancy requires one checkpoint directory"),
+            json);
+    }
+    auto layer = optional_size(args, "--layer", 0U);
+    auto experts = optional_size(args, "--experts", 16U);
+    // A sample of rows rather than the whole matrix. Correlation between 8.4-million-element
+    // matrices is estimated to three digits from a few hundred rows, and the whole thing would cost
+    // 33 MB per expert to hold.
+    auto rows = optional_size(args, "--rows", 256U);
+    auto context = optional_size(args, "--context", 4'096U);
+    auto batch_size = optional_size(args, "--batch-size", 1U);
+    if (!layer || !experts || !rows || !context || !batch_size) {
+        return print_error(vastloom::make_error(vastloom::ErrorCode::invalid_argument,
+                                                "Expert redundancy bounds are invalid"),
+                           json);
+    }
+    if (layer.value() >= 128U || experts.value() < 2U || experts.value() > 64U ||
+        rows.value() == 0U || rows.value() > 4'096U) {
+        return print_error(vastloom::make_error(vastloom::ErrorCode::invalid_argument,
+                                                "Expert redundancy bounds are outside their limits"),
+                           json);
+    }
+
+    const auto checkpoint_root = cli_path(args.front());
+    auto hardware = vastloom::hardware::HardwareProbe::collect(checkpoint_root);
+    if (!hardware) return print_error(hardware.error(), json);
+    auto policy = vastloom::safety::make_safe_runtime_policy(hardware.value());
+    if (!policy) return print_error(policy.error(), json);
+    auto process_guard = vastloom::safety::ProcessSafetyGuard::apply(policy.value());
+    if (!process_guard) return print_error(process_guard.error(), json);
+    vastloom::safety::ResourceGovernor governor(policy.value().resources);
+
+    vastloom::inference::DeepseekV4GgufCheckpointInspectOptions inspect_options;
+    inspect_options.verify_hashes = true;
+    inspect_options.context_tokens = static_cast<std::uint32_t>(context.value());
+    inspect_options.batch_size = static_cast<std::uint32_t>(batch_size.value());
+    inspect_options.safe_ram_cap_bytes = policy.value().resources.host_memory_hard_limit;
+    inspect_options.safe_vram_cap_bytes = policy.value().resources.vram_hard_limit;
+    const auto& spec = pinned_spec_for(checkpoint_root);
+    auto report = vastloom::inference::inspect_deepseek_v4_gguf_checkpoint(
+        checkpoint_root, spec, inspect_options);
+    if (!report) return print_error(report.error(), json);
+    auto config = vastloom::inference::deepseek_v4_reference_config_from_0731_gguf(report.value());
+    if (!config) return print_error(config.error(), json);
+    if (layer.value() >= config.value().layer_count) {
+        return print_error(vastloom::make_error(vastloom::ErrorCode::invalid_argument,
+                                                "Layer is outside the checkpoint",
+                                                std::to_string(layer.value())),
+                           json);
+    }
+
+    auto bindings = vastloom::inference::deepseek_v4_make_gguf_expert_bindings(
+        report.value().catalog, static_cast<std::uint32_t>(layer.value()),
+        report.value().experts_per_layer, config.value().width,
+        config.value().intermediate_width);
+    if (!bindings) return print_error(bindings.error(), json);
+    vastloom::inference::DeepseekV4ExpertCacheOptions cache_options;
+    cache_options.block_prefix = "layers." + std::to_string(layer.value()) + ".ffn";
+    cache_options.max_cached_experts = 1U;
+    cache_options.max_experts_per_request = 1U;
+    auto cache = vastloom::inference::DeepseekV4BoundedExpertCache::create(
+        bindings.take_value(), governor, cache_options);
+    if (!cache) return print_error(cache.error(), json);
+    auto resolve = cache.value()->provider_binding().resolve;
+
+    // One expert at a time, keeping only the sampled rows. Peak residency is the sample rather than
+    // the experts, so this asks its question inside a few hundred megabytes.
+    const std::size_t sampled = std::min<std::size_t>(rows.value(), config.value().intermediate_width);
+    const std::size_t columns = config.value().width;
+    std::vector<std::vector<float>> samples;
+    std::string storage_type;
+    try {
+        samples.reserve(experts.value());
+        for (std::size_t index = 0U; index < experts.value(); ++index) {
+            auto safe = process_guard.value().sample_and_check();
+            if (!safe) return print_error(safe.error(), json);
+            const std::array<std::uint32_t, 1U> wanted{static_cast<std::uint32_t>(index)};
+            auto resolved = resolve(cache_options.block_prefix, wanted);
+            if (!resolved) return print_error(resolved.error(), json);
+            if (resolved.value().empty()) {
+                return print_error(vastloom::make_error(vastloom::ErrorCode::not_found,
+                                                        "Expert bundle did not resolve",
+                                                        std::to_string(index)),
+                                   json);
+            }
+            const auto& w1 = resolved.value().front().w1;
+            if (storage_type.empty()) storage_type = std::to_string(w1.ggml_type);
+            auto payload = vastloom::inference::deepseek_v4_packed_matrix_payload(w1, "redundancy");
+            if (!payload) return print_error(payload.error(), json);
+            std::vector<float> flat(sampled * columns, 0.0F);
+            std::vector<float> row(w1.storage_columns, 0.0F);
+            // Rows spread across the matrix rather than the first few, so the sample is not a
+            // corner of it.
+            const std::size_t stride = std::max<std::size_t>(1U, w1.rows / sampled);
+            for (std::size_t taken = 0U; taken < sampled; ++taken) {
+                const std::size_t source_row = std::min(taken * stride, w1.rows - 1U);
+                auto decoded = vastloom::inference::dequantize_ggml_row_f32(
+                    w1.ggml_type, payload.value(), w1.rows, w1.storage_columns, source_row, row);
+                if (!decoded) return print_error(decoded.error(), json);
+                std::copy_n(row.begin(), columns, flat.begin() +
+                            static_cast<std::ptrdiff_t>(taken * columns));
+            }
+            samples.push_back(std::move(flat));
+        }
+    } catch (const std::bad_alloc&) {
+        return print_error(vastloom::make_error(vastloom::ErrorCode::resource_exhausted,
+                                                "Unable to hold the expert sample"),
+                           json);
+    }
+
+    const std::size_t elements = sampled * columns;
+    std::vector<double> norms(samples.size(), 0.0);
+    for (std::size_t index = 0U; index < samples.size(); ++index) {
+        double sum = 0.0;
+        for (const float value : samples[index]) sum += static_cast<double>(value) * value;
+        norms[index] = std::sqrt(sum);
+    }
+
+    // The shared component, if there is one, is what every expert has in common: their mean.
+    std::vector<double> mean(elements, 0.0);
+    for (const auto& sample : samples) {
+        for (std::size_t index = 0U; index < elements; ++index) mean[index] += sample[index];
+    }
+    for (double& value : mean) value /= static_cast<double>(samples.size());
+    double mean_energy = 0.0;
+    for (const double value : mean) mean_energy += value * value;
+
+    // What is left of each expert once the shared component is removed. Near 1.0 means nothing was
+    // shared and there is no base to factor out; well below 1.0 means there is.
+    double residual_min = 2.0;
+    double residual_max = 0.0;
+    double residual_sum = 0.0;
+    for (std::size_t index = 0U; index < samples.size(); ++index) {
+        double sum = 0.0;
+        for (std::size_t position = 0U; position < elements; ++position) {
+            const double delta = static_cast<double>(samples[index][position]) - mean[position];
+            sum += delta * delta;
+        }
+        const double ratio = norms[index] > 0.0 ? sum / (norms[index] * norms[index]) : 0.0;
+        residual_min = std::min(residual_min, ratio);
+        residual_max = std::max(residual_max, ratio);
+        residual_sum += ratio;
+    }
+    const double residual_mean = residual_sum / static_cast<double>(samples.size());
+
+    double cosine_min = 1.0;
+    double cosine_max = -1.0;
+    double cosine_sum = 0.0;
+    std::size_t pairs = 0U;
+    for (std::size_t left = 0U; left < samples.size(); ++left) {
+        for (std::size_t right = left + 1U; right < samples.size(); ++right) {
+            double dot = 0.0;
+            for (std::size_t position = 0U; position < elements; ++position) {
+                dot += static_cast<double>(samples[left][position]) *
+                       static_cast<double>(samples[right][position]);
+            }
+            const double denominator = norms[left] * norms[right];
+            const double cosine = denominator > 0.0 ? dot / denominator : 0.0;
+            cosine_min = std::min(cosine_min, cosine);
+            cosine_max = std::max(cosine_max, cosine);
+            cosine_sum += cosine;
+            ++pairs;
+        }
+    }
+    const double cosine_mean = pairs == 0U ? 0.0 : cosine_sum / static_cast<double>(pairs);
+
+    if (json) {
+        std::cout << "{\"ok\":true,\"layer\":" << layer.value()
+                  << ",\"experts\":" << samples.size()
+                  << ",\"rows_sampled\":" << sampled
+                  << ",\"columns\":" << columns
+                  << ",\"ggml_type\":" << storage_type
+                  << ",\"mean_energy\":" << mean_energy
+                  << ",\"residual_energy_mean\":" << residual_mean
+                  << ",\"residual_energy_min\":" << residual_min
+                  << ",\"residual_energy_max\":" << residual_max
+                  << ",\"cosine_mean\":" << cosine_mean
+                  << ",\"cosine_min\":" << cosine_min
+                  << ",\"cosine_max\":" << cosine_max << "}\n";
+    } else {
+        std::cout << "Expert redundancy, layer " << layer.value() << '\n'
+                  << "Experts sampled:      " << samples.size() << '\n'
+                  << "Rows x columns:       " << sampled << " x " << columns << '\n'
+                  << "Residual after mean:  " << residual_mean << " (min " << residual_min
+                  << ", max " << residual_max << ")\n"
+                  << "Pairwise cosine:      " << cosine_mean << " (min " << cosine_min
+                  << ", max " << cosine_max << ")\n"
+                  << "Near 1.0 residual and near 0.0 cosine mean the experts share nothing.\n";
+    }
+    return 0;
+}
+
 int command_deepseek_forward(const std::vector<std::string>& args) {
     const bool json = has_flag(args, "--json");
     auto valid = validate_options(
@@ -3782,6 +3998,9 @@ int dispatch_cli(const std::vector<std::string>& arguments) {
         if (command == "deepseek-gguf-range-bind") return command_deepseek_gguf_range_bind(args);
         if (command == "deepseek-layer-probe") return command_deepseek_layer_probe(args);
         if (command == "deepseek-forward") return command_deepseek_forward(args);
+        if (command == "deepseek-expert-redundancy") {
+            return command_deepseek_expert_redundancy(args);
+        }
         if (command == "deepseek-gguf-global-bind") return command_deepseek_gguf_global_bind(args);
         if (command == "moe-logits") return command_moe_logits(args);
         if (command == "heartbeat-write") return command_heartbeat_write(args);

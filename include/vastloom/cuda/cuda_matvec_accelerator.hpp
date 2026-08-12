@@ -28,6 +28,7 @@ struct CudaMatvecAcceleratorStats {
     std::size_t offered{0U};
     std::size_t accelerated{0U};
     std::size_t declined{0U};
+    std::size_t evicted{0U};
     std::size_t resident_matrices{0U};
     ByteCount resident_bytes{0U};
     ByteCount uploaded_bytes{0U};
@@ -64,9 +65,19 @@ public:
 
     [[nodiscard]] const CudaMatvecAcceleratorStats& stats() const noexcept { return stats_; }
 
+    // Whether these exact weights are in device memory right now.
+    //
+    // Residency is evictable, so this is a snapshot and not a promise: a caller must still be able
+    // to supply the host bytes afterwards. Reporting only.
+    [[nodiscard]] bool holds(std::uint64_t cache_identity) const noexcept {
+        return cache_identity != 0U && resident_.contains(cache_identity);
+    }
+
 private:
     struct Resident {
         CudaAllocation allocation;
+        ByteCount total_bytes{0U};
+        std::uint64_t last_used{0U};
         ByteCount matrix_bytes{0U};
         ByteCount grid_offset{0U};
         ByteCount input_offset{0U};
@@ -89,6 +100,8 @@ private:
     // Keyed on the descriptor's stable identity, never on a host address: see the note on
     // DeepseekV4PackedMatrix::cache_identity for what address-keying did to the model's output.
     std::map<std::uint64_t, Resident> resident_;
+    // Monotonic tick, stamped on every use so the least recently used entry can be identified.
+    std::uint64_t clock_{0U};
     CudaMatvecAcceleratorStats stats_;
 };
 

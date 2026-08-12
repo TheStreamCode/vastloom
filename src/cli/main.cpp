@@ -2274,23 +2274,37 @@ int command_deepseek_forward(const std::vector<std::string>& args) {
     // hardware is the difference between 90% of matvecs declined and 28%. Two layers are kept
     // because the graph asks for one while the previous one's matrices may still be in flight.
     struct TrunkWindow {
+        // What a matrix is, without its bytes. Enough for the accelerator to recognise weights it
+        // already holds, which is what lets a resident layer skip its NVMe read entirely.
+        struct Descriptor {
+            std::size_t layer{0U};
+            vastloom::inference::DeepseekV4PackedMatrix shape;
+        };
+
         const vastloom::model::LogicalTensorCatalog* catalog{nullptr};
         const vastloom::inference::DeepseekV4ReferenceConfig* config{nullptr};
         vastloom::safety::ResourceGovernor* governor{nullptr};
+        vastloom::cuda::CudaMatvecAccelerator* accelerator{nullptr};
         std::size_t capacity{2U};
         std::map<std::size_t, vastloom::inference::DeepseekV4ReferenceLayerTrunk> live;
         std::vector<std::size_t> order;
-        std::map<std::string, std::size_t, std::less<>> layer_of;
+        std::map<std::string, Descriptor, std::less<>> index;
+        std::size_t reloads{0U};
+        std::size_t device_hits{0U};
 
         [[nodiscard]] vastloom::Result<const vastloom::inference::DeepseekV4PackedMatrix*> get(
             std::string_view name) {
-            const auto found = layer_of.find(name);
-            if (found == layer_of.end()) return nullptr;
-            const std::size_t layer = found->second;
+            const auto found = index.find(name);
+            if (found == index.end()) return nullptr;
+            // Serving a payload-free descriptor for weights the device already holds was tried and
+            // is unsafe now that residency is evictable: the matrix can leave VRAM between the
+            // question and the multiply, and there would be no host bytes to fall back to.
+            const std::size_t layer = found->second.layer;
             if (!live.contains(layer)) {
                 auto trunk = vastloom::inference::deepseek_v4_load_0731_gguf_layer_trunk(
                     *catalog, *config, layer, *governor);
                 if (!trunk) return trunk.error();
+                ++reloads;
                 try {
                     live.emplace(layer, trunk.take_value());
                     order.push_back(layer);
@@ -2314,6 +2328,7 @@ int command_deepseek_forward(const std::vector<std::string>& args) {
     window.config = &graph.config;
     window.governor = &governor;
     window.capacity = kTrunkWindowCapacity;
+    window.accelerator = accelerator.get();
 
     // Each layer keeps its own bounded expert cache: the 256 bundles of layer N are a different set
     // from layer N+1, and a shared cache would let one layer evict another's working set.
@@ -2329,9 +2344,17 @@ int command_deepseek_forward(const std::vector<std::string>& args) {
         // when the graph reaches it. Normalization vectors and routing tables stay resident - they
         // are small, and they are what the graph consults to decide shapes.
         for (const auto& [name, matrix] : trunk.value().matrices) {
-            static_cast<void>(matrix);
+            // Keep shape, type and identity; drop the bytes. This is what a later token hands back
+            // when the accelerator already holds the weights, so nothing is re-read from NVMe.
+            TrunkWindow::Descriptor descriptor;
+            descriptor.layer = layer;
+            descriptor.shape.ggml_type = matrix.ggml_type;
+            descriptor.shape.rows = matrix.rows;
+            descriptor.shape.logical_columns = matrix.logical_columns;
+            descriptor.shape.storage_columns = matrix.storage_columns;
+            descriptor.shape.cache_identity = matrix.cache_identity;
             try {
-                window.layer_of.emplace(name, layer);
+                window.index.emplace(name, std::move(descriptor));
                 graph.provided_matrix_names.insert(name);
             } catch (const std::bad_alloc&) {
                 return print_error(vastloom::make_error(
@@ -2430,6 +2453,10 @@ int command_deepseek_forward(const std::vector<std::string>& args) {
                       // What the accelerator was allowed to hold, so a run that declines most of
                       // its matvecs shows whether it ran out of room or out of supported types.
                       << ",\"gpu_resident_limit\":" << gpu_resident_limit
+                      // Trunk reads that happened, against requests served from the device without
+                      // one. The second number is I/O the streaming window did not have to pay.
+                      << ",\"trunk_reloads\":" << window.reloads
+                      << ",\"gpu_evicted\":" << gpu_stats.evicted
                       << ",\"gpu_kernel_ms\":" << gpu_stats.kernel_ms
                       << ",\"load_ms\":" << load_elapsed
                       << ",\"generate_ms\":" << generate_elapsed

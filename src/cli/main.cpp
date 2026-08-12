@@ -2629,9 +2629,22 @@ int command_deepseek_forward(const std::vector<std::string>& args) {
             std::string_view name) {
             const auto found = index.find(name);
             if (found == index.end()) return nullptr;
-            // Serving a payload-free descriptor for weights the device already holds was tried and
-            // is unsafe now that residency is evictable: the matrix can leave VRAM between the
-            // question and the multiply, and there would be no host bytes to fall back to.
+            // Already on the device: hand back the shape without its bytes and read nothing.
+            //
+            // This is where most of a token went. Trunk weights never change, yet the window
+            // re-read whole layers 47 times per token - about 7 GB of identical bytes, more than
+            // twice the expert traffic - to rebuild a host copy nothing then looked at, because
+            // the matvec path keys on identity and only touches host bytes for rows the
+            // accelerator declines.
+            //
+            // Safe despite residency being evictable: the caller multiplies by this matrix
+            // immediately and nothing else is uploaded in between, so it cannot be evicted before
+            // use. Were that ever to change, the CPU fallback fails loudly on an empty payload
+            // rather than computing against the wrong weights.
+            if (accelerator != nullptr && accelerator->holds(found->second.shape.cache_identity)) {
+                ++device_hits;
+                return &found->second.shape;
+            }
             const std::size_t layer = found->second.layer;
             if (!live.contains(layer)) {
                 auto trunk = vastloom::inference::deepseek_v4_load_0731_gguf_layer_trunk(
@@ -2793,6 +2806,7 @@ int command_deepseek_forward(const std::vector<std::string>& args) {
                       // Trunk reads that happened, against requests served from the device without
                       // one. The second number is I/O the streaming window did not have to pay.
                       << ",\"trunk_reloads\":" << window.reloads
+                      << ",\"trunk_device_hits\":" << window.device_hits
                       << ",\"gpu_evicted\":" << gpu_stats.evicted
                       << ",\"gpu_declined_by_type\":{";
         {

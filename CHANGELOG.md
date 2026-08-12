@@ -8,7 +8,7 @@
   measured, so this clears the noise floor.
 
   The gain is smaller than the decline count implied, and the standalone gate says why: IQ2_XXS
-  costs 2.05 ms on twelve CPU threads against IQ1_S''s 8.03 for the same shape, so it wins 2.3x on
+  costs 2.05 ms on twelve CPU threads against IQ1_S's 8.03 for the same shape, so it wins 2.3x on
   the device rather than 9x. Decline counts rank what to write next; they do not predict what each
   is worth.
 

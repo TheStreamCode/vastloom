@@ -173,6 +173,12 @@ Result<void> accumulate_generation_telemetry(
     return record_layers(forward.mtp_layers);
 }
 
+// Whether the graph can obtain this matrix at all, held or streamed. The architecture is chosen by
+// asking which tensors a checkpoint carries, so this must not force a load to answer.
+bool has_packed_matrix(const DeepseekV4ReferenceGraph& graph, std::string_view name) {
+    return graph.packed_matrices.contains(name) || graph.provided_matrix_names.contains(name);
+}
+
 Result<std::span<const std::byte>> packed_payload(
     const std::vector<std::byte>& encoded,
     const std::shared_ptr<const model::ResidentByteBuffer>& resident,
@@ -845,6 +851,18 @@ Result<std::vector<float>> linear_tensor(const DeepseekV4ReferenceGraph& graph,
                                     input_width, output_width, context,
                                     graph.config.cpu_threads, graph.accelerator);
     }
+    if (graph.matrix_provider && graph.provided_matrix_names.contains(name)) {
+        auto provided = graph.matrix_provider(name);
+        if (!provided) return provided.error();
+        if (provided.value() == nullptr) {
+            return make_error(ErrorCode::not_found,
+                              "DeepSeek matrix provider does not have a name it advertised",
+                              std::string(name));
+        }
+        return linear_packed_matrix(*provided.value(), name, input, rows,
+                                    input_width, output_width, context,
+                                    graph.config.cpu_threads, graph.accelerator);
+    }
     auto weight = float_tensor(graph, name, {output_width, input_width});
     if (!weight) return weight.error();
     return linear(input, weight.value(), rows, input_width, output_width, context);
@@ -1392,7 +1410,7 @@ Result<AttentionResult> finish_attention(const DeepseekV4ReferenceGraph& graph,
         std::string(base) + ".wo_a output");
     if (!group_count) return group_count.error();
     std::vector<float> grouped(group_count.value());
-    if (graph.packed_matrices.contains(wo_a_name)) {
+    if (has_packed_matrix(graph, wo_a_name)) {
         for (std::size_t token = 0U; token < token_count; ++token) {
             for (std::size_t group = 0U; group < config.output_groups; ++group) {
                 const std::span<const float> group_values(
@@ -2096,7 +2114,7 @@ Result<DeepseekV4HyperConnectionPreResult> hc_pre(
     auto bias = float_tensor(graph, base + "_base", {mix_width});
     if (!bias) return bias.error();
     const std::string function_name = base + "_fn";
-    if (!graph.packed_matrices.contains(function_name)) {
+    if (!has_packed_matrix(graph, function_name)) {
         auto function = float_tensor(
             graph, function_name,
             {mix_width, config.hyper_multiplier * config.width});

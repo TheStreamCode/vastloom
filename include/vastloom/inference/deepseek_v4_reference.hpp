@@ -4,6 +4,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <functional>
+#include <set>
 #include <map>
 #include <memory>
 #include <optional>
@@ -403,6 +404,20 @@ struct DeepseekV4ReferenceGraph {
     std::map<std::string, DeepseekV4PackedIntegerTensor, std::less<>> packed_integer_tensors;
     std::map<std::string, DeepseekV4PackedFloatTensor, std::less<>> packed_float_tensors;
     std::map<std::string, DeepseekV4ExpertProviderBinding, std::less<>> expert_providers;
+
+    // Optional source for matrices that are not held in `packed_matrices`.
+    //
+    // Holding every layer trunk for the whole run is what sets the host memory floor - 6.39 GB of
+    // the 7.62 GB a full-depth pass needs - and that floor is what decides whether the model runs
+    // on a given machine at all, and how much memory is left for the accelerator. A provider lets
+    // the caller keep a bounded window of layers resident instead, the way expert caches already
+    // work. Returning a null pointer means "I do not have that name", which is not an error.
+    //
+    // The returned matrix must stay valid until the next provider call for a different layer.
+    std::function<Result<const DeepseekV4PackedMatrix*>(std::string_view)> matrix_provider;
+    // Names the provider can supply. The graph chooses architecture paths by asking whether a
+    // tensor exists, so that question has to be answerable without paying to load it.
+    std::set<std::string, std::less<>> provided_matrix_names;
 };
 
 struct DeepseekV4ReferenceCompressorState {

@@ -89,6 +89,17 @@ public:
         std::size_t blocks_per_row,
         std::span<const std::byte> input,
         std::span<std::byte> output) = 0;
+    // IQ3_XXS carries a 256-entry grid, placed in the allocation the same way.
+    [[nodiscard]] virtual Result<void> matvec_iq3_xxs_with_transfer(
+        const CudaBackendAllocation& allocation,
+        ByteCount matrix_offset,
+        ByteCount grid_offset,
+        ByteCount input_offset,
+        ByteCount output_offset,
+        std::size_t row_count,
+        std::size_t blocks_per_row,
+        std::span<const std::byte> input,
+        std::span<std::byte> output) = 0;
     [[nodiscard]] virtual Result<void> matvec_q8_0_with_transfer(
         const CudaBackendAllocation& allocation,
         ByteCount matrix_offset,
@@ -173,6 +184,16 @@ public:
         std::size_t row_count,
         std::size_t blocks_per_row) const;
     [[nodiscard]] Result<void> matvec_iq1_s_with_transfer(
+        CudaAllocation& allocation,
+        ByteCount matrix_offset,
+        ByteCount grid_offset,
+        ByteCount input_offset,
+        ByteCount output_offset,
+        std::size_t row_count,
+        std::size_t blocks_per_row,
+        std::span<const std::byte> input,
+        std::span<std::byte> output) const;
+    [[nodiscard]] Result<void> matvec_iq3_xxs_with_transfer(
         CudaAllocation& allocation,
         ByteCount matrix_offset,
         ByteCount grid_offset,

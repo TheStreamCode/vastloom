@@ -16,6 +16,9 @@ constexpr std::size_t kQ8BlockElements = 32U;
 constexpr std::uint32_t kGgmlTypeIq1S = 19U;
 constexpr ByteCount kIq1SBlockBytes = 50U;
 constexpr std::size_t kIq1SBlockElements = 256U;
+constexpr std::uint32_t kGgmlTypeIq3Xxs = 18U;
+constexpr ByteCount kIq3XxsBlockBytes = 98U;
+constexpr std::size_t kIq3XxsBlockElements = 256U;
 
 struct Layout {
     ByteCount block_bytes{0U};
@@ -25,7 +28,15 @@ struct Layout {
 std::optional<Layout> layout_for(std::uint32_t ggml_type) {
     if (ggml_type == kGgmlTypeQ8_0) return Layout{kQ8BlockBytes, kQ8BlockElements};
     if (ggml_type == kGgmlTypeIq1S) return Layout{kIq1SBlockBytes, kIq1SBlockElements};
+    if (ggml_type == kGgmlTypeIq3Xxs) return Layout{kIq3XxsBlockBytes, kIq3XxsBlockElements};
     return std::nullopt;
+}
+
+// Bytes of decode table this storage type needs beside its weights, and the table itself.
+std::span<const std::byte> grid_for(std::uint32_t ggml_type) {
+    if (ggml_type == kGgmlTypeIq1S) return std::as_bytes(inference::iq1_s_grid_table());
+    if (ggml_type == kGgmlTypeIq3Xxs) return std::as_bytes(inference::iq3_xxs_grid_table());
+    return {};
 }
 
 }  // namespace
@@ -105,11 +116,10 @@ Result<bool> CudaMatvecAccelerator::matvec(
         const ByteCount input_bytes =
             static_cast<ByteCount>(matrix.storage_columns) * sizeof(float);
         const ByteCount output_bytes = static_cast<ByteCount>(matrix.rows) * sizeof(float);
-        // IQ1_S decodes through a shared 16 KiB grid, which rides along in the same allocation so
+        // The IQ formats decode through a shared grid, which rides along in the same allocation so
         // the kernel needs no second pointer to manage.
-        const auto grid = inference::iq1_s_grid_table();
-        const ByteCount grid_bytes =
-            matrix.ggml_type == kGgmlTypeIq1S ? grid.size_bytes() : 0U;
+        const auto grid = grid_for(matrix.ggml_type);
+        const auto grid_bytes = static_cast<ByteCount>(grid.size());
         const ByteCount total = matrix_bytes + grid_bytes + input_bytes + output_bytes;
         if (total > options_.maximum_resident_bytes - stats_.resident_bytes) {
             ++stats_.declined;
@@ -137,8 +147,7 @@ Result<bool> CudaMatvecAccelerator::matvec(
         const auto upload_started = std::chrono::steady_clock::now();
         auto uploaded = driver_.copy_from_host(resident.allocation, 0U, payload.value());
         if (uploaded && grid_bytes != 0U) {
-            uploaded = driver_.copy_from_host(resident.allocation, resident.grid_offset,
-                                              std::as_bytes(grid));
+            uploaded = driver_.copy_from_host(resident.allocation, resident.grid_offset, grid);
         }
         stats_.upload_ms += std::chrono::duration<double, std::milli>(
             std::chrono::steady_clock::now() - upload_started).count();
@@ -162,14 +171,24 @@ Result<bool> CudaMatvecAccelerator::matvec(
     // context and synchronize, which costs more than the kernel itself at this call rate.
     auto& live = entry->second;
     const auto started = std::chrono::steady_clock::now();
-    auto executed = live.ggml_type == kGgmlTypeIq1S
-        ? driver_.matvec_iq1_s_with_transfer(
-              live.allocation, 0U, live.grid_offset, live.input_offset, live.output_offset,
-              live.rows, live.blocks_per_row, std::as_bytes(input),
-              std::as_writable_bytes(output))
-        : driver_.matvec_q8_0_with_transfer(
-              live.allocation, 0U, live.input_offset, live.output_offset, live.rows,
-              live.blocks_per_row, std::as_bytes(input), std::as_writable_bytes(output));
+    auto executed = [&] {
+        switch (live.ggml_type) {
+            case kGgmlTypeIq1S:
+                return driver_.matvec_iq1_s_with_transfer(
+                    live.allocation, 0U, live.grid_offset, live.input_offset, live.output_offset,
+                    live.rows, live.blocks_per_row, std::as_bytes(input),
+                    std::as_writable_bytes(output));
+            case kGgmlTypeIq3Xxs:
+                return driver_.matvec_iq3_xxs_with_transfer(
+                    live.allocation, 0U, live.grid_offset, live.input_offset, live.output_offset,
+                    live.rows, live.blocks_per_row, std::as_bytes(input),
+                    std::as_writable_bytes(output));
+            default:
+                return driver_.matvec_q8_0_with_transfer(
+                    live.allocation, 0U, live.input_offset, live.output_offset, live.rows,
+                    live.blocks_per_row, std::as_bytes(input), std::as_writable_bytes(output));
+        }
+    }();
     if (!executed) return executed.error();
     stats_.kernel_ms += std::chrono::duration<double, std::milli>(
         std::chrono::steady_clock::now() - started).count();

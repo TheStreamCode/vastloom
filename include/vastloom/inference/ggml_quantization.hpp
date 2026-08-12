@@ -69,6 +69,10 @@ struct RoutedExpertScratch {
 // own memory; exposing the reference table keeps them from carrying a second copy that could drift.
 [[nodiscard]] std::span<const std::uint64_t> iq1_s_grid_table() noexcept;
 
+// The 256-entry IQ3_XXS grid, each entry four packed uint8 magnitudes whose signs come from the
+// block's own sign field. Exposed for the same reason as the IQ1_S table above.
+[[nodiscard]] std::span<const std::uint32_t> iq3_xxs_grid_table() noexcept;
+
 // True only for storage formats with a bounded scalar reference matvec below.
 [[nodiscard]] bool supports_reference_matvec_ggml_type(std::uint32_t ggml_type) noexcept;
 

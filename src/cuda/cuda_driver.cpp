@@ -351,6 +351,193 @@ IQ1_BLOCK_DONE:
 IQ1_DONE:
     ret;
 }
+
+// One thread per output row of a ggml IQ3_XXS matrix. Each 98-byte block covers 256 weights: an
+// FP16 scale, 64 grid indices, and eight 32-bit fields holding a group scale plus four 7-bit sign
+// patterns. Each index selects one of 256 entries of four packed uint8 magnitudes; the eighth sign
+// bit is the parity of the other seven, which is why popc appears below.
+//
+// The reference decodes a whole block to f32 and then walks columns 0..255 in order. This kernel
+// never materializes the block, so it must visit columns in that same order to sum identically -
+// hence two passes of four lanes per subblock rather than one pass handling both grids at once.
+.visible .entry vastloom_matvec_iq3_xxs_f32(
+    .param .u64 matrix_param,
+    .param .u64 grid_param,
+    .param .u64 input_param,
+    .param .u64 output_param,
+    .param .u32 rows_param,
+    .param .u32 blocks_param
+)
+{
+    .reg .pred %p<8>;
+    .reg .b16 %rs<4>;
+    .reg .b32 %r<40>;
+    .reg .b64 %rd<24>;
+    .reg .f32 %f<20>;
+    .reg .f64 %fd<6>;
+
+    ld.param.u64 %rd0, [matrix_param];
+    ld.param.u64 %rd1, [grid_param];
+    ld.param.u64 %rd2, [input_param];
+    ld.param.u64 %rd3, [output_param];
+    ld.param.u32 %r0, [rows_param];
+    ld.param.u32 %r1, [blocks_param];
+    mov.u32 %r2, %ntid.x;
+    mov.u32 %r3, %ctaid.x;
+    mov.u32 %r4, %tid.x;
+    mad.lo.u32 %r5, %r3, %r2, %r4;
+    setp.ge.u32 %p0, %r5, %r0;
+    @%p0 bra IQ3_DONE;
+
+    // Byte offset of this row: row * blocks_per_row * 98.
+    mul.lo.u32 %r6, %r5, %r1;
+    mul.wide.u32 %rd4, %r6, 98;
+    add.u64 %rd5, %rd0, %rd4;
+    mov.f64 %fd0, 0d0000000000000000;
+    mov.u32 %r7, 0;
+    // Running input pointer. Columns are visited in order, so it only ever moves forward.
+    mov.u64 %rd6, %rd2;
+
+IQ3_BLOCK_LOOP:
+    setp.ge.u32 %p1, %r7, %r1;
+    @%p1 bra IQ3_BLOCK_DONE;
+    ld.global.u16 %rs0, [%rd5];
+    cvt.f32.f16 %f1, %rs0;
+    mov.u32 %r8, 0;
+
+IQ3_GROUP_LOOP:
+    setp.ge.u32 %p2, %r8, 8;
+    @%p2 bra IQ3_GROUP_DONE;
+    // aux = u32 at block + 2 + 64 + 4 * group, assembled from bytes: a 98-byte block stride leaves
+    // this field on an odd address every other block, and a 32-bit load there faults.
+    mul.wide.u32 %rd7, %r8, 4;
+    add.u64 %rd8, %rd5, 66;
+    add.u64 %rd8, %rd8, %rd7;
+    ld.global.u8 %r9, [%rd8];
+    ld.global.u8 %r27, [%rd8+1];
+    shl.b32 %r27, %r27, 8;
+    or.b32 %r9, %r9, %r27;
+    ld.global.u8 %r27, [%rd8+2];
+    shl.b32 %r27, %r27, 16;
+    or.b32 %r9, %r9, %r27;
+    ld.global.u8 %r27, [%rd8+3];
+    shl.b32 %r27, %r27, 24;
+    or.b32 %r9, %r9, %r27;
+    // local_scale = scale * (0.5 + (float)(aux >> 28)) * 0.5, left to right as the reference does.
+    shr.u32 %r10, %r9, 28;
+    cvt.rn.f32.u32 %f2, %r10;
+    mov.f32 %f3, 0f3F000000;
+    add.rn.f32 %f4, %f3, %f2;
+    mul.rn.f32 %f5, %f1, %f4;
+    mul.rn.f32 %f6, %f5, %f3;
+    mov.u32 %r11, 0;
+
+IQ3_SUB_LOOP:
+    setp.ge.u32 %p3, %r11, 4;
+    @%p3 bra IQ3_SUB_DONE;
+    // signs = s | ((popc(s) & 1) << 7), where s = (aux >> (7 * sub)) & 127
+    mul.lo.u32 %r12, %r11, 7;
+    shr.u32 %r13, %r9, %r12;
+    and.b32 %r13, %r13, 127;
+    popc.b32 %r14, %r13;
+    and.b32 %r14, %r14, 1;
+    shl.b32 %r14, %r14, 7;
+    or.b32 %r15, %r13, %r14;
+    // The two grid indices for this subblock: quantized[group * 8 + sub * 2 + {0,1}]
+    mul.lo.u32 %r16, %r8, 8;
+    mul.lo.u32 %r17, %r11, 2;
+    add.u32 %r16, %r16, %r17;
+    cvt.u64.u32 %rd9, %r16;
+    add.u64 %rd10, %rd5, 2;
+    add.u64 %rd10, %rd10, %rd9;
+    ld.global.u8 %r18, [%rd10];
+    ld.global.u8 %r19, [%rd10+1];
+    mul.wide.u32 %rd11, %r18, 4;
+    add.u64 %rd12, %rd1, %rd11;
+    ld.global.u32 %r20, [%rd12];
+    mul.wide.u32 %rd13, %r19, 4;
+    add.u64 %rd14, %rd1, %rd13;
+    ld.global.u32 %r21, [%rd14];
+    // First grid: columns base+0 .. base+3.
+    mov.u32 %r22, 0;
+
+IQ3_FIRST_LOOP:
+    setp.ge.u32 %p4, %r22, 4;
+    @%p4 bra IQ3_FIRST_DONE;
+    shl.b32 %r23, %r22, 3;
+    shr.u32 %r24, %r20, %r23;
+    and.b32 %r24, %r24, 255;
+    cvt.rn.f32.u32 %f7, %r24;
+    mov.u32 %r25, 1;
+    shl.b32 %r25, %r25, %r22;
+    and.b32 %r25, %r25, %r15;
+    setp.ne.u32 %p5, %r25, 0;
+    mov.f32 %f8, 0f3F800000;
+    mov.f32 %f9, 0fBF800000;
+    selp.f32 %f10, %f9, %f8, %p5;
+    mul.rn.f32 %f11, %f6, %f7;
+    mul.rn.f32 %f12, %f11, %f10;
+    ld.global.f32 %f13, [%rd6];
+    cvt.f64.f32 %fd1, %f12;
+    cvt.f64.f32 %fd2, %f13;
+    mul.rn.f64 %fd3, %fd1, %fd2;
+    add.rn.f64 %fd0, %fd0, %fd3;
+    add.u64 %rd6, %rd6, 4;
+    add.u32 %r22, %r22, 1;
+    bra IQ3_FIRST_LOOP;
+
+IQ3_FIRST_DONE:
+    // Second grid: columns base+4 .. base+7, signs taken from bits 4..7.
+    mov.u32 %r22, 0;
+
+IQ3_SECOND_LOOP:
+    setp.ge.u32 %p6, %r22, 4;
+    @%p6 bra IQ3_SECOND_DONE;
+    shl.b32 %r23, %r22, 3;
+    shr.u32 %r24, %r21, %r23;
+    and.b32 %r24, %r24, 255;
+    cvt.rn.f32.u32 %f7, %r24;
+    add.u32 %r26, %r22, 4;
+    mov.u32 %r25, 1;
+    shl.b32 %r25, %r25, %r26;
+    and.b32 %r25, %r25, %r15;
+    setp.ne.u32 %p7, %r25, 0;
+    mov.f32 %f8, 0f3F800000;
+    mov.f32 %f9, 0fBF800000;
+    selp.f32 %f10, %f9, %f8, %p7;
+    mul.rn.f32 %f11, %f6, %f7;
+    mul.rn.f32 %f12, %f11, %f10;
+    ld.global.f32 %f13, [%rd6];
+    cvt.f64.f32 %fd1, %f12;
+    cvt.f64.f32 %fd2, %f13;
+    mul.rn.f64 %fd3, %fd1, %fd2;
+    add.rn.f64 %fd0, %fd0, %fd3;
+    add.u64 %rd6, %rd6, 4;
+    add.u32 %r22, %r22, 1;
+    bra IQ3_SECOND_LOOP;
+
+IQ3_SECOND_DONE:
+    add.u32 %r11, %r11, 1;
+    bra IQ3_SUB_LOOP;
+
+IQ3_SUB_DONE:
+    add.u32 %r8, %r8, 1;
+    bra IQ3_GROUP_LOOP;
+
+IQ3_GROUP_DONE:
+    add.u64 %rd5, %rd5, 98;
+    add.u32 %r7, %r7, 1;
+    bra IQ3_BLOCK_LOOP;
+
+IQ3_BLOCK_DONE:
+    cvt.rn.f32.f64 %f14, %fd0;
+    mul.wide.u32 %rd15, %r5, 4;
+    add.u64 %rd16, %rd3, %rd15;
+    st.global.f32 [%rd16], %f14;
+
+IQ3_DONE:
+    ret;
+}
 )ptx";
 
 void quarantine_backend(std::shared_ptr<CudaDriverBackend> backend) noexcept {
@@ -840,6 +1027,96 @@ public:
         }
         auto popped = pop_context_locked(context);
         if (status != kCudaSuccess) return cuda_error("CUDA IQ1_S matvec transfer/launch", status);
+        if (!popped) return popped.error();
+        return {};
+    }
+
+    [[nodiscard]] Result<void> matvec_iq3_xxs_with_transfer(
+        const CudaBackendAllocation& allocation,
+        ByteCount matrix_offset,
+        ByteCount grid_offset,
+        ByteCount input_offset,
+        ByteCount output_offset,
+        std::size_t row_count,
+        std::size_t blocks_per_row,
+        std::span<const std::byte> input,
+        std::span<std::byte> output) override {
+        std::scoped_lock lock(mutex_);
+        constexpr ByteCount kBlockBytes = 98U;
+        constexpr ByteCount kBlockElements = 256U;
+        constexpr ByteCount kGridBytes = 256U * sizeof(std::uint32_t);
+        if (row_count == 0U || blocks_per_row == 0U ||
+            row_count > std::numeric_limits<std::uint32_t>::max() ||
+            blocks_per_row > std::numeric_limits<std::uint32_t>::max() ||
+            blocks_per_row > std::numeric_limits<ByteCount>::max() / row_count) {
+            return make_error(ErrorCode::invalid_argument,
+                              "CUDA IQ3_XXS matvec launch dimensions are invalid");
+        }
+        const ByteCount blocks = static_cast<ByteCount>(row_count) * blocks_per_row;
+        if (blocks > std::numeric_limits<ByteCount>::max() / kBlockBytes ||
+            blocks_per_row > std::numeric_limits<ByteCount>::max() / kBlockElements ||
+            row_count > std::numeric_limits<ByteCount>::max() / sizeof(float)) {
+            return make_error(ErrorCode::resource_exhausted,
+                              "CUDA IQ3_XXS matvec byte count overflows");
+        }
+        const ByteCount matrix_bytes = blocks * kBlockBytes;
+        const ByteCount input_bytes =
+            static_cast<ByteCount>(blocks_per_row) * kBlockElements * sizeof(float);
+        const ByteCount output_bytes = static_cast<ByteCount>(row_count) * sizeof(float);
+        if (input.size() != input_bytes || output.size() != output_bytes) {
+            return make_error(ErrorCode::invalid_argument,
+                              "CUDA IQ3_XXS matvec host spans do not match its shape");
+        }
+        for (const auto& [offset, bytes] :
+             {std::pair{matrix_offset, matrix_bytes}, std::pair{grid_offset, kGridBytes},
+              std::pair{input_offset, input_bytes}, std::pair{output_offset, output_bytes}}) {
+            auto range = validate_allocation_range(allocation, offset, bytes);
+            if (!range) return range.error();
+        }
+        if (input_offset % alignof(float) != 0U || output_offset % alignof(float) != 0U ||
+            grid_offset % alignof(std::uint32_t) != 0U) {
+            return make_error(ErrorCode::invalid_argument,
+                              "CUDA IQ3_XXS matvec ranges are misaligned");
+        }
+
+        auto* context = reinterpret_cast<CuContext>(allocation.context);
+        CuResult status = context_push_(context);
+        if (status != kCudaSuccess) return cuda_error("cuCtxPushCurrent_v2", status);
+        auto module = cached_module_locked(context, allocation.device_ordinal);
+        if (!module) {
+            static_cast<void>(pop_context_locked(context));
+            return module.error();
+        }
+        CuFunction function = nullptr;
+        status = module_get_function_(&function, module.value(), "vastloom_matvec_iq3_xxs_f32");
+        if (status != kCudaSuccess) {
+            static_cast<void>(pop_context_locked(context));
+            return cuda_error("cuModuleGetFunction", status);
+        }
+        status = copy_host_to_device_(allocation.device_pointer + input_offset, input.data(),
+                                      input.size());
+        if (status == kCudaSuccess) {
+            CuDevicePointer matrix_pointer = allocation.device_pointer + matrix_offset;
+            CuDevicePointer grid_pointer = allocation.device_pointer + grid_offset;
+            CuDevicePointer input_pointer = allocation.device_pointer + input_offset;
+            CuDevicePointer output_pointer = allocation.device_pointer + output_offset;
+            auto rows = static_cast<std::uint32_t>(row_count);
+            auto row_blocks = static_cast<std::uint32_t>(blocks_per_row);
+            void* parameters[] = {&matrix_pointer, &grid_pointer, &input_pointer, &output_pointer,
+                                  &rows, &row_blocks};
+            constexpr std::uint32_t kThreadsPerBlock = 128U;
+            const std::uint32_t grid = (rows + kThreadsPerBlock - 1U) / kThreadsPerBlock;
+            status = launch_kernel_(function, grid, 1U, 1U, kThreadsPerBlock, 1U, 1U, 0U, nullptr,
+                                    parameters, nullptr);
+        }
+        if (status == kCudaSuccess) {
+            status = copy_device_to_host_(output.data(), allocation.device_pointer + output_offset,
+                                          output.size());
+        }
+        auto popped = pop_context_locked(context);
+        if (status != kCudaSuccess) {
+            return cuda_error("CUDA IQ3_XXS matvec transfer/launch", status);
+        }
         if (!popped) return popped.error();
         return {};
     }
@@ -1564,6 +1841,37 @@ Result<void> CudaDriver::matvec_iq1_s_with_transfer(
     } catch (...) {
         return make_error(ErrorCode::internal_error,
                           "CUDA backend threw an unknown IQ1_S matvec exception");
+    }
+}
+
+Result<void> CudaDriver::matvec_iq3_xxs_with_transfer(
+    CudaAllocation& allocation,
+    ByteCount matrix_offset,
+    ByteCount grid_offset,
+    ByteCount input_offset,
+    ByteCount output_offset,
+    std::size_t row_count,
+    std::size_t blocks_per_row,
+    std::span<const std::byte> input,
+    std::span<std::byte> output) const {
+    if (!allocation.valid() || allocation.backend_.get() != backend_.get()) {
+        return make_error(ErrorCode::invalid_argument,
+                          "CUDA allocation does not belong to this driver");
+    }
+    if (row_count == 0U || blocks_per_row == 0U || input.empty() || output.empty()) {
+        return make_error(ErrorCode::invalid_argument,
+                          "CUDA IQ3_XXS matvec transfer parameters are invalid");
+    }
+    try {
+        return backend_->matvec_iq3_xxs_with_transfer(allocation.allocation_, matrix_offset,
+                                                      grid_offset, input_offset, output_offset,
+                                                      row_count, blocks_per_row, input, output);
+    } catch (const std::exception& exception) {
+        return make_error(ErrorCode::internal_error,
+                          "CUDA backend threw during IQ3_XXS matvec", exception.what());
+    } catch (...) {
+        return make_error(ErrorCode::internal_error,
+                          "CUDA backend threw an unknown IQ3_XXS matvec exception");
     }
 }
 

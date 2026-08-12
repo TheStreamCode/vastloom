@@ -6,7 +6,9 @@
 #include <cmath>
 #include <cstdint>
 #include <functional>
+#include <condition_variable>
 #include <limits>
+#include <mutex>
 #include <new>
 #include <string_view>
 #include <system_error>
@@ -555,6 +557,111 @@ Result<void> dequantize_blocked(std::span<const std::byte> encoded,
     return {};
 }
 
+// Fixed set of worker threads shared by every matvec in the process.
+//
+// Bounded by construction: the worker count is set on first use and never grows, there is no queue -
+// one dispatch is in flight at a time - and every dispatch joins before returning, so no work
+// outlives the call that submitted it. Workers idle on a condition variable between dispatches.
+class RowWorkPool {
+public:
+    explicit RowWorkPool(unsigned workers) {
+        try {
+            workers_.reserve(workers);
+            for (unsigned index = 0U; index < workers; ++index) {
+                workers_.emplace_back([this, index]() { serve(index); });
+            }
+        } catch (const std::system_error&) {
+            // Fewer workers than asked for is fine; callers fall back to running inline.
+        }
+    }
+
+    RowWorkPool(const RowWorkPool&) = delete;
+    RowWorkPool& operator=(const RowWorkPool&) = delete;
+
+    ~RowWorkPool() {
+        {
+            const std::lock_guard<std::mutex> lock(mutex_);
+            stopping_ = true;
+        }
+        wake_.notify_all();
+        for (auto& worker : workers_) {
+            if (worker.joinable()) worker.join();
+        }
+    }
+
+    [[nodiscard]] std::size_t size() const noexcept { return workers_.size(); }
+
+    // Runs `job(index)` for index in [0, helpers) on pool workers while the caller runs `inline_job`
+    // itself, then waits for all of them. Returns false when the pool cannot serve the request.
+    bool run(unsigned helpers,
+             const std::function<void(unsigned)>& job,
+             const std::function<void()>& inline_job) {
+        if (helpers == 0U || helpers > workers_.size()) return false;
+        {
+            const std::lock_guard<std::mutex> lock(mutex_);
+            if (stopping_ || job_ != nullptr) return false;
+            job_ = &job;
+            helpers_ = helpers;
+            claimed_ = 0U;
+            finished_ = 0U;
+            ++generation_;
+        }
+        wake_.notify_all();
+        inline_job();
+        std::unique_lock<std::mutex> lock(mutex_);
+        done_.wait(lock, [this, helpers]() { return finished_ == helpers; });
+        job_ = nullptr;
+        return true;
+    }
+
+private:
+    void serve(unsigned) {
+        std::uint64_t seen = 0U;
+        while (true) {
+            unsigned index = 0U;
+            const std::function<void(unsigned)>* job = nullptr;
+            {
+                std::unique_lock<std::mutex> lock(mutex_);
+                wake_.wait(lock, [this, seen]() {
+                    return stopping_ || (job_ != nullptr && generation_ != seen &&
+                                         claimed_ < helpers_);
+                });
+                if (stopping_) return;
+                if (job_ == nullptr || claimed_ >= helpers_) continue;
+                index = claimed_++;
+                job = job_;
+                if (claimed_ >= helpers_) seen = generation_;
+            }
+            (*job)(index);
+            {
+                const std::lock_guard<std::mutex> lock(mutex_);
+                ++finished_;
+                seen = generation_;
+            }
+            done_.notify_all();
+        }
+    }
+
+    std::mutex mutex_;
+    std::condition_variable wake_;
+    std::condition_variable done_;
+    std::vector<std::thread> workers_;
+    const std::function<void(unsigned)>* job_{nullptr};
+    unsigned helpers_{0U};
+    unsigned claimed_{0U};
+    unsigned finished_{0U};
+    std::uint64_t generation_{0U};
+    bool stopping_{false};
+};
+
+// Sized on first use to half the logical processors, matching the largest budget the runtime policy
+// will ever ask for. Sizing it to the full machine would leave the surplus workers waking on every
+// dispatch only to find no share left for them.
+RowWorkPool& row_work_pool() {
+    static RowWorkPool pool(std::max(1U, std::thread::hardware_concurrency() / 2U));
+    return pool;
+}
+
 template <std::size_t BlockElements, std::size_t BlockBytes, typename Validator,
           typename Decoder>
 Result<void> matvec_blocked(std::span<const std::byte> encoded_matrix,
@@ -608,7 +715,7 @@ Result<void> matvec_blocked(std::span<const std::byte> encoded_matrix,
         return {};
     };
 
-    // Below this a thread costs more than the rows it would take.
+    // Below this a worker costs more than the rows it would take.
     constexpr std::size_t kMinimumRowsPerWorker = 64U;
     const unsigned requested = std::max(1U, limits.max_threads);
     const auto affordable = static_cast<unsigned>(
@@ -620,33 +727,24 @@ Result<void> matvec_blocked(std::span<const std::byte> encoded_matrix,
         return compute_rows(0U, rows, decoded);
     }
 
+    // A generation issues tens of thousands of matvecs, so spawning threads per call spends more on
+    // starting workers than on arithmetic. The pool's workers are created once and reused.
     std::vector<Result<void>> outcomes(workers, Result<void>{});
-    std::vector<std::thread> threads;
-    try {
-        threads.reserve(workers - 1U);
-        const std::size_t rows_per_worker = (rows + workers - 1U) / workers;
-        for (unsigned worker = 1U; worker < workers; ++worker) {
-            const std::size_t first = std::min(rows, worker * rows_per_worker);
-            const std::size_t last = std::min(rows, first + rows_per_worker);
-            if (first >= last) continue;
-            threads.emplace_back([&, worker, first, last]() {
-                std::array<float, BlockElements> decoded{};
-                outcomes[worker] = compute_rows(first, last, decoded);
-            });
-        }
+    const std::size_t rows_per_worker = (rows + workers - 1U) / workers;
+    const bool dispatched = row_work_pool().run(workers - 1U, [&](unsigned worker) {
+        const std::size_t first = std::min(rows, (worker + 1U) * rows_per_worker);
+        const std::size_t last = std::min(rows, first + rows_per_worker);
+        if (first >= last) return;
+        std::array<float, BlockElements> decoded{};
+        outcomes[worker + 1U] = compute_rows(first, last, decoded);
+    }, [&]() {
         std::array<float, BlockElements> decoded{};
         outcomes[0] = compute_rows(0U, std::min(rows, rows_per_worker), decoded);
-    } catch (const std::system_error&) {
-        // Thread creation failed partway. Join whatever started, then fall back to finishing the
-        // remaining rows here rather than leaving the output half written.
-        for (auto& thread : threads) {
-            if (thread.joinable()) thread.join();
-        }
+    });
+    if (!dispatched) {
+        // No pool available: finish every row here rather than leaving the output half written.
         std::array<float, BlockElements> decoded{};
         return compute_rows(0U, rows, decoded);
-    }
-    for (auto& thread : threads) {
-        if (thread.joinable()) thread.join();
     }
     for (auto& outcome : outcomes) {
         if (!outcome) return outcome.error();

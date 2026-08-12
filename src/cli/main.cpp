@@ -2578,7 +2578,7 @@ int command_deepseek_forward(const std::vector<std::string>& args) {
     auto valid = validate_options(
         args, 1U,
         {"--token", "--layers", "--context", "--batch-size", "--expert-cache", "--trunk-window", "--prompt",
-         "--tokenizer", "--max-tokens", "--continue-ids", "--gpu-limit"},
+         "--tokenizer", "--max-tokens", "--continue-ids", "--gpu-limit", "--dump-hidden"},
         {"--json", "--dry-run", "--chat", "--cpu-only"});
     if (!valid) return print_error(valid.error(), json);
     if (args.empty() || vastloom::util::starts_with(args.front(), "--")) {
@@ -3258,6 +3258,26 @@ int command_deepseek_forward(const std::vector<std::string>& args) {
         const auto snapshot = cache->snapshot();
         expert_bytes_read += snapshot.logical_bytes_read;
         expert_misses += snapshot.misses;
+    }
+
+    // The hidden state the LM head multiplied, written where another implementation's can be laid
+    // beside it. Logits cannot localize a disagreement - they are this vector seen through the head,
+    // so a fault in either looks identical from outside.
+    if (const auto destination = option_value(args, "--dump-hidden")) {
+        std::ofstream out(cli_path(*destination), std::ios::binary | std::ios::trunc);
+        if (!out) {
+            return print_error(vastloom::make_error(vastloom::ErrorCode::io_error,
+                                                    "Unable to open the hidden-state destination",
+                                                    *destination),
+                               json);
+        }
+        out << std::setprecision(9);
+        for (const float value : forward.value().final_hidden) out << value << '\n';
+        if (!out) {
+            return print_error(vastloom::make_error(vastloom::ErrorCode::io_error,
+                                                    "Unable to write the hidden state", *destination),
+                               json);
+        }
     }
 
     // The eight strongest candidates and their exact logits.

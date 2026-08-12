@@ -2357,7 +2357,8 @@ Result<std::vector<float>> hc_head(const DeepseekV4ReferenceGraph& graph,
 Result<std::vector<float>> final_logits(const DeepseekV4ReferenceGraph& graph,
                                         std::span<const float> hidden,
                                         std::size_t token_count,
-                                        std::string_view tensor_prefix) {
+                                        std::string_view tensor_prefix,
+                                        std::vector<float>* normalized_out = nullptr) {
     const auto& config = graph.config;
     const std::string prefix(tensor_prefix);
     auto reduced = hc_head(graph, hidden, token_count, prefix);
@@ -2371,6 +2372,14 @@ Result<std::vector<float>> final_logits(const DeepseekV4ReferenceGraph& graph,
         normalized.value().data() +
             static_cast<std::ptrdiff_t>((token_count - 1U) * config.width),
         config.width);
+    if (normalized_out != nullptr) {
+        try {
+            normalized_out->assign(final_hidden.begin(), final_hidden.end());
+        } catch (const std::bad_alloc&) {
+            return make_error(ErrorCode::resource_exhausted,
+                              "Unable to retain the final hidden state");
+        }
+    }
     return linear_tensor(graph, "head.weight", final_hidden, 1U, config.width,
                          config.vocabulary_size, prefix + "LM head");
 }
@@ -4513,7 +4522,7 @@ Result<DeepseekV4ReferenceForwardResult> deepseek_v4_reference_prefill(
     }
     valid = execution_checkpoint(control);
     if (!valid) return valid.error();
-    auto logits = final_logits(graph, hidden, token_count, "");
+    auto logits = final_logits(graph, hidden, token_count, "", &result.final_hidden);
     if (!logits) return logits.error();
     result.logits = logits.take_value();
     const auto maximum = std::max_element(result.logits.begin(), result.logits.end());
@@ -4632,7 +4641,7 @@ Result<DeepseekV4ReferenceForwardResult> deepseek_v4_reference_decode(
     }
     state_valid = execution_checkpoint(control);
     if (!state_valid) return state_valid.error();
-    auto logits = final_logits(graph, hidden, 1U, "");
+    auto logits = final_logits(graph, hidden, 1U, "", &result.final_hidden);
     if (!logits) return logits.error();
     result.logits = logits.take_value();
     const auto maximum = std::max_element(result.logits.begin(), result.logits.end());

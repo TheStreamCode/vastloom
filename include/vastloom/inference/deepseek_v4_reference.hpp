@@ -518,6 +518,12 @@ struct DeepseekV4LayerTrace {
 
 struct DeepseekV4ReferenceForwardResult {
     std::vector<float> logits;
+    // The normalized hidden state the LM head multiplies, for the last token only.
+    //
+    // Kept because logits cannot localize a disagreement with another implementation: they are the
+    // hidden state seen through the head, so a difference in either looks the same. Comparing this
+    // vector against a reference splits the body of the model from its head in one measurement.
+    std::vector<float> final_hidden;
     std::vector<DeepseekV4LayerTrace> layers;
     std::uint32_t greedy_token_id{0};
     std::vector<float> mtp_logits;

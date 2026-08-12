@@ -2,6 +2,32 @@
 
 ## Unreleased
 
+- **The forward-pass defect reproduces on a single token**, which turns the debugging loop from a
+  twelve-token generation into one forward pass. Given nothing but the beginning-of-sequence token,
+  the two engines agree on almost nothing:
+
+  | rank | llama.cpp | here |
+  |---|---|---|
+  | 1 | 5 — 16.67 | **20** — 14.78 |
+  | 2 | 201 — 15.40 | **18** — 14.00 |
+  | 3 | 372 — 15.36 | **21** — 13.97 |
+  | 4 | 1897 — 15.09 | **22** — 13.78 |
+  | 5 | 7249 — 14.54 | **26** — 13.70 |
+
+  One token appears in both lists, and the rest do not. So this is not something that accumulates
+  over a sequence, and not something the attention window, the indexer or the positional encoding
+  can be blamed for: with one token there is no history to attend to and one position to encode.
+
+  The shape of our ranking is the lead: **18, 19, 20, 21, 22, 26** — consecutive vocabulary
+  positions. A ranking dominated by adjacent ids is what happens when the hidden state carries no
+  direction worth speaking of and the logits fall back on the row statistics of the LM head. That
+  points at a hidden state that is near-constant or near-zero by the time it reaches the head,
+  rather than at a wrong-but-meaningful one.
+
+  Also measured, and worth keeping straight: at twelve tokens both engines put 7529 first — ours
+  more strongly, 35.46 against 33.71 — while positions two through seven are nearly disjoint. The
+  argmax agreeing is what let this survive a full milestone unnoticed.
+
 - **Routed experts share nothing, so there is no base to factor out of them.** The idea was that an
   expert might be a shared component plus a small individual part, in which case the shared part
   could stay resident and only the parts would stream — and the saving would grow with precision,

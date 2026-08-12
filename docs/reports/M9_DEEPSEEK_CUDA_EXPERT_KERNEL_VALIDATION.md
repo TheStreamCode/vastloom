@@ -253,6 +253,40 @@ claim while 30,280 to 11,639 does.
 Full-depth generation across this work, against the 48,970 ms CPU baseline measured the same day:
 **3.8×** at the median.
 
+## Every storage type on the routed path, and what that cost
+
+Nine kernels now cover the model completely — Q8_0, IQ1_S, IQ2_XXS, IQ3_XXS, Q4_K, Q5_K, Q6_K, MXFP4
+and dense F32/BF16 — and at 43 layers `gpu_declined` is zero with an empty per-type breakdown:
+37,741 matvecs on the device, 7,998 ms per token against 48,970 on the CPU, output unchanged.
+
+Seven carry standalone parity gates at zero absolute error. Q4_K and MXFP4 do not; their correctness
+rests on the end-to-end result alone, which is strong evidence and not the same guarantee.
+
+The ranking lesson held to the end. Decline counts say what to write next; they do not predict what
+it is worth. The K-quants were the most-declined types and among the cheapest to decode — Q5_K costs
+2.05 ms on twelve CPU threads against 1.06 on the device, Q6_K 2.15 against 1.35, both under 2x,
+where IQ1_S wins 9x. The large gains of this milestone came from memory policy, not arithmetic:
+eviction instead of refusal was 2.6x, and streaming the trunks was another 1.4x. All nine kernels
+together are worth less than those two decisions.
+
+## Where a token goes now
+
+| | ms | share |
+|---|---:|---:|
+| trunk reloads | ~3,708 | 50% |
+| GPU kernels | 2,450 | 33% |
+| expert I/O | 1,283 | 17% |
+
+Trunk reloading is the largest single cost and is pure repetition: 47 reloads per token, about 7 GB,
+the same bytes every time. Serving payload-free descriptors for device-resident matrices is
+implemented and answers 69% of requests without a read, yet reloads do not fall, because reloading
+is all-or-nothing — one missing matrix re-reads its whole 149 MB layer. The 31% go missing because
+the forward scans layers cyclically and eviction discards layer 0 while working through the other
+42. Per-tensor loading would read what is actually absent, roughly 2.2 GB per token instead of 7.
+
+Expert caching is closed as a lever: tripling the per-layer cache leaves `expert_bytes_read`
+identical, because top-6 over 256 experts means consecutive tokens select different experts.
+
 ## Bounds
 
 - The 5.60× figure is measured at 16 layers, where VRAM residency is not constrained. The same

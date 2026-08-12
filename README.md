@@ -126,8 +126,12 @@ model conversion.
 > model being practical: a minute per token needs the CUDA path and resident experts before anyone
 > would want to use it.
 >
-> **A full-depth token went from 48,970 ms to a median of 12,960 in one day of work** — 3.8×, over
-> three runs spanning 11,642 to 13,916 — with the output byte-identical at every step. Four changes, each measured: quantized CUDA kernels for the routed
+> **A full-depth token went from 48,970 ms to about 8,000 in one day of work** — 6.1×, and 7.5×
+> against the original serial implementation's 60,301 — with the output byte-identical at every
+> step and host RAM down from 7.62 GB to 2.12. Every matvec in the model now runs on the device:
+> nine kernels, `gpu_declined` zero. The two largest gains were not kernels but corrections to
+> memory policy that had never been checked against their own arithmetic — evicting instead of
+> refusing work (2.6×), and streaming layer trunks instead of holding all 43 resident (1.4×). Four changes, each measured: quantized CUDA kernels for the routed
 > path, layer trunks streamed through a bounded window instead of all held resident (host RAM 7.62 GB
 > to 2.12 GB, which is also what freed the memory the GPU needed), least-recently-used eviction in
 > place of refusing work when VRAM filled, and dense kernels chosen by counting which storage types

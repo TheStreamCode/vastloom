@@ -2,6 +2,28 @@
 
 ## Unreleased
 
+- The UD-IQ2_XXS checkpoint is imported and pinned but does not yet run: one layer of forty-three
+  stores its gate and up projections as **IQ2_S**, a format this project has in no form — no device
+  kernel and, more importantly, no reference decoder. Two tensors out of 129 keep the model from
+  starting. Unsloth's dynamic quantization varies storage per layer, so the mixture has to be read
+  from the file rather than inferred from its name; `ffn_gate_exps` is IQ2_XXS on 42 layers and
+  IQ2_S on layer 26. The reference decoder is the prerequisite, because bit-for-bit parity is what
+  every kernel is checked against; a kernel is optional and would save two matvecs.
+
+- Each quantization now carries its own pinned identity rather than one being privileged. A store
+  holding UD-IQ2_XXS is recognised, verified and executed exactly as one holding UD-IQ1_S, and a
+  store matching neither is verified against nothing. Two independent gates enforced this — the spec
+  comparison in the catalog reader and the reference-config check in the graph — and both were
+  extended rather than relaxed: the promise is that a checkpoint cannot quietly become a different
+  one, which is per-quantization and stays intact.
+
+- The GGUF reader accepts metadata under both `deepseek4.` and `dflash.` prefixes, so the DSpark
+  draft describes itself to the same reader as the main checkpoint. The draft is downloaded
+  (10.15 GB): architecture dflash, three blocks, `target_layers [41,42,43]`, 256 experts at top-6,
+  routed experts in MXFP4 with everything else Q8_0, BF16 or F32 — every one of which already has a
+  device kernel. Its catalog is still rejected because the validator expects a 43-layer tensor and
+  expert mapping.
+
 - Added the IQ2_XXS kernel, which the decline breakdown had ranked first. Declines at 43 layers fall
   from 5,089 to 2,749 and a token from about 13,226 to 11,739-11,954 ms, with zero absolute error
   against the reference. The two runs land within 1.8% of each other, tighter than anything else

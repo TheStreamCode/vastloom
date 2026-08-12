@@ -259,6 +259,20 @@ struct DeepseekV4GlobalTensorPlan {
 [[nodiscard]] const DeepseekV4GgufCheckpointSpec&
 pinned_deepseek_v4_flash_0731_iq1s_checkpoint();
 
+// The 2-bit sibling from the same repository and revision. Same architecture; only the routed
+// experts' storage differs.
+[[nodiscard]] const DeepseekV4GgufCheckpointSpec&
+pinned_deepseek_v4_flash_0731_iq2xxs_checkpoint();
+
+// Picks the pinned identity whose shards are the ones present under this root.
+//
+// Each quantization is pinned separately on purpose - a checkpoint must not be able to become a
+// different one quietly - so a caller holding only a directory needs to be told which pin applies
+// rather than guessing. Returns nothing when the directory matches no known identity, which is a
+// refusal to execute rather than a licence to skip the check.
+[[nodiscard]] const DeepseekV4GgufCheckpointSpec* pinned_deepseek_v4_flash_0731_checkpoint_for(
+    const std::filesystem::path& checkpoint_root);
+
 // Verifies an immutable importer manifest, exact object identities and (by default) every file
 // hash before exposing payload paths. A full verified checkpoint is rejected unless one complete
 // expert bundle fits in either the safe RAM tier or the safe VRAM tier. The two capacities are

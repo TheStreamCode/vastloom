@@ -1538,6 +1538,23 @@ Result<std::vector<std::uint32_t>> parse_expert_ids(std::string_view value) {
     return experts;
 }
 
+// Picks the pinned checkpoint identity matching what is on disk.
+//
+// Each quantization of the same model is pinned separately, on purpose: the pin exists so a
+// checkpoint cannot quietly become a different one, and that promise is per-quantization. A
+// directory holding UD-IQ2_XXS is a different identity from one holding UD-IQ1_S, not a
+// corrupted version of it. When nothing matches, the first identity is returned so the failure
+// comes from the hash gate, which names the object that did not match, rather than from a vaguer
+// complaint about the directory.
+const vastloom::inference::DeepseekV4GgufCheckpointSpec& pinned_spec_for(
+    const std::filesystem::path& checkpoint_root) {
+    const auto* found =
+        vastloom::inference::pinned_deepseek_v4_flash_0731_checkpoint_for(checkpoint_root);
+    return found != nullptr
+        ? *found
+        : vastloom::inference::pinned_deepseek_v4_flash_0731_iq1s_checkpoint();
+}
+
 int command_deepseek_gguf_inspect(const std::vector<std::string>& args) {
     std::size_t positional_count = 0U;
     while (positional_count < args.size() && !vastloom::util::starts_with(args[positional_count], "--")) {
@@ -1924,7 +1941,7 @@ int command_deepseek_gguf_range_bind(const std::vector<std::string>& args) {
     inspect_options.batch_size = static_cast<std::uint32_t>(batch_size.value());
     inspect_options.safe_ram_cap_bytes = policy.value().resources.host_memory_hard_limit;
     inspect_options.safe_vram_cap_bytes = policy.value().resources.vram_hard_limit;
-    const auto& spec = vastloom::inference::pinned_deepseek_v4_flash_0731_iq1s_checkpoint();
+    const auto& spec = pinned_spec_for(checkpoint_root);
     auto report = vastloom::inference::inspect_deepseek_v4_gguf_checkpoint(
         checkpoint_root, spec, inspect_options);
     if (!report) return print_error(report.error(), json);
@@ -2151,7 +2168,7 @@ int command_deepseek_layer_probe(const std::vector<std::string>& args) {
     inspect_options.batch_size = static_cast<std::uint32_t>(batch_size.value());
     inspect_options.safe_ram_cap_bytes = policy.value().resources.host_memory_hard_limit;
     inspect_options.safe_vram_cap_bytes = policy.value().resources.vram_hard_limit;
-    const auto& spec = vastloom::inference::pinned_deepseek_v4_flash_0731_iq1s_checkpoint();
+    const auto& spec = pinned_spec_for(checkpoint_root);
     auto report = vastloom::inference::inspect_deepseek_v4_gguf_checkpoint(
         checkpoint_root, spec, inspect_options);
     if (!report) return print_error(report.error(), json);
@@ -2394,7 +2411,7 @@ int command_deepseek_forward(const std::vector<std::string>& args) {
     inspect_options.batch_size = static_cast<std::uint32_t>(batch_size.value());
     inspect_options.safe_ram_cap_bytes = policy.value().resources.host_memory_hard_limit;
     inspect_options.safe_vram_cap_bytes = policy.value().resources.vram_hard_limit;
-    const auto& spec = vastloom::inference::pinned_deepseek_v4_flash_0731_iq1s_checkpoint();
+    const auto& spec = pinned_spec_for(checkpoint_root);
     auto report = vastloom::inference::inspect_deepseek_v4_gguf_checkpoint(
         checkpoint_root, spec, inspect_options);
     if (!report) return print_error(report.error(), json);

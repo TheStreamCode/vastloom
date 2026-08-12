@@ -1042,6 +1042,69 @@ const DeepseekV4GgufCheckpointSpec& pinned_deepseek_v4_flash_0731_iq1s_checkpoin
     return spec;
 }
 
+// The 2-bit sibling of the checkpoint above, from the same repository and revision.
+//
+// Same architecture, same 43 layers and 256 experts at top-6; only the routed experts' storage
+// differs, and every type it uses already has both a reference and a device kernel. It is worth
+// pinning as its own identity rather than relaxing the check: the point of the pin is that a
+// checkpoint cannot quietly become a different one, and that guarantee is per-quantization.
+//
+// These shards carry no separately extracted header, so each object names itself for both its full
+// and its metadata identity - the reader takes the header from the front of the complete file.
+const DeepseekV4GgufCheckpointSpec& pinned_deepseek_v4_flash_0731_iq2xxs_checkpoint() {
+    static const DeepseekV4GgufCheckpointSpec spec{
+        "unsloth/DeepSeek-V4-Flash-0731-GGUF",
+        "fbbb5b93fb787c21338159b0af3318bb3f4d9768",
+        {
+            {
+                "UD-IQ2_XXS/DeepSeek-V4-Flash-0731-UD-IQ2_XXS-00001-of-00003.gguf",
+                5'257'664U,
+                "c58c9d62eac7b62e9578b52613f425e48313d7212ab8d1d76caed8ea8de26595",
+                "UD-IQ2_XXS/DeepSeek-V4-Flash-0731-UD-IQ2_XXS-00001-of-00003.gguf",
+                5'257'664U,
+                "c58c9d62eac7b62e9578b52613f425e48313d7212ab8d1d76caed8ea8de26595",
+            },
+            {
+                "UD-IQ2_XXS/DeepSeek-V4-Flash-0731-UD-IQ2_XXS-00002-of-00003.gguf",
+                49'890'588'800U,
+                "65a113df6d4469f16db6882b6919e153c464c3c78c833f5e1b41a33803cdbd52",
+                "UD-IQ2_XXS/DeepSeek-V4-Flash-0731-UD-IQ2_XXS-00002-of-00003.gguf",
+                49'890'588'800U,
+                "65a113df6d4469f16db6882b6919e153c464c3c78c833f5e1b41a33803cdbd52",
+            },
+            {
+                "UD-IQ2_XXS/DeepSeek-V4-Flash-0731-UD-IQ2_XXS-00003-of-00003.gguf",
+                40'964'890'464U,
+                "a69102ddfaf4a84426e11fdb66716654f4260dc3a1de3ade9fd50e006b8691d3",
+                "UD-IQ2_XXS/DeepSeek-V4-Flash-0731-UD-IQ2_XXS-00003-of-00003.gguf",
+                40'964'890'464U,
+                "a69102ddfaf4a84426e11fdb66716654f4260dc3a1de3ade9fd50e006b8691d3",
+            },
+        },
+        43U,
+        256U,
+        6U,
+    };
+    return spec;
+}
+
+const DeepseekV4GgufCheckpointSpec* pinned_deepseek_v4_flash_0731_checkpoint_for(
+    const std::filesystem::path& checkpoint_root) {
+    for (const auto* candidate : {&pinned_deepseek_v4_flash_0731_iq1s_checkpoint(),
+                                  &pinned_deepseek_v4_flash_0731_iq2xxs_checkpoint()}) {
+        if (candidate->shards.empty()) continue;
+        std::error_code error;
+        const auto first = checkpoint_root / candidate->shards.front().full_relative_path;
+        // Presence and size only: the hashes are the execution gate's job, and doing it here would
+        // read tens of gigabytes just to decide which identity to hand it.
+        if (!std::filesystem::is_regular_file(first, error) || error) continue;
+        const auto bytes = std::filesystem::file_size(first, error);
+        if (error || bytes != candidate->shards.front().full_bytes) continue;
+        return candidate;
+    }
+    return nullptr;
+}
+
 Result<DeepseekV4GgufCatalogReport> inspect_deepseek_v4_gguf_checkpoint(
     const std::filesystem::path& checkpoint_root,
     const DeepseekV4GgufCheckpointSpec& spec,
@@ -1144,8 +1207,13 @@ Result<DeepseekV4GgufCatalogReport> inspect_deepseek_v4_gguf_checkpoint(
         options.safe_vram_cap_bytes = inspect_options.safe_vram_cap_bytes;
         options.metadata_only = imported.value().metadata_only ||
                                 !imported.value().full_hash_verified;
-        const auto& pinned = pinned_deepseek_v4_flash_0731_iq1s_checkpoint();
-        const bool pinned_spec_verified = checkpoint_specs_equal(spec, pinned);
+        // Matching any pinned identity counts as verified. Each quantization is pinned separately -
+        // the promise is that a checkpoint cannot become a different one, not that only one
+        // quantization exists - so a store holding UD-IQ2_XXS is as verified as one holding
+        // UD-IQ1_S, and a store matching neither is verified against nothing.
+        const bool pinned_spec_verified =
+            checkpoint_specs_equal(spec, pinned_deepseek_v4_flash_0731_iq1s_checkpoint()) ||
+            checkpoint_specs_equal(spec, pinned_deepseek_v4_flash_0731_iq2xxs_checkpoint());
         options.require_reference_architecture = pinned_spec_verified;
         // Logical source ranges always name the immutable full checkpoint objects. Metadata-only
         // header snapshots supply offsets and shapes, but must never become payload identities.

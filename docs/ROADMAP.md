@@ -434,9 +434,13 @@ verification costs; output remains target-model correct.
 
 ## M13 — Local service and agent integration
 
-- [ ] OpenAI-compatible loopback API.
+- [ ] OpenAI-compatible loopback API. The point is not the protocol but the ecosystem: opencode,
+  Continue, Aider, Zed and Claude Code all drive an OpenAI endpoint, so one server replaces every
+  client this project would otherwise have to write.
 - [ ] Streaming, cancellation, structured outputs and tool calls.
-- [ ] Session/prefix KV management.
+- [ ] Session/prefix KV management. This is the load-bearing piece, not the JSON. A coding agent
+  resends the same long context every turn and changes only its tail; without prefix reuse each
+  request re-runs the whole prompt, and no amount of kernel work compensates for that.
 - [ ] Request-level resource budgets and watchdog integration.
 - [ ] Coding-agent compatibility tests.
 

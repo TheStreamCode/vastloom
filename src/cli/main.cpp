@@ -3135,9 +3135,26 @@ int command_deepseek_forward(const std::vector<std::string>& args) {
         if (tokenizer.has_value()) {
             options.stop_token_ids.push_back(1U);  // <|end of sentence|>
         }
+        // Physical device reads across the generation, which is the one quantity the byte counters
+        // cannot supply. `expert_bytes_read` and `trunk_bytes_read` are logical: they say what the
+        // engine asked for, not what the disk delivered, and the difference is page cache. Without
+        // separating them, an expert rate of 1.74 GB/s could equally be a saturated SSD or a warm
+        // cache being consumed slowly, and those call for opposite work.
+        auto device_before = vastloom::io::sample_device_io(checkpoint_root);
         auto generated = vastloom::inference::deepseek_v4_reference_generate(
             graph, token_ids, options, &process_guard.value());
         if (!generated) return print_error(generated.error(), json);
+        vastloom::ByteCount device_read_bytes = 0U;
+        std::uint64_t device_read_operations = 0U;
+        if (device_before) {
+            if (auto device_after = vastloom::io::sample_device_io(checkpoint_root)) {
+                if (auto delta = vastloom::io::device_io_delta(device_before.value(),
+                                                              device_after.value())) {
+                    device_read_bytes = delta.value().read_bytes;
+                    device_read_operations = delta.value().read_operations;
+                }
+            }
+        }
         const auto generate_elapsed = std::chrono::duration<double, std::milli>(
             std::chrono::steady_clock::now() - started).count();
         std::string text;
@@ -3201,6 +3218,15 @@ int command_deepseek_forward(const std::vector<std::string>& args) {
                       // another: 7,029 reads of one matrix and 473 of a whole layer differ by a
                       // factor of fifteen in count and by 7% in traffic.
                       << ",\"trunk_bytes_read\":" << window.bytes_read
+                      // The four quantities a bandwidth budget needs kept apart. Logical bytes are
+                      // what the engine consumed; device bytes are what the disk actually delivered,
+                      // and their difference is page cache; uploaded bytes are what crossed PCIe,
+                      // which is far less than the logical total because resident matrices are not
+                      // re-sent. Each divides by the target time into a different requirement.
+                      << ",\"device_read_bytes\":" << device_read_bytes
+                      << ",\"device_read_operations\":" << device_read_operations
+                      << ",\"gpu_uploaded_bytes\":" << gpu_stats.uploaded_bytes
+                      << ",\"gpu_upload_ms\":" << gpu_stats.upload_ms
                       << ",\"gpu_evicted\":" << gpu_stats.evicted
                       << ",\"gpu_declined_by_type\":{";
         {

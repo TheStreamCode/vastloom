@@ -2,6 +2,31 @@
 
 ## Unreleased
 
+- **Interleaving the Q8_0 weight layout for coalescing was 21% slower, and the reason ties it to a
+  different problem.** One thread per output row against row-major storage puts consecutive threads
+  a whole row apart, so a warp issues thirty-two separate memory transactions. Storing block *b* of
+  every row together fixes that — a warp then covers 1,088 contiguous bytes — and it preserves the
+  accumulation order exactly, because each thread still walks its own blocks and columns in the same
+  sequence. Paired at a pinned 1 GiB ceiling:
+
+  | | s/token | kernel ms |
+  |---|---:|---:|
+  | row-major | **6.81** | **26,165** |
+  | block-interleaved | 8.27 | 30,046 |
+
+  The rearrangement costs one pass over the matrix per upload, and with a reuse factor of 1.03
+  every matrix is uploaded on every token. So the engine now shuffles 8.5 GB on the CPU per pass to
+  save reads on a kernel that is not bandwidth-bound at batch 1 — one thread grinding 4,096 serial
+  iterations is latency-bound, and coalescing a machine that is already stalled does not start it.
+
+  Reverted, but the idea is not refuted: it is **coupled to residency**. Repacking amortizes only
+  over matrices that stay on the device, and none do. If the VRAM ceiling ever holds the trunk, this
+  becomes worth retrying — and at that point the accumulation-order-preserving version is the one to
+  reach for first, before anything that needs a tolerance.
+
+- `--json` now reports `device_read_bytes`, `device_read_operations`, `gpu_uploaded_bytes` and
+  `gpu_upload_ms`, which is what separated a warm page cache from a saturated disk.
+
 - **Removing the GPU makes a token four times slower, so the accelerator stays.** The advice under
   consideration was to drop the hybrid GPU decode and invest in a CPU path, on the sound argument
   that batch-1 decode with 1-2.3 GB of resident VRAM makes the device a PCIe streaming accelerator

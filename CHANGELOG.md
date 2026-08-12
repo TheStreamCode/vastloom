@@ -14,6 +14,18 @@
   [complete forward validation](docs/reports/M9_DEEPSEEK_COMPLETE_FORWARD_VALIDATION.md). This is one
   forward pass, not generation, and 29.4 s per token is correct rather than usable.
 
+- A completed checkpoint verification now leaves a receipt, so the 82.54 GB SHA-256 pass that gates
+  execution is paid once rather than before every prompt. The receipt records each file's size and
+  last-write time beside the hash that was confirmed, keyed on the manifest's own hash; if both
+  still match, the bytes on disk are the bytes that were verified. This trusts filesystem metadata,
+  which is weaker than rehashing — a file edited in place preserving size and timestamp would pass —
+  and it is bounded: any mismatch, a missing or malformed receipt, or a changed manifest forces the
+  full verification again, and the receipt is written only after every file passes.
+
+- Inference now uses half the machine's logical processors rather than a fixed six, which predated
+  any threaded kernel. Combined with the threaded matvecs, generation went from 60,301 ms per token
+  serial to 32,730 at six threads and 25,891 at twelve, with byte-identical output throughout.
+
 - Packed matvec rows now split across the Governor's thread budget, taking generation from 60.3 s to
   32.7 s per token on the reference PC with byte-identical output. Rows are independent and each is
   still computed exactly as it would be serially, so the ggml parity fixtures are unaffected. The

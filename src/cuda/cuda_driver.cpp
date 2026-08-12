@@ -127,6 +127,81 @@ OUTPUT_LOOP:
 DONE:
     ret;
 }
+
+// One thread per output row of a ggml Q8_0 matrix: 34-byte blocks of one FP16 scale followed by
+// 32 int8 weights. Accumulation runs block by block in the same order as the CPU reference, but in
+// FP32 rather than FP64, so results agree to a declared tolerance rather than bit for bit.
+.visible .entry vastloom_matvec_q8_0_f32(
+    .param .u64 matrix_param,
+    .param .u64 input_param,
+    .param .u64 output_param,
+    .param .u32 rows_param,
+    .param .u32 blocks_param
+)
+{
+    .reg .pred %p<4>;
+    .reg .b16 %rs<2>;
+    .reg .b32 %r<12>;
+    .reg .b64 %rd<10>;
+    .reg .f32 %f<8>;
+
+    ld.param.u64 %rd0, [matrix_param];
+    ld.param.u64 %rd1, [input_param];
+    ld.param.u64 %rd2, [output_param];
+    ld.param.u32 %r0, [rows_param];
+    ld.param.u32 %r1, [blocks_param];
+    mov.u32 %r2, %ntid.x;
+    mov.u32 %r3, %ctaid.x;
+    mov.u32 %r4, %tid.x;
+    mad.lo.u32 %r5, %r3, %r2, %r4;
+    setp.ge.u32 %p0, %r5, %r0;
+    @%p0 bra Q8_DONE;
+
+    // Byte offset of this row: row * blocks_per_row * 34.
+    mul.lo.u32 %r6, %r5, %r1;
+    mul.wide.u32 %rd3, %r6, 34;
+    add.u64 %rd4, %rd0, %rd3;
+    mov.f32 %f0, 0f00000000;
+    mov.u32 %r7, 0;
+
+Q8_BLOCK_LOOP:
+    setp.ge.u32 %p1, %r7, %r1;
+    @%p1 bra Q8_BLOCK_DONE;
+    ld.global.u16 %rs0, [%rd4];
+    cvt.f32.f16 %f1, %rs0;
+    add.u64 %rd5, %rd4, 2;
+    mul.lo.u32 %r8, %r7, 32;
+    mul.wide.u32 %rd6, %r8, 4;
+    add.u64 %rd7, %rd1, %rd6;
+    mov.f32 %f2, 0f00000000;
+    mov.u32 %r9, 0;
+
+Q8_ELEMENT_LOOP:
+    setp.ge.u32 %p2, %r9, 32;
+    @%p2 bra Q8_ELEMENT_DONE;
+    ld.global.s8 %r10, [%rd5];
+    cvt.rn.f32.s32 %f3, %r10;
+    ld.global.f32 %f4, [%rd7];
+    fma.rn.f32 %f2, %f3, %f4, %f2;
+    add.u64 %rd5, %rd5, 1;
+    add.u64 %rd7, %rd7, 4;
+    add.u32 %r9, %r9, 1;
+    bra Q8_ELEMENT_LOOP;
+
+Q8_ELEMENT_DONE:
+    fma.rn.f32 %f0, %f1, %f2, %f0;
+    add.u64 %rd4, %rd4, 34;
+    add.u32 %r7, %r7, 1;
+    bra Q8_BLOCK_LOOP;
+
+Q8_BLOCK_DONE:
+    mul.wide.u32 %rd8, %r5, 4;
+    add.u64 %rd9, %rd2, %rd8;
+    st.global.f32 [%rd9], %f0;
+
+Q8_DONE:
+    ret;
+}
 )ptx";
 
 void quarantine_backend(std::shared_ptr<CudaDriverBackend> backend) noexcept {
@@ -524,6 +599,109 @@ public:
         const CuResult unload_status = module_unload_(module);
         auto popped = pop_context_locked(context);
         if (status != kCudaSuccess) return cuda_error("CUDA RMSNorm launch/synchronize", status);
+        if (unload_status != kCudaSuccess) return cuda_error("cuModuleUnload", unload_status);
+        if (!popped) return popped.error();
+        return {};
+    }
+
+    [[nodiscard]] Result<void> launch_matvec_q8_0(
+        const CudaBackendAllocation& allocation,
+        ByteCount matrix_offset,
+        ByteCount input_offset,
+        ByteCount output_offset,
+        std::size_t row_count,
+        std::size_t blocks_per_row) override {
+        std::scoped_lock lock(mutex_);
+        constexpr ByteCount kBlockBytes = 34U;
+        constexpr ByteCount kBlockElements = 32U;
+        if (row_count == 0U || blocks_per_row == 0U ||
+            row_count > std::numeric_limits<std::uint32_t>::max() ||
+            blocks_per_row > std::numeric_limits<std::uint32_t>::max()) {
+            return make_error(ErrorCode::invalid_argument,
+                              "CUDA Q8_0 matvec launch dimensions are invalid");
+        }
+        if (blocks_per_row > std::numeric_limits<ByteCount>::max() / row_count) {
+            return make_error(ErrorCode::resource_exhausted,
+                              "CUDA Q8_0 matvec block count overflows");
+        }
+        const ByteCount blocks = static_cast<ByteCount>(row_count) * blocks_per_row;
+        if (blocks > std::numeric_limits<ByteCount>::max() / kBlockBytes ||
+            blocks_per_row > std::numeric_limits<ByteCount>::max() / kBlockElements ||
+            row_count > std::numeric_limits<ByteCount>::max() / sizeof(float)) {
+            return make_error(ErrorCode::resource_exhausted,
+                              "CUDA Q8_0 matvec byte count overflows");
+        }
+        const ByteCount matrix_bytes = blocks * kBlockBytes;
+        const ByteCount input_bytes =
+            static_cast<ByteCount>(blocks_per_row) * kBlockElements * sizeof(float);
+        const ByteCount output_bytes = static_cast<ByteCount>(row_count) * sizeof(float);
+        for (const auto& [offset, bytes] :
+             {std::pair{matrix_offset, matrix_bytes}, std::pair{input_offset, input_bytes},
+              std::pair{output_offset, output_bytes}}) {
+            auto range = validate_allocation_range(allocation, offset, bytes);
+            if (!range) return range.error();
+        }
+        if (input_offset % alignof(float) != 0U || output_offset % alignof(float) != 0U) {
+            return make_error(ErrorCode::invalid_argument,
+                              "CUDA Q8_0 matvec float ranges must be FP32-aligned");
+        }
+        const auto overlaps = [](ByteCount first_offset, ByteCount first_bytes,
+                                 ByteCount second_offset, ByteCount second_bytes) {
+            return first_offset < second_offset + second_bytes &&
+                   second_offset < first_offset + first_bytes;
+        };
+        if (overlaps(matrix_offset, matrix_bytes, input_offset, input_bytes) ||
+            overlaps(matrix_offset, matrix_bytes, output_offset, output_bytes) ||
+            overlaps(input_offset, input_bytes, output_offset, output_bytes)) {
+            return make_error(ErrorCode::invalid_argument,
+                              "CUDA Q8_0 matvec ranges must not overlap");
+        }
+
+        auto* context = reinterpret_cast<CuContext>(allocation.context);
+        CuResult status = context_push_(context);
+        if (status != kCudaSuccess) return cuda_error("cuCtxPushCurrent_v2", status);
+        CuModule module = nullptr;
+        std::array<char, kMaximumJitLogBytes> jit_error_log{};
+        int jit_options[] = {kJitErrorLogBufferSizeBytes, kJitErrorLogBuffer};
+        void* jit_option_values[] = {
+            reinterpret_cast<void*>(static_cast<std::uintptr_t>(jit_error_log.size())),
+            jit_error_log.data()};
+        status = module_load_data_(&module, kRmsNormPtx.data(), 2U, jit_options,
+                                   jit_option_values);
+        if (status != kCudaSuccess) {
+            static_cast<void>(pop_context_locked(context));
+            auto error = cuda_error("cuModuleLoadDataEx", status);
+            if (jit_error_log.front() != '\0') {
+                const auto log_end = std::find(jit_error_log.begin(), jit_error_log.end(), '\0');
+                error.context += ", JIT log: ";
+                error.context.append(
+                    jit_error_log.data(),
+                    static_cast<std::size_t>(std::distance(jit_error_log.begin(), log_end)));
+            }
+            return error;
+        }
+        CuFunction function = nullptr;
+        status = module_get_function_(&function, module, "vastloom_matvec_q8_0_f32");
+        if (status != kCudaSuccess) {
+            static_cast<void>(module_unload_(module));
+            static_cast<void>(pop_context_locked(context));
+            return cuda_error("cuModuleGetFunction", status);
+        }
+        CuDevicePointer matrix_pointer = allocation.device_pointer + matrix_offset;
+        CuDevicePointer input_pointer = allocation.device_pointer + input_offset;
+        CuDevicePointer output_pointer = allocation.device_pointer + output_offset;
+        auto rows = static_cast<std::uint32_t>(row_count);
+        auto row_blocks = static_cast<std::uint32_t>(blocks_per_row);
+        void* parameters[] = {&matrix_pointer, &input_pointer, &output_pointer, &rows,
+                              &row_blocks};
+        constexpr std::uint32_t kThreadsPerBlock = 128U;
+        const std::uint32_t grid = (rows + kThreadsPerBlock - 1U) / kThreadsPerBlock;
+        status = launch_kernel_(function, grid, 1U, 1U, kThreadsPerBlock, 1U, 1U, 0U, nullptr,
+                                parameters, nullptr);
+        if (status == kCudaSuccess) status = context_synchronize_();
+        const CuResult unload_status = module_unload_(module);
+        auto popped = pop_context_locked(context);
+        if (status != kCudaSuccess) return cuda_error("CUDA Q8_0 matvec launch/synchronize", status);
         if (unload_status != kCudaSuccess) return cuda_error("cuModuleUnload", unload_status);
         if (!popped) return popped.error();
         return {};
@@ -992,6 +1170,35 @@ Result<void> CudaDriver::launch_rms_norm(
     } catch (...) {
         return make_error(ErrorCode::internal_error,
                           "CUDA backend threw an unknown RMSNorm exception");
+    }
+}
+
+Result<void> CudaDriver::launch_matvec_q8_0(
+    CudaAllocation& allocation,
+    ByteCount matrix_offset,
+    ByteCount input_offset,
+    ByteCount output_offset,
+    std::size_t row_count,
+    std::size_t blocks_per_row) const {
+    if (!allocation.valid() || allocation.backend_.get() != backend_.get()) {
+        return make_error(ErrorCode::invalid_argument,
+                          "CUDA allocation does not belong to this driver");
+    }
+    if (row_count == 0U || blocks_per_row == 0U ||
+        row_count > std::numeric_limits<std::uint32_t>::max() ||
+        blocks_per_row > std::numeric_limits<std::uint32_t>::max()) {
+        return make_error(ErrorCode::invalid_argument,
+                          "CUDA Q8_0 matvec launch parameters are invalid");
+    }
+    try {
+        return backend_->launch_matvec_q8_0(allocation.allocation_, matrix_offset, input_offset,
+                                            output_offset, row_count, blocks_per_row);
+    } catch (const std::exception& exception) {
+        return make_error(ErrorCode::internal_error,
+                          "CUDA backend threw during Q8_0 matvec launch", exception.what());
+    } catch (...) {
+        return make_error(ErrorCode::internal_error,
+                          "CUDA backend threw an unknown Q8_0 matvec exception");
     }
 }
 

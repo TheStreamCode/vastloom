@@ -18,6 +18,35 @@ namespace {
 
 int failures = 0;
 
+// IEEE-754 binary16 to binary32, matching the conversion the GGML block scale uses.
+float half_to_float(std::uint16_t bits) {
+    const std::uint32_t sign = static_cast<std::uint32_t>(bits & 0x8000U) << 16U;
+    const std::uint32_t exponent = (bits >> 10U) & 0x1FU;
+    const std::uint32_t mantissa = bits & 0x3FFU;
+    std::uint32_t result = 0U;
+    if (exponent == 0U) {
+        if (mantissa != 0U) {
+            std::uint32_t shift = 0U;
+            std::uint32_t value = mantissa;
+            while ((value & 0x400U) == 0U) {
+                value <<= 1U;
+                ++shift;
+            }
+            value &= 0x3FFU;
+            result = sign | ((127U - 15U - shift) << 23U) | (value << 13U);
+        } else {
+            result = sign;
+        }
+    } else if (exponent == 0x1FU) {
+        result = sign | 0x7F800000U | (mantissa << 13U);
+    } else {
+        result = sign | ((exponent + 127U - 15U) << 23U) | (mantissa << 13U);
+    }
+    float output = 0.0F;
+    std::memcpy(&output, &result, sizeof(output));
+    return output;
+}
+
 #define CHECK(condition)                                                        \
     do {                                                                        \
         if (!(condition)) {                                                     \
@@ -211,6 +240,71 @@ public:
                     static_cast<float>(static_cast<double>(input_value) * inverse *
                                        static_cast<double>(weight_value)));
             }
+        }
+        return {};
+    }
+
+    // Deterministic stand-in for the Q8_0 kernel: same block layout, same accumulation order, so
+    // the surrounding contract can be exercised without a GPU.
+    [[nodiscard]] vastloom::Result<void> launch_matvec_q8_0(
+        const vastloom::cuda::CudaBackendAllocation& allocation,
+        vastloom::ByteCount matrix_offset,
+        vastloom::ByteCount input_offset,
+        vastloom::ByteCount output_offset,
+        std::size_t row_count,
+        std::size_t blocks_per_row) override {
+        ++launch_calls;
+        if (throw_launch) throw std::runtime_error("injected CUDA kernel exception");
+        if (fail_launch) {
+            return vastloom::make_error(vastloom::ErrorCode::io_error,
+                                        "injected CUDA kernel failure");
+        }
+        constexpr std::size_t kBlockBytes = 34U;
+        constexpr std::size_t kBlockElements = 32U;
+        if (row_count == 0U || blocks_per_row == 0U ||
+            blocks_per_row > SIZE_MAX / row_count) {
+            return vastloom::make_error(vastloom::ErrorCode::invalid_argument,
+                                        "fake CUDA Q8_0 shape is invalid");
+        }
+        const std::size_t matrix_bytes = row_count * blocks_per_row * kBlockBytes;
+        const std::size_t input_bytes = blocks_per_row * kBlockElements * sizeof(float);
+        const std::size_t output_bytes = row_count * sizeof(float);
+        const auto valid = [&](vastloom::ByteCount offset, std::size_t bytes) {
+            return offset <= allocation.bytes && bytes <= allocation.bytes - offset &&
+                   offset <= memory.size() &&
+                   bytes <= memory.size() - static_cast<std::size_t>(offset);
+        };
+        if (!valid(matrix_offset, matrix_bytes) || !valid(input_offset, input_bytes) ||
+            !valid(output_offset, output_bytes)) {
+            return vastloom::make_error(vastloom::ErrorCode::invalid_argument,
+                                        "fake CUDA Q8_0 range is invalid");
+        }
+        for (std::size_t row = 0U; row < row_count; ++row) {
+            float accumulator = 0.0F;
+            for (std::size_t block = 0U; block < blocks_per_row; ++block) {
+                const std::size_t base =
+                    static_cast<std::size_t>(matrix_offset) +
+                    (row * blocks_per_row + block) * kBlockBytes;
+                std::uint16_t scale_bits = 0U;
+                std::memcpy(&scale_bits, memory.data() + base, sizeof(scale_bits));
+                const float scale = half_to_float(scale_bits);
+                float inner = 0.0F;
+                for (std::size_t element = 0U; element < kBlockElements; ++element) {
+                    std::int8_t quantized = 0;
+                    std::memcpy(&quantized, memory.data() + base + 2U + element,
+                                sizeof(quantized));
+                    float value = 0.0F;
+                    std::memcpy(&value,
+                                memory.data() + static_cast<std::size_t>(input_offset) +
+                                    (block * kBlockElements + element) * sizeof(float),
+                                sizeof(value));
+                    inner += static_cast<float>(quantized) * value;
+                }
+                accumulator += scale * inner;
+            }
+            std::memcpy(memory.data() + static_cast<std::size_t>(output_offset) +
+                            row * sizeof(float),
+                        &accumulator, sizeof(accumulator));
         }
         return {};
     }

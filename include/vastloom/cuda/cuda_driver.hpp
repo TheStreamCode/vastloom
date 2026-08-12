@@ -64,6 +64,16 @@ public:
         std::size_t row_count,
         std::size_t width,
         float epsilon) = 0;
+    // One thread per output row over a ggml Q8_0 matrix: 34-byte blocks of one FP16 scale and
+    // 32 int8 weights. Blocks accumulate in the CPU reference's order but in FP32, so the result
+    // matches to a declared tolerance rather than bit for bit.
+    [[nodiscard]] virtual Result<void> launch_matvec_q8_0(
+        const CudaBackendAllocation& allocation,
+        ByteCount matrix_offset,
+        ByteCount input_offset,
+        ByteCount output_offset,
+        std::size_t row_count,
+        std::size_t blocks_per_row) = 0;
 };
 
 class CudaAllocation {
@@ -131,6 +141,13 @@ public:
         std::size_t row_count,
         std::size_t width,
         float epsilon) const;
+    [[nodiscard]] Result<void> launch_matvec_q8_0(
+        CudaAllocation& allocation,
+        ByteCount matrix_offset,
+        ByteCount input_offset,
+        ByteCount output_offset,
+        std::size_t row_count,
+        std::size_t blocks_per_row) const;
 
 private:
     explicit CudaDriver(std::shared_ptr<CudaDriverBackend> backend);

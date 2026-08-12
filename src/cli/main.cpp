@@ -357,18 +357,26 @@ int command_cuda_info(const std::vector<std::string>& args) {
     }
     auto valid = validate_options(args, 0U,
                                   {"--allocation-smoke", "--minimum-free-vram"},
-                                  {"--json", "--help", "--rmsnorm-smoke"});
+                                  {"--json", "--help", "--rmsnorm-smoke", "--matvec-smoke"});
     if (!valid) return print_error(valid.error(), json);
     const bool allocation_smoke_requested =
         option_value(args, "--allocation-smoke").has_value();
     const bool rmsnorm_smoke_requested = has_flag(args, "--rmsnorm-smoke");
+    const bool matvec_smoke_requested = has_flag(args, "--matvec-smoke");
+    if ((allocation_smoke_requested || rmsnorm_smoke_requested) && matvec_smoke_requested) {
+        return print_error(
+            vastloom::make_error(vastloom::ErrorCode::invalid_argument,
+                                 "--matvec-smoke runs on its own"),
+            json);
+    }
     if (allocation_smoke_requested && rmsnorm_smoke_requested) {
         return print_error(vastloom::make_error(
                                vastloom::ErrorCode::invalid_argument,
                                "--allocation-smoke and --rmsnorm-smoke are mutually exclusive"),
                            json);
     }
-    const bool operation_requested = allocation_smoke_requested || rmsnorm_smoke_requested;
+    const bool operation_requested =
+        allocation_smoke_requested || rmsnorm_smoke_requested || matvec_smoke_requested;
     if (!operation_requested && option_value(args, "--minimum-free-vram").has_value()) {
         return print_error(vastloom::make_error(
                                vastloom::ErrorCode::invalid_argument,
@@ -396,6 +404,13 @@ int command_cuda_info(const std::vector<std::string>& args) {
     bool rmsnorm_smoke_passed = false;
     double rmsnorm_max_abs_error = 0.0;
     vastloom::cuda::CudaRmsNormStats rmsnorm_stats;
+    bool matvec_smoke_passed = false;
+    double matvec_max_abs_error = 0.0;
+    double matvec_kernel_ms = 0.0;
+    double matvec_cpu_ms = 0.0;
+    std::size_t matvec_rows_executed = 0U;
+    std::size_t matvec_columns_executed = 0U;
+    ByteCount matvec_device_bytes = 0U;
     if (operation_requested) {
         if (probe.value().devices.empty()) {
             return print_error(vastloom::make_error(
@@ -478,6 +493,106 @@ int command_cuda_info(const std::vector<std::string>& args) {
             rmsnorm_stats = actual.value().stats;
             rmsnorm_smoke_passed = true;
         }
+        if (matvec_smoke_requested) {
+            // The first quantized kernel on the GPU, checked against the CPU matvec that is itself
+            // validated bit-for-bit against pinned ggml. The GPU accumulates in FP32 where the
+            // reference uses FP64, so this is a tolerance gate, not a parity gate.
+            constexpr std::size_t matvec_rows = 4'096U;
+            constexpr std::size_t matvec_columns = 4'096U;
+            constexpr std::size_t block_elements = 32U;
+            constexpr std::size_t block_bytes = 34U;
+            constexpr double matvec_tolerance = 2.0e-2;
+            const std::size_t blocks_per_row = matvec_columns / block_elements;
+            const ByteCount matrix_bytes =
+                static_cast<ByteCount>(matvec_rows) * blocks_per_row * block_bytes;
+            const ByteCount input_bytes =
+                static_cast<ByteCount>(matvec_columns) * sizeof(float);
+            const ByteCount output_bytes = static_cast<ByteCount>(matvec_rows) * sizeof(float);
+
+            auto caller_host = governor.try_reserve(
+                vastloom::safety::ResourceKind::scratch,
+                matrix_bytes + input_bytes + 2U * output_bytes, "cuda-matvec-smoke-host");
+            if (!caller_host) return print_error(caller_host.error(), json);
+
+            std::vector<float> dense(matvec_rows * matvec_columns);
+            std::vector<float> input(matvec_columns);
+            for (std::size_t index = 0U; index < dense.size(); ++index) {
+                dense[index] = static_cast<float>(static_cast<int>(index % 251U) - 125) / 512.0F;
+            }
+            for (std::size_t index = 0U; index < input.size(); ++index) {
+                input[index] = static_cast<float>(static_cast<int>(index % 199U) - 99) / 256.0F;
+            }
+            auto encoded = vastloom::inference::quantize_q8_0_reference(
+                dense, matvec_rows, matvec_columns, matvec_columns);
+            if (!encoded) return print_error(encoded.error(), json);
+            if (encoded.value().size() != matrix_bytes) {
+                return print_error(vastloom::make_error(
+                                       vastloom::ErrorCode::integrity_error,
+                                       "Q8_0 smoke encoding has an unexpected size"),
+                                   json);
+            }
+
+            std::vector<float> expected(matvec_rows);
+            vastloom::inference::QuantizedKernelLimits kernel_limits;
+            kernel_limits.max_elements = matvec_rows * matvec_columns;
+            kernel_limits.max_threads = policy.value().cpu_threads;
+            const auto cpu_started = std::chrono::steady_clock::now();
+            auto cpu = vastloom::inference::matvec_q8_0_f32(
+                encoded.value(), matvec_rows, matvec_columns, input, expected, kernel_limits);
+            matvec_cpu_ms = std::chrono::duration<double, std::milli>(
+                std::chrono::steady_clock::now() - cpu_started).count();
+            if (!cpu) return print_error(cpu.error(), json);
+
+            const ByteCount input_offset = matrix_bytes;
+            const ByteCount output_offset = input_offset + input_bytes;
+            auto device = driver.value().allocate(
+                0, matrix_bytes + input_bytes + output_bytes, minimum_free.value(), governor,
+                "cuda-matvec-q8-0-smoke");
+            if (!device) return print_error(device.error(), json);
+            auto allocation = device.take_value();
+            auto copied_matrix = driver.value().copy_from_host(allocation, 0U, encoded.value());
+            if (!copied_matrix) return print_error(copied_matrix.error(), json);
+            auto copied_input = driver.value().copy_from_host(
+                allocation, input_offset, std::as_bytes(std::span<const float>(input)));
+            if (!copied_input) return print_error(copied_input.error(), json);
+            const auto started = std::chrono::steady_clock::now();
+            auto launched = driver.value().launch_matvec_q8_0(
+                allocation, 0U, input_offset, output_offset, matvec_rows, blocks_per_row);
+            if (!launched) return print_error(launched.error(), json);
+            matvec_kernel_ms = std::chrono::duration<double, std::milli>(
+                std::chrono::steady_clock::now() - started).count();
+            std::vector<float> actual_output(matvec_rows);
+            auto copied_output = driver.value().copy_to_host(
+                allocation, output_offset,
+                std::as_writable_bytes(std::span<float>(actual_output)));
+            if (!copied_output) return print_error(copied_output.error(), json);
+            auto released = allocation.release();
+            if (!released) return print_error(released.error(), json);
+
+            for (std::size_t index = 0U; index < actual_output.size(); ++index) {
+                if (!std::isfinite(actual_output[index])) {
+                    return print_error(vastloom::make_error(
+                                           vastloom::ErrorCode::integrity_error,
+                                           "CUDA Q8_0 matvec produced a non-finite value"),
+                                       json);
+                }
+                matvec_max_abs_error = std::max(
+                    matvec_max_abs_error,
+                    std::abs(static_cast<double>(actual_output[index]) -
+                             static_cast<double>(expected[index])));
+            }
+            if (matvec_max_abs_error > matvec_tolerance) {
+                return print_error(vastloom::make_error(
+                                       vastloom::ErrorCode::integrity_error,
+                                       "CUDA Q8_0 matvec does not match the CPU reference",
+                                       std::to_string(matvec_max_abs_error)),
+                                   json);
+            }
+            matvec_rows_executed = matvec_rows;
+            matvec_columns_executed = matvec_columns;
+            matvec_device_bytes = matrix_bytes + input_bytes + output_bytes;
+            matvec_smoke_passed = true;
+        }
         const auto snapshot = governor.snapshot();
         if (snapshot.reserved[static_cast<std::size_t>(
                 vastloom::safety::ResourceKind::vram)] != 0U) {
@@ -502,6 +617,17 @@ int command_cuda_info(const std::vector<std::string>& args) {
                 output += ",\"allocation_smoke\":{\"passed\":";
                 output += allocation_smoke_passed ? "true" : "false";
                 output += ",\"bytes\":" + std::to_string(smoke_bytes.value()) +
+                          ",\"minimum_free_vram_after\":" +
+                          std::to_string(minimum_free.value()) + "}}";
+            } else if (matvec_smoke_requested) {
+                output += ",\"matvec_q8_0_smoke\":{\"passed\":";
+                output += matvec_smoke_passed ? "true" : "false";
+                output += ",\"rows\":" + std::to_string(matvec_rows_executed) +
+                          ",\"columns\":" + std::to_string(matvec_columns_executed) +
+                          ",\"max_abs_error\":" + std::to_string(matvec_max_abs_error) +
+                          ",\"device_buffer_bytes\":" + std::to_string(matvec_device_bytes) +
+                          ",\"kernel_ms\":" + std::to_string(matvec_kernel_ms) +
+                          ",\"cpu_ms\":" + std::to_string(matvec_cpu_ms) +
                           ",\"minimum_free_vram_after\":" +
                           std::to_string(minimum_free.value()) + "}}";
             } else {
@@ -531,6 +657,11 @@ int command_cuda_info(const std::vector<std::string>& args) {
             std::cout << "RMSNorm:        PASS (" << rmsnorm_stats.row_count << "x"
                       << rmsnorm_stats.width << ", max abs error "
                       << rmsnorm_max_abs_error << ", released)\n";
+        } else if (matvec_smoke_requested) {
+            std::cout << "Q8_0 matvec:    PASS (" << matvec_rows_executed << "x"
+                      << matvec_columns_executed << ", max abs error " << matvec_max_abs_error
+                      << ", GPU " << matvec_kernel_ms << " ms vs CPU " << matvec_cpu_ms
+                      << " ms, released)\n";
         }
     }
     return 0;

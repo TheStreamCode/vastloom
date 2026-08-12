@@ -2141,7 +2141,16 @@ int command_deepseek_forward(const std::vector<std::string>& args) {
         token_ids.size() * config.value().experts_per_token, config.value().expert_count);
     const auto cache_size = std::max<std::size_t>(expert_cache.value(), per_layer_experts);
     const auto expert_bytes = largest_expert * cache_size * std::min<std::size_t>(depth, 2U);
-    const auto required = trunk_bytes + global_bytes + expert_bytes;
+    // Trunks are streamed through a bounded window rather than all held, so what a pass needs is a
+    // few layers' worth, not the whole depth. This is what lets a machine run a model larger than
+    // its RAM: the floor stops scaling with the model and starts scaling with one layer. Charged as
+    // the window's capacity plus one spare layer, and against the largest layer rather than the
+    // average, because a refusal that comes too late is worse than one that comes too early.
+    constexpr std::size_t kTrunkWindowCapacity = 2U;
+    const auto average_trunk = depth == 0U ? 0U : trunk_bytes / depth;
+    const auto resident_trunk_bytes =
+        std::min(trunk_bytes, average_trunk * (kTrunkWindowCapacity + 1U) * 2U);
+    const auto required = resident_trunk_bytes + global_bytes + expert_bytes;
     const auto budget = policy.value().resources.ram_hard_limit;
 
     // Planning works from metadata alone; executing does not. Say which of the two this store
@@ -2222,7 +2231,12 @@ int command_deepseek_forward(const std::vector<std::string>& args) {
             // full depth there is not, and a 43-layer pass that ignored this passed preflight and
             // then died in the expert loader with bad_alloc. Spend only what the preflight left
             // over, keeping a gigabyte of that headroom for the allocations it does not model.
-            constexpr vastloom::ByteCount kUnmodelledHostHeadroom = 1U * vastloom::GiB;
+            // Covers what the preflight does not model and the accelerator must not crowd out: the
+            // expert loader's own read buffers, graph scratch and KV state, and the window's trunk
+            // reloads. One gigabyte was enough while the weights themselves left little room; with
+            // trunks streamed the ceiling would otherwise claim nearly all the remaining commit and
+            // starve the very reloads that made the room.
+            constexpr vastloom::ByteCount kUnmodelledHostHeadroom = 3U * vastloom::GiB;
             const vastloom::ByteCount host_headroom =
                 budget > required + kUnmodelledHostHeadroom
                     ? budget - required - kUnmodelledHostHeadroom
@@ -2253,6 +2267,54 @@ int command_deepseek_forward(const std::vector<std::string>& args) {
         graph.packed_float_tensors.emplace(name, std::move(tensor));
     }
 
+    // A bounded window of layer trunks, refilled as the graph walks layers.
+    //
+    // Holding all 43 is what sets the host memory floor, and that floor decides both whether the
+    // model runs on a given machine and how much is left for the accelerator - which on this
+    // hardware is the difference between 90% of matvecs declined and 28%. Two layers are kept
+    // because the graph asks for one while the previous one's matrices may still be in flight.
+    struct TrunkWindow {
+        const vastloom::model::LogicalTensorCatalog* catalog{nullptr};
+        const vastloom::inference::DeepseekV4ReferenceConfig* config{nullptr};
+        vastloom::safety::ResourceGovernor* governor{nullptr};
+        std::size_t capacity{2U};
+        std::map<std::size_t, vastloom::inference::DeepseekV4ReferenceLayerTrunk> live;
+        std::vector<std::size_t> order;
+        std::map<std::string, std::size_t, std::less<>> layer_of;
+
+        [[nodiscard]] vastloom::Result<const vastloom::inference::DeepseekV4PackedMatrix*> get(
+            std::string_view name) {
+            const auto found = layer_of.find(name);
+            if (found == layer_of.end()) return nullptr;
+            const std::size_t layer = found->second;
+            if (!live.contains(layer)) {
+                auto trunk = vastloom::inference::deepseek_v4_load_0731_gguf_layer_trunk(
+                    *catalog, *config, layer, *governor);
+                if (!trunk) return trunk.error();
+                try {
+                    live.emplace(layer, trunk.take_value());
+                    order.push_back(layer);
+                } catch (const std::bad_alloc&) {
+                    return vastloom::make_error(vastloom::ErrorCode::resource_exhausted,
+                                                "Unable to record a streamed layer trunk");
+                }
+                while (order.size() > capacity) {
+                    live.erase(order.front());
+                    order.erase(order.begin());
+                }
+            }
+            const auto& matrices = live.at(layer).matrices;
+            const auto matrix = matrices.find(std::string(name));
+            if (matrix == matrices.end()) return nullptr;
+            return &matrix->second;
+        }
+    };
+    TrunkWindow window;
+    window.catalog = &report.value().catalog;
+    window.config = &graph.config;
+    window.governor = &governor;
+    window.capacity = kTrunkWindowCapacity;
+
     // Each layer keeps its own bounded expert cache: the 256 bundles of layer N are a different set
     // from layer N+1, and a shared cache would let one layer evict another's working set.
     std::vector<std::shared_ptr<vastloom::inference::DeepseekV4BoundedExpertCache>> caches;
@@ -2263,11 +2325,20 @@ int command_deepseek_forward(const std::vector<std::string>& args) {
         auto trunk = vastloom::inference::deepseek_v4_load_0731_gguf_layer_trunk(
             report.value().catalog, graph.config, layer, governor);
         if (!trunk) return print_error(trunk.error(), json);
-        // Uploading these trunk matrices here, rather than on their first use, was tried and made
-        // the model 25% slower at full depth: it spends VRAM in load order, before the routed
-        // experts that do most of the arithmetic can ask for any. See the CUDA expert kernel report.
-        for (auto& [name, matrix] : trunk.value().matrices) {
-            graph.packed_matrices.emplace(name, std::move(matrix));
+        // Matrices are recorded by name and released; the window reloads the ones each layer needs
+        // when the graph reaches it. Normalization vectors and routing tables stay resident - they
+        // are small, and they are what the graph consults to decide shapes.
+        for (const auto& [name, matrix] : trunk.value().matrices) {
+            static_cast<void>(matrix);
+            try {
+                window.layer_of.emplace(name, layer);
+                graph.provided_matrix_names.insert(name);
+            } catch (const std::bad_alloc&) {
+                return print_error(vastloom::make_error(
+                                       vastloom::ErrorCode::resource_exhausted,
+                                       "Unable to index a streamed layer trunk"),
+                                   json);
+            }
         }
         for (auto& [name, tensor] : trunk.value().float_tensors) {
             graph.packed_float_tensors.emplace(name, std::move(tensor));
@@ -2308,6 +2379,7 @@ int command_deepseek_forward(const std::vector<std::string>& args) {
         graph.expert_providers.emplace(cache_options.block_prefix, std::move(staged));
         caches.push_back(cache.take_value());
     }
+    graph.matrix_provider = [&window](std::string_view name) { return window.get(name); };
     const auto load_elapsed = std::chrono::duration<double, std::milli>(
         std::chrono::steady_clock::now() - load_started).count();
 

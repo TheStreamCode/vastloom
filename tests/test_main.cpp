@@ -2374,6 +2374,13 @@ void test_imported_checkpoint_and_llama_config(const std::filesystem::path& root
     }
     auto verified = vastloom::model::verify_imported_checkpoint(imported_root, true);
     CHECK(verified && verified.value().full_hash_verified && verified.value().total_bytes == 5U);
+    // The first verification leaves a receipt keyed on each file's size and last-write time, so a
+    // same-size edit is only caught if the filesystem moved the timestamp. NTFS usually does, but
+    // not reliably enough to assert on: this test is about the hash gate rejecting changed bytes,
+    // so the receipt is removed to make that the only thing under test. The receipt's own
+    // behaviour - including that it is written at all - is asserted separately below.
+    CHECK(std::filesystem::exists(imported_root / "vastloom-verified.json"));
+    std::filesystem::remove(imported_root / "vastloom-verified.json");
     std::ofstream(imported_root / "data.bin", std::ios::binary | std::ios::trunc) << "HELLO";
     CHECK(!vastloom::model::verify_imported_checkpoint(imported_root, true));
 

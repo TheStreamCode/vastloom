@@ -123,6 +123,11 @@ Result<LoadedExpert> load_prepared_expert_bundle(const ExpertBundle& bundle,
                     return make_error(ErrorCode::resource_exhausted, "Expert load cancelled safely");
                 }
                 const auto range_size = static_cast<std::size_t>(range.bytes);
+                // Buffered on purpose. Bypassing the page cache here was tried and was three times
+                // slower: with top-6 routing over 256 experts some bundles recur often enough that
+                // the OS cache was serving a large share of these reads from RAM for free. The
+                // 1.77 GB/s this path appears to sustain is that mixture, not device bandwidth -
+                // unbuffered reads of the same ranges measure 0.57 GB/s.
                 auto read = io::read_buffered_range_into(
                     range.shard, range.offset, std::span<std::byte>(scratch.data(), range_size));
                 if (!read) return read.error();

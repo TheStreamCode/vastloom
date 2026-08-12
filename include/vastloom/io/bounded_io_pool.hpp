@@ -32,6 +32,19 @@ enum class IoCacheMode : std::uint8_t {
                                                      ByteCount offset,
                                                      std::span<std::byte> destination);
 
+// Reads a range with the caller's choice of page-cache behaviour.
+//
+// Expert payload is the reason this is exposed. A decode step reads gigabytes of expert weights
+// that will not be read again - a different token routes to different experts - so filling the page
+// cache with them evicts what the host was using and buys nothing. `bypass` also avoids the copy
+// through that cache, and measured effective bandwidth on this path was well under what the device
+// can sustain. Falls back to a buffered read when the platform refuses an unbuffered one, because
+// alignment requirements are a property of the device and not something a caller can guarantee.
+[[nodiscard]] Result<void> read_range_into(const std::filesystem::path& path,
+                                           ByteCount offset,
+                                           std::span<std::byte> destination,
+                                           IoCacheMode cache_mode);
+
 enum class IoFaultKind : std::uint8_t {
     none,
     fail,

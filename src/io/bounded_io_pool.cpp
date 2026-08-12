@@ -231,6 +231,27 @@ std::string_view to_string(IoCacheMode mode) noexcept {
     return "unknown";
 }
 
+Result<void> read_range_into(const std::filesystem::path& path,
+                             ByteCount offset,
+                             std::span<std::byte> destination,
+                             IoCacheMode cache_mode) {
+    if (path.empty() || destination.empty()) {
+        return make_error(ErrorCode::invalid_argument,
+                          "Range read requires a path and destination");
+    }
+    if (cache_mode == IoCacheMode::buffered) {
+        return read_buffered_range_into(path, offset, destination);
+    }
+    auto read = read_file_range(path, offset, destination, destination.size(), cache_mode);
+    // Unbuffered reads carry device alignment rules the caller cannot promise to satisfy, and a
+    // short read means the range was not delivered. Either way the buffered path is correct, so a
+    // refusal costs throughput rather than the load.
+    if (!read || read.value() != destination.size()) {
+        return read_buffered_range_into(path, offset, destination);
+    }
+    return {};
+}
+
 Result<void> read_buffered_range_into(const std::filesystem::path& path,
                                       ByteCount offset,
                                       std::span<std::byte> destination) {

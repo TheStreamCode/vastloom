@@ -275,6 +275,26 @@ public:
                                     "fake CUDA backend has no IQ2_XXS kernel");
     }
 
+    [[nodiscard]] vastloom::Result<void> matvec_q4_k_with_transfer(
+        const vastloom::cuda::CudaBackendAllocation&,
+        vastloom::ByteCount, vastloom::ByteCount, vastloom::ByteCount,
+        std::size_t, std::size_t,
+        std::span<const std::byte>, std::span<std::byte>) override {
+        ++launch_calls;
+        return vastloom::make_error(vastloom::ErrorCode::unsupported,
+                                    "fake CUDA backend has no Q4_K kernel");
+    }
+
+    [[nodiscard]] vastloom::Result<void> matvec_mxfp4_with_transfer(
+        const vastloom::cuda::CudaBackendAllocation&,
+        vastloom::ByteCount, vastloom::ByteCount, vastloom::ByteCount,
+        std::size_t, std::size_t,
+        std::span<const std::byte>, std::span<std::byte>) override {
+        ++launch_calls;
+        return vastloom::make_error(vastloom::ErrorCode::unsupported,
+                                    "fake CUDA backend has no MXFP4 kernel");
+    }
+
     [[nodiscard]] vastloom::Result<void> matvec_q6_k_with_transfer(
         const vastloom::cuda::CudaBackendAllocation&,
         vastloom::ByteCount,

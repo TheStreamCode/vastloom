@@ -100,6 +100,25 @@ public:
         std::size_t blocks_per_row,
         std::span<const std::byte> input,
         std::span<std::byte> output) = 0;
+    // Q4_K super-blocks: 144 bytes per 256 weights. MXFP4 is 17 bytes per 32, with an E8M0 scale.
+    [[nodiscard]] virtual Result<void> matvec_q4_k_with_transfer(
+        const CudaBackendAllocation& allocation,
+        ByteCount matrix_offset,
+        ByteCount input_offset,
+        ByteCount output_offset,
+        std::size_t row_count,
+        std::size_t blocks_per_row,
+        std::span<const std::byte> input,
+        std::span<std::byte> output) = 0;
+    [[nodiscard]] virtual Result<void> matvec_mxfp4_with_transfer(
+        const CudaBackendAllocation& allocation,
+        ByteCount matrix_offset,
+        ByteCount input_offset,
+        ByteCount output_offset,
+        std::size_t row_count,
+        std::size_t blocks_per_row,
+        std::span<const std::byte> input,
+        std::span<std::byte> output) = 0;
     // Q6_K super-blocks: 210 bytes per 256 weights, no shared grid.
     [[nodiscard]] virtual Result<void> matvec_q6_k_with_transfer(
         const CudaBackendAllocation& allocation,
@@ -239,6 +258,24 @@ public:
         CudaAllocation& allocation,
         ByteCount matrix_offset,
         ByteCount grid_offset,
+        ByteCount input_offset,
+        ByteCount output_offset,
+        std::size_t row_count,
+        std::size_t blocks_per_row,
+        std::span<const std::byte> input,
+        std::span<std::byte> output) const;
+    [[nodiscard]] Result<void> matvec_q4_k_with_transfer(
+        CudaAllocation& allocation,
+        ByteCount matrix_offset,
+        ByteCount input_offset,
+        ByteCount output_offset,
+        std::size_t row_count,
+        std::size_t blocks_per_row,
+        std::span<const std::byte> input,
+        std::span<std::byte> output) const;
+    [[nodiscard]] Result<void> matvec_mxfp4_with_transfer(
+        CudaAllocation& allocation,
+        ByteCount matrix_offset,
         ByteCount input_offset,
         ByteCount output_offset,
         std::size_t row_count,

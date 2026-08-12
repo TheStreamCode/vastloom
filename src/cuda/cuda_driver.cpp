@@ -1158,13 +1158,315 @@ Q6K_BLOCK_DONE:
 Q6K_DONE:
     ret;
 }
+
+)ptx";
+
+// Fourth literal, same MSVC limit as the others.
+constexpr std::string_view kSmallBlockMatvecPtx = R"ptx(
+// One thread per output row of a ggml Q4_K matrix. The same shape as Q5_K minus the fifth-bit
+// plane: 144 bytes per 256 weights, four groups of 64, packed 6-bit scale/minimum pairs.
+.visible .entry vastloom_matvec_q4_k_f32(
+    .param .u64 matrix_param,
+    .param .u64 input_param,
+    .param .u64 output_param,
+    .param .u32 rows_param,
+    .param .u32 blocks_param
+)
+{
+    .reg .pred %p<10>;
+    .reg .b16 %rs<4>;
+    .reg .b32 %r<48>;
+    .reg .b64 %rd<24>;
+    .reg .f32 %f<24>;
+    .reg .f64 %fd<6>;
+
+    ld.param.u64 %rd0, [matrix_param];
+    ld.param.u64 %rd1, [input_param];
+    ld.param.u64 %rd2, [output_param];
+    ld.param.u32 %r0, [rows_param];
+    ld.param.u32 %r1, [blocks_param];
+    mov.u32 %r2, %ntid.x;
+    mov.u32 %r3, %ctaid.x;
+    mov.u32 %r4, %tid.x;
+    mad.lo.u32 %r5, %r3, %r2, %r4;
+    setp.ge.u32 %p0, %r5, %r0;
+    @%p0 bra Q4K_DONE;
+
+    mul.lo.u32 %r6, %r5, %r1;
+    mul.wide.u32 %rd3, %r6, 144;
+    add.u64 %rd4, %rd0, %rd3;
+    mov.u64 %rd5, %rd1;
+    mov.f64 %fd0, 0d0000000000000000;
+    mov.u32 %r7, 0;
+
+Q4K_BLOCK_LOOP:
+    setp.ge.u32 %p1, %r7, %r1;
+    @%p1 bra Q4K_BLOCK_DONE;
+    ld.global.u16 %rs0, [%rd4];
+    cvt.f32.f16 %f1, %rs0;
+    ld.global.u16 %rs1, [%rd4+2];
+    cvt.f32.f16 %f2, %rs1;
+    mov.u32 %r8, 0;
+
+Q4K_GROUP_LOOP:
+    setp.ge.u32 %p2, %r8, 4;
+    @%p2 bra Q4K_GROUP_DONE;
+    shl.b32 %r11, %r8, 1;
+    mov.u32 %r30, 0;
+
+Q4K_PAIR_LOOP:
+    setp.ge.u32 %p3, %r30, 2;
+    @%p3 bra Q4K_PAIR_DONE;
+    add.u32 %r12, %r11, %r30;
+    add.u64 %rd6, %rd4, 4;
+    setp.ge.u32 %p4, %r12, 4;
+    @%p4 bra Q4K_HIGH_INDEX;
+    cvt.u64.u32 %rd7, %r12;
+    add.u64 %rd8, %rd6, %rd7;
+    ld.global.u8 %r13, [%rd8];
+    and.b32 %r13, %r13, 63;
+    ld.global.u8 %r14, [%rd8+4];
+    and.b32 %r14, %r14, 63;
+    bra Q4K_PAIR_STORE;
+
+Q4K_HIGH_INDEX:
+    cvt.u64.u32 %rd7, %r12;
+    add.u64 %rd8, %rd6, %rd7;
+    ld.global.u8 %r15, [%rd8+4];
+    and.b32 %r13, %r15, 15;
+    ld.global.u8 %r16, [%rd8+-4];
+    shr.u32 %r16, %r16, 6;
+    shl.b32 %r16, %r16, 4;
+    or.b32 %r13, %r13, %r16;
+    shr.u32 %r14, %r15, 4;
+    ld.global.u8 %r17, [%rd8];
+    shr.u32 %r17, %r17, 6;
+    shl.b32 %r17, %r17, 4;
+    or.b32 %r14, %r14, %r17;
+
+Q4K_PAIR_STORE:
+    cvt.rn.f32.u32 %f3, %r13;
+    cvt.rn.f32.u32 %f4, %r14;
+    mul.rn.f32 %f5, %f1, %f3;
+    mul.rn.f32 %f6, %f2, %f4;
+    setp.eq.u32 %p5, %r30, 0;
+    @!%p5 bra Q4K_PAIR_SECOND;
+    mov.f32 %f7, %f5;
+    mov.f32 %f8, %f6;
+    bra Q4K_PAIR_NEXT;
+
+Q4K_PAIR_SECOND:
+    mov.f32 %f9, %f5;
+    mov.f32 %f10, %f6;
+
+Q4K_PAIR_NEXT:
+    add.u32 %r30, %r30, 1;
+    bra Q4K_PAIR_LOOP;
+
+Q4K_PAIR_DONE:
+    // this group's 32 packed bytes start at +16 + 32 * group
+    shl.b32 %r18, %r8, 5;
+    cvt.u64.u32 %rd9, %r18;
+    add.u64 %rd10, %rd4, 16;
+    add.u64 %rd10, %rd10, %rd9;
+    mov.u32 %r19, 0;
+
+Q4K_FIRST_LOOP:
+    setp.ge.u32 %p6, %r19, 32;
+    @%p6 bra Q4K_FIRST_DONE;
+    cvt.u64.u32 %rd12, %r19;
+    add.u64 %rd13, %rd10, %rd12;
+    ld.global.u8 %r20, [%rd13];
+    and.b32 %r21, %r20, 15;
+    cvt.rn.f32.u32 %f11, %r21;
+    mul.rn.f32 %f12, %f7, %f11;
+    sub.rn.f32 %f13, %f12, %f8;
+    ld.global.f32 %f14, [%rd5];
+    cvt.f64.f32 %fd1, %f13;
+    cvt.f64.f32 %fd2, %f14;
+    mul.rn.f64 %fd3, %fd1, %fd2;
+    add.rn.f64 %fd0, %fd0, %fd3;
+    add.u64 %rd5, %rd5, 4;
+    add.u32 %r19, %r19, 1;
+    bra Q4K_FIRST_LOOP;
+
+Q4K_FIRST_DONE:
+    mov.u32 %r19, 0;
+
+Q4K_SECOND_LOOP:
+    setp.ge.u32 %p8, %r19, 32;
+    @%p8 bra Q4K_SECOND_DONE;
+    cvt.u64.u32 %rd12, %r19;
+    add.u64 %rd13, %rd10, %rd12;
+    ld.global.u8 %r20, [%rd13];
+    shr.u32 %r21, %r20, 4;
+    cvt.rn.f32.u32 %f11, %r21;
+    mul.rn.f32 %f12, %f9, %f11;
+    sub.rn.f32 %f13, %f12, %f10;
+    ld.global.f32 %f14, [%rd5];
+    cvt.f64.f32 %fd1, %f13;
+    cvt.f64.f32 %fd2, %f14;
+    mul.rn.f64 %fd3, %fd1, %fd2;
+    add.rn.f64 %fd0, %fd0, %fd3;
+    add.u64 %rd5, %rd5, 4;
+    add.u32 %r19, %r19, 1;
+    bra Q4K_SECOND_LOOP;
+
+Q4K_SECOND_DONE:
+    add.u32 %r8, %r8, 1;
+    bra Q4K_GROUP_LOOP;
+
+Q4K_GROUP_DONE:
+    add.u64 %rd4, %rd4, 144;
+    add.u32 %r7, %r7, 1;
+    bra Q4K_BLOCK_LOOP;
+
+Q4K_BLOCK_DONE:
+    cvt.rn.f32.f64 %f15, %fd0;
+    mul.wide.u32 %rd15, %r5, 4;
+    add.u64 %rd16, %rd2, %rd15;
+    st.global.f32 [%rd16], %f15;
+
+Q4K_DONE:
+    ret;
+}
+
+)ptx";
+
+// Fifth literal, same MSVC limit as the others.
+constexpr std::string_view kMxfp4MatvecPtx = R"ptx(
+// One thread per output row of a ggml MXFP4 matrix. Each 17-byte block covers 32 weights: an E8M0
+// scale byte and sixteen bytes holding two 4-bit codes each. The sixteen code values are a fixed
+// table, small enough to build in registers rather than read from memory.
+//
+// The reference emits codes 0..15 as columns 0..15 and their high nibbles as columns 16..31, so
+// this walks the block twice.
+.visible .entry vastloom_matvec_mxfp4_f32(
+    .param .u64 matrix_param,
+    .param .u64 input_param,
+    .param .u64 output_param,
+    .param .u32 rows_param,
+    .param .u32 blocks_param
+)
+{
+    .reg .pred %p<8>;
+    .reg .b32 %r<32>;
+    .reg .b64 %rd<20>;
+    .reg .f32 %f<16>;
+    .reg .f64 %fd<6>;
+
+    ld.param.u64 %rd0, [matrix_param];
+    ld.param.u64 %rd1, [input_param];
+    ld.param.u64 %rd2, [output_param];
+    ld.param.u32 %r0, [rows_param];
+    ld.param.u32 %r1, [blocks_param];
+    mov.u32 %r2, %ntid.x;
+    mov.u32 %r3, %ctaid.x;
+    mov.u32 %r4, %tid.x;
+    mad.lo.u32 %r5, %r3, %r2, %r4;
+    setp.ge.u32 %p0, %r5, %r0;
+    @%p0 bra MXFP4_DONE;
+
+    mul.lo.u32 %r6, %r5, %r1;
+    mul.wide.u32 %rd3, %r6, 17;
+    add.u64 %rd4, %rd0, %rd3;
+    mov.u64 %rd5, %rd1;
+    mov.f64 %fd0, 0d0000000000000000;
+    mov.u32 %r7, 0;
+
+MXFP4_BLOCK_LOOP:
+    setp.ge.u32 %p1, %r7, %r1;
+    @%p1 bra MXFP4_BLOCK_DONE;
+    // scale: values below two map to 0x00200000 << value, others to (value - 1) << 23
+    ld.global.u8 %r8, [%rd4];
+    setp.lt.u32 %p2, %r8, 2;
+    @!%p2 bra MXFP4_SCALE_NORMAL;
+    mov.u32 %r9, 2097152;
+    shl.b32 %r9, %r9, %r8;
+    bra MXFP4_SCALE_DONE;
+
+MXFP4_SCALE_NORMAL:
+    sub.u32 %r9, %r8, 1;
+    shl.b32 %r9, %r9, 23;
+
+MXFP4_SCALE_DONE:
+    mov.b32 %f1, %r9;
+    // half selects the nibble: 0 for columns 0..15, 1 for 16..31
+    mov.u32 %r10, 0;
+
+MXFP4_HALF_LOOP:
+    setp.ge.u32 %p3, %r10, 2;
+    @%p3 bra MXFP4_HALF_DONE;
+    mov.u32 %r11, 0;
+
+MXFP4_CODE_LOOP:
+    setp.ge.u32 %p4, %r11, 16;
+    @%p4 bra MXFP4_CODE_DONE;
+    cvt.u64.u32 %rd6, %r11;
+    add.u64 %rd7, %rd4, 1;
+    add.u64 %rd7, %rd7, %rd6;
+    ld.global.u8 %r12, [%rd7];
+    setp.eq.u32 %p5, %r10, 0;
+    @%p5 bra MXFP4_NIBBLE_LOW;
+    shr.u32 %r13, %r12, 4;
+    bra MXFP4_NIBBLE_DONE;
+
+MXFP4_NIBBLE_LOW:
+    and.b32 %r13, %r12, 15;
+
+MXFP4_NIBBLE_DONE:
+    // Magnitudes {0,1,2,3,4,6,8,12} for codes 0..7, negated for 8..15. All eight fit in four bits,
+    // so the whole table is one 32-bit constant and the lookup is a shift:
+    //   0<<0 | 1<<4 | 2<<8 | 3<<12 | 4<<16 | 6<<20 | 8<<24 | 12<<28 == 3362009616
+    and.b32 %r14, %r13, 7;
+    shl.b32 %r15, %r14, 2;
+    mov.u32 %r16, 3362009616;
+    shr.u32 %r17, %r16, %r15;
+    and.b32 %r17, %r17, 15;
+    cvt.rn.f32.u32 %f2, %r17;
+    and.b32 %r18, %r13, 8;
+    setp.ne.u32 %p7, %r18, 0;
+    mov.f32 %f3, 0f3F800000;
+    mov.f32 %f4, 0fBF800000;
+    selp.f32 %f5, %f4, %f3, %p7;
+    mul.rn.f32 %f6, %f2, %f5;
+    mul.rn.f32 %f7, %f6, %f1;
+    ld.global.f32 %f8, [%rd5];
+    cvt.f64.f32 %fd1, %f7;
+    cvt.f64.f32 %fd2, %f8;
+    mul.rn.f64 %fd3, %fd1, %fd2;
+    add.rn.f64 %fd0, %fd0, %fd3;
+    add.u64 %rd5, %rd5, 4;
+    add.u32 %r11, %r11, 1;
+    bra MXFP4_CODE_LOOP;
+
+MXFP4_CODE_DONE:
+    add.u32 %r10, %r10, 1;
+    bra MXFP4_HALF_LOOP;
+
+MXFP4_HALF_DONE:
+    add.u64 %rd4, %rd4, 17;
+    add.u32 %r7, %r7, 1;
+    bra MXFP4_BLOCK_LOOP;
+
+MXFP4_BLOCK_DONE:
+    cvt.rn.f32.f64 %f9, %fd0;
+    mul.wide.u32 %rd8, %r5, 4;
+    add.u64 %rd9, %rd2, %rd8;
+    st.global.f32 [%rd9], %f9;
+
+MXFP4_DONE:
+    ret;
+}
 )ptx";
 
 // The whole module, assembled once. Returned by reference so the JIT gets a stable pointer.
 const std::string& module_ptx() {
     static const std::string text = std::string(kRmsNormPtx) +
                                     std::string(kQuantizedMatvecPtx) +
-                                    std::string(kKQuantMatvecPtx);
+                                    std::string(kKQuantMatvecPtx) +
+                                    std::string(kSmallBlockMatvecPtx) +
+                                    std::string(kMxfp4MatvecPtx);
     return text;
 }
 
@@ -1571,6 +1873,35 @@ public:
         return {};
     }
 
+    [[nodiscard]] Result<void> matvec_q4_k_with_transfer(
+        const CudaBackendAllocation& allocation,
+        ByteCount matrix_offset,
+        ByteCount input_offset,
+        ByteCount output_offset,
+        std::size_t row_count,
+        std::size_t blocks_per_row,
+        std::span<const std::byte> input,
+        std::span<std::byte> output) override {
+        return matvec_small_block_locked(allocation, matrix_offset, input_offset, output_offset,
+                                         row_count, blocks_per_row, 144U, 256U,
+                                         "vastloom_matvec_q4_k_f32", "Q4_K", input, output);
+    }
+
+    [[nodiscard]] Result<void> matvec_mxfp4_with_transfer(
+        const CudaBackendAllocation& allocation,
+        ByteCount matrix_offset,
+        ByteCount input_offset,
+        ByteCount output_offset,
+        std::size_t row_count,
+        std::size_t blocks_per_row,
+        std::span<const std::byte> input,
+        std::span<std::byte> output) override {
+        // 32 weights per 17-byte block rather than the K-quants' 256.
+        return matvec_small_block_locked(allocation, matrix_offset, input_offset, output_offset,
+                                         row_count, blocks_per_row, 17U, 32U,
+                                         "vastloom_matvec_mxfp4_f32", "MXFP4", input, output);
+    }
+
     [[nodiscard]] Result<void> matvec_iq1_s_with_transfer(
         const CudaBackendAllocation& allocation,
         ByteCount matrix_offset,
@@ -1853,8 +2184,28 @@ public:
         const char* label,
         std::span<const std::byte> input,
         std::span<std::byte> output) {
+        return matvec_small_block_locked(allocation, matrix_offset, input_offset, output_offset,
+                                         row_count, blocks_per_row, block_bytes, 256U,
+                                         entry_point, label, input, output);
+    }
+
+    // Shared body for every block format without a decode grid: they differ only in block stride,
+    // weights per block, and entry point.
+    [[nodiscard]] Result<void> matvec_small_block_locked(
+        const CudaBackendAllocation& allocation,
+        ByteCount matrix_offset,
+        ByteCount input_offset,
+        ByteCount output_offset,
+        std::size_t row_count,
+        std::size_t blocks_per_row,
+        ByteCount block_bytes,
+        ByteCount block_elements,
+        const char* entry_point,
+        const char* label,
+        std::span<const std::byte> input,
+        std::span<std::byte> output) {
         std::scoped_lock lock(mutex_);
-        constexpr ByteCount kBlockElements = 256U;
+        const ByteCount kBlockElements = block_elements;
         if (row_count == 0U || blocks_per_row == 0U || block_bytes == 0U ||
             row_count > std::numeric_limits<std::uint32_t>::max() ||
             blocks_per_row > std::numeric_limits<std::uint32_t>::max() ||
@@ -2830,6 +3181,66 @@ Result<void> CudaDriver::matvec_iq2_xxs_with_transfer(
     } catch (...) {
         return make_error(ErrorCode::internal_error,
                           "CUDA backend threw an unknown IQ2_XXS matvec exception");
+    }
+}
+
+Result<void> CudaDriver::matvec_q4_k_with_transfer(
+    CudaAllocation& allocation,
+    ByteCount matrix_offset,
+    ByteCount input_offset,
+    ByteCount output_offset,
+    std::size_t row_count,
+    std::size_t blocks_per_row,
+    std::span<const std::byte> input,
+    std::span<std::byte> output) const {
+    if (!allocation.valid() || allocation.backend_.get() != backend_.get()) {
+        return make_error(ErrorCode::invalid_argument,
+                          "CUDA allocation does not belong to this driver");
+    }
+    if (row_count == 0U || blocks_per_row == 0U || input.empty() || output.empty()) {
+        return make_error(ErrorCode::invalid_argument,
+                          "CUDA Q4_K matvec transfer parameters are invalid");
+    }
+    try {
+        return backend_->matvec_q4_k_with_transfer(allocation.allocation_, matrix_offset,
+                                                   input_offset, output_offset, row_count,
+                                                   blocks_per_row, input, output);
+    } catch (const std::exception& exception) {
+        return make_error(ErrorCode::internal_error,
+                          "CUDA backend threw during Q4_K matvec", exception.what());
+    } catch (...) {
+        return make_error(ErrorCode::internal_error,
+                          "CUDA backend threw an unknown Q4_K matvec exception");
+    }
+}
+
+Result<void> CudaDriver::matvec_mxfp4_with_transfer(
+    CudaAllocation& allocation,
+    ByteCount matrix_offset,
+    ByteCount input_offset,
+    ByteCount output_offset,
+    std::size_t row_count,
+    std::size_t blocks_per_row,
+    std::span<const std::byte> input,
+    std::span<std::byte> output) const {
+    if (!allocation.valid() || allocation.backend_.get() != backend_.get()) {
+        return make_error(ErrorCode::invalid_argument,
+                          "CUDA allocation does not belong to this driver");
+    }
+    if (row_count == 0U || blocks_per_row == 0U || input.empty() || output.empty()) {
+        return make_error(ErrorCode::invalid_argument,
+                          "CUDA MXFP4 matvec transfer parameters are invalid");
+    }
+    try {
+        return backend_->matvec_mxfp4_with_transfer(allocation.allocation_, matrix_offset,
+                                                    input_offset, output_offset, row_count,
+                                                    blocks_per_row, input, output);
+    } catch (const std::exception& exception) {
+        return make_error(ErrorCode::internal_error,
+                          "CUDA backend threw during MXFP4 matvec", exception.what());
+    } catch (...) {
+        return make_error(ErrorCode::internal_error,
+                          "CUDA backend threw an unknown MXFP4 matvec exception");
     }
 }
 

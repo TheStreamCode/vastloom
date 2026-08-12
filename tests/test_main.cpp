@@ -1563,6 +1563,74 @@ void test_openai_protocol() {
     CHECK(vastloom::api::http_status_for(vastloom::ErrorCode::internal_error) == 500);
 }
 
+// Q4_K and MXFP4 were the two storage types with no standalone parity gate: their correctness had
+// rested on the end-to-end result, which is the thing now known to be wrong. Q4_K in particular
+// carries the LM head, where a decoding defect would misplace individual vocabulary rows.
+//
+// Checked against ggml's own dequantize_row_q4_K and dequantize_row_mxfp4, run under WSL on these
+// exact bytes.
+void test_q4k_mxfp4_reference_parity() {
+    constexpr std::array<std::uint16_t, 6U> scales{
+        0x3c00U, 0xb800U, 0x3555U, 0x4000U, 0x0400U, 0x0001U};
+    constexpr std::array<std::uint16_t, 6U> minimums{
+        0x3800U, 0x3555U, 0xbc00U, 0x0001U, 0x4200U, 0x0400U};
+    std::vector<std::byte> q4k(scales.size() * vastloom::inference::kQ4KBlockBytes);
+    for (std::size_t block = 0U; block < scales.size(); ++block) {
+        const std::size_t base = block * vastloom::inference::kQ4KBlockBytes;
+        q4k[base] = static_cast<std::byte>(scales[block] & 0xffU);
+        q4k[base + 1U] = static_cast<std::byte>(scales[block] >> 8U);
+        q4k[base + 2U] = static_cast<std::byte>(minimums[block] & 0xffU);
+        q4k[base + 3U] = static_cast<std::byte>(minimums[block] >> 8U);
+        for (std::size_t index = 0U; index < 12U; ++index) {
+            q4k[base + 4U + index] =
+                static_cast<std::byte>((block * 37U + index * 53U + 0x2bU) & 0xffU);
+        }
+        for (std::size_t index = 0U; index < 128U; ++index) {
+            q4k[base + 16U + index] =
+                static_cast<std::byte>((block * 733U + index * 977U + 0x1234U) & 0xffU);
+        }
+    }
+    std::vector<float> decoded(scales.size() * vastloom::inference::kQ4KBlockElements);
+    CHECK(vastloom::inference::dequantize_q4_k(q4k, decoded));
+    std::uint64_t hash = UINT64_C(14695981039346656037);
+    for (const float value : decoded) {
+        const std::uint32_t bits = std::bit_cast<std::uint32_t>(value);
+        for (unsigned shift = 0U; shift < 32U; shift += 8U) {
+            hash ^= static_cast<std::uint8_t>((bits >> shift) & 0xffU);
+            hash *= UINT64_C(1099511628211);
+        }
+    }
+    CHECK(hash == UINT64_C(0x4a61f0f8094737cc));
+    CHECK(decoded[0] == 140.5F && decoded[1] == 183.5F && decoded[31] == 97.5F &&
+          decoded[32] == 70.0F && decoded[127] == 85.0F && decoded[255] == 680.5F);
+    CHECK(std::abs(decoded[256] - (-19.9970703F)) <= 1.0e-4F);
+    CHECK(std::abs(decoded[511] - (-348.995361F)) <= 1.0e-3F);
+    CHECK(std::abs(decoded[1024] - (-56.9692383F)) <= 1.0e-4F);
+
+    std::vector<std::byte> mxfp4(scales.size() * vastloom::inference::kMxfp4BlockBytes);
+    for (std::size_t block = 0U; block < scales.size(); ++block) {
+        const std::size_t base = block * vastloom::inference::kMxfp4BlockBytes;
+        mxfp4[base] = static_cast<std::byte>(120U + block * 3U);
+        for (std::size_t index = 0U; index < 16U; ++index) {
+            mxfp4[base + 1U + index] =
+                static_cast<std::byte>((block * 91U + index * 167U + 0x5aU) & 0xffU);
+        }
+    }
+    std::vector<float> mx(scales.size() * vastloom::inference::kMxfp4BlockElements);
+    CHECK(vastloom::inference::dequantize_mxfp4(mxfp4, mx));
+    std::uint64_t mx_hash = UINT64_C(14695981039346656037);
+    for (const float value : mx) {
+        const std::uint32_t bits = std::bit_cast<std::uint32_t>(value);
+        for (unsigned shift = 0U; shift < 32U; shift += 8U) {
+            mx_hash ^= static_cast<std::uint8_t>((bits >> shift) & 0xffU);
+            mx_hash *= UINT64_C(1099511628211);
+        }
+    }
+    CHECK(mx_hash == UINT64_C(0xce2b9aa19ef0e448));
+    CHECK(mx[0] == -0.0078125F && mx[1] == 0.00390625F && mx[2] == 0.0F &&
+          mx[3] == -0.046875F && mx[4] == 0.03125F);
+}
+
 void test_iq2_s_reference_kernel() {
     // Scales vary in exponent and mantissa, including a subnormal, and the input below is
     // non-dyadic. A gate built from dyadic values cannot separate f32 from f64 accumulation and has
@@ -7371,6 +7439,7 @@ int main() {
     test_iq1_s_reference_kernel();
     test_iq2_xxs_reference_kernel();
     test_iq2_s_reference_kernel();
+    test_q4k_mxfp4_reference_parity();
     test_openai_protocol();
     test_iq3_xxs_reference_kernel();
     test_mxfp4_reference_kernel();

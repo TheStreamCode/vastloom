@@ -2,6 +2,36 @@
 
 ## Unreleased
 
+- **An external oracle exists at last, and it disagrees with us.** llama.cpp built from source against
+  the same 82.54 GB checkpoint, given the same twelve prompt tokens, greedy, answers
+  `"La capitale d'Italia è **Roma**."` This project answers `"La capitale d'Italia è **R Roma**."`
+
+  The stray `R` is ours. It survived a quantization change from 1.5 to 2.06 bits, an exact
+  detokenizer round-trip and a prefill-versus-decode comparison — three suspects cleared, and the
+  only one left standing was the forward pass, which no internal test could indict because every
+  internal test shares it.
+
+  The disagreement is narrow. Eight generated tokens match exactly, including the `R` itself; the
+  ninth differs, `oma` (6091) where we produce ` Roma` (38710). A forward pass that were broadly
+  wrong would not agree for eight tokens, so this is a near-tie decided differently — and whether
+  that is a defect or a precision difference is not yet known. Our matvecs accumulate in `double`
+  by design, ggml's in `float`; on two logits close enough together, more precision and different
+  precision look the same from outside. The next measurement is the gap between the top two logits
+  at that position: wide means a bug, narrow means arithmetic.
+
+  Two things are independently confirmed by the same run: the tokenizer and chat template are exact
+  — llama.cpp turns the templated prompt into the identical twelve ids — and llama.cpp supports both
+  `deepseek4` and `dflash`, so the DSpark draft has a reference too.
+
+- **llama.cpp is about fourteen times faster than this engine, on CPU, against our GPU path.**
+  Same machine, same checkpoint, same twelve threads, no CUDA in their build: 545 ms per token
+  against our 7,577. Model load took them ten seconds.
+
+  This is the comparison this project had never made, and it reframes every performance number in
+  this changelog. The kernels here are deliberately naive — one thread per row, no coalescing, a
+  matvec measured seventeen times off the memory bandwidth — and that gap now has a name and a
+  number rather than an assumption that it was small.
+
 - **Trunk reloading is about a tenth of a token, not half of it, and this milestone spent a day
   optimising the wrong thing on the strength of that figure.** The 50% came from subtraction — all
   unaccounted time charged to the trunk — and subtraction cannot tell reading from computing.

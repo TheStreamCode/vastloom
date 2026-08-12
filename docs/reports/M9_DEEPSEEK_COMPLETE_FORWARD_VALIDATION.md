@@ -196,6 +196,28 @@ after every file passes.
 - All 43 trunks stay resident, so the pass needs 6.39 GB before it starts and a host with less free
   RAM is refused rather than served. Experts are released as the graph advances; trunks are not.
 
+## Where the time actually goes
+
+The Q8_0 kernel is in the graph and the model gained 10%. The accelerator's own telemetry explains
+why, and it is not the kernel:
+
+| | 24-layer generation |
+|---|---:|
+| total | 66.5 s |
+| in the Q8_0 kernel, including transfers | 7.2 s |
+| everything else, on the CPU | 59.3 s |
+
+Q8_0 covers the attention projections — about 11% of the run. Even at zero cost they cap the speedup
+at 1.12×. The 89% is the routed experts in IQ1_S and IQ3_XXS, plus attention, normalization, RoPE
+and the Hyper-Connection mixing.
+
+That reorders the remaining work. Optimising the Q8_0 kernel further, or shaving its per-call
+round trips, cannot move the model: 2,728 calls at 2.64 ms each against 0.71 ms standalone hides at
+most 5 s inside a 66 s run. The kernels that matter are the ones for the expert quantizations, and
+after them the rest of the layer — at which point keeping activations resident stops being an
+optimisation and becomes the only sensible design, because nothing would need to come back to the
+host between operations.
+
 ## What would make it interactive
 
 At 26 s per token the model answers but cannot hold a conversation. The measurements point at one

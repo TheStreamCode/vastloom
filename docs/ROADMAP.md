@@ -355,9 +355,14 @@ recorded in the [M8 CUDA RMSNorm report](reports/M8_CUDA_RMSNORM_VALIDATION.md).
 - [x] Wire the GPU into the graph with weights resident in VRAM: 2,728 matvecs accelerated across a
   24-layer pass, 2.90 GB resident, identical output. Net gain is small — 24,328 ms per token to
   22,246 — because each accelerated call still costs 2.65 ms against the kernel's own 0.558 ms.
-- [ ] Remove the per-call round trips: one context push per matvec instead of three, asynchronous
-  copies, and keeping activations on the device between kernels. This is what turns the kernel's
-  5.4× into a model-level speedup.
+- [x] Collapse the per-matvec round trips into one driver entry. Worth 0.5%, which measured the
+  assumption rather than confirming it: the round trips were not the constraint.
+- [ ] IQ1_S and IQ3_XXS kernels. Telemetry from a 24-layer generation puts 7.2 s of 66.5 s inside
+  the Q8_0 kernel and its transfers, so the attention projections cap any speedup at 1.12× even at
+  zero cost. The routed experts are the 89%, and they are where the next kernel has to go.
+- [ ] Then the rest of the layer — attention, normalization, RoPE, Hyper-Connection — after which
+  keeping activations resident on the device stops being an optimisation and becomes the only
+  sensible design, because nothing would need to return to the host between operations.
 - [ ] Load and release layer trunks the way experts now are. All 43 are held resident, so the pass
   needs 6.39 GB of trunk and a host with less free RAM is refused rather than served — the largest
   remaining obstacle to running on ordinary machines, and the project's founding idea.

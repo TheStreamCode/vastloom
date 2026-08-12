@@ -88,6 +88,10 @@ private:
         std::size_t rows{0U};
         std::size_t blocks_per_row{0U};
         std::uint32_t ggml_type{0U};
+        // Whether the next pass will ask for these weights again. See the eviction comment in
+        // ensure_resident: recency alone cannot separate weights every token needs from experts
+        // this token happened to pick.
+        bool recurring{false};
     };
 
     CudaMatvecAccelerator(CudaDriver driver,

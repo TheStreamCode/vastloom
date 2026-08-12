@@ -130,6 +130,14 @@ struct DeepseekV4PackedMatrix {
     // one expert's weights under another's name. Zero means no identity was supplied, which callers
     // must read as "do not cache" rather than "cache by address".
     std::uint64_t cache_identity{0U};
+    // Whether the next forward pass will ask for these exact weights again.
+    //
+    // Always-active weights will: every token multiplies by every one of them. A routed expert will
+    // not, with high probability - top-6 of 256 means consecutive tokens pick different ones, and
+    // tripling the expert cache was measured to change the bytes read by nothing. A cache that
+    // cannot tell them apart lets the second kind evict the first, which is what kept every layer
+    // trunk being re-read on every pass regardless of how much VRAM was available.
+    bool recurring{false};
 };
 
 // Returns the exact encoded view owned by this descriptor. The matrix must outlive the returned

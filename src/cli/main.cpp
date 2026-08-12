@@ -2594,6 +2594,19 @@ int command_deepseek_forward(const std::vector<std::string>& args) {
             accelerator_options.maximum_resident_bytes = std::min<vastloom::ByteCount>(
                 policy.value().resources.vram_hard_limit, host_headroom);
             gpu_resident_limit = accelerator_options.maximum_resident_bytes;
+            // A ceiling of zero means the GPU is present and unusable, which costs about fourfold
+            // and otherwise looks like the model simply being slow. The Governor is right to refuse
+            // - the host has no commit to spare - but the user is owed the reason, because the
+            // remedy is theirs: free host memory, not a faster disk or a better GPU.
+            if (gpu_resident_limit == 0U && !json) {
+                std::cout << "Note: the GPU is present but has no host memory budget left, so every "
+                             "matrix runs on the CPU.\n"
+                          << "      Free host RAM to use it: the budget is what the RAM limit "
+                          << vastloom::format_bytes(budget) << " leaves after the pass needs "
+                          << vastloom::format_bytes(required) << " and "
+                          << vastloom::format_bytes(kUnmodelledHostHeadroom)
+                          << " is reserved for what the preflight does not model.\n";
+            }
             // Attention contributes a handful of matrices per layer, but every routed expert is
             // two more, and a decode step may select different experts each token. Let VRAM be the
             // limit rather than a count sized for attention alone.

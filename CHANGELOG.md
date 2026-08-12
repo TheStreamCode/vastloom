@@ -2,6 +2,28 @@
 
 ## Unreleased
 
+- The accelerator now evicts what will not be asked for again before what will. Recency cannot rank
+  these matrices: the forward pass touches every one of them exactly once per token, so
+  least-recently-used *is* arrival order and evicts what is needed soonest — the textbook
+  pathological case for a cyclic scan. What separates them is recurrence. Always-active weights are
+  multiplied by every token; a routed expert is top-6 of 256 and probably will not be picked again,
+  which is why tripling the expert cache changed the bytes read by nothing. Roughly 774 expert
+  uploads per pass were evicting the trunk, and `trunk_reloads` sat at exactly 473 — 43 layers times
+  11 passes, every layer re-read on every pass — whether the ceiling was 1 GB or 6.
+
+  **This change is not yet measured.** The reference machine currently gives the accelerator a
+  ceiling of zero, so the code does not execute at all: a 43-layer pass falls to CPU and costs
+  55,788 ms per token against 8,768 with a 2 GB ceiling. The measurement needs about 15 GiB of
+  available host memory; the numbers to watch are `trunk_reloads` against 473 and
+  `trunk_bytes_read` against 65.3 GB. Correctness is checked — 28/28, output unchanged — but no
+  speed is claimed and the hypothesis may still be wrong.
+
+- A GPU with no host budget now says so. The accelerator's ceiling is what the RAM limit leaves
+  after the pass's own requirement and a 3 GiB reserve for what the preflight does not model, and
+  on a busy machine that reaches zero: the model runs about fourfold slower and looks merely slow.
+  The Governor is right to refuse — the host has no commit to spare — but the remedy belongs to the
+  user and is host memory, not a faster disk or a better GPU, so the reason is now printed.
+
 - Streaming one trunk matrix at a time instead of one layer at a time was implemented, measured and
   rejected. It is the obvious optimisation — a layer is 138 MB and a matrix about 5, and the window
   was re-reading the whole layer whenever any single matrix of it was absent from the device — and

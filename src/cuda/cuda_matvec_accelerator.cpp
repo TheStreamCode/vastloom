@@ -156,12 +156,26 @@ Result<CudaMatvecAccelerator::Resident*> CudaMatvecAccelerator::ensure_resident(
     // routed expert costs about 0.29 ms to upload and 0.88 ms to multiply against roughly 8 ms on
     // twelve CPU threads, so re-uploading a matrix on every use still wins by around sevenfold.
     // Space is worth spending on whatever is being used now, not on whatever was used first.
+    // Recency alone cannot rank these matrices, because the forward pass touches every one of them
+    // exactly once per token. Least-recently-used is therefore arrival order, and it evicts what
+    // will be needed soonest - the textbook pathological case for a cyclic scan.
+    //
+    // What separates them is whether the next pass will ask again. Always-active weights will:
+    // every token multiplies by all of them. A routed expert will not - top-6 of 256, and tripling
+    // the expert cache was measured to change the bytes read by nothing. Treating both alike let
+    // roughly 774 expert uploads per pass evict the trunk, which is why every layer was re-read on
+    // every pass whether the ceiling was 1 GB or 6.
+    //
+    // So spend the space on what recurs, and evict what does not first. Among equals, recency.
     while ((stats_.resident_bytes + total > options_.maximum_resident_bytes ||
             resident_.size() >= options_.maximum_matrices) &&
            !resident_.empty()) {
         auto victim = std::min_element(
             resident_.begin(), resident_.end(),
             [](const auto& left, const auto& right) {
+                if (left.second.recurring != right.second.recurring) {
+                    return !left.second.recurring;
+                }
                 return left.second.last_used < right.second.last_used;
             });
         const ByteCount reclaimed = victim->second.total_bytes;
@@ -190,6 +204,7 @@ Result<CudaMatvecAccelerator::Resident*> CudaMatvecAccelerator::ensure_resident(
     resident.rows = matrix.rows;
     resident.blocks_per_row = blocks_per_row;
     resident.ggml_type = matrix.ggml_type;
+    resident.recurring = matrix.recurring;
 
     const auto upload_started = std::chrono::steady_clock::now();
     auto uploaded = driver_.copy_from_host(resident.allocation, 0U, payload.value());

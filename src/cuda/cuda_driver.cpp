@@ -666,7 +666,10 @@ BF16_LOOP_DONE:
 BF16_DONE:
     ret;
 }
+)ptx";
 
+// Third literal, for the same MSVC limit as the second.
+constexpr std::string_view kKQuantMatvecPtx = R"ptx(
 // One thread per output row of a ggml IQ2_XXS matrix. Each 66-byte block covers 256 weights: an
 // FP16 scale, then eight groups of four grid indices plus a 32-bit field holding a group scale and
 // four 7-bit sign patterns. Each index selects one of 256 entries of eight packed uint8 magnitudes,
@@ -811,12 +814,357 @@ IQ2_BLOCK_DONE:
 IQ2_DONE:
     ret;
 }
+
+// One thread per output row of a ggml Q5_K matrix. Each 176-byte block covers 256 weights as four
+// groups of 64: an FP16 scale and minimum, twelve bytes of packed 6-bit scale/minimum pairs, 32
+// bytes carrying the fifth bit of every weight, and 128 bytes of 4-bit lows.
+//
+// The reference emits columns base+0..31 from the low nibbles and base+32..63 from the high ones,
+// so this walks each group twice rather than interleaving, to sum in the reference's order.
+.visible .entry vastloom_matvec_q5_k_f32(
+    .param .u64 matrix_param,
+    .param .u64 input_param,
+    .param .u64 output_param,
+    .param .u32 rows_param,
+    .param .u32 blocks_param
+)
+{
+    .reg .pred %p<10>;
+    .reg .b16 %rs<4>;
+    .reg .b32 %r<48>;
+    .reg .b64 %rd<24>;
+    .reg .f32 %f<24>;
+    .reg .f64 %fd<6>;
+
+    ld.param.u64 %rd0, [matrix_param];
+    ld.param.u64 %rd1, [input_param];
+    ld.param.u64 %rd2, [output_param];
+    ld.param.u32 %r0, [rows_param];
+    ld.param.u32 %r1, [blocks_param];
+    mov.u32 %r2, %ntid.x;
+    mov.u32 %r3, %ctaid.x;
+    mov.u32 %r4, %tid.x;
+    mad.lo.u32 %r5, %r3, %r2, %r4;
+    setp.ge.u32 %p0, %r5, %r0;
+    @%p0 bra Q5K_DONE;
+
+    mul.lo.u32 %r6, %r5, %r1;
+    mul.wide.u32 %rd3, %r6, 176;
+    add.u64 %rd4, %rd0, %rd3;
+    mov.u64 %rd5, %rd1;
+    mov.f64 %fd0, 0d0000000000000000;
+    mov.u32 %r7, 0;
+
+Q5K_BLOCK_LOOP:
+    setp.ge.u32 %p1, %r7, %r1;
+    @%p1 bra Q5K_BLOCK_DONE;
+    ld.global.u16 %rs0, [%rd4];
+    cvt.f32.f16 %f1, %rs0;
+    ld.global.u16 %rs1, [%rd4+2];
+    cvt.f32.f16 %f2, %rs1;
+    // group counter, and the two rotating masks that select this group's fifth bits
+    mov.u32 %r8, 0;
+    mov.u32 %r9, 1;
+    mov.u32 %r10, 2;
+
+Q5K_GROUP_LOOP:
+    setp.ge.u32 %p2, %r8, 4;
+    @%p2 bra Q5K_GROUP_DONE;
+    // scale_index = 2 * group; unpack it and its successor from the 12 packed bytes at +4.
+    shl.b32 %r11, %r8, 1;
+    mov.u32 %r30, 0;
+
+Q5K_PAIR_LOOP:
+    setp.ge.u32 %p3, %r30, 2;
+    @%p3 bra Q5K_PAIR_DONE;
+    add.u32 %r12, %r11, %r30;
+    add.u64 %rd6, %rd4, 4;
+    setp.ge.u32 %p4, %r12, 4;
+    @%p4 bra Q5K_HIGH_INDEX;
+    // index < 4: scale = s[index] & 63, minimum = s[index + 4] & 63
+    cvt.u64.u32 %rd7, %r12;
+    add.u64 %rd8, %rd6, %rd7;
+    ld.global.u8 %r13, [%rd8];
+    and.b32 %r13, %r13, 63;
+    ld.global.u8 %r14, [%rd8+4];
+    and.b32 %r14, %r14, 63;
+    bra Q5K_PAIR_STORE;
+
+Q5K_HIGH_INDEX:
+    // scale = (s[i+4] & 15) | ((s[i-4] >> 6) << 4);  min = (s[i+4] >> 4) | ((s[i] >> 6) << 4)
+    cvt.u64.u32 %rd7, %r12;
+    add.u64 %rd8, %rd6, %rd7;
+    ld.global.u8 %r15, [%rd8+4];
+    and.b32 %r13, %r15, 15;
+    ld.global.u8 %r16, [%rd8+-4];
+    shr.u32 %r16, %r16, 6;
+    shl.b32 %r16, %r16, 4;
+    or.b32 %r13, %r13, %r16;
+    shr.u32 %r14, %r15, 4;
+    ld.global.u8 %r17, [%rd8];
+    shr.u32 %r17, %r17, 6;
+    shl.b32 %r17, %r17, 4;
+    or.b32 %r14, %r14, %r17;
+
+Q5K_PAIR_STORE:
+    // d = scale * s, m = minimum * mn, kept per half of the group
+    cvt.rn.f32.u32 %f3, %r13;
+    cvt.rn.f32.u32 %f4, %r14;
+    mul.rn.f32 %f5, %f1, %f3;
+    mul.rn.f32 %f6, %f2, %f4;
+    setp.eq.u32 %p5, %r30, 0;
+    @!%p5 bra Q5K_PAIR_SECOND;
+    mov.f32 %f7, %f5;
+    mov.f32 %f8, %f6;
+    bra Q5K_PAIR_NEXT;
+
+Q5K_PAIR_SECOND:
+    mov.f32 %f9, %f5;
+    mov.f32 %f10, %f6;
+
+Q5K_PAIR_NEXT:
+    add.u32 %r30, %r30, 1;
+    bra Q5K_PAIR_LOOP;
+
+Q5K_PAIR_DONE:
+    // low bytes for this group start at +48 + 32 * group; high bytes are shared at +16.
+    shl.b32 %r18, %r8, 5;
+    cvt.u64.u32 %rd9, %r18;
+    add.u64 %rd10, %rd4, 48;
+    add.u64 %rd10, %rd10, %rd9;
+    add.u64 %rd11, %rd4, 16;
+    // first half: columns base+0..31 from the low nibble plus the first mask bit
+    mov.u32 %r19, 0;
+
+Q5K_FIRST_LOOP:
+    setp.ge.u32 %p6, %r19, 32;
+    @%p6 bra Q5K_FIRST_DONE;
+    cvt.u64.u32 %rd12, %r19;
+    add.u64 %rd13, %rd10, %rd12;
+    ld.global.u8 %r20, [%rd13];
+    and.b32 %r21, %r20, 15;
+    add.u64 %rd14, %rd11, %rd12;
+    ld.global.u8 %r22, [%rd14];
+    and.b32 %r23, %r22, %r9;
+    setp.ne.u32 %p7, %r23, 0;
+    selp.b32 %r24, 16, 0, %p7;
+    add.u32 %r21, %r21, %r24;
+    cvt.rn.f32.u32 %f11, %r21;
+    mul.rn.f32 %f12, %f7, %f11;
+    sub.rn.f32 %f13, %f12, %f8;
+    ld.global.f32 %f14, [%rd5];
+    cvt.f64.f32 %fd1, %f13;
+    cvt.f64.f32 %fd2, %f14;
+    mul.rn.f64 %fd3, %fd1, %fd2;
+    add.rn.f64 %fd0, %fd0, %fd3;
+    add.u64 %rd5, %rd5, 4;
+    add.u32 %r19, %r19, 1;
+    bra Q5K_FIRST_LOOP;
+
+Q5K_FIRST_DONE:
+    // second half: columns base+32..63 from the high nibble plus the second mask bit
+    mov.u32 %r19, 0;
+
+Q5K_SECOND_LOOP:
+    setp.ge.u32 %p8, %r19, 32;
+    @%p8 bra Q5K_SECOND_DONE;
+    cvt.u64.u32 %rd12, %r19;
+    add.u64 %rd13, %rd10, %rd12;
+    ld.global.u8 %r20, [%rd13];
+    shr.u32 %r21, %r20, 4;
+    add.u64 %rd14, %rd11, %rd12;
+    ld.global.u8 %r22, [%rd14];
+    and.b32 %r23, %r22, %r10;
+    setp.ne.u32 %p9, %r23, 0;
+    selp.b32 %r24, 16, 0, %p9;
+    add.u32 %r21, %r21, %r24;
+    cvt.rn.f32.u32 %f11, %r21;
+    mul.rn.f32 %f12, %f9, %f11;
+    sub.rn.f32 %f13, %f12, %f10;
+    ld.global.f32 %f14, [%rd5];
+    cvt.f64.f32 %fd1, %f13;
+    cvt.f64.f32 %fd2, %f14;
+    mul.rn.f64 %fd3, %fd1, %fd2;
+    add.rn.f64 %fd0, %fd0, %fd3;
+    add.u64 %rd5, %rd5, 4;
+    add.u32 %r19, %r19, 1;
+    bra Q5K_SECOND_LOOP;
+
+Q5K_SECOND_DONE:
+    shl.b32 %r9, %r9, 2;
+    shl.b32 %r10, %r10, 2;
+    add.u32 %r8, %r8, 1;
+    bra Q5K_GROUP_LOOP;
+
+Q5K_GROUP_DONE:
+    add.u64 %rd4, %rd4, 176;
+    add.u32 %r7, %r7, 1;
+    bra Q5K_BLOCK_LOOP;
+
+Q5K_BLOCK_DONE:
+    cvt.rn.f32.f64 %f15, %fd0;
+    mul.wide.u32 %rd15, %r5, 4;
+    add.u64 %rd16, %rd2, %rd15;
+    st.global.f32 [%rd16], %f15;
+
+Q5K_DONE:
+    ret;
+}
+
+// One thread per output row of a ggml Q6_K matrix. Each 210-byte block covers 256 weights as two
+// halves of 128: 128 bytes of 4-bit lows, 64 bytes supplying two more bits per weight, sixteen
+// signed 8-bit sub-scales, and one FP16 scale at the end.
+//
+// The reference emits four interleaved runs of 32 columns per half, so this walks each half four
+// times to sum in the same order.
+.visible .entry vastloom_matvec_q6_k_f32(
+    .param .u64 matrix_param,
+    .param .u64 input_param,
+    .param .u64 output_param,
+    .param .u32 rows_param,
+    .param .u32 blocks_param
+)
+{
+    .reg .pred %p<10>;
+    .reg .b16 %rs<4>;
+    .reg .b32 %r<48>;
+    .reg .b64 %rd<24>;
+    .reg .f32 %f<24>;
+    .reg .f64 %fd<6>;
+
+    ld.param.u64 %rd0, [matrix_param];
+    ld.param.u64 %rd1, [input_param];
+    ld.param.u64 %rd2, [output_param];
+    ld.param.u32 %r0, [rows_param];
+    ld.param.u32 %r1, [blocks_param];
+    mov.u32 %r2, %ntid.x;
+    mov.u32 %r3, %ctaid.x;
+    mov.u32 %r4, %tid.x;
+    mad.lo.u32 %r5, %r3, %r2, %r4;
+    setp.ge.u32 %p0, %r5, %r0;
+    @%p0 bra Q6K_DONE;
+
+    mul.lo.u32 %r6, %r5, %r1;
+    mul.wide.u32 %rd3, %r6, 210;
+    add.u64 %rd4, %rd0, %rd3;
+    mov.u64 %rd5, %rd1;
+    mov.f64 %fd0, 0d0000000000000000;
+    mov.u32 %r7, 0;
+
+Q6K_BLOCK_LOOP:
+    setp.ge.u32 %p1, %r7, %r1;
+    @%p1 bra Q6K_BLOCK_DONE;
+    ld.global.u16 %rs0, [%rd4+208];
+    cvt.f32.f16 %f1, %rs0;
+    mov.u32 %r8, 0;
+
+Q6K_HALF_LOOP:
+    setp.ge.u32 %p2, %r8, 2;
+    @%p2 bra Q6K_HALF_DONE;
+    // low += 64 * half, high = +128 + 32 * half, scales = +192 + 8 * half
+    shl.b32 %r9, %r8, 6;
+    cvt.u64.u32 %rd6, %r9;
+    add.u64 %rd7, %rd4, %rd6;
+    shl.b32 %r10, %r8, 5;
+    cvt.u64.u32 %rd8, %r10;
+    add.u64 %rd9, %rd4, 128;
+    add.u64 %rd9, %rd9, %rd8;
+    shl.b32 %r11, %r8, 3;
+    cvt.u64.u32 %rd10, %r11;
+    add.u64 %rd11, %rd4, 192;
+    add.u64 %rd11, %rd11, %rd10;
+    // run selects which of the four column groups this pass emits
+    mov.u32 %r12, 0;
+
+Q6K_RUN_LOOP:
+    setp.ge.u32 %p3, %r12, 4;
+    @%p3 bra Q6K_RUN_DONE;
+    mov.u32 %r13, 0;
+
+Q6K_LANE_LOOP:
+    setp.ge.u32 %p4, %r13, 32;
+    @%p4 bra Q6K_LANE_DONE;
+    cvt.u64.u32 %rd12, %r13;
+    add.u64 %rd13, %rd7, %rd12;
+    add.u64 %rd14, %rd9, %rd12;
+    ld.global.u8 %r14, [%rd14];
+    // runs 0 and 2 read low[lane]; runs 1 and 3 read low[lane + 32]
+    and.b32 %r15, %r12, 1;
+    setp.eq.u32 %p5, %r15, 0;
+    @%p5 bra Q6K_LOW_FIRST;
+    ld.global.u8 %r16, [%rd13+32];
+    bra Q6K_LOW_DONE;
+
+Q6K_LOW_FIRST:
+    ld.global.u8 %r16, [%rd13];
+
+Q6K_LOW_DONE:
+    // runs 0 and 1 take the low nibble; runs 2 and 3 the high one
+    setp.lt.u32 %p6, %r12, 2;
+    @%p6 bra Q6K_NIBBLE_LOW;
+    shr.u32 %r17, %r16, 4;
+    bra Q6K_NIBBLE_DONE;
+
+Q6K_NIBBLE_LOW:
+    and.b32 %r17, %r16, 15;
+
+Q6K_NIBBLE_DONE:
+    // the extra two bits sit at 2 * run within the high byte
+    shl.b32 %r18, %r12, 1;
+    shr.u32 %r19, %r14, %r18;
+    and.b32 %r19, %r19, 3;
+    shl.b32 %r19, %r19, 4;
+    or.b32 %r17, %r17, %r19;
+    sub.s32 %r17, %r17, 32;
+    cvt.rn.f32.s32 %f2, %r17;
+    // sub-scale index is lane / 16 plus twice the run
+    shr.u32 %r20, %r13, 4;
+    shl.b32 %r21, %r12, 1;
+    add.u32 %r20, %r20, %r21;
+    cvt.u64.u32 %rd15, %r20;
+    add.u64 %rd16, %rd11, %rd15;
+    ld.global.s8 %r22, [%rd16];
+    cvt.rn.f32.s32 %f3, %r22;
+    mul.rn.f32 %f4, %f1, %f3;
+    mul.rn.f32 %f5, %f4, %f2;
+    ld.global.f32 %f6, [%rd5];
+    cvt.f64.f32 %fd1, %f5;
+    cvt.f64.f32 %fd2, %f6;
+    mul.rn.f64 %fd3, %fd1, %fd2;
+    add.rn.f64 %fd0, %fd0, %fd3;
+    add.u64 %rd5, %rd5, 4;
+    add.u32 %r13, %r13, 1;
+    bra Q6K_LANE_LOOP;
+
+Q6K_LANE_DONE:
+    add.u32 %r12, %r12, 1;
+    bra Q6K_RUN_LOOP;
+
+Q6K_RUN_DONE:
+    add.u32 %r8, %r8, 1;
+    bra Q6K_HALF_LOOP;
+
+Q6K_HALF_DONE:
+    add.u64 %rd4, %rd4, 210;
+    add.u32 %r7, %r7, 1;
+    bra Q6K_BLOCK_LOOP;
+
+Q6K_BLOCK_DONE:
+    cvt.rn.f32.f64 %f7, %fd0;
+    mul.wide.u32 %rd17, %r5, 4;
+    add.u64 %rd18, %rd2, %rd17;
+    st.global.f32 [%rd18], %f7;
+
+Q6K_DONE:
+    ret;
+}
 )ptx";
 
 // The whole module, assembled once. Returned by reference so the JIT gets a stable pointer.
 const std::string& module_ptx() {
-    static const std::string text =
-        std::string(kRmsNormPtx) + std::string(kQuantizedMatvecPtx);
+    static const std::string text = std::string(kRmsNormPtx) +
+                                    std::string(kQuantizedMatvecPtx) +
+                                    std::string(kKQuantMatvecPtx);
     return text;
 }
 
@@ -1489,6 +1837,127 @@ public:
         }
         if (!popped) return popped.error();
         return {};
+    }
+
+    // Shared body for the K-quant matvecs. They differ only in block stride and entry point: no
+    // shared grid, one FP16 scale somewhere in the block, and 256 weights per block.
+    [[nodiscard]] Result<void> matvec_k_quant_locked(
+        const CudaBackendAllocation& allocation,
+        ByteCount matrix_offset,
+        ByteCount input_offset,
+        ByteCount output_offset,
+        std::size_t row_count,
+        std::size_t blocks_per_row,
+        ByteCount block_bytes,
+        const char* entry_point,
+        const char* label,
+        std::span<const std::byte> input,
+        std::span<std::byte> output) {
+        std::scoped_lock lock(mutex_);
+        constexpr ByteCount kBlockElements = 256U;
+        if (row_count == 0U || blocks_per_row == 0U || block_bytes == 0U ||
+            row_count > std::numeric_limits<std::uint32_t>::max() ||
+            blocks_per_row > std::numeric_limits<std::uint32_t>::max() ||
+            blocks_per_row > std::numeric_limits<ByteCount>::max() / row_count) {
+            return make_error(ErrorCode::invalid_argument,
+                              std::string("CUDA ") + label +
+                                  " matvec launch dimensions are invalid");
+        }
+        const ByteCount blocks = static_cast<ByteCount>(row_count) * blocks_per_row;
+        if (blocks > std::numeric_limits<ByteCount>::max() / block_bytes ||
+            blocks_per_row > std::numeric_limits<ByteCount>::max() / kBlockElements ||
+            row_count > std::numeric_limits<ByteCount>::max() / sizeof(float)) {
+            return make_error(ErrorCode::resource_exhausted,
+                              std::string("CUDA ") + label + " matvec byte count overflows");
+        }
+        const ByteCount matrix_bytes = blocks * block_bytes;
+        const ByteCount input_bytes =
+            static_cast<ByteCount>(blocks_per_row) * kBlockElements * sizeof(float);
+        const ByteCount output_bytes = static_cast<ByteCount>(row_count) * sizeof(float);
+        if (input.size() != input_bytes || output.size() != output_bytes) {
+            return make_error(ErrorCode::invalid_argument,
+                              std::string("CUDA ") + label +
+                                  " matvec host spans do not match its shape");
+        }
+        for (const auto& [offset, bytes] :
+             {std::pair{matrix_offset, matrix_bytes}, std::pair{input_offset, input_bytes},
+              std::pair{output_offset, output_bytes}}) {
+            auto range = validate_allocation_range(allocation, offset, bytes);
+            if (!range) return range.error();
+        }
+        if (input_offset % alignof(float) != 0U || output_offset % alignof(float) != 0U ||
+            matrix_offset % 2U != 0U) {
+            return make_error(ErrorCode::invalid_argument,
+                              std::string("CUDA ") + label + " matvec ranges are misaligned");
+        }
+
+        auto* context = reinterpret_cast<CuContext>(allocation.context);
+        CuResult status = context_push_(context);
+        if (status != kCudaSuccess) return cuda_error("cuCtxPushCurrent_v2", status);
+        auto module = cached_module_locked(context, allocation.device_ordinal);
+        if (!module) {
+            static_cast<void>(pop_context_locked(context));
+            return module.error();
+        }
+        CuFunction function = nullptr;
+        status = module_get_function_(&function, module.value(), entry_point);
+        if (status != kCudaSuccess) {
+            static_cast<void>(pop_context_locked(context));
+            return cuda_error("cuModuleGetFunction", status);
+        }
+        status = copy_host_to_device_(allocation.device_pointer + input_offset, input.data(),
+                                      input.size());
+        if (status == kCudaSuccess) {
+            CuDevicePointer matrix_pointer = allocation.device_pointer + matrix_offset;
+            CuDevicePointer input_pointer = allocation.device_pointer + input_offset;
+            CuDevicePointer output_pointer = allocation.device_pointer + output_offset;
+            auto rows = static_cast<std::uint32_t>(row_count);
+            auto row_blocks = static_cast<std::uint32_t>(blocks_per_row);
+            void* parameters[] = {&matrix_pointer, &input_pointer, &output_pointer,
+                                  &rows, &row_blocks};
+            constexpr std::uint32_t kThreadsPerBlock = 128U;
+            const std::uint32_t grid = (rows + kThreadsPerBlock - 1U) / kThreadsPerBlock;
+            status = launch_kernel_(function, grid, 1U, 1U, kThreadsPerBlock, 1U, 1U, 0U, nullptr,
+                                    parameters, nullptr);
+        }
+        if (status == kCudaSuccess) {
+            status = copy_device_to_host_(output.data(), allocation.device_pointer + output_offset,
+                                          output.size());
+        }
+        auto popped = pop_context_locked(context);
+        if (status != kCudaSuccess) {
+            return cuda_error(std::string("CUDA ") + label + " matvec transfer/launch", status);
+        }
+        if (!popped) return popped.error();
+        return {};
+    }
+
+    [[nodiscard]] Result<void> matvec_q6_k_with_transfer(
+        const CudaBackendAllocation& allocation,
+        ByteCount matrix_offset,
+        ByteCount input_offset,
+        ByteCount output_offset,
+        std::size_t row_count,
+        std::size_t blocks_per_row,
+        std::span<const std::byte> input,
+        std::span<std::byte> output) override {
+        return matvec_k_quant_locked(allocation, matrix_offset, input_offset, output_offset,
+                                     row_count, blocks_per_row, 210U,
+                                     "vastloom_matvec_q6_k_f32", "Q6_K", input, output);
+    }
+
+    [[nodiscard]] Result<void> matvec_q5_k_with_transfer(
+        const CudaBackendAllocation& allocation,
+        ByteCount matrix_offset,
+        ByteCount input_offset,
+        ByteCount output_offset,
+        std::size_t row_count,
+        std::size_t blocks_per_row,
+        std::span<const std::byte> input,
+        std::span<std::byte> output) override {
+        return matvec_k_quant_locked(allocation, matrix_offset, input_offset, output_offset,
+                                     row_count, blocks_per_row, 176U,
+                                     "vastloom_matvec_q5_k_f32", "Q5_K", input, output);
     }
 
     [[nodiscard]] Result<void> matvec_dense_with_transfer(
@@ -2361,6 +2830,66 @@ Result<void> CudaDriver::matvec_iq2_xxs_with_transfer(
     } catch (...) {
         return make_error(ErrorCode::internal_error,
                           "CUDA backend threw an unknown IQ2_XXS matvec exception");
+    }
+}
+
+Result<void> CudaDriver::matvec_q6_k_with_transfer(
+    CudaAllocation& allocation,
+    ByteCount matrix_offset,
+    ByteCount input_offset,
+    ByteCount output_offset,
+    std::size_t row_count,
+    std::size_t blocks_per_row,
+    std::span<const std::byte> input,
+    std::span<std::byte> output) const {
+    if (!allocation.valid() || allocation.backend_.get() != backend_.get()) {
+        return make_error(ErrorCode::invalid_argument,
+                          "CUDA allocation does not belong to this driver");
+    }
+    if (row_count == 0U || blocks_per_row == 0U || input.empty() || output.empty()) {
+        return make_error(ErrorCode::invalid_argument,
+                          "CUDA Q6_K matvec transfer parameters are invalid");
+    }
+    try {
+        return backend_->matvec_q6_k_with_transfer(allocation.allocation_, matrix_offset,
+                                                   input_offset, output_offset, row_count,
+                                                   blocks_per_row, input, output);
+    } catch (const std::exception& exception) {
+        return make_error(ErrorCode::internal_error,
+                          "CUDA backend threw during Q6_K matvec", exception.what());
+    } catch (...) {
+        return make_error(ErrorCode::internal_error,
+                          "CUDA backend threw an unknown Q6_K matvec exception");
+    }
+}
+
+Result<void> CudaDriver::matvec_q5_k_with_transfer(
+    CudaAllocation& allocation,
+    ByteCount matrix_offset,
+    ByteCount input_offset,
+    ByteCount output_offset,
+    std::size_t row_count,
+    std::size_t blocks_per_row,
+    std::span<const std::byte> input,
+    std::span<std::byte> output) const {
+    if (!allocation.valid() || allocation.backend_.get() != backend_.get()) {
+        return make_error(ErrorCode::invalid_argument,
+                          "CUDA allocation does not belong to this driver");
+    }
+    if (row_count == 0U || blocks_per_row == 0U || input.empty() || output.empty()) {
+        return make_error(ErrorCode::invalid_argument,
+                          "CUDA Q5_K matvec transfer parameters are invalid");
+    }
+    try {
+        return backend_->matvec_q5_k_with_transfer(allocation.allocation_, matrix_offset,
+                                                   input_offset, output_offset, row_count,
+                                                   blocks_per_row, input, output);
+    } catch (const std::exception& exception) {
+        return make_error(ErrorCode::internal_error,
+                          "CUDA backend threw during Q5_K matvec", exception.what());
+    } catch (...) {
+        return make_error(ErrorCode::internal_error,
+                          "CUDA backend threw an unknown Q5_K matvec exception");
     }
 }
 

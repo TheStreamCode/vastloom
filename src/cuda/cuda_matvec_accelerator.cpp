@@ -22,6 +22,12 @@ constexpr std::size_t kIq3XxsBlockElements = 256U;
 // Dense formats have no block structure; one element is its own block.
 constexpr std::uint32_t kGgmlTypeF32 = 0U;
 constexpr std::uint32_t kGgmlTypeBf16 = 30U;
+constexpr std::uint32_t kGgmlTypeQ6K = 14U;
+constexpr ByteCount kQ6KBlockBytes = 210U;
+constexpr std::size_t kQ6KBlockElements = 256U;
+constexpr std::uint32_t kGgmlTypeQ5K = 13U;
+constexpr ByteCount kQ5KBlockBytes = 176U;
+constexpr std::size_t kQ5KBlockElements = 256U;
 constexpr std::uint32_t kGgmlTypeIq2Xxs = 16U;
 constexpr ByteCount kIq2XxsBlockBytes = 66U;
 constexpr std::size_t kIq2XxsBlockElements = 256U;
@@ -36,6 +42,8 @@ std::optional<Layout> layout_for(std::uint32_t ggml_type) {
     if (ggml_type == kGgmlTypeIq1S) return Layout{kIq1SBlockBytes, kIq1SBlockElements};
     if (ggml_type == kGgmlTypeIq3Xxs) return Layout{kIq3XxsBlockBytes, kIq3XxsBlockElements};
     if (ggml_type == kGgmlTypeIq2Xxs) return Layout{kIq2XxsBlockBytes, kIq2XxsBlockElements};
+    if (ggml_type == kGgmlTypeQ5K) return Layout{kQ5KBlockBytes, kQ5KBlockElements};
+    if (ggml_type == kGgmlTypeQ6K) return Layout{kQ6KBlockBytes, kQ6KBlockElements};
     if (ggml_type == kGgmlTypeF32) return Layout{4U, 1U};
     if (ggml_type == kGgmlTypeBf16) return Layout{2U, 1U};
     return std::nullopt;
@@ -236,6 +244,14 @@ Result<bool> CudaMatvecAccelerator::matvec(
                     live.allocation, 0U, live.grid_offset, live.input_offset, live.output_offset,
                     live.rows, live.blocks_per_row, std::as_bytes(input),
                     std::as_writable_bytes(output));
+            case kGgmlTypeQ6K:
+                return driver_.matvec_q6_k_with_transfer(
+                    live.allocation, 0U, live.input_offset, live.output_offset, live.rows,
+                    live.blocks_per_row, std::as_bytes(input), std::as_writable_bytes(output));
+            case kGgmlTypeQ5K:
+                return driver_.matvec_q5_k_with_transfer(
+                    live.allocation, 0U, live.input_offset, live.output_offset, live.rows,
+                    live.blocks_per_row, std::as_bytes(input), std::as_writable_bytes(output));
             case kGgmlTypeF32:
             case kGgmlTypeBf16:
                 // blocks_per_row is the column count for these: one element per block.

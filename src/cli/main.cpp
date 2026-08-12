@@ -359,7 +359,7 @@ int command_cuda_info(const std::vector<std::string>& args) {
     auto valid = validate_options(args, 0U,
                                   {"--allocation-smoke", "--minimum-free-vram"},
                                   {"--json", "--help", "--rmsnorm-smoke", "--matvec-smoke",
-                                   "--iq1s-smoke", "--iq3xxs-smoke", "--iq2xxs-smoke"});
+                                   "--iq1s-smoke", "--iq3xxs-smoke", "--iq2xxs-smoke", "--q5k-smoke", "--q6k-smoke"});
     if (!valid) return print_error(valid.error(), json);
     const bool allocation_smoke_requested =
         option_value(args, "--allocation-smoke").has_value();
@@ -368,9 +368,11 @@ int command_cuda_info(const std::vector<std::string>& args) {
     const bool iq1s_smoke_requested = has_flag(args, "--iq1s-smoke");
     const bool iq3xxs_smoke_requested = has_flag(args, "--iq3xxs-smoke");
     const bool iq2xxs_smoke_requested = has_flag(args, "--iq2xxs-smoke");
+    const bool q5k_smoke_requested = has_flag(args, "--q5k-smoke");
+    const bool q6k_smoke_requested = has_flag(args, "--q6k-smoke");
     if ((allocation_smoke_requested || rmsnorm_smoke_requested) &&
         (matvec_smoke_requested || iq1s_smoke_requested || iq3xxs_smoke_requested ||
-         iq2xxs_smoke_requested)) {
+         iq2xxs_smoke_requested || q5k_smoke_requested || q6k_smoke_requested)) {
         return print_error(
             vastloom::make_error(vastloom::ErrorCode::invalid_argument,
                                  "the matvec parity gates run on their own"),
@@ -384,7 +386,8 @@ int command_cuda_info(const std::vector<std::string>& args) {
     }
     const bool operation_requested = allocation_smoke_requested || rmsnorm_smoke_requested ||
                                      matvec_smoke_requested || iq1s_smoke_requested ||
-                                     iq3xxs_smoke_requested || iq2xxs_smoke_requested;
+                                     iq3xxs_smoke_requested || iq2xxs_smoke_requested ||
+                                     q5k_smoke_requested || q6k_smoke_requested;
     if (!operation_requested && option_value(args, "--minimum-free-vram").has_value()) {
         return print_error(vastloom::make_error(
                                vastloom::ErrorCode::invalid_argument,
@@ -420,6 +423,14 @@ int command_cuda_info(const std::vector<std::string>& args) {
     double iq1s_max_abs_error = 0.0;
     double iq1s_kernel_ms = 0.0;
     double iq1s_cpu_ms = 0.0;
+    bool q6k_smoke_passed = false;
+    double q6k_max_abs_error = 0.0;
+    double q6k_kernel_ms = 0.0;
+    double q6k_cpu_ms = 0.0;
+    bool q5k_smoke_passed = false;
+    double q5k_max_abs_error = 0.0;
+    double q5k_kernel_ms = 0.0;
+    double q5k_cpu_ms = 0.0;
     bool iq2xxs_smoke_passed = false;
     double iq2xxs_max_abs_error = 0.0;
     double iq2xxs_kernel_ms = 0.0;
@@ -931,6 +942,202 @@ int command_cuda_info(const std::vector<std::string>& args) {
             }
             iq2xxs_smoke_passed = true;
         }
+        if (q5k_smoke_requested) {
+            // The shared expert's storage, active on every token of every layer.
+            constexpr std::size_t q5k_rows = 2'048U;
+            constexpr std::size_t q5k_columns = 4'096U;
+            constexpr std::size_t q5k_block_elements = 256U;
+            constexpr std::size_t q5k_block_bytes = 176U;
+            constexpr double q5k_tolerance = 1.0e-3;
+            const std::size_t q5k_blocks_per_row = q5k_columns / q5k_block_elements;
+            const ByteCount q5k_matrix_bytes =
+                static_cast<ByteCount>(q5k_rows) * q5k_blocks_per_row * q5k_block_bytes;
+            const ByteCount q5k_input_bytes =
+                static_cast<ByteCount>(q5k_columns) * sizeof(float);
+            const ByteCount q5k_output_bytes = static_cast<ByteCount>(q5k_rows) * sizeof(float);
+
+            auto caller_host = governor.try_reserve(
+                vastloom::safety::ResourceKind::scratch,
+                q5k_matrix_bytes + q5k_input_bytes + 2U * q5k_output_bytes,
+                "cuda-q5k-smoke-host");
+            if (!caller_host) return print_error(caller_host.error(), json);
+
+            std::vector<std::byte> encoded(static_cast<std::size_t>(q5k_matrix_bytes));
+            for (std::size_t index = 0U; index < encoded.size(); ++index) {
+                encoded[index] = static_cast<std::byte>((index * 47U + 23U) % 251U);
+            }
+            for (std::size_t block = 0U; block * q5k_block_bytes < encoded.size(); ++block) {
+                // Both the scale and the minimum are FP16 and both must be finite; vary them for
+                // the reason spelled out in the IQ1_S gate above.
+                const auto exponent = static_cast<std::uint16_t>(0x0CU + (block % 5U));
+                const auto mantissa = static_cast<std::uint16_t>((block * 4'513U + 7U) & 0x03FFU);
+                const auto scale_bits =
+                    static_cast<std::uint16_t>((exponent << 10U) | mantissa);
+                const auto minimum_bits = static_cast<std::uint16_t>(
+                    ((0x0BU + (block % 4U)) << 10U) | ((block * 2'207U + 19U) & 0x03FFU));
+                std::memcpy(encoded.data() + block * q5k_block_bytes, &scale_bits,
+                            sizeof(scale_bits));
+                std::memcpy(encoded.data() + block * q5k_block_bytes + 2U, &minimum_bits,
+                            sizeof(minimum_bits));
+            }
+            std::vector<float> q5k_input(q5k_columns);
+            for (std::size_t index = 0U; index < q5k_input.size(); ++index) {
+                const auto scrambled =
+                    static_cast<std::uint32_t>((index * 1'664'525ULL + 1'013ULL) % 1'000'003ULL);
+                q5k_input[index] = static_cast<float>(scrambled) / 1'000'003.0F - 0.5F;
+            }
+
+            std::vector<float> q5k_expected(q5k_rows);
+            vastloom::inference::QuantizedKernelLimits q5k_limits;
+            q5k_limits.max_elements = q5k_rows * q5k_columns;
+            q5k_limits.max_threads = policy.value().cpu_threads;
+            const auto q5k_cpu_started = std::chrono::steady_clock::now();
+            auto q5k_cpu = vastloom::inference::matvec_q5_k_f32(
+                encoded, q5k_rows, q5k_columns, q5k_input, q5k_expected, q5k_limits);
+            q5k_cpu_ms = std::chrono::duration<double, std::milli>(
+                std::chrono::steady_clock::now() - q5k_cpu_started).count();
+            if (!q5k_cpu) return print_error(q5k_cpu.error(), json);
+
+            const ByteCount q5k_input_offset = q5k_matrix_bytes;
+            const ByteCount q5k_output_offset = q5k_input_offset + q5k_input_bytes;
+            auto q5k_device = driver.value().allocate(
+                0, q5k_output_offset + q5k_output_bytes, minimum_free.value(), governor,
+                "cuda-matvec-q5-k-smoke");
+            if (!q5k_device) return print_error(q5k_device.error(), json);
+            auto q5k_allocation = q5k_device.take_value();
+            auto copied = driver.value().copy_from_host(q5k_allocation, 0U, encoded);
+            if (!copied) return print_error(copied.error(), json);
+
+            std::vector<float> q5k_actual(q5k_rows);
+            const auto q5k_started = std::chrono::steady_clock::now();
+            auto q5k_launched = driver.value().matvec_q5_k_with_transfer(
+                q5k_allocation, 0U, q5k_input_offset, q5k_output_offset,
+                q5k_rows, q5k_blocks_per_row,
+                std::as_bytes(std::span<const float>(q5k_input)),
+                std::as_writable_bytes(std::span<float>(q5k_actual)));
+            if (!q5k_launched) return print_error(q5k_launched.error(), json);
+            q5k_kernel_ms = std::chrono::duration<double, std::milli>(
+                std::chrono::steady_clock::now() - q5k_started).count();
+            auto q5k_released = q5k_allocation.release();
+            if (!q5k_released) return print_error(q5k_released.error(), json);
+
+            for (std::size_t index = 0U; index < q5k_actual.size(); ++index) {
+                if (!std::isfinite(q5k_actual[index])) {
+                    return print_error(vastloom::make_error(
+                                           vastloom::ErrorCode::integrity_error,
+                                           "CUDA Q5_K matvec produced a non-finite value"),
+                                       json);
+                }
+                q5k_max_abs_error = std::max(
+                    q5k_max_abs_error,
+                    std::abs(static_cast<double>(q5k_actual[index]) -
+                             static_cast<double>(q5k_expected[index])));
+            }
+            if (q5k_max_abs_error > q5k_tolerance) {
+                return print_error(vastloom::make_error(
+                                       vastloom::ErrorCode::integrity_error,
+                                       "CUDA Q5_K matvec does not match the CPU reference",
+                                       std::to_string(q5k_max_abs_error)),
+                                   json);
+            }
+            q5k_smoke_passed = true;
+        }
+        if (q6k_smoke_requested) {
+            // The last trunk storage type without a kernel, and with it every trunk matrix the
+            // streaming window reloads becomes one the device can hold instead.
+            constexpr std::size_t q6k_rows = 2'048U;
+            constexpr std::size_t q6k_columns = 4'096U;
+            constexpr std::size_t q6k_block_elements = 256U;
+            constexpr std::size_t q6k_block_bytes = 210U;
+            constexpr double q6k_tolerance = 1.0e-3;
+            const std::size_t q6k_blocks_per_row = q6k_columns / q6k_block_elements;
+            const ByteCount q6k_matrix_bytes =
+                static_cast<ByteCount>(q6k_rows) * q6k_blocks_per_row * q6k_block_bytes;
+            const ByteCount q6k_input_bytes =
+                static_cast<ByteCount>(q6k_columns) * sizeof(float);
+            const ByteCount q6k_output_bytes = static_cast<ByteCount>(q6k_rows) * sizeof(float);
+
+            auto caller_host = governor.try_reserve(
+                vastloom::safety::ResourceKind::scratch,
+                q6k_matrix_bytes + q6k_input_bytes + 2U * q6k_output_bytes,
+                "cuda-q6k-smoke-host");
+            if (!caller_host) return print_error(caller_host.error(), json);
+
+            std::vector<std::byte> encoded(static_cast<std::size_t>(q6k_matrix_bytes));
+            for (std::size_t index = 0U; index < encoded.size(); ++index) {
+                encoded[index] = static_cast<std::byte>((index * 43U + 31U) % 251U);
+            }
+            for (std::size_t block = 0U; block * q6k_block_bytes < encoded.size(); ++block) {
+                // The FP16 scale lives at the end of a Q6_K block, not the start.
+                const auto exponent = static_cast<std::uint16_t>(0x0BU + (block % 5U));
+                const auto mantissa = static_cast<std::uint16_t>((block * 3'187U + 11U) & 0x03FFU);
+                const auto scale_bits =
+                    static_cast<std::uint16_t>((exponent << 10U) | mantissa);
+                std::memcpy(encoded.data() + block * q6k_block_bytes + 208U, &scale_bits,
+                            sizeof(scale_bits));
+            }
+            std::vector<float> q6k_input(q6k_columns);
+            for (std::size_t index = 0U; index < q6k_input.size(); ++index) {
+                const auto scrambled =
+                    static_cast<std::uint32_t>((index * 22'695'477ULL + 53ULL) % 1'000'003ULL);
+                q6k_input[index] = static_cast<float>(scrambled) / 1'000'003.0F - 0.5F;
+            }
+
+            std::vector<float> q6k_expected(q6k_rows);
+            vastloom::inference::QuantizedKernelLimits q6k_limits;
+            q6k_limits.max_elements = q6k_rows * q6k_columns;
+            q6k_limits.max_threads = policy.value().cpu_threads;
+            const auto q6k_cpu_started = std::chrono::steady_clock::now();
+            auto q6k_cpu = vastloom::inference::matvec_q6_k_f32(
+                encoded, q6k_rows, q6k_columns, q6k_input, q6k_expected, q6k_limits);
+            q6k_cpu_ms = std::chrono::duration<double, std::milli>(
+                std::chrono::steady_clock::now() - q6k_cpu_started).count();
+            if (!q6k_cpu) return print_error(q6k_cpu.error(), json);
+
+            const ByteCount q6k_input_offset = q6k_matrix_bytes;
+            const ByteCount q6k_output_offset = q6k_input_offset + q6k_input_bytes;
+            auto q6k_device = driver.value().allocate(
+                0, q6k_output_offset + q6k_output_bytes, minimum_free.value(), governor,
+                "cuda-matvec-q6-k-smoke");
+            if (!q6k_device) return print_error(q6k_device.error(), json);
+            auto q6k_allocation = q6k_device.take_value();
+            auto copied = driver.value().copy_from_host(q6k_allocation, 0U, encoded);
+            if (!copied) return print_error(copied.error(), json);
+
+            std::vector<float> q6k_actual(q6k_rows);
+            const auto q6k_started = std::chrono::steady_clock::now();
+            auto q6k_launched = driver.value().matvec_q6_k_with_transfer(
+                q6k_allocation, 0U, q6k_input_offset, q6k_output_offset,
+                q6k_rows, q6k_blocks_per_row,
+                std::as_bytes(std::span<const float>(q6k_input)),
+                std::as_writable_bytes(std::span<float>(q6k_actual)));
+            if (!q6k_launched) return print_error(q6k_launched.error(), json);
+            q6k_kernel_ms = std::chrono::duration<double, std::milli>(
+                std::chrono::steady_clock::now() - q6k_started).count();
+            auto q6k_released = q6k_allocation.release();
+            if (!q6k_released) return print_error(q6k_released.error(), json);
+
+            for (std::size_t index = 0U; index < q6k_actual.size(); ++index) {
+                if (!std::isfinite(q6k_actual[index])) {
+                    return print_error(vastloom::make_error(
+                                           vastloom::ErrorCode::integrity_error,
+                                           "CUDA Q6_K matvec produced a non-finite value"),
+                                       json);
+                }
+                q6k_max_abs_error = std::max(
+                    q6k_max_abs_error,
+                    std::abs(static_cast<double>(q6k_actual[index]) -
+                             static_cast<double>(q6k_expected[index])));
+            }
+            if (q6k_max_abs_error > q6k_tolerance) {
+                return print_error(vastloom::make_error(
+                                       vastloom::ErrorCode::integrity_error,
+                                       "CUDA Q6_K matvec does not match the CPU reference",
+                                       std::to_string(q6k_max_abs_error)),
+                                   json);
+            }
+            q6k_smoke_passed = true;
+        }
         const auto snapshot = governor.snapshot();
         if (snapshot.reserved[static_cast<std::size_t>(
                 vastloom::safety::ResourceKind::vram)] != 0U) {
@@ -1013,6 +1220,14 @@ int command_cuda_info(const std::vector<std::string>& args) {
             std::cout << "IQ1_S matvec:   " << (iq1s_smoke_passed ? "PASS" : "FAIL")
                       << " (2048x4096, max abs error " << iq1s_max_abs_error << ", GPU "
                       << iq1s_kernel_ms << " ms vs CPU " << iq1s_cpu_ms << " ms, released)\n";
+        } else if (q6k_smoke_requested) {
+            std::cout << "Q6_K matvec:    " << (q6k_smoke_passed ? "PASS" : "FAIL")
+                      << " (2048x4096, max abs error " << q6k_max_abs_error << ", GPU "
+                      << q6k_kernel_ms << " ms vs CPU " << q6k_cpu_ms << " ms, released)\n";
+        } else if (q5k_smoke_requested) {
+            std::cout << "Q5_K matvec:    " << (q5k_smoke_passed ? "PASS" : "FAIL")
+                      << " (2048x4096, max abs error " << q5k_max_abs_error << ", GPU "
+                      << q5k_kernel_ms << " ms vs CPU " << q5k_cpu_ms << " ms, released)\n";
         } else if (iq2xxs_smoke_requested) {
             std::cout << "IQ2_XXS matvec: " << (iq2xxs_smoke_passed ? "PASS" : "FAIL")
                       << " (2048x4096, max abs error " << iq2xxs_max_abs_error << ", GPU "

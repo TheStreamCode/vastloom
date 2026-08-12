@@ -100,6 +100,26 @@ public:
         std::size_t blocks_per_row,
         std::span<const std::byte> input,
         std::span<std::byte> output) = 0;
+    // Q6_K super-blocks: 210 bytes per 256 weights, no shared grid.
+    [[nodiscard]] virtual Result<void> matvec_q6_k_with_transfer(
+        const CudaBackendAllocation& allocation,
+        ByteCount matrix_offset,
+        ByteCount input_offset,
+        ByteCount output_offset,
+        std::size_t row_count,
+        std::size_t blocks_per_row,
+        std::span<const std::byte> input,
+        std::span<std::byte> output) = 0;
+    // Q5_K super-blocks: 176 bytes per 256 weights, no shared grid.
+    [[nodiscard]] virtual Result<void> matvec_q5_k_with_transfer(
+        const CudaBackendAllocation& allocation,
+        ByteCount matrix_offset,
+        ByteCount input_offset,
+        ByteCount output_offset,
+        std::size_t row_count,
+        std::size_t blocks_per_row,
+        std::span<const std::byte> input,
+        std::span<std::byte> output) = 0;
     // Dense little-endian rows with no block structure: 4 bytes per element for FP32, 2 for BF16.
     [[nodiscard]] virtual Result<void> matvec_dense_with_transfer(
         const CudaBackendAllocation& allocation,
@@ -219,6 +239,24 @@ public:
         CudaAllocation& allocation,
         ByteCount matrix_offset,
         ByteCount grid_offset,
+        ByteCount input_offset,
+        ByteCount output_offset,
+        std::size_t row_count,
+        std::size_t blocks_per_row,
+        std::span<const std::byte> input,
+        std::span<std::byte> output) const;
+    [[nodiscard]] Result<void> matvec_q6_k_with_transfer(
+        CudaAllocation& allocation,
+        ByteCount matrix_offset,
+        ByteCount input_offset,
+        ByteCount output_offset,
+        std::size_t row_count,
+        std::size_t blocks_per_row,
+        std::span<const std::byte> input,
+        std::span<std::byte> output) const;
+    [[nodiscard]] Result<void> matvec_q5_k_with_transfer(
+        CudaAllocation& allocation,
+        ByteCount matrix_offset,
         ByteCount input_offset,
         ByteCount output_offset,
         std::size_t row_count,

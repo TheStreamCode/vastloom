@@ -2361,7 +2361,7 @@ int command_deepseek_forward(const std::vector<std::string>& args) {
     auto valid = validate_options(
         args, 1U,
         {"--token", "--layers", "--context", "--batch-size", "--expert-cache", "--trunk-window", "--prompt",
-         "--tokenizer", "--max-tokens"},
+         "--tokenizer", "--max-tokens", "--continue-ids"},
         {"--json", "--dry-run", "--chat", "--cpu-only"});
     if (!valid) return print_error(valid.error(), json);
     if (args.empty() || vastloom::util::starts_with(args.front(), "--")) {
@@ -2458,6 +2458,31 @@ int command_deepseek_forward(const std::vector<std::string>& args) {
                 json);
         }
         token_ids = encoded.take_value();
+        // Extra tokens appended after the template, so a partially generated answer can be replayed
+        // as a prompt. That is what separates a model choosing an odd token from an incremental
+        // decode feeding it the wrong state: prefilling the same prefix has to predict the same
+        // next token the decode loop produced, and if it does not, the loop is wrong.
+        if (const auto continuation = option_value(args, "--continue-ids")) {
+            std::string_view remaining = *continuation;
+            while (!remaining.empty()) {
+                const auto comma = remaining.find(',');
+                const auto field = remaining.substr(0U, comma);
+                std::uint32_t value = 0U;
+                const auto* const first = field.data();
+                const auto* const last = field.data() + field.size();
+                const auto parsed = std::from_chars(first, last, value);
+                if (parsed.ec != std::errc{} || parsed.ptr != last) {
+                    return print_error(
+                        vastloom::make_error(vastloom::ErrorCode::invalid_argument,
+                                             "--continue-ids takes a comma-separated token list",
+                                             std::string(field)),
+                        json);
+                }
+                token_ids.push_back(value);
+                if (comma == std::string_view::npos) break;
+                remaining.remove_prefix(comma + 1U);
+            }
+        }
     } else {
         token_ids.push_back(static_cast<std::uint32_t>(token.value()));
     }
@@ -2859,6 +2884,19 @@ int command_deepseek_forward(const std::vector<std::string>& args) {
                       << ",\"model_layers\":" << config.value().layer_count
                       << ",\"prompt_tokens\":" << stats.prompt_tokens
                       << ",\"generated_tokens\":" << stats.generated_tokens
+                      // The tokens themselves, not just their rendering. A decoded string cannot
+                      // distinguish a model that chose an odd token from a decoder that mangled a
+                      // reasonable one, and telling those apart is most of diagnosing bad output.
+                      << ",\"generated_ids\":[";
+            {
+                bool first_id = true;
+                for (const std::uint32_t id : generated.value().generated_ids) {
+                    if (!first_id) std::cout << ',';
+                    first_id = false;
+                    std::cout << id;
+                }
+            }
+            std::cout << "]"
                       << ",\"finish_reason\":\""
                       << vastloom::inference::to_string(generated.value().finish_reason)
                       << "\",\"text\":\"" << vastloom::util::json_escape(text)

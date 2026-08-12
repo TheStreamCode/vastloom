@@ -85,9 +85,25 @@
 - **The stray `R` is not a quantization artefact.** This changelog said it was the ~1.5-bit
   quantization showing through, and a 2.06-bit checkpoint of the same model has now produced the
   identical string, stray `R` included. Two quantizations differing by half a bit per weight do not
-  agree character for character by accident on a defect that belongs to one of them. Whatever
-  produces it — the chat template, the detokenizer, or this implementation — it is not IQ1_S, and
-  the earlier explanation was a plausible story rather than a measured one.
+  agree character for character by accident on a defect that belongs to one of them. The earlier
+  explanation was a plausible story rather than a measured one.
+
+  Two suspects have since been cleared. The detokenizer is exact: the generated ids
+  `7529, 113213, 283, 9, 75993, 7269, 2619, 52, 38710, 42499` re-encode from the rendered text to
+  themselves, and 52 is `R` while 38710 is ` Roma` — the model really did emit both. The incremental
+  decode is not feeding the model stale state either: replaying the same prefix through prefill
+  alone, via the new `--continue-ids`, predicts 38710 as well. Prefill and decode agree.
+
+  What that leaves is the forward pass itself or the model's own behaviour, and this test cannot
+  separate them because both paths share that forward pass. Distinguishing them needs the external
+  oracle this project still does not have. A second prompt fails differently —
+  `"La capitale della Francia è **Par**."` truncates rather than duplicating — so whatever it is, it
+  is not a single fixed off-by-one.
+
+- `deepseek-forward --json` now reports `generated_ids`, and `--continue-ids` appends exact tokens
+  after the chat template so a partly generated answer can be replayed as a prompt. A decoded string
+  cannot distinguish a model that chose an odd token from a decoder that mangled a reasonable one,
+  and that distinction was most of the work above.
 
 - Each quantization now carries its own pinned identity rather than one being privileged. A store
   holding UD-IQ2_XXS is recognised, verified and executed exactly as one holding UD-IQ1_S, and a

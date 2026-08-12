@@ -7,6 +7,12 @@
   against the reference. The two runs land within 1.8% of each other, tighter than anything else
   measured, so this clears the noise floor.
 
+  On a full answer the gain is larger than the four-token runs showed. The same question that cost
+  12,180 ms per token before this kernel now costs 8,736 - 28% - and returns the same
+  `"La capitale d'Italia è **R Roma**."` on its own stop token. Longer generations amortise both the
+  load and the VRAM warm-up, so short measurements understate what a real response costs; four
+  tokens showed 10%.
+
   The gain is smaller than the decline count implied, and the standalone gate says why: IQ2_XXS
   costs 2.05 ms on twelve CPU threads against IQ1_S's 8.03 for the same shape, so it wins 2.3x on
   the device rather than 9x. Decline counts rank what to write next; they do not predict what each

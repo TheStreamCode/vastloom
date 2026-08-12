@@ -75,6 +75,7 @@ include(GNUInstallDirs)
 include(CMakePackageConfigHelpers)
 
 add_library(vastloom_core STATIC
+    src/api/openai_protocol.cpp
     src/core/bytes.cpp
     src/cuda/cuda_driver.cpp
     src/cuda/cuda_matvec_accelerator.cpp

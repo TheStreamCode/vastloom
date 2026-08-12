@@ -17,6 +17,7 @@
 #include <thread>
 #include <vector>
 
+#include "vastloom/api/openai_protocol.hpp"
 #include "vastloom/core/bytes.hpp"
 #include "vastloom/hardware/hardware_probe.hpp"
 #include "vastloom/inference/gpt2_tokenizer.hpp"
@@ -1441,6 +1442,127 @@ void test_iq2_xxs_reference_kernel() {
 // 66, a 1,024-entry grid addressed by ten bits of which two come from a per-group high-bit byte,
 // two four-bit scales per group of 32, and explicit sign bytes instead of a seven-bit index with a
 // parity bit.
+// A request arriving over a socket decides how much work this process does, so the parser is
+// checked for what it refuses at least as hard as for what it accepts.
+void test_openai_protocol() {
+    const std::string body =
+        R"({"model":"deepseek-v4-flash","messages":[{"role":"system","content":"Sei conciso."},)"
+        R"({"role":"user","content":"Qual e la capitale d'Italia?"}],"max_tokens":24,)"
+        R"("stream":true,"temperature":0,"stop":["\n\n","FINE"]})";
+    auto parsed = vastloom::api::parse_chat_completion_request(body);
+    CHECK(parsed);
+    CHECK(parsed.value().model == "deepseek-v4-flash");
+    CHECK(parsed.value().messages.size() == 2U);
+    CHECK(parsed.value().messages[0].role == "system");
+    CHECK(parsed.value().messages[1].content == "Qual e la capitale d'Italia?");
+    CHECK(parsed.value().max_tokens == 24U);
+    CHECK(parsed.value().stream);
+    CHECK(parsed.value().temperature.has_value() && *parsed.value().temperature == 0.0);
+    CHECK(parsed.value().stop.size() == 2U && parsed.value().stop[1] == "FINE");
+
+    // The newer field wins when a client sends both, which some send during migration.
+    auto both = vastloom::api::parse_chat_completion_request(
+        R"({"model":"m","messages":[{"role":"user","content":"x"}],)"
+        R"("max_tokens":8,"max_completion_tokens":16})");
+    CHECK(both && both.value().max_tokens == 16U);
+
+    // A single string is as legal as an array for `stop`, and clients use both.
+    auto one_stop = vastloom::api::parse_chat_completion_request(
+        R"({"model":"m","messages":[{"role":"user","content":"x"}],"stop":"###"})");
+    CHECK(one_stop && one_stop.value().stop.size() == 1U && one_stop.value().stop[0] == "###");
+
+    // Absent optionals keep their bounded defaults rather than becoming unbounded.
+    auto minimal = vastloom::api::parse_chat_completion_request(
+        R"({"model":"m","messages":[{"role":"user","content":"x"}]})");
+    CHECK(minimal && minimal.value().max_tokens == 128U && !minimal.value().stream);
+    CHECK(!minimal.value().temperature.has_value());
+
+    // Refusals. Each of these would otherwise become work this process performs on request.
+    CHECK(!vastloom::api::parse_chat_completion_request(R"({"messages":[]})"));
+    CHECK(!vastloom::api::parse_chat_completion_request(R"({"model":"m","messages":[]})"));
+    CHECK(!vastloom::api::parse_chat_completion_request(R"({"model":"m"})"));
+    CHECK(!vastloom::api::parse_chat_completion_request(
+        R"({"model":"m","messages":[{"role":"user"}]})"));
+    CHECK(!vastloom::api::parse_chat_completion_request(
+        R"({"model":"m","messages":[{"content":"x"}]})"));
+    CHECK(!vastloom::api::parse_chat_completion_request("not json"));
+    CHECK(!vastloom::api::parse_chat_completion_request(R"(["array","root"])"));
+    // Out of bounds is refused, not clamped: a clamped request is one the caller believes it made.
+    CHECK(!vastloom::api::parse_chat_completion_request(
+        R"({"model":"m","messages":[{"role":"user","content":"x"}],"max_tokens":1000000})"));
+    CHECK(!vastloom::api::parse_chat_completion_request(
+        R"({"model":"m","messages":[{"role":"user","content":"x"}],"max_tokens":0})"));
+    vastloom::api::ChatCompletionLimits tight;
+    tight.max_messages = 1U;
+    CHECK(!vastloom::api::parse_chat_completion_request(
+        R"({"model":"m","messages":[{"role":"user","content":"a"},{"role":"user","content":"b"}]})",
+        tight));
+    tight = {};
+    tight.max_body_bytes = 16U;
+    CHECK(!vastloom::api::parse_chat_completion_request(
+        R"({"model":"m","messages":[{"role":"user","content":"x"}]})", tight));
+    tight = {};
+    tight.max_stop_sequences = 1U;
+    CHECK(!vastloom::api::parse_chat_completion_request(
+        R"({"model":"m","messages":[{"role":"user","content":"x"}],"stop":["a","b"]})", tight));
+
+    vastloom::api::ChatCompletionResponse response;
+    response.id = "chatcmpl-1";
+    response.model = "deepseek-v4-flash";
+    response.content = "La capitale d'Italia è \"Roma\".\nDavvero.";
+    response.finish_reason = "stop";
+    response.created = 1'700'000'000U;
+    response.prompt_tokens = 12U;
+    response.completion_tokens = 10U;
+    auto serialized = vastloom::api::serialize_chat_completion_response(response);
+    CHECK(serialized);
+    // The payload must survive a round trip through the project's own parser, which is what any
+    // client will do to it. Quotes and newlines in generated text are the usual way that breaks.
+    auto reparsed = vastloom::util::parse_json(serialized.value());
+    CHECK(reparsed);
+    {
+        auto root = reparsed.value().as_object();
+        CHECK(root);
+        const auto* choices = reparsed.value().find("choices");
+        CHECK(choices != nullptr);
+        auto array = choices->as_array();
+        CHECK(array && array.value()->size() == 1U);
+        const auto* message = (*array.value())[0].find("message");
+        CHECK(message != nullptr);
+        const auto* content = message->find("content");
+        CHECK(content != nullptr);
+        auto text = content->as_string();
+        CHECK(text && text.value() == response.content);
+        const auto* usage = reparsed.value().find("usage");
+        CHECK(usage != nullptr);
+        const auto* total = usage->find("total_tokens");
+        CHECK(total != nullptr);
+        auto total_value = total->as_u64();
+        CHECK(total_value && total_value.value() == 22U);
+    }
+
+    auto first_chunk = vastloom::api::serialize_chat_completion_chunk(response, "La", true, false);
+    CHECK(first_chunk && vastloom::util::parse_json(first_chunk.value()));
+    CHECK(first_chunk.value().find("\"role\":\"assistant\"") != std::string::npos);
+    CHECK(first_chunk.value().find("\"finish_reason\":null") != std::string::npos);
+    auto last_chunk = vastloom::api::serialize_chat_completion_chunk(response, "", false, true);
+    CHECK(last_chunk && vastloom::util::parse_json(last_chunk.value()));
+    CHECK(last_chunk.value().find("\"finish_reason\":\"stop\"") != std::string::npos);
+
+    auto listing = vastloom::api::serialize_model_list("deepseek-v4-flash", 1'700'000'000U);
+    CHECK(listing && vastloom::util::parse_json(listing.value()));
+
+    auto error_body = vastloom::api::serialize_error("no room", "insufficient_resources", 503);
+    CHECK(vastloom::util::parse_json(error_body));
+
+    // A Governor refusal is a 503, not a 500: the request was fine and the host was not able.
+    CHECK(vastloom::api::http_status_for(vastloom::ErrorCode::resource_exhausted) == 503);
+    CHECK(vastloom::api::http_status_for(vastloom::ErrorCode::invalid_argument) == 400);
+    CHECK(vastloom::api::http_status_for(vastloom::ErrorCode::not_found) == 404);
+    CHECK(vastloom::api::http_status_for(vastloom::ErrorCode::unsupported) == 501);
+    CHECK(vastloom::api::http_status_for(vastloom::ErrorCode::internal_error) == 500);
+}
+
 void test_iq2_s_reference_kernel() {
     // Scales vary in exponent and mantissa, including a subnormal, and the input below is
     // non-dyadic. A gate built from dyadic values cannot separate f32 from f64 accumulation and has
@@ -7249,6 +7371,7 @@ int main() {
     test_iq1_s_reference_kernel();
     test_iq2_xxs_reference_kernel();
     test_iq2_s_reference_kernel();
+    test_openai_protocol();
     test_iq3_xxs_reference_kernel();
     test_mxfp4_reference_kernel();
     test_quantized_routed_expert_contract();

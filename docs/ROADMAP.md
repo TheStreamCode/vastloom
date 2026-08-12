@@ -462,11 +462,13 @@ and the server binds to loopback unless remote access is explicitly configured.
 ## M14 — Model and backend expansion
 
 - [ ] Complete and execute the official DeepSeek V4 Flash 0731/DSpark profile.
-- [ ] Reference decoder for IQ2_S, which blocks the UD-IQ2_XXS checkpoint. That checkpoint is
-  imported, pinned and verified, but one layer of forty-three stores its gate and up projections as
-  IQ2_S - a format with neither a kernel nor a reference decoder here - and two tensors out of 129
-  stop the model starting. The decoder is the prerequisite because parity is checked against it; a
-  device kernel is optional and worth two matvecs.
+- [x] Reference decoder for IQ2_S, which had blocked the UD-IQ2_XXS checkpoint. 82-byte blocks, a
+  1,024-entry grid addressed by ten bits of which two come from a per-group high-bit byte, two
+  four-bit scales per group of 32 and explicit sign bytes - a different format from IQ2_XXS, not a
+  variant of it. Checked against ggml's own `dequantize_row_iq2_s` run under WSL on the same bytes:
+  the FNV hash of all 1,536 decoded values matches, as do the matvec results, at zero absolute
+  error. The gate was verified capable of failing by corrupting the expected hash. A device kernel
+  is still optional and worth two matvecs of forty-three layers.
 - [ ] Accept the DSpark draft's catalog. Its metadata already reads (both deepseek4. and dflash.
   prefixes resolve), but the validator expects a 43-layer tensor and expert mapping where the draft
   has three blocks.

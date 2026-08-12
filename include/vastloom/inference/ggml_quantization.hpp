@@ -20,6 +20,8 @@ inline constexpr std::size_t kQ6KBlockElements = 256U;
 inline constexpr std::size_t kQ6KBlockBytes = 210U;
 inline constexpr std::size_t kIq2XxsBlockElements = 256U;
 inline constexpr std::size_t kIq2XxsBlockBytes = 66U;
+inline constexpr std::size_t kIq2SBlockElements = 256U;
+inline constexpr std::size_t kIq2SBlockBytes = 82U;
 inline constexpr std::size_t kIq1SBlockElements = 256U;
 inline constexpr std::size_t kIq1SBlockBytes = 50U;
 inline constexpr std::size_t kIq3XxsBlockElements = 256U;
@@ -36,6 +38,7 @@ inline constexpr std::uint32_t kGgmlTypeQ5K = 13U;
 inline constexpr std::uint32_t kGgmlTypeQ6K = 14U;
 inline constexpr std::uint32_t kGgmlTypeIq2Xxs = 16U;
 inline constexpr std::uint32_t kGgmlTypeIq3Xxs = 18U;
+inline constexpr std::uint32_t kGgmlTypeIq2S = 22U;
 inline constexpr std::uint32_t kGgmlTypeIq1S = 19U;
 inline constexpr std::uint32_t kGgmlTypeI32 = 26U;
 inline constexpr std::uint32_t kGgmlTypeBf16 = 30U;
@@ -75,6 +78,7 @@ struct RoutedExpertScratch {
 
 // The 256-entry IQ2_XXS grid, each entry eight packed uint8 magnitudes.
 [[nodiscard]] std::span<const std::uint64_t> iq2_xxs_grid_table() noexcept;
+[[nodiscard]] std::span<const std::uint64_t> iq2_s_grid_table() noexcept;
 
 // True only for storage formats with a bounded scalar reference matvec below.
 [[nodiscard]] bool supports_reference_matvec_ggml_type(std::uint32_t ggml_type) noexcept;
@@ -159,6 +163,26 @@ struct RoutedExpertScratch {
 
 // Reference matrix-vector product for consecutive GGML IQ2_XXS rows.
 [[nodiscard]] Result<void> matvec_iq2_xxs_f32(
+    std::span<const std::byte> encoded_matrix,
+    std::size_t rows,
+    std::size_t columns,
+    std::span<const float> input,
+    std::span<float> output,
+    const QuantizedKernelLimits& limits = {});
+
+// Decodes complete little-endian GGML IQ2_S blocks into caller-owned FP32 storage.
+//
+// A different format from IQ2_XXS despite the name: 82 bytes rather than 66, a 1,024-entry grid
+// rather than 256, two four-bit scales per group of 32 rather than one derived from a sign word,
+// and explicit sign bytes rather than a seven-bit index whose eighth bit is a parity. Unsloth's
+// dynamic mixture puts it on one layer of forty-three, which is enough to stop the checkpoint.
+[[nodiscard]] Result<void> dequantize_iq2_s(
+    std::span<const std::byte> encoded,
+    std::span<float> output,
+    const QuantizedKernelLimits& limits = {});
+
+// Reference matrix-vector product for consecutive GGML IQ2_S rows.
+[[nodiscard]] Result<void> matvec_iq2_s_f32(
     std::span<const std::byte> encoded_matrix,
     std::size_t rows,
     std::size_t columns,

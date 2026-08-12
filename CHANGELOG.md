@@ -60,13 +60,34 @@
   token did not follow it. The ceiling mattered when it was the difference between 90% of matvecs
   declined and 28%; with every storage type now having a kernel, it no longer is.
 
-- The UD-IQ2_XXS checkpoint is imported and pinned but does not yet run: one layer of forty-three
-  stores its gate and up projections as **IQ2_S**, a format this project has in no form — no device
-  kernel and, more importantly, no reference decoder. Two tensors out of 129 keep the model from
-  starting. Unsloth's dynamic quantization varies storage per layer, so the mixture has to be read
-  from the file rather than inferred from its name; `ffn_gate_exps` is IQ2_XXS on 42 layers and
-  IQ2_S on layer 26. The reference decoder is the prerequisite, because bit-for-bit parity is what
-  every kernel is checked against; a kernel is optional and would save two matvecs.
+- **IQ2_S decodes, and the UD-IQ2_XXS checkpoint starts.** One layer of forty-three stored its gate
+  and up projections in a format this project had in no form, and two tensors out of 129 were enough
+  to stop the model. It is not a variant of IQ2_XXS despite the name: 82-byte blocks rather than 66,
+  a 1,024-entry grid rather than 256 — addressed by ten bits, two of which are lifted out of a
+  per-group high-bit byte — two four-bit scales per group of 32 rather than one derived from a sign
+  word, and explicit sign bytes rather than a seven-bit index whose eighth bit is a parity.
+
+  Checked against ggml's own `dequantize_row_iq2_s`, compiled and run under WSL on the same bytes,
+  rather than against this implementation's output: the FNV hash of all 1,536 decoded values matches
+  at zero absolute error, as do the matvec results. The gate uses scales that vary in exponent and
+  mantissa, including a subnormal, and a non-dyadic input, and it was verified capable of failing by
+  corrupting one digit of the expected hash and watching the suite go red.
+
+  The lesson that made this necessary stands: *dynamic* means the mixture is read from the file, not
+  inferred from the name. `ffn_gate_exps` is IQ2_XXS on forty-two layers and IQ2_S on layer 26.
+
+  The 90.86 GB checkpoint then ran all 43 layers and answered
+  `"La capitale d'Italia è **R Roma**."` on its own stop token, at 7,800 ms per token with a 0.59 GB
+  accelerator ceiling. 264 matvecs were declined and every one of them was type 22 — IQ2_S, the only
+  format now without a device kernel — which is how we know the new decoder is on the path rather
+  than merely compiled.
+
+- **The stray `R` is not a quantization artefact.** This changelog said it was the ~1.5-bit
+  quantization showing through, and a 2.06-bit checkpoint of the same model has now produced the
+  identical string, stray `R` included. Two quantizations differing by half a bit per weight do not
+  agree character for character by accident on a defect that belongs to one of them. Whatever
+  produces it — the chat template, the detokenizer, or this implementation — it is not IQ1_S, and
+  the earlier explanation was a plausible story rather than a measured one.
 
 - Each quantization now carries its own pinned identity rather than one being privileged. A store
   holding UD-IQ2_XXS is recognised, verified and executed exactly as one holding UD-IQ1_S, and a

@@ -1111,6 +1111,7 @@ void test_trunk_storage_reference_kernels() {
              vastloom::inference::kGgmlTypeQ5K,
              vastloom::inference::kGgmlTypeQ6K,
              vastloom::inference::kGgmlTypeIq2Xxs,
+             vastloom::inference::kGgmlTypeIq2S,
              vastloom::inference::kGgmlTypeIq3Xxs,
              vastloom::inference::kGgmlTypeIq1S,
              vastloom::inference::kGgmlTypeMxfp4,
@@ -1433,6 +1434,118 @@ void test_iq2_xxs_reference_kernel() {
     input[0] = std::numeric_limits<float>::quiet_NaN();
     CHECK(!vastloom::inference::matvec_iq2_xxs_f32(
         encoded, 3U, 512U, input, output));
+}
+
+// Checked against ggml's own dequantize_row_iq2_s, run under WSL on these exact bytes, rather than
+// against this implementation's own output. IQ2_S is not a variant of IQ2_XXS: 82 bytes rather than
+// 66, a 1,024-entry grid addressed by ten bits of which two come from a per-group high-bit byte,
+// two four-bit scales per group of 32, and explicit sign bytes instead of a seven-bit index with a
+// parity bit.
+void test_iq2_s_reference_kernel() {
+    // Scales vary in exponent and mantissa, including a subnormal, and the input below is
+    // non-dyadic. A gate built from dyadic values cannot separate f32 from f64 accumulation and has
+    // already let two wrong kernels through.
+    constexpr std::array<std::uint16_t, 6U> scales{
+        0x3c00U, 0xb800U, 0x3555U, 0x4000U, 0x0400U, 0x0001U};
+    std::vector<std::byte> encoded(
+        scales.size() * vastloom::inference::kIq2SBlockBytes);
+    for (std::size_t block = 0U; block < scales.size(); ++block) {
+        const std::size_t base = block * vastloom::inference::kIq2SBlockBytes;
+        encoded[base] = static_cast<std::byte>(scales[block] & 0xffU);
+        encoded[base + 1U] = static_cast<std::byte>(scales[block] >> 8U);
+        for (std::size_t index = 0U; index < 32U; ++index) {
+            encoded[base + 2U + index] = static_cast<std::byte>(
+                (block * 733U + index * 977U + 0x1234U) & 0xffU);
+        }
+        for (std::size_t index = 0U; index < 32U; ++index) {
+            encoded[base + 34U + index] = static_cast<std::byte>(
+                (block * 251U + index * 131U + 0x5aa5U) & 0xffU);
+        }
+        for (std::size_t index = 0U; index < 8U; ++index) {
+            encoded[base + 66U + index] = static_cast<std::byte>(
+                (block * 97U + index * 43U + 0x3cU) & 0xffU);
+        }
+        for (std::size_t index = 0U; index < 8U; ++index) {
+            encoded[base + 74U + index] = static_cast<std::byte>(
+                (block * 61U + index * 29U + 0x17U) & 0xffU);
+        }
+    }
+
+    std::vector<float> decoded(scales.size() * vastloom::inference::kIq2SBlockElements);
+    auto status = vastloom::inference::dequantize_iq2_s(encoded, decoded);
+    CHECK(status);
+    std::uint64_t hash = UINT64_C(14695981039346656037);
+    for (const float value : decoded) {
+        const std::uint32_t bits = std::bit_cast<std::uint32_t>(value);
+        for (unsigned shift = 0U; shift < 32U; shift += 8U) {
+            hash ^= static_cast<std::uint8_t>((bits >> shift) & 0xffU);
+            hash *= UINT64_C(1099511628211);
+        }
+    }
+    CHECK(hash == UINT64_C(0x785968d455de0695));
+    CHECK(decoded[0] == -15.0F && decoded[7] == -15.0F && decoded[8] == 15.0F &&
+          decoded[31] == 3.0F && decoded[32] == -9.0F && decoded[63] == 21.875F &&
+          decoded[127] == 40.625F && decoded[255] == -29.0F &&
+          decoded[256] == -4.5F && decoded[511] == -8.0625F);
+
+    std::vector<float> input(512U);
+    for (std::size_t column = 0U; column < input.size(); ++column) {
+        const int centered = static_cast<int>(column % 29U) - 14;
+        input[column] = static_cast<float>(centered) * 0.03125F +
+                        static_cast<float>(column % 3U) * 0.0078125F;
+    }
+    std::array<float, 3U> output{};
+    auto multiplied = vastloom::inference::matvec_iq2_s_f32(
+        encoded, 3U, 512U, input, output);
+    CHECK(multiplied);
+    CHECK(output[0] == 209.540527F);
+    CHECK(output[1] == 274.050537F);
+    CHECK(std::abs(output[2] - 0.0192997903F) <= 1.0e-9F);
+
+    std::vector<float> row(512U);
+    CHECK(vastloom::inference::dequantize_ggml_row_f32(
+        vastloom::inference::kGgmlTypeIq2S, encoded, 3U, 512U, 1U, row));
+    CHECK(std::equal(row.begin(), row.end(), decoded.begin() + 512));
+
+    std::array<float, 3U> scratch{};
+    std::array<float, 3U> published{17.0F, 17.0F, 17.0F};
+    CHECK(vastloom::inference::matvec_ggml_f32_transactional(
+        vastloom::inference::kGgmlTypeIq2S, encoded, 3U, 512U, input,
+        scratch, published));
+    CHECK(published == output);
+
+    auto truncated = encoded;
+    truncated.pop_back();
+    CHECK(!vastloom::inference::dequantize_iq2_s(truncated, decoded));
+    CHECK(!vastloom::inference::dequantize_iq2_s(encoded, std::span<float>{}));
+    vastloom::inference::QuantizedKernelLimits small_limits;
+    small_limits.max_elements = 256U;
+    CHECK(!vastloom::inference::dequantize_iq2_s(encoded, decoded, small_limits));
+    CHECK(!vastloom::inference::matvec_iq2_s_f32(encoded, 3U, 255U, input, output));
+    CHECK(!vastloom::inference::matvec_iq2_s_f32(truncated, 3U, 512U, input, output));
+    CHECK(!vastloom::inference::dequantize_ggml_row_f32(
+        vastloom::inference::kGgmlTypeIq2S, encoded, 3U, 512U, 3U, row));
+
+    auto invalid_scale = encoded;
+    invalid_scale[4U * vastloom::inference::kIq2SBlockBytes] = std::byte{0x00U};
+    invalid_scale[4U * vastloom::inference::kIq2SBlockBytes + 1U] = std::byte{0x7cU};
+    auto unchanged = decoded;
+    CHECK(!vastloom::inference::dequantize_iq2_s(invalid_scale, decoded));
+    CHECK(decoded == unchanged);
+    std::fill(published.begin(), published.end(), 17.0F);
+    CHECK(!vastloom::inference::matvec_ggml_f32_transactional(
+        vastloom::inference::kGgmlTypeIq2S, invalid_scale, 3U, 512U, input,
+        scratch, published));
+    CHECK(std::all_of(published.begin(), published.end(),
+                      [](float value) { return value == 17.0F; }));
+    input[0] = std::numeric_limits<float>::quiet_NaN();
+    CHECK(!vastloom::inference::matvec_iq2_s_f32(encoded, 3U, 512U, input, output));
+
+    CHECK(vastloom::inference::iq2_s_grid_table().size() == 1'024U);
+    auto iq2s_bytes = vastloom::inference::ggml_storage_bytes(
+        vastloom::inference::kGgmlTypeIq2S, 2U, 256U);
+    CHECK(iq2s_bytes &&
+          iq2s_bytes.value() == 2U * vastloom::inference::kIq2SBlockBytes);
 }
 
 void test_iq3_xxs_reference_kernel() {
@@ -7135,6 +7248,7 @@ int main() {
     test_trunk_storage_reference_kernels();
     test_iq1_s_reference_kernel();
     test_iq2_xxs_reference_kernel();
+    test_iq2_s_reference_kernel();
     test_iq3_xxs_reference_kernel();
     test_mxfp4_reference_kernel();
     test_quantized_routed_expert_contract();

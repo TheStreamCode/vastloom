@@ -30,6 +30,10 @@ constexpr std::array<std::uint64_t, 256U> kIq2XxsGrid{
 #include "iq2xxs_grid.inc"
 };
 
+constexpr std::array<std::uint64_t, 1'024U> kIq2SGrid{
+#include "iq2s_grid.inc"
+};
+
 constexpr std::array<std::uint32_t, 256U> kIq3XxsGrid{
 #include "iq3xxs_grid.inc"
 };
@@ -64,6 +68,19 @@ consteval std::uint64_t iq2_xxs_grid_fingerprint() {
 }
 
 static_assert(iq2_xxs_grid_fingerprint() == UINT64_C(0xbb4ee025b5ac6e8e));
+
+consteval std::uint64_t iq2_s_grid_fingerprint() {
+    std::uint64_t hash = UINT64_C(14695981039346656037);
+    for (const std::uint64_t value : kIq2SGrid) {
+        for (unsigned shift = 0U; shift < 64U; shift += 8U) {
+            hash ^= static_cast<std::uint8_t>((value >> shift) & 0xffU);
+            hash *= UINT64_C(1099511628211);
+        }
+    }
+    return hash;
+}
+
+static_assert(iq2_s_grid_fingerprint() == UINT64_C(0x123edd38a3b62b90));
 
 consteval std::uint64_t iq3_xxs_grid_fingerprint() {
     std::uint64_t hash = UINT64_C(14695981039346656037);
@@ -254,6 +271,57 @@ Result<void> decode_iq2_xxs_block(
                 const auto magnitude = static_cast<std::uint8_t>(
                     (grid >> static_cast<unsigned>(lane * 8U)) & 0xffU);
                 const float sign = (signs & (1U << lane)) != 0U ? -1.0F : 1.0F;
+                output[base + lane] =
+                    local_scale * static_cast<float>(magnitude) * sign;
+            }
+        }
+    }
+    return {};
+}
+
+Result<void> decode_iq2_s_block(
+    const std::byte* encoded,
+    std::span<float, kIq2SBlockElements> output) {
+    const float scale = fp16_to_float(read_u16_le(encoded));
+    if (!std::isfinite(scale)) {
+        return make_error(ErrorCode::invalid_format,
+                          "IQ2_S block scale is not finite");
+    }
+    // 82 bytes: one FP16 scale, then 64 bytes of quants whose first half indexes the grid and whose
+    // second half holds explicit signs, then eight high-bit bytes and eight packed scale pairs.
+    const std::byte* quantized = encoded + 2U;
+    const std::byte* signs = quantized + 32U;
+    const std::byte* high = quantized + 64U;
+    const std::byte* scales = quantized + 72U;
+    for (std::size_t group = 0U; group < 8U; ++group) {
+        const auto packed_scale = std::to_integer<std::uint8_t>(scales[group]);
+        const auto high_bits =
+            static_cast<std::uint32_t>(std::to_integer<std::uint8_t>(high[group]));
+        // Two four-bit scales per group of 32, the low nibble covering the first sixteen values and
+        // the high nibble the second.
+        const float low_scale =
+            scale * (0.5F + static_cast<float>(packed_scale & 0x0fU)) * 0.25F;
+        const float high_scale =
+            scale * (0.5F + static_cast<float>(packed_scale >> 4U)) * 0.25F;
+        for (std::size_t subblock = 0U; subblock < 4U; ++subblock) {
+            const float local_scale = subblock < 2U ? low_scale : high_scale;
+            // The grid has 1,024 entries, so the index needs ten bits: eight from the quant byte
+            // and two lifted out of this group's high-bit byte. Shifting left by 8 - 2*subblock
+            // and masking 0x300 selects the pair belonging to this subblock.
+            const auto low_index = static_cast<std::uint32_t>(
+                std::to_integer<std::uint8_t>(quantized[group * 4U + subblock]));
+            const std::uint32_t grid_index =
+                low_index | ((high_bits << (8U - 2U * static_cast<unsigned>(subblock))) & 0x300U);
+            const std::uint64_t grid = kIq2SGrid[grid_index];
+            const auto sign_byte =
+                static_cast<std::uint32_t>(
+                    std::to_integer<std::uint8_t>(signs[group * 4U + subblock]));
+            const std::size_t base = group * 32U + subblock * 8U;
+            for (std::size_t lane = 0U; lane < 8U; ++lane) {
+                const auto magnitude = static_cast<std::uint8_t>(
+                    (grid >> static_cast<unsigned>(lane * 8U)) & 0xffU);
+                const float sign =
+                    (sign_byte & (1U << static_cast<unsigned>(lane))) != 0U ? -1.0F : 1.0F;
                 output[base + lane] =
                     local_scale * static_cast<float>(magnitude) * sign;
             }
@@ -923,6 +991,10 @@ std::span<const std::uint64_t> iq2_xxs_grid_table() noexcept {
     return std::span<const std::uint64_t>(kIq2XxsGrid);
 }
 
+std::span<const std::uint64_t> iq2_s_grid_table() noexcept {
+    return std::span<const std::uint64_t>(kIq2SGrid);
+}
+
 bool supports_reference_matvec_ggml_type(std::uint32_t ggml_type) noexcept {
     switch (ggml_type) {
         case kGgmlTypeF32:
@@ -931,6 +1003,7 @@ bool supports_reference_matvec_ggml_type(std::uint32_t ggml_type) noexcept {
         case kGgmlTypeQ5K:
         case kGgmlTypeQ6K:
         case kGgmlTypeIq2Xxs:
+        case kGgmlTypeIq2S:
         case kGgmlTypeIq3Xxs:
         case kGgmlTypeIq1S:
         case kGgmlTypeMxfp4:
@@ -973,6 +1046,10 @@ Result<std::size_t> ggml_storage_bytes(std::uint32_t ggml_type,
         case kGgmlTypeIq2Xxs:
             block_elements = kIq2XxsBlockElements;
             block_bytes = kIq2XxsBlockBytes;
+            break;
+        case kGgmlTypeIq2S:
+            block_elements = kIq2SBlockElements;
+            block_bytes = kIq2SBlockBytes;
             break;
         case kGgmlTypeIq3Xxs:
             block_elements = kIq3XxsBlockElements;
@@ -1165,6 +1242,30 @@ Result<void> matvec_iq2_xxs_f32(std::span<const std::byte> encoded_matrix,
     return matvec_blocked<kIq2XxsBlockElements, kIq2XxsBlockBytes>(
         encoded_matrix, rows, columns, input, output, limits, validator,
         decode_iq2_xxs_block);
+}
+
+Result<void> dequantize_iq2_s(std::span<const std::byte> encoded,
+                              std::span<float> output,
+                              const QuantizedKernelLimits& limits) {
+    const auto validator = [](std::span<const std::byte> bytes) -> Result<void> {
+        return validate_block_scales(bytes, kIq2SBlockBytes);
+    };
+    return dequantize_blocked<kIq2SBlockElements, kIq2SBlockBytes>(
+        encoded, output, limits, validator, decode_iq2_s_block);
+}
+
+Result<void> matvec_iq2_s_f32(std::span<const std::byte> encoded_matrix,
+                              std::size_t rows,
+                              std::size_t columns,
+                              std::span<const float> input,
+                              std::span<float> output,
+                              const QuantizedKernelLimits& limits) {
+    const auto validator = [](std::span<const std::byte> bytes) -> Result<void> {
+        return validate_block_scales(bytes, kIq2SBlockBytes);
+    };
+    return matvec_blocked<kIq2SBlockElements, kIq2SBlockBytes>(
+        encoded_matrix, rows, columns, input, output, limits, validator,
+        decode_iq2_s_block);
 }
 
 Result<void> dequantize_iq1_s(std::span<const std::byte> encoded,
@@ -1437,6 +1538,7 @@ Result<void> dequantize_ggml_row_f32(
         case kGgmlTypeQ5K: return dequantize_q5_k(encoded_row, output, limits);
         case kGgmlTypeQ6K: return dequantize_q6_k(encoded_row, output, limits);
         case kGgmlTypeIq2Xxs: return dequantize_iq2_xxs(encoded_row, output, limits);
+        case kGgmlTypeIq2S: return dequantize_iq2_s(encoded_row, output, limits);
         case kGgmlTypeIq3Xxs: return dequantize_iq3_xxs(encoded_row, output, limits);
         case kGgmlTypeIq1S: return dequantize_iq1_s(encoded_row, output, limits);
         case kGgmlTypeMxfp4: return dequantize_mxfp4(encoded_row, output, limits);
@@ -1496,6 +1598,10 @@ Result<void> matvec_ggml_f32_transactional(
             break;
         case kGgmlTypeIq2Xxs:
             status = matvec_iq2_xxs_f32(
+                encoded_matrix, rows, columns, input, scratch, limits);
+            break;
+        case kGgmlTypeIq2S:
+            status = matvec_iq2_s_f32(
                 encoded_matrix, rows, columns, input, scratch, limits);
             break;
         case kGgmlTypeIq3Xxs:

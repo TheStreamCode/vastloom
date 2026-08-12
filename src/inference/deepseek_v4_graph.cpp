@@ -409,6 +409,7 @@ bool storage_type_matches_dtype(std::uint32_t ggml_type,
         case kGgmlTypeQ5K:
         case kGgmlTypeQ6K:
         case kGgmlTypeIq2Xxs:
+        case kGgmlTypeIq2S:
         case kGgmlTypeIq3Xxs:
         case kGgmlTypeIq1S:
         case kGgmlTypeMxfp4: return dtype == model::TensorDType::quantized;
@@ -3644,8 +3645,13 @@ deepseek_v4_validate_0731_gguf_checkpoint_catalog(
                     const bool expected_profile_type = projection_index == 0U
                         ? (tensor.ggml_type == kGgmlTypeIq3Xxs ||
                            tensor.ggml_type == kGgmlTypeMxfp4)
+                        // Gate and up projections. Unsloth's dynamic mixture varies these per layer
+                        // rather than per checkpoint: UD-IQ2_XXS is IQ2_XXS on forty-two layers and
+                        // IQ2_S on one, which is why the set is read from the file and not derived
+                        // from the checkpoint's name.
                         : (tensor.ggml_type == kGgmlTypeIq1S ||
-                           tensor.ggml_type == kGgmlTypeIq2Xxs);
+                           tensor.ggml_type == kGgmlTypeIq2Xxs ||
+                           tensor.ggml_type == kGgmlTypeIq2S);
                     if (projections[projection_index] ||
                         tensor.role != model::TensorRole::routed_expert ||
                         tensor.speculative || tensor.layer != layer ||

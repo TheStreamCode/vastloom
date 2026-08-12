@@ -700,8 +700,18 @@ Result<std::vector<float>> linear_packed_matrix(
     auto storage_count = bounded_packed_product(
         {matrix.rows, matrix.storage_columns}, std::string(name) + " storage shape");
     if (!storage_count) return storage_count.error();
-    auto payload = deepseek_v4_packed_matrix_payload(matrix, name);
-    if (!payload) return payload.error();
+    // The encoded bytes are fetched on the first row the accelerator declines, not up front. A
+    // matrix that has been handed to the device has no host copy left, and demanding one here would
+    // fail for exactly the matrices that are running entirely on the GPU.
+    std::optional<std::span<const std::byte>> payload;
+    const auto host_payload = [&]() -> Result<std::span<const std::byte>> {
+        if (!payload.has_value()) {
+            auto fetched = deepseek_v4_packed_matrix_payload(matrix, name);
+            if (!fetched) return fetched.error();
+            payload = fetched.value();
+        }
+        return payload.value();
+    };
     if (input.size() != input_count.value()) {
         return make_error(ErrorCode::invalid_argument,
                           "DeepSeek packed matrix input shape does not match",
@@ -732,8 +742,10 @@ Result<std::vector<float>> linear_packed_matrix(
             accelerated = offered.value();
         }
         if (!accelerated) {
+            auto encoded = host_payload();
+            if (!encoded) return encoded.error();
             auto multiplied = matvec_ggml_f32_transactional(
-                matrix.ggml_type, payload.value(), matrix.rows, matrix.storage_columns,
+                matrix.ggml_type, encoded.value(), matrix.rows, matrix.storage_columns,
                 padded_input, scratch, row_output, limits);
             if (!multiplied) {
                 return make_error(multiplied.error().code, multiplied.error().message,

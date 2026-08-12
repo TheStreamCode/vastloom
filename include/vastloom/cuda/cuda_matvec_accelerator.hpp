@@ -57,6 +57,11 @@ public:
         std::span<const float> input,
         std::span<float> output) override;
 
+    // Matrices are uploaded on first use, deliberately. Uploading them eagerly as each layer loads
+    // was measured and was 25% slower at full depth: it spends VRAM on trunk matrices before the
+    // routed experts - which do most of the arithmetic - can ask for any, so first-come beats
+    // most-used. On-demand residency lets the busiest matrices win the space.
+
     [[nodiscard]] const CudaMatvecAcceleratorStats& stats() const noexcept { return stats_; }
 
 private:
@@ -74,6 +79,9 @@ private:
     CudaMatvecAccelerator(CudaDriver driver,
                           safety::ResourceGovernor& governor,
                           CudaMatvecAcceleratorOptions options);
+
+    [[nodiscard]] Result<Resident*> ensure_resident(
+        const inference::DeepseekV4PackedMatrix& matrix);
 
     CudaDriver driver_;
     safety::ResourceGovernor* governor_{nullptr};

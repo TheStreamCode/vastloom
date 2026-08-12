@@ -70,106 +70,106 @@ Result<std::unique_ptr<CudaMatvecAccelerator>> CudaMatvecAccelerator::create(
     }
 }
 
+// Returns the resident entry for this matrix, uploading it on first sight. A null pointer means the
+// accelerator will not take it - unsupported type, no stable identity, or no VRAM left - which is a
+// refusal rather than a failure, so the caller runs the CPU reference instead.
+Result<CudaMatvecAccelerator::Resident*> CudaMatvecAccelerator::ensure_resident(
+    const inference::DeepseekV4PackedMatrix& matrix) {
+    const auto layout = layout_for(matrix.ggml_type);
+    if (!layout.has_value() || matrix.rows == 0U || matrix.storage_columns == 0U ||
+        matrix.storage_columns % layout->block_elements != 0U) {
+        return nullptr;
+    }
+    // No stable identity means there is no safe way to recognize this matrix again later, so it
+    // goes to the CPU rather than into a cache that could confuse it with another.
+    if (matrix.cache_identity == 0U) return nullptr;
+
+    auto entry = resident_.find(matrix.cache_identity);
+    if (entry != resident_.end()) return &entry->second;
+
+    if (resident_.size() >= options_.maximum_matrices ||
+        stats_.resident_bytes >= options_.maximum_resident_bytes) {
+        return nullptr;
+    }
+    auto payload = inference::deepseek_v4_packed_matrix_payload(matrix, "cuda-matvec");
+    if (!payload) return payload.error();
+    const std::size_t blocks_per_row = matrix.storage_columns / layout->block_elements;
+    if (blocks_per_row == 0U ||
+        matrix.rows > std::numeric_limits<ByteCount>::max() / blocks_per_row) {
+        return nullptr;
+    }
+    const ByteCount matrix_bytes =
+        static_cast<ByteCount>(matrix.rows) * blocks_per_row * layout->block_bytes;
+    if (payload.value().size() != matrix_bytes) return nullptr;
+
+    const ByteCount input_bytes = static_cast<ByteCount>(matrix.storage_columns) * sizeof(float);
+    const ByteCount output_bytes = static_cast<ByteCount>(matrix.rows) * sizeof(float);
+    // The IQ formats decode through a shared grid, which rides along in the same allocation so the
+    // kernel needs no second pointer to manage.
+    const auto grid = grid_for(matrix.ggml_type);
+    const auto grid_bytes = static_cast<ByteCount>(grid.size());
+    const ByteCount total = matrix_bytes + grid_bytes + input_bytes + output_bytes;
+    if (total > options_.maximum_resident_bytes - stats_.resident_bytes) return nullptr;
+
+    auto allocation = driver_.allocate(options_.device_ordinal, total,
+                                       options_.minimum_free_vram_after, *governor_,
+                                       "cuda-matvec-resident");
+    // Out of VRAM is a reason to stop offering, not to fail the forward pass.
+    if (!allocation) return nullptr;
+
+    Resident resident;
+    resident.allocation = allocation.take_value();
+    resident.matrix_bytes = matrix_bytes;
+    resident.grid_offset = matrix_bytes;
+    resident.input_offset = matrix_bytes + grid_bytes;
+    resident.output_offset = matrix_bytes + grid_bytes + input_bytes;
+    resident.rows = matrix.rows;
+    resident.blocks_per_row = blocks_per_row;
+    resident.ggml_type = matrix.ggml_type;
+
+    const auto upload_started = std::chrono::steady_clock::now();
+    auto uploaded = driver_.copy_from_host(resident.allocation, 0U, payload.value());
+    if (uploaded && grid_bytes != 0U) {
+        uploaded = driver_.copy_from_host(resident.allocation, resident.grid_offset, grid);
+    }
+    stats_.upload_ms += std::chrono::duration<double, std::milli>(
+        std::chrono::steady_clock::now() - upload_started).count();
+    if (!uploaded) {
+        auto released = resident.allocation.release();
+        if (!released) return released.error();
+        return uploaded.error();
+    }
+    stats_.uploaded_bytes += matrix_bytes;
+    stats_.resident_bytes += total;
+    try {
+        entry = resident_.emplace(matrix.cache_identity, std::move(resident)).first;
+    } catch (const std::bad_alloc&) {
+        return make_error(ErrorCode::resource_exhausted,
+                          "Unable to record a resident CUDA matrix");
+    }
+    stats_.resident_matrices = resident_.size();
+    return &entry->second;
+}
+
 Result<bool> CudaMatvecAccelerator::matvec(
     const inference::DeepseekV4PackedMatrix& matrix,
     std::span<const float> input,
     std::span<float> output) {
     ++stats_.offered;
-    // Q8_0 and IQ1_S have device kernels. Everything else is declined rather than failed, so the
-    // graph keeps producing the same numbers through the CPU reference.
-    const auto layout = layout_for(matrix.ggml_type);
-    if (!layout.has_value() || matrix.rows == 0U || matrix.storage_columns == 0U ||
-        matrix.storage_columns % layout->block_elements != 0U ||
-        input.size() != matrix.storage_columns || output.size() != matrix.rows) {
+    if (input.size() != matrix.storage_columns || output.size() != matrix.rows) {
         ++stats_.declined;
         return false;
     }
-    // No stable identity means there is no safe way to recognize this matrix again later, so it
-    // goes to the CPU rather than into a cache that could confuse it with another.
-    if (matrix.cache_identity == 0U) {
+    auto made = ensure_resident(matrix);
+    if (!made) return made.error();
+    if (made.value() == nullptr) {
         ++stats_.declined;
         return false;
-    }
-    const std::uint64_t key = matrix.cache_identity;
-
-    auto entry = resident_.find(key);
-    if (entry == resident_.end()) {
-        if (resident_.size() >= options_.maximum_matrices ||
-            stats_.resident_bytes >= options_.maximum_resident_bytes) {
-            ++stats_.declined;
-            return false;
-        }
-        auto payload = inference::deepseek_v4_packed_matrix_payload(matrix, "cuda-matvec");
-        if (!payload) return payload.error();
-        const std::size_t blocks_per_row = matrix.storage_columns / layout->block_elements;
-        if (blocks_per_row == 0U ||
-            matrix.rows > std::numeric_limits<ByteCount>::max() / blocks_per_row) {
-            ++stats_.declined;
-            return false;
-        }
-        const ByteCount matrix_bytes =
-            static_cast<ByteCount>(matrix.rows) * blocks_per_row * layout->block_bytes;
-        if (payload.value().size() != matrix_bytes) {
-            ++stats_.declined;
-            return false;
-        }
-        const ByteCount input_bytes =
-            static_cast<ByteCount>(matrix.storage_columns) * sizeof(float);
-        const ByteCount output_bytes = static_cast<ByteCount>(matrix.rows) * sizeof(float);
-        // The IQ formats decode through a shared grid, which rides along in the same allocation so
-        // the kernel needs no second pointer to manage.
-        const auto grid = grid_for(matrix.ggml_type);
-        const auto grid_bytes = static_cast<ByteCount>(grid.size());
-        const ByteCount total = matrix_bytes + grid_bytes + input_bytes + output_bytes;
-        if (total > options_.maximum_resident_bytes - stats_.resident_bytes) {
-            ++stats_.declined;
-            return false;
-        }
-
-        auto allocation = driver_.allocate(options_.device_ordinal, total,
-                                           options_.minimum_free_vram_after, *governor_,
-                                           "cuda-matvec-resident");
-        if (!allocation) {
-            // Out of VRAM is a reason to stop offering, not to fail the forward pass.
-            ++stats_.declined;
-            return false;
-        }
-        Resident resident;
-        resident.allocation = allocation.take_value();
-        resident.matrix_bytes = matrix_bytes;
-        resident.grid_offset = matrix_bytes;
-        resident.input_offset = matrix_bytes + grid_bytes;
-        resident.output_offset = matrix_bytes + grid_bytes + input_bytes;
-        resident.rows = matrix.rows;
-        resident.blocks_per_row = blocks_per_row;
-        resident.ggml_type = matrix.ggml_type;
-
-        const auto upload_started = std::chrono::steady_clock::now();
-        auto uploaded = driver_.copy_from_host(resident.allocation, 0U, payload.value());
-        if (uploaded && grid_bytes != 0U) {
-            uploaded = driver_.copy_from_host(resident.allocation, resident.grid_offset, grid);
-        }
-        stats_.upload_ms += std::chrono::duration<double, std::milli>(
-            std::chrono::steady_clock::now() - upload_started).count();
-        if (!uploaded) {
-            auto released = resident.allocation.release();
-            if (!released) return released.error();
-            return uploaded.error();
-        }
-        stats_.uploaded_bytes += matrix_bytes;
-        stats_.resident_bytes += total;
-        try {
-            entry = resident_.emplace(key, std::move(resident)).first;
-        } catch (const std::bad_alloc&) {
-            return make_error(ErrorCode::resource_exhausted,
-                              "Unable to record a resident CUDA matrix");
-        }
-        stats_.resident_matrices = resident_.size();
     }
 
     // Upload, launch and download in one driver entry: three separate calls each push and pop the
     // context and synchronize, which costs more than the kernel itself at this call rate.
-    auto& live = entry->second;
+    auto& live = *made.value();
     const auto started = std::chrono::steady_clock::now();
     auto executed = [&] {
         switch (live.ggml_type) {

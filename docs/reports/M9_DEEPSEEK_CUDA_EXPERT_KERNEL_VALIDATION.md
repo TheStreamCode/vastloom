@@ -141,6 +141,33 @@ This inverts the usual reading of the remaining work. Streaming layer trunks ins
 memory that the GPU needs in order to keep expert weights resident. The 5.60× at 16 layers is what
 this hardware does when the VRAM is there.
 
+### Eager adoption was tried and made it worse
+
+The obvious move — upload each trunk matrix as its layer loads, then release the host copy — was
+implemented and measured. It is 25% slower at full depth:
+
+| 43 layers | GPU matvecs | VRAM resident | ms per token |
+|---|---:|---:|---:|
+| Upload on first use | 2,550 | 3.46 GB | 37,680 |
+| Upload as the layer loads | 2,534 | 2.97 GB | 47,191 |
+
+Two reasons, both worth keeping in mind before trying it again.
+
+**It spends VRAM in arrival order rather than on the busiest matrices.** Trunk matrices are uploaded
+before the routed experts have asked for anything, and the experts do most of the arithmetic. Lazy
+residency lets whoever actually runs claim the space; eager residency gives it to whoever loads
+first.
+
+**It frees no host memory anyway.** All of a layer's trunk tensors share one buffer — the trunk
+loader hands out offsets into a single `retain_buffer()`. Releasing a matrix's reference does
+nothing while any sibling still holds one, and there is always a sibling: Q5_K, Q6_K and BF16 have
+no device kernel, so at least one tensor per layer is declined and keeps the whole 149 MB alive.
+
+Making this work would need per-tensor buffers, or kernels for every remaining trunk type, and it
+would still be spending host commit charge to save host RAM. Streaming the trunks — loading and
+releasing them as the graph walks layers, the way expert caches already work — reduces the host
+floor directly instead of relocating it, and is the route worth taking.
+
 ## Bounds
 
 - The 5.60× figure is measured at 16 layers, where VRAM residency is not constrained. The same

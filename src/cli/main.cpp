@@ -2261,6 +2261,8 @@ int command_deepseek_forward(const std::vector<std::string>& args) {
         auto trunk = vastloom::inference::deepseek_v4_load_0731_gguf_layer_trunk(
             report.value().catalog, graph.config, layer, governor);
         if (!trunk) return print_error(trunk.error(), json);
+        // Uploading these trunk matrices here, rather than on their first use, was tried and made
+        // the model slower: see the note on eager adoption in the CUDA expert kernel report.
         for (auto& [name, matrix] : trunk.value().matrices) {
             graph.packed_matrices.emplace(name, std::move(matrix));
         }

@@ -2721,8 +2721,9 @@ int command_deepseek_forward(const std::vector<std::string>& args) {
         vastloom::safety::ResourceGovernor* governor{nullptr};
         vastloom::cuda::CudaMatvecAccelerator* accelerator{nullptr};
         std::size_t capacity{2U};
+        // Layers that keep their place, and the one slot everything else passes through.
         std::map<std::size_t, vastloom::inference::DeepseekV4ReferenceLayerTrunk> live;
-        std::vector<std::size_t> order;
+        std::map<std::size_t, vastloom::inference::DeepseekV4ReferenceLayerTrunk> transient;
         std::map<std::string, Descriptor, std::less<>> index;
         std::uint64_t bytes_read{0U};
         std::size_t reloads{0U};
@@ -2743,7 +2744,9 @@ int command_deepseek_forward(const std::vector<std::string>& args) {
                 return &found->second.shape;
             }
             const std::size_t layer = found->second.layer;
-            if (!live.contains(layer)) {
+            // The spare slot counts as held, or every matrix of a streamed layer reloads the whole
+            // layer: 5,805 reads and 810 GB where 473 and 65.3 had been.
+            if (!live.contains(layer) && !transient.contains(layer)) {
                 auto trunk = vastloom::inference::deepseek_v4_load_0731_gguf_layer_trunk(
                     *catalog, *config, layer, *governor);
                 if (!trunk) return trunk.error();
@@ -2755,18 +2758,29 @@ int command_deepseek_forward(const std::vector<std::string>& args) {
                                           ? static_cast<std::uint64_t>(matrix.resident_bytes)
                                           : static_cast<std::uint64_t>(matrix.encoded.size());
                     }
-                    live.emplace(layer, trunk.take_value());
-                    order.push_back(layer);
+                    // Retain a fixed set, and stream the rest through one slot.
+                    //
+                    // Discarding the oldest was worth nothing: the pass walks layers in a cycle, so
+                    // by the time it returns to layer 0 an eight-deep window has replaced it, and
+                    // eight resident layers gave exactly the reload count of two. Under a cyclic
+                    // reference pattern a window smaller than the cycle has a hit rate of zero
+                    // however it chooses its victim - but it has a hit rate of capacity/cycle if it
+                    // simply stops choosing. Whichever layers arrive first keep their place; the
+                    // others pass through the spare slot, which exists so a matrix stays alive
+                    // while the caller multiplies by it.
+                    if (live.size() < capacity) {
+                        live.emplace(layer, trunk.take_value());
+                    } else {
+                        transient.clear();
+                        transient.emplace(layer, trunk.take_value());
+                    }
                 } catch (const std::bad_alloc&) {
                     return vastloom::make_error(vastloom::ErrorCode::resource_exhausted,
                                                 "Unable to record a streamed layer trunk");
                 }
-                while (order.size() > capacity) {
-                    live.erase(order.front());
-                    order.erase(order.begin());
-                }
             }
-            const auto& matrices = live.at(layer).matrices;
+            const auto& held = live.contains(layer) ? live : transient;
+            const auto& matrices = held.at(layer).matrices;
             const auto matrix = matrices.find(std::string(name));
             if (matrix == matrices.end()) return nullptr;
             return &matrix->second;

@@ -2,6 +2,41 @@
 
 ## Unreleased
 
+- **Trunk reloading is about a tenth of a token, not half of it, and this milestone spent a day
+  optimising the wrong thing on the strength of that figure.** The 50% came from subtraction — all
+  unaccounted time charged to the trunk — and subtraction cannot tell reading from computing.
+
+  The correction came from a change that worked exactly as predicted and bought nothing. The
+  streaming window now retains a fixed set of layers instead of discarding the oldest: under a
+  cyclic reference pattern a window smaller than the cycle has a hit rate of zero however it picks
+  its victim, but a hit rate of capacity/cycle if it simply stops picking. At eight layers that is
+  393 reloads and 54.5 GB against 473 and 65.3 — the predicted 393 and ~54 to the digit — and the
+  time per token moved 1.9%, inside the noise.
+
+  Ten point eight fewer gigabytes read for no measurable time bounds what the reading costs: about
+  7.7 GB/s, which is page-cache speed rather than NVMe speed. The same page cache that made direct
+  I/O three times slower has been serving the trunk all along. Where a token actually goes, of
+  75,769 ms:
+
+  | | ms | share |
+  |---|---:|---:|
+  | GPU kernels | 23,724 | 31% |
+  | expert loading | 15,014 | 20% |
+  | expert compute | 13,601 | 18% |
+  | everything else, trunk reads included | 23,430 | 31% |
+
+  Expert bytes are 26.1 GB and are read once each, so that traffic is real; trunk bytes are the same
+  6.39 GB re-read eleven times, and mostly are not. Future work belongs on the kernels and the
+  experts.
+
+  The retention change stays: fewer bytes for the same time, and at the default window of two it is
+  a strict improvement over discarding the oldest. It carries no speed claim.
+
+  It also shipped broken for one run, and the discipline caught it: the prediction was written down
+  first, 5,805 reloads and 810 GB came back instead of 393 and 54, and the missing `transient` check
+  was obvious within a second. A vaguer prediction would have filed it as another idea that did not
+  work, and left the defect in.
+
 - `deepseek-forward --gpu-limit N` pins the accelerator's ceiling to N mebibytes, so an A/B compares
   two runs rather than two machine states. The derived ceiling moves with whatever else the host is
   doing — it varied between 1.05 and 2.34 GB across one afternoon — and it is the largest single

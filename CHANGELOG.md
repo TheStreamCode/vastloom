@@ -2,6 +2,20 @@
 
 ## Unreleased
 
+- **A token moves 8.00 GB of weights, so 1.8 tokens per second needs 14.4 GB/s. We deliver 1.16.**
+  That is roughly 3% of what a dual-channel desktop memory bus hands over, and it reframes every
+  performance question this milestone has asked.
+
+  The target does not require a GPU: 14.4 GB/s sits inside RAM bandwidth, and llama.cpp reaches
+  1.8 tokens per second on CPU alone, which puts it near a third of the memory bus — what a
+  well-written SIMD kernel achieves.
+
+  It also explains a run of null results. At 1.16 GB/s nothing is near a bandwidth limit — not
+  PCIe, not VRAM, not RAM — which is why the accelerator ceiling between 1.05 and 2.34 GB never
+  correlated with anything, and why every I/O and cache change measured this milestone hit its
+  prediction on bytes and moved the clock by nothing. The gap is in the kernels, not the device and
+  not the memory hierarchy.
+
 - **The forward pass was reading the Hyper-Connection mixing matrix transposed, and the model now
   answers `"La capitale d'Italia è **Roma**."`** The stray `R` that this changelog spent a milestone
   attributing to 1.5-bit quantization was one index expression.

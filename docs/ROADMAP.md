@@ -352,8 +352,12 @@ recorded in the [M8 CUDA RMSNorm report](reports/M8_CUDA_RMSNORM_VALIDATION.md).
   per row, no coalescing, matrix copied per call — so the headroom above 5.28× is large.
 - [ ] IQ1_S and IQ3_XXS kernels for the routed experts, which are the larger share of per-layer
   arithmetic, then attention itself.
-- [ ] Wire the GPU kernels into the graph and keep weights resident in VRAM across calls, rather
-  than copying a matrix per launch. Until this lands the kernels do not make the model faster.
+- [x] Wire the GPU into the graph with weights resident in VRAM: 2,728 matvecs accelerated across a
+  24-layer pass, 2.90 GB resident, identical output. Net gain is small — 24,328 ms per token to
+  22,246 — because each accelerated call still costs 2.65 ms against the kernel's own 0.558 ms.
+- [ ] Remove the per-call round trips: one context push per matvec instead of three, asynchronous
+  copies, and keeping activations on the device between kernels. This is what turns the kernel's
+  5.4× into a model-level speedup.
 - [ ] Load and release layer trunks the way experts now are. All 43 are held resident, so the pass
   needs 6.39 GB of trunk and a host with less free RAM is refused rather than served — the largest
   remaining obstacle to running on ordinary machines, and the project's founding idea.

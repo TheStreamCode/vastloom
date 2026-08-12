@@ -2,6 +2,19 @@
 
 ## Unreleased
 
+- The GPU is now in the inference path. The graph offers each packed matvec to an optional
+  accelerator and falls back to the CPU kernel on refusal, so matrices without a device kernel run
+  unchanged. Q8_0 matrices stay resident in VRAM after their first upload — 2.90 GB across a
+  24-layer pass — because a decode step revisits the same matrices and copying per launch would cost
+  more than the kernel saves. The driver also caches its compiled module per context, holding its
+  own context reference so the module cannot outlive it.
+
+  At 24 layers with identical output text: 24,328 ms per token on CPU against 22,246–23,509 ms with
+  2,728 matvecs accelerated and 4,899 declined. Far short of the kernel's own 5.4×, and the reason is
+  measured: 2.65 ms per accelerated call against 0.558 ms in isolation, because each call still
+  pushes and pops the context around three synchronous operations. The round trips, not the kernel,
+  are what to fix next.
+
 - Added the first quantized CUDA kernel: a Q8_0 matvec in hand-written PTX, loaded through the same
   toolkit-free driver path as the RMSNorm gate. On the reference RTX 4070 Super a 4096×4096 matvec
   runs in 0.5735 ms against 3.0305 ms for the twelve-threaded CPU kernel — 5.28× — with a maximum

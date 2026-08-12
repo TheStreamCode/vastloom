@@ -423,7 +423,11 @@ prediction overhead and wasted I/O.
 
 ## M12 — Speculative memory and expert superbatching
 
-- [ ] Integrate the checkpoint-compatible draft/DSpark/MTP component.
+- [ ] Integrate the checkpoint-compatible draft/DSpark/MTP component. The draft exists and is
+  distributed separately: unsloth/DeepSeek-V4-Flash-0731-GGUF ships dspark Q8_0 at 10.9 GB and BF16
+  at 11.3 GB, and DeepSeek document support for up to seven speculative tokens. The quantized main
+  checkpoints do not contain MTP blocks - UD-IQ1_S reports mtp_enabled false - so the draft has to be
+  loaded as its own model rather than found inside the weights.
 - [ ] Produce future routing graphs from draft tokens.
 - [ ] Batch-union and deduplicate future experts.
 - [ ] Schedule one read for expert reuse across speculative tokens.

@@ -130,9 +130,27 @@ Result<ByteCount> multiply_bytes(std::initializer_list<ByteCount> factors,
     return result;
 }
 
+// Looks a key up under this checkpoint's own architecture prefix.
+//
+// The main checkpoints publish their metadata under `deepseek4.`, while the DSpark draft that ships
+// beside them uses `dflash.` for the same architecture: three blocks instead of forty-three, but the
+// same experts, attention, Hyper-Connections and clamps. Rather than duplicating fifty-five key
+// strings, a miss under the primary prefix is retried under the other one, so both describe
+// themselves to the same reader.
+const model::GgufMetadataEntry* find_architecture_metadata(const model::GgufFile& metadata,
+                                                           std::string_view key) {
+    if (const auto* entry = metadata.find_metadata(key); entry != nullptr) return entry;
+    constexpr std::string_view primary = "deepseek4.";
+    constexpr std::string_view draft = "dflash.";
+    if (!key.starts_with(primary)) return nullptr;
+    std::string alternative(draft);
+    alternative.append(key.substr(primary.size()));
+    return metadata.find_metadata(alternative);
+}
+
 Result<std::uint32_t> required_u32(const model::GgufFile& metadata,
                                    std::string_view key) {
-    const auto* entry = metadata.find_metadata(key);
+    const auto* entry = find_architecture_metadata(metadata, key);
     if (entry == nullptr || !entry->unsigned_value.has_value() ||
         *entry->unsigned_value > std::numeric_limits<std::uint32_t>::max()) {
         return make_error(ErrorCode::invalid_format,
@@ -146,7 +164,7 @@ Result<std::vector<std::uint32_t>> required_compress_ratios(
     const model::GgufFile& metadata,
     std::uint32_t expected_count) {
     constexpr std::string_view key = "deepseek4.attention.compress_ratios";
-    const auto* entry = metadata.find_metadata(key);
+    const auto* entry = find_architecture_metadata(metadata, key);
     if (entry == nullptr || entry->type != model::GgufValueType::array ||
         entry->array_elements != expected_count) {
         return make_error(ErrorCode::invalid_format,
@@ -190,7 +208,7 @@ Result<std::vector<std::uint32_t>> required_compress_ratios(
 
 Result<float> required_float(const model::GgufFile& metadata,
                              std::string_view key) {
-    const auto* entry = metadata.find_metadata(key);
+    const auto* entry = find_architecture_metadata(metadata, key);
     if (entry == nullptr || !entry->floating_value.has_value() ||
         !std::isfinite(*entry->floating_value) ||
         *entry->floating_value <
@@ -206,7 +224,7 @@ Result<float> required_float(const model::GgufFile& metadata,
 
 Result<bool> required_bool(const model::GgufFile& metadata,
                            std::string_view key) {
-    const auto* entry = metadata.find_metadata(key);
+    const auto* entry = find_architecture_metadata(metadata, key);
     if (entry == nullptr || !entry->boolean_value.has_value()) {
         return make_error(ErrorCode::invalid_format,
                           "DeepSeek GGUF required boolean metadata is missing or invalid",
@@ -217,7 +235,7 @@ Result<bool> required_bool(const model::GgufFile& metadata,
 
 Result<std::string> required_string(const model::GgufFile& metadata,
                                     std::string_view key) {
-    const auto* entry = metadata.find_metadata(key);
+    const auto* entry = find_architecture_metadata(metadata, key);
     if (entry == nullptr || !entry->string_value.has_value() ||
         entry->string_value->empty()) {
         return make_error(ErrorCode::invalid_format,
@@ -231,7 +249,7 @@ Result<std::vector<float>> required_float_schedule(
     const model::GgufFile& metadata,
     std::string_view key,
     std::uint32_t expected_count) {
-    const auto* entry = metadata.find_metadata(key);
+    const auto* entry = find_architecture_metadata(metadata, key);
     if (entry == nullptr || entry->type != model::GgufValueType::array ||
         (entry->array_type != model::GgufValueType::float32 &&
          entry->array_type != model::GgufValueType::float64) ||

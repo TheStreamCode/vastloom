@@ -2215,8 +2215,19 @@ int command_deepseek_forward(const std::vector<std::string>& args) {
         if (cuda_driver) {
             vastloom::cuda::CudaMatvecAcceleratorOptions accelerator_options;
             accelerator_options.minimum_free_vram_after = 1U * vastloom::GiB;
-            accelerator_options.maximum_resident_bytes =
-                policy.value().resources.vram_hard_limit;
+            // VRAM is not free of host memory on Windows: a device allocation carries commit
+            // charge, so resident matrices compete with the weights for the same budget the
+            // preflight just checked. At shallow depths there is room for the full VRAM limit; at
+            // full depth there is not, and a 43-layer pass that ignored this passed preflight and
+            // then died in the expert loader with bad_alloc. Spend only what the preflight left
+            // over, keeping a gigabyte of that headroom for the allocations it does not model.
+            constexpr vastloom::ByteCount kUnmodelledHostHeadroom = 1U * vastloom::GiB;
+            const vastloom::ByteCount host_headroom =
+                budget > required + kUnmodelledHostHeadroom
+                    ? budget - required - kUnmodelledHostHeadroom
+                    : 0U;
+            accelerator_options.maximum_resident_bytes = std::min<vastloom::ByteCount>(
+                policy.value().resources.vram_hard_limit, host_headroom);
             // Attention contributes a handful of matrices per layer, but every routed expert is
             // two more, and a decode step may select different experts each token. Let VRAM be the
             // limit rather than a count sized for attention alone.

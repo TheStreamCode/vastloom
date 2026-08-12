@@ -61,6 +61,14 @@ those immutable weights on SSD and reports the recurrent traffic. RAM, staging a
 an aggregate Governor ceiling; VRAM is enforced separately and is never summed with RAM to fit one
 expert.
 
+VRAM being enforced separately does not make it free of host memory. On Windows a device allocation
+carries commit charge, so matrices the accelerator keeps resident compete for the same host budget
+the weights were checked against. A 43-layer pass that ignored this passed its preflight and then
+failed in the expert loader with `bad_alloc`. The accelerator's residency ceiling is therefore
+capped at what the preflight left unspent, less a gigabyte for the allocations it does not model —
+which at full depth is close to nothing, and is one more reason the resident-trunk floor is the
+constraint worth removing.
+
 ## Native CUDA driver boundary
 
 The first M8 slice uses the CUDA Driver API through a runtime-loaded platform library. Windows

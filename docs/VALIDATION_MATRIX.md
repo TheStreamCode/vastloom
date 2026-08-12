@@ -100,7 +100,16 @@ only. Two categories of claim are therefore never re-checked by CI:
 - **Real GPU execution.** No hosted runner exposes an NVIDIA device, so `cuda-info --json` fails
   its probe there and `vastloom_cuda_cli` validates only the argument and error contract. The
   RMSNorm kernel result recorded in `docs/reports/M8_CUDA_RMSNORM_VALIDATION.md` comes exclusively
-  from the reference PC.
+  from the reference PC, as do the three quantized matvec gates — `--matvec-smoke`, `--iq1s-smoke`
+  and `--iq3xxs-smoke`, each of which reports zero absolute error against the CPU reference in
+  `docs/reports/M9_DEEPSEEK_CUDA_EXPERT_KERNEL_VALIDATION.md`.
+
+  A parity gate is only as good as the numbers it feeds the kernel. These three previously used a
+  fixed FP16 scale of 0.25, a delta of 0.125 and a k/256 input; every product is then exactly
+  representable, f32 and f64 accumulation agree to the bit, and the gate reported zero error for a
+  kernel accumulating in the wrong precision. Gates over quantized formats must vary the scale
+  exponent and mantissa and use non-dyadic input, and a reported error of exactly zero deserves
+  suspicion until the arithmetic is known not to be degenerate.
 
 ## Host pressure is not a failure, and not a pass either
 

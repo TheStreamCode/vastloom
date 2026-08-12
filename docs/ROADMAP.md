@@ -350,22 +350,34 @@ recorded in the [M8 CUDA RMSNorm report](reports/M8_CUDA_RMSNORM_VALIDATION.md).
 - [x] First quantized CUDA kernel: Q8_0 matvec in hand-written PTX, 0.5735 ms against 3.0305 ms for
   the twelve-threaded CPU kernel at 4096×4096, max error 3.8147e-06. Naive on purpose — one thread
   per row, no coalescing, matrix copied per call — so the headroom above 5.28× is large.
-- [ ] IQ1_S and IQ3_XXS kernels for the routed experts, which are the larger share of per-layer
-  arithmetic, then attention itself.
+- [x] IQ1_S and IQ3_XXS kernels for the routed experts, which are the larger share of per-layer
+  arithmetic. A 16-layer generation went from 13,300 to 2,374 ms per token — 5.60× — with identical
+  text and identical expert traffic. Attention itself is still on the CPU.
 - [x] Wire the GPU into the graph with weights resident in VRAM: 2,728 matvecs accelerated across a
   24-layer pass, 2.90 GB resident, identical output. Net gain is small — 24,328 ms per token to
   22,246 — because each accelerated call still costs 2.65 ms against the kernel's own 0.558 ms.
 - [x] Collapse the per-matvec round trips into one driver entry. Worth 0.5%, which measured the
   assumption rather than confirming it: the round trips were not the constraint.
-- [ ] IQ1_S and IQ3_XXS kernels. Telemetry from a 24-layer generation puts 7.2 s of 66.5 s inside
-  the Q8_0 kernel and its transfers, so the attention projections cap any speedup at 1.12× even at
-  zero cost. The routed experts are the 89%, and they are where the next kernel has to go.
+- [x] IQ1_S and IQ3_XXS kernels, which were indeed the 89%. IQ3_XXS carried most of the gain because
+  it is the most expensive format to decode on the CPU — 9.76 ms against Q8_0's 3.04 for the same
+  shape. All three kernels now match the reference at zero error rather than under a tolerance, by
+  accumulating in f64 in the reference's own order.
+- [x] Make the parity gates capable of failing. Built from dyadic values — a fixed 0.25 scale, a
+  0.125 delta, a k/256 input — they could not distinguish f32 from f64 accumulation and passed
+  kernels that were summing in the wrong precision.
+- [x] Key the VRAM cache on what a matrix is rather than where it happens to live. Host addresses are
+  recycled when expert buffers are released, so an address-keyed cache served one expert's weights
+  under another's name, and the model's output changed between runs of the same command.
 - [ ] Then the rest of the layer — attention, normalization, RoPE, Hyper-Connection — after which
   keeping activations resident on the device stops being an optimisation and becomes the only
   sensible design, because nothing would need to return to the host between operations.
 - [ ] Load and release layer trunks the way experts now are. All 43 are held resident, so the pass
   needs 6.39 GB of trunk and a host with less free RAM is refused rather than served — the largest
-  remaining obstacle to running on ordinary machines, and the project's founding idea.
+  remaining obstacle to running on ordinary machines, and the project's founding idea. This is now
+  also what caps the GPU: device allocations carry host commit charge, so VRAM residency has to be
+  spent out of the same headroom the weights leave behind, and at full depth there is almost none.
+- [ ] Count the expert loader's own read buffers in the preflight. At 32 layers it approves and the
+  loader then fails on `bad_alloc`, which should have been an up-front refusal with a correct figure.
 - [ ] Pinned host buffers.
 - [ ] Direct/overlapped NVMe reads where supported.
 - [ ] Resident-trunk and bounded streamed-trunk placement profiles.

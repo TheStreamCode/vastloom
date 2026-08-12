@@ -126,6 +126,16 @@ model conversion.
 > model being practical: a minute per token needs the CUDA path and resident experts before anyone
 > would want to use it.
 >
+> **Every quantization on the routed path now runs on the GPU.** Q8_0 for attention, IQ1_S for the
+> experts' gate and up, IQ3_XXS for their down projection, all in hand-written PTX through the same
+> toolkit-free driver. A 16-layer generation went from 13,300 to 2,374 ms per token — 5.60× — and
+> produced the same text and the same expert traffic as the CPU path, byte for byte. Each kernel
+> matches the reference at zero absolute error, not under a tolerance, because it accumulates in f64
+> in the reference's own order. Getting there meant fixing a VRAM cache that indexed matrices by a
+> host address the allocator recycles, and parity gates built from dyadic values that could not tell
+> f32 from f64. See the
+> [`M9 CUDA expert kernel report`](docs/reports/M9_DEEPSEEK_CUDA_EXPERT_KERNEL_VALIDATION.md).
+>
 > **One real DeepSeek layer now executes from official weights.** The checkpoint's own router picks
 > the experts, and eight quantizations run together — Q8_0 attention, Q5_K/Q6_K shared expert, BF16
 > router, I32 routing table, IQ1_S/IQ3_XXS routed experts and the Q4_K embedding — producing 129,280
@@ -1037,9 +1047,11 @@ It currently has:
 - two executable pinned Hugging Face adapters plus a DeepSeek metadata/tokenizer, reduced
   FP32 prefill oracle, file-backed governed Q8_0 layer, official 0731 GGUF metadata catalog and
   verified source-binding boundary; no full-checkpoint DeepSeek, MiniMax or Kimi execution adapter;
-- native CUDA driver discovery, governed allocation, synchronous copies and one scalar FP32
-  RMSNorm parity kernel, but no attention/dense/quantized-MoE CUDA path, streams or complete GPU
-  inference; no ROCm, Vulkan or Metal inference backend;
+- native CUDA driver discovery, governed allocation, synchronous copies, one scalar FP32 RMSNorm
+  parity kernel and quantized Q8_0/IQ1_S/IQ3_XXS matvec kernels wired into the DeepSeek graph with
+  weights resident in VRAM, but no attention/dense CUDA path, no streams and no complete GPU
+  inference — activations still return to the host between operations; no ROCm, Vulkan or Metal
+  inference backend;
 - scalar IQ1_S/IQ2_XXS/IQ3_XXS/MXFP4 expert, Q4_K global and Q8_0/Q5_K/Q6_K/BF16/F32 trunk
   reference kernels, plus bounded Q4_K/IQ2_XXS/MXFP4 row lookup and I32 router-table decoding, one
   deterministic reduced

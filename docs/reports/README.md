@@ -13,6 +13,11 @@ hardware, commands, measurements and limitations.
 
 ## Current report
 
+- [`M9_DEEPSEEK_CUDA_EXPERT_KERNEL_VALIDATION.md`](M9_DEEPSEEK_CUDA_EXPERT_KERNEL_VALIDATION.md) —
+  every storage type on the routed path given a device kernel: 5.60× on a 16-layer generation with
+  identical text and identical expert traffic, all three matvec gates at zero error, and the two
+  defects a passing gate was hiding — a VRAM cache keyed on recycled host addresses, and parity gates
+  built from dyadic values that made f32 and f64 indistinguishable.
 - [`M9_DEEPSEEK_COMPLETE_FORWARD_VALIDATION.md`](M9_DEEPSEEK_COMPLETE_FORWARD_VALIDATION.md) —
   the complete 43-layer model executed on the reference PC: 258 expert bundles, 1,770,651,648 expert
   bytes matching the metadata prediction exactly, 129,280 logits, and host memory that never

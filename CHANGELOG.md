@@ -2,6 +2,43 @@
 
 ## Unreleased
 
+- Every storage type on the routed expert path now has a CUDA kernel, and a 16-layer generation
+  dropped from 13,300 to 2,374 ms per token — 5.60× — producing the same text (`" guaranteedlyahi"`)
+  and reading the same 3,963,551,744 bytes of expert payload as the CPU path. IQ3_XXS carried most of
+  that: it is the most expensive format to decode on the CPU (9.76 ms against Q8_0's 3.04 for the
+  same shape), so it gained the most on a device where the decoding hides behind memory latency. All
+  three kernels — Q8_0, IQ1_S, IQ3_XXS — now match the reference at zero error rather than under a
+  tolerance, because they accumulate in f64 in the reference's own order. At full depth the same
+  kernels take a 43-layer generation from 48,970 to 37,680 ms per token, `complete_model: true`,
+  output `" una grande"` on both paths. See the
+  [CUDA expert kernel validation](docs/reports/M9_DEEPSEEK_CUDA_EXPERT_KERNEL_VALIDATION.md).
+
+- The accelerator's VRAM residency is now capped by the host memory the preflight left unspent.
+  A Windows device allocation carries host commit charge, so resident matrices compete for the same
+  budget the weights were checked against: a 43-layer pass with the accelerator at its full 6 GB
+  ceiling passed preflight and then died in the expert loader with `bad_alloc`, while the identical
+  `--cpu-only` run completed. It now spends only the leftover headroom less a gigabyte for
+  allocations the preflight does not model — 3.46 GB at full depth, where it settles for 1.30×
+  because 9,457 of 12,007 matvecs are declined for want of VRAM. At 16 layers, where there is room,
+  the same kernels give 5.60×. Streaming layer trunks is therefore not only about fitting on smaller
+  machines; it is what would free the host memory the GPU needs.
+
+- Fixed two defects that a passing parity gate was hiding, both found because the model's output text
+  changed while the gate reported zero error.
+
+  The accelerator indexed its resident VRAM matrices by the host address of the buffer they came
+  from. Expert buffers are released as the pass advances, the allocator reuses those addresses, and a
+  cache entry then served one expert's weights under another's name. The tell was that the output
+  changed *between runs of the same command* — wrong arithmetic is wrong the same way every time.
+  Matrices now carry a `cache_identity` derived from what they are (layer, expert and catalog tensor
+  for experts; name and byte range otherwise), and no identity means no caching, so a caller that
+  omits it loses speed rather than correctness.
+
+  Separately, the parity gates were built from dyadic values — a fixed scale of 0.25, a delta of
+  0.125 and a k/256 input — which makes f32 and f64 accumulation agree to the bit and let kernels
+  accumulating in `fma.rn.f32` pass while the reference summed in `double`. The gates now vary the
+  FP16 exponent per block, fill the mantissa, and use non-dyadic input.
+
 - The GPU is now in the inference path. The graph offers each packed matvec to an optional
   accelerator and falls back to the CPU kernel on refusal, so matrices without a device kernel run
   unchanged. Q8_0 matrices stay resident in VRAM after their first upload — 2.90 GB across a

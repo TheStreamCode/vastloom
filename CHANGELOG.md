@@ -2,6 +2,40 @@
 
 ## Unreleased
 
+- **Residency is a step, not a slope, and the step is above what this host can reach.** Raising the
+  accelerator ceiling from 4.33 GB to 5.20 GB by freeing host memory changed nothing measurable:
+  uploads stayed at 8.54 GB per pass, the reuse factor at 1.03, evictions at about 20,300. Both
+  figures sit below the 6.39 GB trunk, and under a cyclic scan a cache smaller than the working set
+  evicts everything before it is next needed whatever its size. 5.20 GB buys exactly what 1.05 did.
+
+- **The 3 GiB reserve was doing real work, and the measurement that said otherwise could not have
+  seen it.** Earlier this milestone the unmodelled host allocation was measured at 0.23 GB — peak
+  commit 5.12 GB against 2.56 charged and 2.33 held by the accelerator — and the reserve was called
+  thirteen times larger than what it stood for. Crossing the residency threshold with
+  `--gpu-reserve 1024` produced:
+
+  ```
+  preflight: fits: true     (required 2.75 GB, budget 11.24 GB)
+  runtime:   Unable to allocate the bounded tensor tile buffer
+  ```
+
+  The accelerator took roughly 7.4 GB of VRAM, which costs an equal host commit, and the tile
+  loader then had nothing left. That 0.23 GB was measured with a small ceiling — in a regime where
+  the accelerator consumed little commit and the buffers it competes with never met resistance. It
+  did not generalize to the regime it was being used to justify.
+
+  Fifth check this milestone that could not fail, and the subtlest: not a quantity fixed by
+  construction, but one measured under conditions where the effect it bounds does not occur.
+
+  The safety machinery behaved: a refusal, with the host at 19.2 GiB free and responsive. The known
+  defect it exposes is the same one the roadmap already carries — the preflight does not charge the
+  loader's own read buffers, so it approves and the loader fails. Modelling them is the principled
+  way to shrink the reserve, and the only one: the reserve cannot simply be cut.
+
+- `deepseek-forward --gpu-reserve MB` overrides the unmodelled-host reserve, so a residency
+  threshold can be crossed under measurement without changing what every other run holds back. The
+  default is unchanged and the Governor still refuses in advance.
+
 - **VRAM costs host commit one for one, measured rather than assumed — and six gigabytes of it are
   available.** The belief that a device allocation carries an equal host commit charge on Windows
   has capped the accelerator's ceiling since this milestone began. `cuda-info --allocation-smoke`

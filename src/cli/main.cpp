@@ -2596,7 +2596,8 @@ int command_deepseek_forward(const std::vector<std::string>& args) {
     auto valid = validate_options(
         args, 1U,
         {"--token", "--layers", "--context", "--batch-size", "--expert-cache", "--trunk-window", "--prompt",
-         "--tokenizer", "--max-tokens", "--continue-ids", "--gpu-limit", "--dump-hidden"},
+         "--tokenizer", "--max-tokens", "--continue-ids", "--gpu-limit", "--gpu-reserve",
+         "--dump-hidden"},
         {"--json", "--dry-run", "--chat", "--cpu-only"});
     if (!valid) return print_error(valid.error(), json);
     if (args.empty() || vastloom::util::starts_with(args.front(), "--")) {
@@ -2846,7 +2847,17 @@ int command_deepseek_forward(const std::vector<std::string>& args) {
             // reloads. One gigabyte was enough while the weights themselves left little room; with
             // trunks streamed the ceiling would otherwise claim nearly all the remaining commit and
             // starve the very reloads that made the room.
-            constexpr vastloom::ByteCount kUnmodelledHostHeadroom = 3U * vastloom::GiB;
+            // Overridable so the residency threshold can be crossed under measurement without
+            // changing what every other run reserves. The default stands; a smaller value is a
+            // deliberate experiment, and the Governor still refuses any allocation the host cannot
+            // afford, so this widens what may be attempted rather than what may be exceeded.
+            vastloom::ByteCount kUnmodelledHostHeadroom = 3U * vastloom::GiB;
+            if (option_value(args, "--gpu-reserve").has_value()) {
+                auto reserve = optional_size(args, "--gpu-reserve", 3072U);
+                if (!reserve) return print_error(reserve.error(), json);
+                kUnmodelledHostHeadroom =
+                    static_cast<vastloom::ByteCount>(reserve.value()) * vastloom::MiB;
+            }
             vastloom::ByteCount host_headroom =
                 budget > required + kUnmodelledHostHeadroom
                     ? budget - required - kUnmodelledHostHeadroom

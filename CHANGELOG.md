@@ -2,6 +2,35 @@
 
 ## Unreleased
 
+- **A device allocation now costs both budgets, because it costs both.** The Governor tracked VRAM
+  and host RAM as separate pools while WDDM backs device memory with host commit — measured on this
+  machine at one for one. So a VRAM reservation passed a check that never asked whether the host
+  could back it, and the failure surfaced wherever host memory was next requested: a preflight said
+  yes and the tile loader died on `bad_alloc` mid-pass.
+
+  `CudaDriver::allocate` reserves the same bytes twice on Windows, once against each budget, and the
+  allocation holds both leases. The refusal now arrives where it can be handled — the accelerator
+  declines a matrix and that matvec runs on the CPU — rather than where it cannot.
+
+  The command that failed yesterday now completes:
+
+  | | before | after |
+  |---|---|---|
+  | outcome | `bad_alloc` in the tile loader | completes, output correct |
+  | ceiling | ~7.4 GB, then crash | 3.34 GB |
+  | peak commit | — | 6.52 GB, inside budget |
+  | declined matvecs | — | 0 |
+
+  This was not the accounting gap the roadmap predicted. The loader's buffers were already charged;
+  what was missing was that the accelerator's own allocations were charged to one pool while drawing
+  on two.
+
+  It also settles a question this milestone kept reopening: **trunk residency is not reachable on
+  this hardware.** 6.39 GB of resident weights cost 6.39 GB of host commit on top of a working set
+  that already needs about 2.8, against a budget near 11 — and now that the ceiling reflects what
+  the host can actually back, it self-limits to 3.34 GB rather than overcommitting and failing. The
+  step function stands; this machine cannot reach the step.
+
 - **Residency is a step, not a slope, and the step is above what this host can reach.** Raising the
   accelerator ceiling from 4.33 GB to 5.20 GB by freeing host memory changed nothing measurable:
   uploads stayed at 8.54 GB per pass, the reuse factor at 1.03, evictions at about 20,300. Both

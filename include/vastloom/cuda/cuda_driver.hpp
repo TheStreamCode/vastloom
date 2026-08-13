@@ -194,12 +194,19 @@ private:
     friend class CudaDriver;
     CudaAllocation(std::shared_ptr<CudaDriverBackend> backend,
                    CudaBackendAllocation allocation,
-                   safety::Reservation reservation);
+                   safety::Reservation reservation,
+                   safety::Reservation host_reservation);
     void release_for_destruction() noexcept;
 
     std::shared_ptr<CudaDriverBackend> backend_;
     CudaBackendAllocation allocation_;
     safety::Reservation reservation_;
+    // Device memory is not free of host memory where WDDM charges commit for it. Measured on the
+    // reference machine at one for one - 6 GB of VRAM cost 6.26 GB of host commit - so the same
+    // bytes are reserved twice, once against each budget. Without it the Governor approves a device
+    // allocation the host cannot back, and the failure surfaces later in whatever asks for host
+    // memory next: the tile loader died on bad_alloc after a preflight that had said yes.
+    safety::Reservation host_reservation_;
 };
 
 class CudaDriver {

@@ -2812,15 +2812,18 @@ private:
 
 CudaAllocation::CudaAllocation(std::shared_ptr<CudaDriverBackend> backend,
                                CudaBackendAllocation allocation,
-                               safety::Reservation reservation)
+                               safety::Reservation reservation,
+                               safety::Reservation host_reservation)
     : backend_(std::move(backend)),
       allocation_(allocation),
-      reservation_(std::move(reservation)) {}
+      reservation_(std::move(reservation)),
+      host_reservation_(std::move(host_reservation)) {}
 
 CudaAllocation::CudaAllocation(CudaAllocation&& other) noexcept
     : backend_(std::move(other.backend_)),
       allocation_(std::exchange(other.allocation_, {})),
-      reservation_(std::move(other.reservation_)) {}
+      reservation_(std::move(other.reservation_)),
+      host_reservation_(std::move(other.host_reservation_)) {}
 
 CudaAllocation& CudaAllocation::operator=(CudaAllocation&& other) noexcept {
     if (this != &other) {
@@ -2828,6 +2831,7 @@ CudaAllocation& CudaAllocation::operator=(CudaAllocation&& other) noexcept {
         backend_ = std::move(other.backend_);
         allocation_ = std::exchange(other.allocation_, {});
         reservation_ = std::move(other.reservation_);
+        host_reservation_ = std::move(other.host_reservation_);
     }
     return *this;
 }
@@ -2869,6 +2873,7 @@ Result<void> CudaAllocation::release() {
     if (!released) return released.error();
     allocation_ = {};
     reservation_.release();
+    host_reservation_.release();
     backend_.reset();
     return {};
 }
@@ -2883,6 +2888,7 @@ void CudaAllocation::release_for_destruction() noexcept {
     // The device allocation may still be live. Preserve fail-closed Governor accounting rather
     // than allowing a second allocation to consume bytes that the backend failed to free.
     reservation_.abandon_accounting_on_external_release_failure();
+    host_reservation_.abandon_accounting_on_external_release_failure();
     allocation_ = {};
     quarantine_backend(std::move(backend_));
 }
@@ -2943,6 +2949,20 @@ Result<CudaAllocation> CudaDriver::allocate(
     }
     auto reservation = governor.try_reserve(safety::ResourceKind::vram, bytes, tag);
     if (!reservation) return reservation.error();
+    // The same bytes again, against host memory.
+    //
+    // Where WDDM backs device allocations with commit charge - measured on the reference machine at
+    // one for one, 6 GB of VRAM costing 6.26 GB of host commit - a VRAM budget checked alone is not
+    // a check at all. The Governor approved device allocations the host could not back, and the
+    // failure surfaced in whatever asked for host memory next: a preflight said yes and the tile
+    // loader died on bad_alloc. Charging both budgets makes the refusal arrive here, where it can
+    // be handled by declining the matrix rather than by aborting a forward pass.
+    safety::Reservation host_reservation;
+#if defined(_WIN32)
+    auto host = governor.try_reserve(safety::ResourceKind::ram, bytes, tag);
+    if (!host) return host.error();
+    host_reservation = std::move(host.value());
+#endif
 
     Result<CudaBackendAllocation> allocated = make_error(
         ErrorCode::internal_error, "CUDA backend allocation was not attempted");
@@ -2977,7 +2997,8 @@ Result<CudaAllocation> CudaDriver::allocate(
         return make_error(ErrorCode::integrity_error,
                           "CUDA backend returned an invalid allocation handle");
     }
-    return CudaAllocation(backend_, allocated.take_value(), reservation.take_value());
+    return CudaAllocation(backend_, allocated.take_value(), reservation.take_value(),
+                          std::move(host_reservation));
 }
 
 Result<void> CudaDriver::copy_from_host(

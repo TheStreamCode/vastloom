@@ -126,6 +126,23 @@ model conversion.
 > model being practical: a minute per token needs the CUDA path and resident experts before anyone
 > would want to use it.
 >
+> **The forward pass was wrong while every one of those numbers was measured.** An external oracle
+> — llama.cpp, built from source against the same checkpoint and given the same tokens — disagreed
+> on the answer, and the cause was one index expression: the Hyper-Connection mixing matrix was read
+> transposed, so each layer multiplied the residual by slightly more than one and the hidden state
+> reached RMS 4,064 by the last of forty-three. It is fixed, all eight strongest logits now match
+> the reference in order, and the model answers `"La capitale d'Italia è **Roma**."` The speed
+> figures below stand as measurements of the engine's throughput; they were never measurements of a
+> correct computation until now. The lesson is in the changelog and it is not a small one: the M6
+> Python reference carried the same transposition, so two implementations written from one reading
+> of the equations confirmed each other for a milestone.
+>
+> **Against that oracle the engine is 14× slower on its GPU path than llama.cpp is on CPU alone** —
+> 6.9 s per token against 0.55, same machine, same checkpoint, twelve threads each. A token moves
+> 8.00 GB of weights, so 1.8 tokens per second needs 14.4 GB/s of effective bandwidth and we deliver
+> 1.16, about 3% of a desktop memory bus. The gap is in the kernels, not the device and not the
+> memory hierarchy: a matvec measured 17× off the bandwidth it could reach.
+>
 > **A full-depth token went from 48,970 ms to about 8,000 in one day of work** — 6.1×, and 7.5×
 > against the original serial implementation's 60,301 — with the output byte-identical at every
 > step and host RAM down from 7.62 GB to 2.12. Every matvec in the model now runs on the device:

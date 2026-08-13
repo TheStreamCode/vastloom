@@ -123,6 +123,26 @@ Do not restart or generically redesign the project. Inspect the relevant impleme
 documentation, tests and git state before changing code. Preserve working components and do not
 replace real paths with placeholders.
 
+An external reference now exists and is the authority: llama.cpp built from source reads the same
+checkpoint and supports both `deepseek4` and `dflash`. It found a defect no internal test could —
+the Hyper-Connection mixing matrix was read transposed — because the M6 Python operator reference
+carried the same transposition, and two implementations written from one reading of the equations
+confirmed each other for a milestone. Prefer it over this project's own reference whenever the two
+disagree, and treat bit-exactness as a property of the storage decoders rather than of accumulation
+order: this reference sums in `double` where ggml sums in `float`, and their logits differ by
+0.01 to 0.06 by construction.
+
+Measured position: a token moves 8.00 GB of weights, so 1.8 tokens per second needs 14.4 GB/s of
+effective bandwidth and this engine delivers 1.16 — roughly 3% of a desktop memory bus, and 14×
+slower than llama.cpp on CPU alone. The gap is in the kernels rather than the device or the memory
+hierarchy. Do not describe any throughput here as competitive.
+
+Before trusting a number, ask under what conditions it was taken. Five checks in this milestone
+could not fail: dyadic parity values that cannot separate f32 from f64; a cost breakdown by
+subtraction; a hidden-state norm sampled after the normalization that fixes it; PCIe traffic assumed
+equal to logical bytes; and a memory reserve measured in the regime where it is not needed, then
+used to justify the regime where it is.
+
 ## Safety invariants
 
 - The Safety Governor outranks performance scheduling.

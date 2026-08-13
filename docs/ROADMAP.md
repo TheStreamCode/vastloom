@@ -368,6 +368,21 @@ recorded in the [M8 CUDA RMSNorm report](reports/M8_CUDA_RMSNORM_VALIDATION.md).
 - [x] Key the VRAM cache on what a matrix is rather than where it happens to live. Host addresses are
   recycled when expert buffers are released, so an address-keyed cache served one expert's weights
   under another's name, and the model's output changed between runs of the same command.
+- [x] Obtain an external oracle and use it. llama.cpp built from source reads this checkpoint,
+  supports both `deepseek4` and `dflash`, and tokenizes the templated prompt to the identical twelve
+  ids. It disagreed on the answer, and the disagreement was ours: `deepseek_v4_hc_post` read the
+  Sinkhorn combination matrix transposed, summing a direction nothing had normalized, so every layer
+  multiplied the residual by slightly more than one and the hidden state reached RMS 4,064 by layer
+  43. All eight strongest logits now match in order, within the f64-versus-f32 gap. The M6 Python
+  operator reference carried the same transposition and was corrected with it — two implementations
+  written from one reading of the equations had been confirming each other.
+- [x] Gate every storage decoder against ggml. Q4_K and MXFP4 were the last two without a
+  standalone parity test, and Q4_K carries the LM head; both decode bit-exactly.
+- [x] Put a bandwidth budget on the target. A token moves 8.00 GB of weights — 6.39 trunk, 2.37
+  experts — so 1.8 tokens per second needs 14.4 GB/s and the engine delivers 1.16, near 3% of a
+  desktop memory bus. Of the logical bytes 88% come from page cache and only 0.98 GB per pass
+  reaches the SSD, so storage is not the constraint; PCIe carries 8.54 GB per pass at a reuse factor
+  of 1.03, which is no reuse at all.
 - [ ] Then the rest of the layer — attention, normalization, RoPE, Hyper-Connection — after which
   keeping activations resident on the device stops being an optimisation and becomes the only
   sensible design, because nothing would need to return to the host between operations.
@@ -398,6 +413,13 @@ recorded in the [M8 CUDA RMSNorm report](reports/M8_CUDA_RMSNORM_VALIDATION.md).
   policy and not evidence against this one.
 - [ ] Count the expert loader's own read buffers in the preflight. At 32 layers it approves and the
   loader then fails on `bad_alloc`, which should have been an up-front refusal with a correct figure.
+  This is now the prerequisite for everything else rather than an accounting tidy-up. Accelerator
+  residency is a step function: the ceiling buys nothing until it exceeds the 6.39 GB trunk, and
+  4.33 GB, 5.20 GB and 1.05 GB all produce the same 8.54 GB of uploads per pass. Crossing the step
+  needs a smaller unmodelled reserve, and the reserve cannot simply be cut — shrinking it to 1 GiB
+  passed preflight and then failed in the tile loader, because the accelerator's own commit charge
+  crowded out the buffers nobody counts. Modelling them moves what the reserve stands for into the
+  arithmetic, which is the only way to shrink it honestly.
 - [ ] Pinned host buffers.
 - [ ] Direct/overlapped NVMe reads where supported.
 - [ ] Resident-trunk and bounded streamed-trunk placement profiles.

@@ -2,6 +2,232 @@
 
 ## Unreleased
 
+- **M13 first slice: an OpenAI-compatible loopback endpoint.** New `vastloom serve
+  MODEL_OR_MANIFEST [--port N]` binds `127.0.0.1` only (remote access is out of scope by
+  construction) and serves `GET /v1/models` and `POST /v1/chat/completions` from the bundled
+  TinyChat path, single-connection-at-a-time so its resource envelope stays bounded. Requests
+  are parsed by the existing `api::parse_chat_completion_request` (bounded body/messages/tokens);
+  `stream:true` is served as a real SSE stream (role frame, one delta frame per generated piece
+  through the model's own `on_text` callback, finish frame, `data: [DONE]`) - the emit callback
+  returns false once the client is gone, so a disconnect stops feeding the stream;
+  `temperature>0` is refused rather than silently served greedy, and Governor refusals surface
+  as 503 via `api::http_status_for`. Backed by a new minimal portable HTTP server
+  (`api::LoopbackServer`, Winsock/POSIX) whose oversized-body refusals drain the already
+  committed request bytes (bounded, no buffering) so the 413 reaches the client instead of a
+  connection reset. Covered by an always-on end-to-end test that does real socket round-trips
+  against the bundled fixture (models list, the deterministic "2+2 fa 4." completion, the
+  SSE stream, 404, 413 over the body ceiling). Prefix-KV session reuse - the load-bearing
+  M13 piece - remains the next step; it needs a stateful model, not the stateless TinyChat
+  fixture.
+
+- **Persist-decode validated end-to-end on the real IQ2 catalog via the new preflight.** A
+  `--dry-run` sweep at the loaded host's ~5.1 GB live budget shows the mechanism engaging
+  exactly when the overhead-inclusive resident set fits: `--layers 8/16` report
+  `persist_decode:true`, `--layers 24` fits but falls back to the prefill expert set, and
+  `--layers 32/43` refuse up front (exit 75) instead of dying mid-pass. Staging (284 MB
+  worst-case range) and the ggml pool (8 MB) are now charged. The full window-43 *timed*
+  measurement is **infeasible on a 31 GiB host**: it needs a live budget of ~9.1 GB
+  (>= ~17.1 GiB available), and at that RAM the trunk window and the persisted experts cannot
+  both be afforded - the §6.5 trade-off (persist bought with trunk residency loses) expressed
+  at the admission level. Closed as a measured constraint, not attempted by force.
+
+- **The forward preflight now charges what the runtime reserves, so an approved run cannot be
+  surprised mid-pass.** Extracted as `inference::deepseek_v4_forward_preflight` (pure, unit-
+  tested): it adds the bounded-read staging for the worst-case single source range and, when
+  `--ggml-compute` is on, the backend's graph pool, to the trunk/globals/expert resident set,
+  and only enables `persist_decode` when that whole overhead-inclusive total fits the live
+  budget. Previously the preflight checked weights alone against `ram_hard_limit` while the
+  loader and backend reserved staging and scratch on the same host budget afterwards — the
+  failure mode that passed preflight and then died in the expert loader with `bad_alloc`.
+  `--json` preflight now reports `staging_bytes` and `ggml_pool_bytes`. This is the plan's
+  "count the loader's buffers in the preflight" step; it makes refusals arrive up front
+  (exit 75) instead of as mid-pass crashes.
+
+- **The per-token bandwidth budget was an addition error, and is corrected everywhere.**
+  The catalog says 6,390,088,008 trunk bytes + 596,000,788 globals + 1,770,651,648 expert
+  bytes = 8,756,740,444, i.e. **8.76 GB/token**, not 8.00: the original figure wrote
+  6.39 + 2.37 as 8.00 and labelled the 2.37 row "experts" when it was experts plus globals.
+  Recomputed against 8.76: 1.8 tok/s needs 15.8 GB/s (not 14.4); halving expert traffic
+  bounds end-to-end gain at 1.11× (not 1.17×), 1.25× in the limit of free experts; K=7
+  speculative verification amortizes the always-active weight to 1.00 GB per accepted token
+  for a 3.2–3.7× reduction, not 4×; the IQ1_S engine delivered 2.9–3.4 GB/s effective, and
+  llama.cpp's idle 3.06–3.31 tok/s is 27–29 GB/s. Corrected in the streaming paper (with a
+  correction note in §4), `RESUME.md`, `docs/ROADMAP.md`, `README.md`, `AGENTS.md` and
+  `docs/research/PHASE_A1_SPECULATION_FEASIBILITY.md`. The executed full-depth forward read
+  exactly 1,770,651,648 expert bytes, matching the corrected derivation to the byte.
+
+- **The ggml compute gate re-passed on 2026-08-19 with the paper under revision.** Parity
+  0.084 against the 0.2 tolerance (F32 at 9.5e-7), corruption probe 0.379, benchmarks
+  167 GB/s Q8_0 cache-hot, 95 GB/s streaming, 14 GB/s IQ1_S and 0.18 GB/s scalar IQ1_S —
+  the recorded table values reproduce within machine-state variance. A fresh IQ2_XXS
+  window-43 generate was refused by the Governor under this session's host load
+  (7.69 GB required against a 3.90 GB live budget, exit 75), which is the designed outcome;
+  Table 5 of the paper keeps its recorded state-declared figures. The paper is also
+  re-rendered to PDF with the new `tools/render_paper_pdf.py` so the shareable artifact
+  carries the corrected figures.
+
+- **Docs match the IQ2 execution path.** `AGENTS.md`, `README.md`, `RESUME.md`,
+  `docs/ROADMAP.md`, `docs/MODEL_COMPATIBILITY.md`, `docs/SAFETY.md`,
+  `docs/VALIDATION_MATRIX.md` and the streaming paper now state that official
+  generate is UD-IQ2_XXS only, ~0.3 tok/s on the reference PC, and that persist
+  must not steal the trunk window.
+
+- **A quarter of routed experts come back on the next token.** 1,070 / 4,102
+  identities recurred. Persist of the last six experts per layer cut expert
+  traffic from 31.2 GB to 24.6 GB on the same prompt — and doubling the trunk
+  reloads (43 → 383) to make that persist fit made the run **slower** (6.48 vs
+  3.27 s/token). Persist stays opt-in when window 43 already fits; do not steal
+  the trunk to pay for it.
+
+- **Expert-load workers keep GGUF shard handles open for their lifetime.**
+  `BufferedReadSession` lives on the async pool thread, not process-wide, so
+  fixture overwrites still take a fresh open. IQ2 remasure on window 43 stayed
+  in the same band (3,488 vs 3,198 ms/token) with a colder page cache (42.7 GB
+  device reads vs 23.8). Not a throughput claim.
+
+- **Buffered reads hint SEQUENTIAL_SCAN instead of RANDOM_ACCESS.** Expert and
+  trunk ranges are large sequential spans; RANDOM_ACCESS was disabling Windows
+  read-ahead. A handle cache on the same shards was tried and withdrawn: it
+  served stale bytes after an in-place overwrite, and the corrupt-global gate
+  caught it. Window-43 remasure did not fit this host's live budget; a window-16
+  run under cache pressure is not a baseline.
+
+- **Official path is IQ2_XXS only.** The UD-IQ1_S store was deleted. First IQ2
+  generate on this host (43 layers, chat prompt, `--cpu-only --ggml-compute
+  --trunk-window 43`): correct `**Roma**`, stop at 10 tokens, **3,317 ms/token**
+  at 2 workers then **3,198 ms/token** at 4 workers. Overlap 4.9 → 7.8 s;
+  expert load remains most of the 32 s generate. IQ2 experts are larger than
+  IQ1; do not compare that 3.2 s/token to the 2.6 s IQ1 figure as a regression.
+
+- **Window 43 fits again, and the official 12-token run is the fastest yet:
+  2,587 ms/token.** The previous 3,063 ms/token needed a two-layer expert
+  preflight that refused this host by 400 MB (exit 75) even though peak commit
+  on the same prompt was 3.0 GB at window 12. Layers now release after they
+  finish, hash prefetch of N+1 runs only on single-token steps, and the
+  preflight charges one selected set. Same ids (`**Roma**`), 43 trunk reloads,
+  7,655 activation-quantize hits, peak commit 7.46 GB inside a 7.83 GB budget.
+  Expert load is still 23.3 s of the 31.0 s generate: that is the next fight.
+
+- **Hash-routed layer N+1 now starts loading during layer N.** `begin` no longer
+  evicts the previous layer; the graph prefetches the next hash layer before
+  attention and releases a layer only after it finishes. Peak expert residency
+  stays two layers, which the preflight already budgets. Learned-router layers
+  are unchanged: their identities are still unknown until after attention.
+  Packed-matrix matvecs reuse thread-local scratch and, with `--ggml-compute`,
+  write the ggml result straight into the row buffer.
+
+- **Expert loads no longer bounce through a second host copy, and ggml quantizes
+  each activation once.** `load_prepared_expert_bundle` now reads each source range
+  straight into the published RAM buffer. The Governor still reserves staging for
+  the largest range; the extra `memcpy` of every expert byte is gone. The ggml
+  backend keeps one graph context for the life of `--ggml-compute` and encodes
+  each F32 activation to the weight's `vec_dot` type (Q8_K for IQ1_S/IQ3_XXS,
+  Q8_0 for Q8_0) on first use, then reuses that encoding for later matvecs of
+  the same vector. Gate and up of every expert in a layer share one hidden
+  state, so they share one encode. `--json` reports `ggml_input_quantizes` and
+  `ggml_input_quantize_hits`. The reuse gate can fail: a second IQ1_S matvec
+  with the same input must not increment the quantize counter and must match
+  the first result bit for bit; a mutated input must increment it and move the
+  output. Wall time on the official checkpoint is not yet remeasured.
+
+- **Working paper.** `docs/research/CONSUMER_STREAMING_INFERENCE.md` collects the measured
+  findings as an experience / negative-results report: the per-token bandwidth budget
+  (corrected to 8.76 GB/token, see the top of this changelog), the
+  measurements that cannot fail, the eight closed directions, the ggml handoff, the
+  path-conditioned trunk-window result, and the speculative run that this host cannot
+  complete. It does not claim a faster engine.
+
+- **Hash-routed expert identities are known from the token id, so their loads now start
+  before the gate matvec.** Learned-router layers still cannot: the router reads the
+  post-attention hidden state, and prefetching N+1 during N+1's attention would be a
+  guess. On the same 12-token prompt the wall time did not move (3,063 to 3,003 ms/token,
+  inside run-to-run noise): only the first three of forty-three layers are hash-routed.
+  Generated ids unchanged. 29/29 tests.
+
+- **On CPU-only ggml, a resident trunk and overlapped expert loads cut another 36%.** The
+  earlier finding that a wider trunk window was slower was a GPU-path fact: extra host RAM
+  stole the accelerator's ceiling. With `--cpu-only --ggml-compute` that coupling is gone.
+  `--trunk-window 43` keeps every layer trunk after the first pass (43 reloads instead of 494,
+  5.94 GB of trunk traffic instead of 68.4). Two asynchronous expert workers then submit the
+  selected misses after routing; the graph computes the shared expert - which lives in the
+  trunk - while those loads run. Same prompt, 12 tokens, identical ids:
+
+  | | ms/token | trunk reloads | overlap |
+  |---|---:|---:|---:|
+  | window 2, sync | 4,816 | 494 | 0 |
+  | window 8, sync | 4,541 | 428 | 0 |
+  | window 43, sync | 3,446 | 43 | 0 |
+  | window 43, async | **3,063** | 43 | 5,017 ms |
+
+  Peak commit 7.09 GB, inside the 11 GB budget. The async queue cap moved from 64 to 256 so a
+  12-token prefill (up to 72 selected experts) can submit as one batch. `--json` now reports
+  `io_compute_overlap_ms`. Still about 10x behind llama.cpp's 302 ms/token on the same machine
+  state: the remaining cost is serial expert I/O after the shared-expert overlap is spent, and
+  IQ decode.
+
+- **Compute now delegates to ggml's kernels, and the engine is 6.5x faster - but the gap that
+  remains is streaming, not compute.** Phase C of the approved plan started with the entry
+  ticket: Vastloom's scalar reference kernels were 21x slower than llama.cpp, which buried any
+  story the streaming layer could tell. An opt-in backend now hands matrix-vector products to a
+  pinned ggml checkout (0.19.0, commit `30bf868` - the same commit the NOTICE and the parity
+  oracles already name), built static and linked behind a new `VASTLOOM_GGML_ROOT` CMake option.
+  Without the option the build is exactly what it was: the scalar reference kernels stay the
+  default and the validated path.
+
+  Enabling is explicit and governed: `deepseek-forward --ggml-compute` reserves the backend's
+  graph pool with the Governor before anything allocates, creates one ggml thread pool at the
+  Governor's thread budget, and tears both down on exit. Dispatch sits at the two existing choke
+  points - the transactional matvec and the fused routed expert - and falls back to the scalar
+  kernels call by call for types, shapes and alignments the backend declines. A backend failure is
+  an error, never a silent switch.
+
+  On the real checkpoint (43 layers, 12 tokens, `--cpu-only`, same prompt):
+
+  | | scalar | ggml backend |
+  |---|---:|---:|
+  | ms/token | 27,925 | **4,282** |
+  | expert compute | 231.3 s | 9.1 s |
+  | generated ids | `7529 113213 283 9 ...` | identical |
+  | text | `La capitale d'Italia è **Roma**.` | identical |
+
+  39,181 matvecs accelerated, 276 fell back, peak commit 1.79 GB. The ids match because the
+  backend decodes with ggml's own kernels - the bytes are the same GGUF blocks Vastloom streams -
+  and ggml quantizes the activation to the dot type exactly as llama.cpp does; greedy decoding is
+  stable across that rounding.
+
+  The new `vastloom_ggml_compute` test gates the path: Q8_0 and F32 parity against the scalar
+  reference within accumulation-plus-input-quantization noise (0.084 observed, 0.2 allowed, F32
+  at 9.5e-7), a corruption probe built so it can fail (clean backend-vs-backend comparison,
+  noise-free), and the benchmarks below. 29/29 tests pass.
+
+  The honest remainder, measured the same day on the same machine state: llama.cpp CPU runs the
+  same checkpoint at 302 ms/token, so Vastloom is still about 14x behind. The benchmarks say the
+  kernels are no longer why: Q8_0 measures 199 GB/s cache-hot and 100 GB/s streaming a 71 MB
+  matrix, at ~0.02 ms per-call overhead. What is left is the streaming itself - 494 trunk
+  reloads and governed expert loads per 12 tokens, with no overlap between read and compute - and
+  IQ decoding, where IQ1_S measures 16 GB/s cache-hot against Q8_0's 199 and the cold experts in
+  the real run averaged 3.2 GB/s. The next lever is I/O, not compute.
+
+- **Speculative decoding on the reference PC reached the machine's envelope, not a code wall.**
+  Phase A.1 of the approved plan measured llama.cpp `b1-84e908c` on the same checkpoint at
+  3.06-3.31 tok/s today (CPU-only, 12 threads, greedy, correct `**Roma**` output) — against the
+  1.51 tok/s recorded this morning with a byte-identical binary and flags. Prompt eval barely
+  moved between the two (651 vs 647 ms/token); decode halved (662 vs 326 ms/token). Batch-1
+  decode is bandwidth-bound, and machine state — page-cache warmth, background contention —
+  decides which figure a run gets. The 1.8 tok/s pinned in earlier documents is one such state,
+  not a property of the engine.
+
+  The DSpark speculative run could not be measured: initialization faults ~21 GiB of mapped
+  pages in ~8 s (76.9 GB target + 10.1 GB draft on 31.1 GiB RAM); Available Bytes reached
+  1.1 GiB before the draft began loading, and the standing safety constraint stops there.
+  Three attempts, all aborted by design; pre-warming the target's page cache did not change the
+  init profile. The attempt established one ecosystem fact regardless: llama.cpp already ships
+  first-class `draft-dspark` support (dedicated implementation, Markov head, anchor-first
+  blocks, `ctx_other` target-context wiring). Recorded verdict: the limit is the machine; the
+  strategic decision — adopt an existing engine on this hardware, or continue research where
+  target+draft fit (~48 GiB free RAM) — is open. See
+  `docs/research/PHASE_A1_SPECULATION_FEASIBILITY.md`.
+
 - **A device allocation now costs both budgets, because it costs both.** The Governor tracked VRAM
   and host RAM as separate pools while WDDM backs device memory with host commit — measured on this
   machine at one for one. So a VRAM reservation passed a check that never asked whether the host
@@ -125,9 +351,11 @@
 
   | | s/token | effective bandwidth |
   |---|---:|---:|
-  | llama.cpp, CPU | **0.55** | **14.4 GB/s** |
-  | here, hybrid GPU | 6.88 | 1.16 GB/s |
-  | here, `--cpu-only` | 28.5 | 0.28 GB/s |
+  | llama.cpp, CPU | **0.55** | **15.9 GB/s** |
+  | here, hybrid GPU | 6.88 | 1.27 GB/s |
+  | here, `--cpu-only` | 28.5 | 0.31 GB/s |
+
+  (Effective bandwidths recomputed against the corrected 8.76 GB/token budget.)
 
   Expert compute goes from 15,706 ms to 235,897 when those matvecs fall back — fifteen times — and
   that is the whole difference.
@@ -142,18 +370,20 @@
   road because it is already four times ahead.
 
   A prediction was written before the run, as usual, and it was wrong: rough parity was expected on
-  the grounds that 1.16 GB/s is nowhere near any bandwidth limit, so the device should not matter.
+  the grounds that 1.27 GB/s is nowhere near any bandwidth limit, so the device should not matter.
   It matters because our two kernel sets are not equally bad.
 
-- **A token moves 8.00 GB of weights, so 1.8 tokens per second needs 14.4 GB/s. We deliver 1.16.**
-  That is roughly 3% of what a dual-channel desktop memory bus hands over, and it reframes every
-  performance question this milestone has asked.
+- **A token moves 8.76 GB of weights, so 1.8 tokens per second needs 15.8 GB/s. We delivered
+  1.27 on this path.** (Originally logged as 8.00 GB / 14.4 GB/s / 1.16 GB/s; the budget was
+  an addition error, corrected at the top of this changelog.) That is roughly 3% of what a
+  dual-channel desktop memory bus hands over, and it reframes every performance question this
+  milestone has asked.
 
-  The target does not require a GPU: 14.4 GB/s sits inside RAM bandwidth, and llama.cpp reaches
+  The target does not require a GPU: 15.8 GB/s sits inside RAM bandwidth, and llama.cpp reaches
   1.8 tokens per second on CPU alone, which puts it near a third of the memory bus — what a
   well-written SIMD kernel achieves.
 
-  It also explains a run of null results. At 1.16 GB/s nothing is near a bandwidth limit — not
+  It also explains a run of null results. At 1.27 GB/s nothing is near a bandwidth limit — not
   PCIe, not VRAM, not RAM — which is why the accelerator ceiling between 1.05 and 2.34 GB never
   correlated with anything, and why every I/O and cache change measured this milestone hit its
   prediction on bytes and moved the clock by nothing. The gap is in the kernels, not the device and

@@ -5,7 +5,9 @@
 Vastloom is a native inference runtime, not a model and not a generic swap wrapper. Its
 purpose is to execute a validated model graph while controlling where each weight/state
 object lives and how it moves. A small CLI is included as a reference client and
-validation surface.
+validation surface. Official DeepSeek V4 Flash generate on the reference PC is the
+`UD-IQ2_XXS` GGUF through `deepseek-forward`; IQ1 is not an execution path. See
+`README.md` and `AGENTS.md` for the current measured milliseconds-per-token.
 
 ```text
                      Model adapter
@@ -874,7 +876,17 @@ router decisions or accepted output tokens.
   reference/streaming, DeepSeek Safetensors/GGUF inspection and the reduced router-first
   selected-expert reference path, plus exact non-executing DeepSeek trunk-artifact binding and
   complete reduced packed-catalog tensor-set consumption.
+- `inference/ggml_compute`: opt-in delegation of CPU matrix-vector products to a pinned ggml
+  checkout, enabled at configure time by `VASTLOOM_GGML_ROOT` and at run time by
+  `deepseek-forward --ggml-compute`. The Governor charges its fixed pool before allocation, one
+  thread pool is created at the Governor's thread budget, and both are torn down at exit.
+  Dispatch sits at the two existing choke points — the transactional matvec and the fused routed
+  expert — and falls back to the scalar reference kernels call by call. The scalar kernels remain
+  the default and the parity reference; a backend error is an error, never a silent switch.
 - `cli/`: interactive and one-shot model client commands.
+- `api/`: OpenAI request/response protocol with bounded parsing, and the loopback-only HTTP
+  server behind `vastloom serve` (single connection at a time, SSE streaming, Governor
+  refusals surfaced as HTTP 503).
 - `tools/`: pinned full/metadata import plus bounded non-executable range-artifact publication.
 
 The data plane now has device-level I/O plus a repeatable operating-system cache-bypass

@@ -3,6 +3,9 @@
 Vastloom advances only when each milestone has a measurable correctness and safety gate.
 A command existing in the CLI is not enough; it must run against a validated model path.
 
+**Now.** Official generate is `UD-IQ2_XXS` on the reference PC at about 0.3 tok/s. IQ1 is
+not an execution path. See `AGENTS.md` and the note at the top of `README.md`.
+
 ## M0 — Research harness — complete in alpha.1
 
 - [x] Native C++20/CMake project.
@@ -378,11 +381,12 @@ recorded in the [M8 CUDA RMSNorm report](reports/M8_CUDA_RMSNORM_VALIDATION.md).
   written from one reading of the equations had been confirming each other.
 - [x] Gate every storage decoder against ggml. Q4_K and MXFP4 were the last two without a
   standalone parity test, and Q4_K carries the LM head; both decode bit-exactly.
-- [x] Put a bandwidth budget on the target. A token moves 8.00 GB of weights — 6.39 trunk, 2.37
-  experts — so 1.8 tokens per second needs 14.4 GB/s and the engine delivers 1.16, near 3% of a
-  desktop memory bus. Of the logical bytes 88% come from page cache and only 0.98 GB per pass
-  reaches the SSD, so storage is not the constraint; PCIe carries 8.54 GB per pass at a reuse factor
-  of 1.03, which is no reuse at all.
+- [x] Put a bandwidth budget on the target. A token moves 8.76 GB of weights — 6.99 always
+  active (6.39 trunk plus 0.60 globals) and 1.77 selected experts — so 1.8 tokens per second
+  needs 15.8 GB/s. (The original entry reported 8.00 GB and 14.4 GB/s; that was an addition
+  error, corrected with the paper's Table 1.) Of the logical bytes 88% come from page cache
+  and only 0.98 GB per pass reaches the SSD, so storage is not the constraint; PCIe carries
+  8.54 GB per pass at a reuse factor of 1.03, which is no reuse at all.
 - [ ] Then the rest of the layer — attention, normalization, RoPE, Hyper-Connection — after which
   keeping activations resident on the device stops being an optimisation and becomes the only
   sensible design, because nothing would need to return to the host between operations.
@@ -399,7 +403,8 @@ recorded in the [M8 CUDA RMSNorm report](reports/M8_CUDA_RMSNORM_VALIDATION.md).
   Q5_K; the measurement put FP32 third and BF16 fifth, both far cheaper to write. Declines 3,432 to
   2,375.
 - [ ] Kernels for IQ2_XXS (1,092 declines), Q5_K (882), Q6_K (315) and MXFP4 (84) — all that now
-  keeps work off the device.
+  keeps work off the device. (The CPU path no longer waits on these: the opt-in ggml backend
+  covers every one of them; this item is now device-side only.)
 - [x] Establish why per-token trunk I/O cannot be cut by reading less. Streaming one matrix instead
   of one layer read exactly the same 65.3 GB and cost 19% more, because the device holds half the
   matrices and a fifteenth of the bytes: what is missing is the trunk. Rejected with numbers; the
@@ -425,12 +430,24 @@ recorded in the [M8 CUDA RMSNorm report](reports/M8_CUDA_RMSNORM_VALIDATION.md).
 - [ ] Resident-trunk and bounded streamed-trunk placement profiles.
 - [ ] VRAM/RAM expert tiers.
 - [ ] Bounded staging and cancellation-aware prefetch.
+- [x] Delegate CPU matvecs to a pinned ggml checkout (opt-in `VASTLOOM_GGML_ROOT`, runtime
+  `deepseek-forward --ggml-compute`). The scalar reference kernels stay the default and the parity
+  gates; the backend is Governor-charged, static-linked, and falls back call by call. On the real
+  checkpoint: 27.9 to 4.28 s per token (6.5x), identical generated ids and text, 39,181 matvecs
+  accelerated against 276 fallbacks. The new `vastloom_ggml_compute` test gates parity (Q8_0/F32
+  within accumulation plus input-quantization noise, corruption probe built to fail) and benchmarks:
+  Q8_0 199 GB/s cache-hot and 100 GB/s streaming 71 MB, IQ1_S 16 GB/s cache-hot. Kernels are no
+  longer the constraint; streaming I/O and IQ decode are.
 
 **Gate:** the selected target model starts within hard limits and survives injected
 short reads, OOM, cancellation and storage-pressure events.
 
 ## M10 — Adaptive expert placement
 
+- [x] Measure token-to-token expert identity recurrence on the official IQ2 path (1,070 /
+  4,102 = 26% on the pinned prompt). Persist of the last six experts per layer cuts expert
+  traffic (31.2 → 24.6 GB) and is enabled only when the 43-layer trunk already fits.
+  Stealing the trunk window to pay for persist made the run slower (6.48 s/token).
 - [ ] Per-layer LRU baseline in the real token path.
 - [ ] Frequency, reuse-distance and transfer/compute cost model.
 - [ ] Persisted workload heat with local-only privacy-safe state.
@@ -442,6 +459,8 @@ changing target router decisions.
 
 ## M11 — Predictive prefetch
 
+- [x] Exact hash-layer N+1 `begin` during layer N (three of forty-three layers). Learned
+  N+1 still cannot start until after attention.
 - [ ] One-layer router look-ahead.
 - [ ] Transfer deadline model.
 - [ ] Prefetch cancellation and stale-request handling.
@@ -457,7 +476,11 @@ prediction overhead and wasted I/O.
   distributed separately: unsloth/DeepSeek-V4-Flash-0731-GGUF ships dspark Q8_0 at 10.9 GB and BF16
   at 11.3 GB, and DeepSeek document support for up to seven speculative tokens. The quantized main
   checkpoints do not contain MTP blocks - UD-IQ1_S reports mtp_enabled false - so the draft has to be
-  loaded as its own model rather than found inside the weights.
+  loaded as its own model rather than found inside the weights. 2026-08-13: llama.cpp `b1-84e908c`
+  already ships first-class `draft-dspark` support, and the reference PC cannot host target+draft
+  within its safe RAM envelope (Available Bytes reached 1.1 GiB during init), so the measurement is
+  blocked on host capacity, not on code. See
+  `docs/research/PHASE_A1_SPECULATION_FEASIBILITY.md`.
 - [ ] Produce future routing graphs from draft tokens.
 - [ ] Batch-union and deduplicate future experts.
 - [ ] Schedule one read for expert reuse across speculative tokens.
@@ -468,13 +491,18 @@ verification costs; output remains target-model correct.
 
 ## M13 — Local service and agent integration
 
-- [ ] OpenAI-compatible loopback API. The point is not the protocol but the ecosystem: opencode,
+- [x] OpenAI-compatible loopback API. The point is not the protocol but the ecosystem: opencode,
   Continue, Aider, Zed and Claude Code all drive an OpenAI endpoint, so one server replaces every
-  client this project would otherwise have to write.
-- [ ] Streaming, cancellation, structured outputs and tool calls.
+  client this project would otherwise have to write. First slice shipped: `vastloom serve` binds
+  `127.0.0.1` only and serves `/v1/models` plus `/v1/chat/completions` (SSE streaming included)
+  from the validation model path.
+- [ ] Streaming, cancellation, structured outputs and tool calls. SSE streaming is live on the
+  loopback slice and a client disconnect stops feeding it; structured outputs and tool calls
+  remain open.
 - [ ] Session/prefix KV management. This is the load-bearing piece, not the JSON. A coding agent
   resends the same long context every turn and changes only its tail; without prefix reuse each
-  request re-runs the whole prompt, and no amount of kernel work compensates for that.
+  request re-runs the whole prompt, and no amount of kernel work compensates for that. It needs a
+  stateful model wired to the endpoint, not the stateless TinyChat fixture.
 - [ ] Request-level resource budgets and watchdog integration.
 - [ ] Coding-agent compatibility tests.
 
@@ -483,7 +511,9 @@ and the server binds to loopback unless remote access is explicitly configured.
 
 ## M14 — Model and backend expansion
 
-- [ ] Complete and execute the official DeepSeek V4 Flash 0731/DSpark profile.
+- [x] Execute official DeepSeek V4 Flash 0731 generate on the reference PC (`UD-IQ2_XXS`,
+  `--cpu-only --ggml-compute --trunk-window 43`, greedy `**Roma**`). Throughput is about
+  0.3 tok/s; DSpark/speculative measurement remains blocked on host RAM.
 - [x] Reference decoder for IQ2_S, which had blocked the UD-IQ2_XXS checkpoint. 82-byte blocks, a
   1,024-entry grid addressed by ten bits of which two come from a per-group high-bit byte, two
   four-bit scales per group of 32 and explicit sign bytes - a different format from IQ2_XXS, not a

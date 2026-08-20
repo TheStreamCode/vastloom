@@ -52,6 +52,12 @@ tensor slices; destroys scratch before releasing staging; and keeps its use leas
 packed bytes are destroyed. Short reads, bounds failures and cancellation publish `FAILED` only
 after temporary buffers have been released.
 
+The optional ggml compute backend is governed on the same terms. `--ggml-compute` reserves the
+backend's fixed graph pool through the Governor before anything allocates, creates one thread pool
+sized to the Governor's thread budget rather than the machine's core count, and tears both down
+when the command exits. Shapes, types and alignments the backend declines fall back to the scalar
+reference kernels call by call; a backend failure is an error and never a silent substitution.
+
 The non-routed layer-tile loader follows the same publication rule. A plan may be derived from
 metadata, but payload loading is rejected until the catalog has executable sources. Before a
 single tile is allocated, the loader checks its exact tensor-relative offset against the catalog,
@@ -60,7 +66,7 @@ RAM destination and staging charge. Cancellation is checked before admission and
 short reads or late cancellation release the transfer and both reservations before publishing
 `FAILED`. A successful buffer keeps a use lease until its bytes are destroyed.
 
-The shared asynchronous expert pool keeps one to four fixed workers and one to 64 queued
+The shared asynchronous expert pool keeps one to four fixed workers and one to 256 queued
 requests. Each request reserves its complete destination and bounded staging before enqueue. A
 second capacity check rolls those reservations back if another submitter filled the queue or
 shutdown began. Shutdown fails queued requests, completes their futures, releases their
@@ -224,10 +230,11 @@ The pinned DeepSeek V4 Flash preview inspection path is intentionally non-execut
 The opt-in authorizes only an immutable download. It does not imply that the runtime can
 execute the checkpoint, and it does not relax the 300 GiB default free-space reserve.
 The newer official 0731 release, Unsloth GGUF variants and Laguna S 2.1 have separate identities.
-The exact 0731 `UD-IQ1_S` profile now has its own pinned importer and source-admission boundary;
-this is not authorization to execute a layer or generate tokens. A user-supplied URL never
-bypasses revision pinning, license review, exact size/hash catalogs or the large-download
-interlock.
+The 0731 GGUF family has a pinned importer and source-admission boundary. Execution on the
+reference PC is `UD-IQ2_XXS` through `deepseek-forward` after a live Governor preflight;
+exit 75 is a correct refusal. Do not execute or advertise `UD-IQ1_S`. A user-supplied URL
+never bypasses revision pinning, license review, exact size/hash catalogs or the
+large-download interlock.
 
 The 0731 GGUF reader adds a metadata-only safety boundary:
 

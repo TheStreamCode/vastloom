@@ -2,6 +2,10 @@
 
 Validation date: 2026-08-09
 
+The project was named Stargate Local AI when this report was written; the commands below are
+recorded as they were run. The binary is now `vastloom`, so `stargate <command>` reads
+`vastloom <command>` today. Nothing else in this snapshot has been rewritten.
+
 ## Scope
 
 Alpha 2 validates one complete native CPU inference path:

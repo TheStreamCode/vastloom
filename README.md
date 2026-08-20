@@ -22,8 +22,24 @@ goal is practical local inference for giant sparse Mixture-of-Experts models on 
 consumer hardware—without uncontrolled swapping, surprise resource exhaustion or destructive
 model conversion.
 
+> [!NOTE]
+> **Current measured position (August 2026, reference PC: 31 GiB RAM, RTX 4070 Super).**
+> Official generate is **UD-IQ2_XXS only**. The UD-IQ1_S store was deleted; do not run or
+> cite IQ1 as product quality. `deepseek-forward --cpu-only --ggml-compute --trunk-window 43`
+> produces the llama.cpp-correct greedy answer (`**Roma**` on the pinned Italian prompt) at
+> about **3.2–3.5 s/token** (~0.3 tok/s), page-cache dependent. llama.cpp on CPU was
+> 0.30–0.33 s/token on the earlier IQ1 profile when idle. Expert I/O dominates. 26% of
+> selected experts recur on the next token; keeping them across decode saves expert traffic
+> but must not steal the 43-layer trunk window (that trade made the run slower). The
+> Governor refuses with exit 75 when the live budget is short. This is correct generation,
+> not a usable interactive rate. The long note below is a chronological lab log; where it
+> disagrees with this box, this box wins.
+
 > [!IMPORTANT]
-> **Current source — `0.4.0-alpha.4` plus unreleased DeepSeek and multitier-control slices.**
+> **Lab log — `0.4.0-alpha.4` plus unreleased DeepSeek and multitier-control slices.**
+> Historical figures in this note (60 s/token, 6.9 s GPU, “kernels are the gap”,
+> “generation unvalidated”) are superseded by the box above. They stay as the path that
+> got here.
 > Vastloom now runs the routed token path of the pinned 13.84 GB
 > `allenai/OLMoE-1B-7B-0924-Instruct` checkpoint on CPU while keeping only the
 > always-active trunk and a bounded expert cache in RAM. Native logits, top-8 routes
@@ -139,9 +155,10 @@ model conversion.
 >
 > **Against that oracle the engine is 14× slower on its GPU path than llama.cpp is on CPU alone** —
 > 6.9 s per token against 0.55, same machine, same checkpoint, twelve threads each. A token moves
-> 8.00 GB of weights, so 1.8 tokens per second needs 14.4 GB/s of effective bandwidth and we deliver
-> 1.16, about 3% of a desktop memory bus. The gap is in the kernels, not the device and not the
-> memory hierarchy: a matvec measured 17× off the bandwidth it could reach.
+> 8.76 GB of weights, so 1.8 tokens per second needs 15.8 GB/s of effective bandwidth and this path
+> delivered 1.27, a few percent of a desktop memory bus. (Originally logged as 8.00 GB and 14.4 GB/s;
+> corrected — an addition error, see the streaming paper's Table 1.) The gap is in the kernels, not
+> the device and not the memory hierarchy: a matvec measured 17× off the bandwidth it could reach.
 >
 > **A full-depth token went from 48,970 ms to about 8,000 in one day of work** — 6.1×, and 7.5×
 > against the original serial implementation's 60,301 — with the output byte-identical at every
@@ -715,6 +732,18 @@ Interactive commands:
 The TinyChat fixture is intentionally stateless. The CLI keeps command state and the
 latest metrics, but it does not concatenate conversation history for this model.
 
+## Serve a local OpenAI-compatible endpoint
+
+```powershell
+./build/vastloom serve examples/models/vastloom-tinychat-v1.sgtm --port 8099
+```
+
+Exposes `GET /v1/models` and `POST /v1/chat/completions` (including `"stream": true`
+server-sent events) on `127.0.0.1` only - remote access is out of scope by construction.
+One connection at a time, bounded request bodies, Governor refusals surfaced as HTTP 503.
+This is the M13 endpoint slice on the validation model; prefix-KV session reuse is the
+next milestone piece.
+
 ## Chat with the real SmolLM2 checkpoint
 
 Initialize the external store and import the pinned checkpoint. Model files remain
@@ -1099,9 +1128,11 @@ It currently has:
 - no VRAM expert tier or pinned host buffers; direct/unbuffered I/O is currently an
   opt-in OLMoE measurement protocol, not the production path for every adapter;
 - OLMoE currently exposes final-logit probes and route telemetry, not decoding/chat;
-- expert kernels remain scalar CPU reference implementations; the asynchronous selected-expert
-  scheduler uses one to four bounded workers, permits one active batch per cache and defaults to
-  ordinary buffered file I/O;
+- the scalar CPU kernels remain the default and the parity reference; production CPU speed
+  requires the opt-in ggml backend (`VASTLOOM_GGML_ROOT` at configure time, `--ggml-compute` at
+  run time), and the CUDA path covers Q8_0/IQ1_S/IQ3_XXS matvec only. The asynchronous
+  selected-expert scheduler uses one to four bounded workers, permits one active batch per cache
+  and defaults to ordinary buffered file I/O;
 - device counters and a repeatable OS-cache-bypass protocol are available where the
   checkpoint has an unambiguous local-device mapping, but whole-device deltas can include
   unrelated traffic and SSD temperature/power telemetry is not implemented;

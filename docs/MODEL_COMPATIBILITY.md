@@ -14,7 +14,8 @@ or matching tensor dimensions is never enough to enable execution automatically.
 | OLMoE-1B-7B-0924-Instruct | Pinned shards, top-k routes, expert streaming and I/O telemetry | Validated CPU expert streaming |
 | `deepseek-ai/DeepSeek-V4-Flash` preview at `60d8d707...` | Header catalog, tokenizer, reduced main+MTP prefill, five incremental cache steps and exact eight-token greedy/portable seeded generation | Reduced FP32 reference execution only |
 | `deepseek-ai/DeepSeek-V4-Flash-0731` at `7872f01b...` | Public metadata/config reviewed on 2026-08-10 | Not imported, inspected or executed by Vastloom yet |
-| `unsloth/DeepSeek-V4-Flash-0731-GGUF` at `fbbb5b93...` | Pinned atomic importer, verified metadata binding, exact metadata-derived native config, all-layer 1,193-descriptor consumer contract and full 1,328-physical/34,223-logical checkpoint-catalog closure; 43 bounded layer-trunk plans, exact layer-0 trunk+top-6 range planning, exact six-global planning, bounded immutable partial-artifact import with real trunk/global dry-runs, native closed-world range verification/exact trunk and global binding, aggregate governed tensor-set loading, all trunk storage types plus Q4_K globals covered by scalar references, one router-first governed reduced Q8_0/IQ1_S/IQ3_XXS layer, reduced packed global prefill/decode and bounded generation-lifecycle parity, alternate reduced IQ2_XXS/IQ3_XXS and IQ1_S/MXFP4 expert parity, and canonical synchronous/asynchronous cache-to-kernel parity on one real expert | The complete reduced packed trunk and six-global catalogs reach the synthetic graph through aggregate artifact buffers; one separate extracted official expert also executes. Q4_K, IQ2_XXS and MXFP4 have pinned scalar kernels and bounded row lookup. The checkpoint-shaped official-payload path remains non-executing, its expert IDs are not yet authoritative and no official trunk/global payload was downloaded; complete shards, official layer/token and official-payload generation remain unvalidated |
+| `unsloth/DeepSeek-V4-Flash-0731-GGUF` `UD-IQ2_XXS` | Same catalog/importer/kernel evidence as the 0731 GGUF family, plus full-depth `deepseek-forward` generate on the reference PC | **Execution path.** Greedy 43-layer generate matches the llama.cpp oracle on the pinned prompt. About 3.2–3.5 s/token with `--cpu-only --ggml-compute --trunk-window 43`. Not interactive. |
+| `unsloth/DeepSeek-V4-Flash-0731-GGUF` `UD-IQ1_S` (`fbbb5b93...`) | Catalog, importer, IQ1_S/IQ3_XXS kernels and earlier generate measurements | **Do not execute.** Store deleted on the reference PC. Historical tests and reports only. |
 | `unsloth/Laguna-S-2.1` at `1a646907...` | Public config, custom-code and shard metadata reviewed on 2026-08-10 | Adapter and execution not implemented |
 | Kimi K3-class profiles | Public-roadmap capacity/traffic study only | Not a reference-PC execution target unless one exact complete expert passes the single-tier gate |
 
@@ -39,7 +40,8 @@ profiles range from 82,539,237,792 bytes (`UD-IQ1_S`) to 161,869,615,520 bytes
 bounded GGUF metadata/tensor reader and quantization-specific parity tests; no profile may be
 selected through silent quality degradation.
 
-The bounded catalog and immutable source-admission boundary are now implemented for `UD-IQ1_S`.
+The bounded catalog and immutable source-admission boundary were first implemented for
+`UD-IQ1_S`. Product execution on the reference PC is `UD-IQ2_XXS` only.
 Native inspection of the
 three split headers validates 1,328 physical tensors and slices the 129 packed expert matrices
 into 11,008 logical layer/expert bundles. The catalog accounts for 75,547,803,648 routed-expert
@@ -273,7 +275,7 @@ submit all selected misses before acquiring them at each expert's fixed compute 
 synthetic bundles use the same IQ1_S gate/up plus IQ3_XXS down format combination as the real
 profile. A controlled fixture proves positive service/compute intersection with exact output
 parity. The general pool supports
-one to four workers, a queue of at most 64 requests, pre-enqueue reservations and safe queued-work
+one to four workers, a queue of at most 256 requests, pre-enqueue reservations and safe queued-work
 cancellation; the current cache permits one active asynchronous batch and drains/counts successful
 unused loads as wasted prefetch. No test yet overlaps real official-payload multi-expert I/O with
 compute; direct I/O remains in the OLMoE-specific measurement path.

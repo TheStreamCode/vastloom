@@ -12,12 +12,15 @@ the machine for it to run at all.
 
 | Layer | What runs | Where |
 |---|---|---|
-| Always-on | 13 tests with inputs committed to the repository | every local build and every CI job |
+| Always-on | 14 tests with inputs committed to the repository | every local build and every CI job |
 | Opt-in model tests | 13 tests gated behind `VASTLOOM_*` CMake paths | only where the operator supplies the inputs |
 | Live GPU test | the real CUDA kernel inside `vastloom_cuda_cli` | only on a host with an NVIDIA driver and enough free RAM |
 
 Two of the opt-in tests consume official DeepSeek weight payload, which exists only after an
-explicitly authorised import. They are the only tests that touch real model weights.
+explicitly authorised import. They are the only *automated* tests that touch real model
+weights. Full-depth IQ2_XXS generate (`deepseek-forward --layers 43`) is a manual
+measurement on the reference PC, not a CI job. Record cache state, `--trunk-window`, and
+whether decode persist was charged when citing its milliseconds-per-token.
 
 A test that is not configured is silently absent from `ctest`, not reported as skipped. A passing
 `ctest` run therefore means "everything configured on this machine passed", never "every claim in
@@ -30,9 +33,10 @@ need a Python 3 interpreter, which CMake detects with `find_package(Python3)`.
 
 | Test | Claim it defends |
 |---|---|
-| `vastloom_tests` | core, safety, planner, catalog, residency, quantization and graph unit contracts |
+| `vastloom_tests` | core, safety, planner, catalog, residency, quantization and graph unit contracts; loopback OpenAI endpoint end-to-end (models list, deterministic completion, SSE stream, 404/413) |
 | `vastloom_range_artifact` | closed-world range-artifact reader, rehashing and forged-binding refusal |
 | `vastloom_cuda_driver` | CUDA driver boundary against the deterministic fake backend, including injected faults |
+| `vastloom_ggml_compute` | ggml backend parity against the scalar reference, a corruption probe built to fail, and the input-quantization reuse contract. Registered unconditionally, but it exits 75 (skipped) unless the build was configured with `VASTLOOM_GGML_ROOT` |
 | `vastloom_cli_tiny_chat` | bundled TinyTransformer answers its registered prompt |
 | `vastloom_cli_tiny_self_test` | bundled manifest verification and self-test path |
 | `vastloom_cli_tiny_integration` | streaming, JSON and resource-limit CLI behaviour on the tiny model |
@@ -135,6 +139,9 @@ different claims, and only the first one is evidence.
 - Base commit: `30256fe`.
 - Configured layers: always-on plus all 11 opt-in model tests.
 - Result: **24 registered, 14 passed, 10 skipped, 0 failed.**
+
+That snapshot predates the ggml backend, so it does not cover `vastloom_ggml_compute` and its
+always-on count is one lower than today's. The full matrix has not been re-run since.
 
 The ten skips were not a property of the code. An unrelated application held 12–20 GiB of RAM for
 the whole session, leaving 0.3–7.8 GiB free against the Governor's 8 GiB headroom requirement, so

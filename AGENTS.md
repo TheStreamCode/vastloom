@@ -6,7 +6,26 @@ This file applies to the entire repository. Human-facing contribution rules are 
 ## Mission and current boundary
 
 Vastloom is a native, hardware-adaptive local inference runtime that treats VRAM, RAM and
-NVMe as a model-aware hierarchy. The current validated paths are the synthetic TinyTransformer,
+NVMe as a model-aware hierarchy.
+
+**Execution checkpoint.** Official DeepSeek V4 Flash 0731 generate on the reference PC uses
+only `UD-IQ2_XXS` (`deepseek-v4-flash-0731-iq2xxs`). Do not run, measure, or claim product
+quality on IQ1 / `UD-IQ1_S`; that store was deleted. The IQ1_S decoder and reduced-graph
+fixtures remain as historical tests, not as the execution path.
+
+**Current measured position (reference PC, `--cpu-only --ggml-compute --trunk-window 43`).**
+Full 43-layer greedy generate is correct against the llama.cpp oracle (`**Roma**` on the
+pinned Italian prompt). IQ2_XXS: about **3.2–3.5 s/token** (~0.3 tok/s), page-cache
+dependent. llama.cpp CPU on the earlier IQ1 profile was 0.30–0.33 s/token idle. Expert I/O
+is most of the generate. 26% of selected expert identities recur on the next token; keeping
+those six-per-layer across decode cuts expert traffic (31.2 → 24.6 GB) but stealing the
+trunk window to afford that persist made the run slower (6.48 s/token). Persist is on only
+when window 43 already fits the live budget. Exit 75 is a correct Governor refusal.
+
+The longer boundary below is a lab log. Where it says official generate is unvalidated or
+that the remaining gap is missing kernels, this paragraph wins.
+
+The current validated fixture paths are the synthetic TinyTransformer,
 SmolLM2 dense CPU inference, OLMoE CPU expert streaming and a non-executing DeepSeek V4 Flash
 metadata/header inspector plus a closed-world non-executing partial-range trunk binder, native
 tokenizer/basic chat framing and bounded equation-level reference operators. A deterministic
@@ -96,20 +115,19 @@ artifacts, and token 0 runs through Q8_0 attention, Q5_K/Q6_K shared expert, BF1
 IQ1_S/IQ3_XXS experts and Q4_K embedding to produce 129,280 deterministic layer-0 logits. That is
 one layer of 43 and every command reports it as such. `deepseek-forward` executes to an explicit
 `--layers` depth straight from a complete checkpoint, refusing in advance any depth whose exact
-resident cost exceeds the live safe RAM budget; the full 43-layer pass needs 7,056,343,388 bytes.
-Full-depth execution, generation and any throughput claim remain unvalidated.
+resident cost exceeds the live safe RAM budget. Full-depth IQ2_XXS generate is validated on the
+reference PC (see the execution paragraph at the top of this file). Complete CUDA model
+inference is still not a claim: the GPU path is reference kernels plus one RMSNorm smoke, not
+a full device graph.
 
-The first official payload is now local. Hash-routed layers select experts by table lookup, so the
-imported layer-0 trunk (21 ranges, 138,867,160 bytes) answers the routing question without executing
-anything: `deepseek_v4_resolve_hash_route` reads the pinned `blk.0.ffn_gate_tid2eid` table through
-the governed rehashed range path and token 0 resolves to experts 35, 53, 200, 222, 245 and 254. That
-`official-tid2eid-verified` authority opened the previously refused selected-expert scope and
-imported those six complete bundles (18 ranges, 38,928,384 bytes). Learned-router layers remain
-unresolvable without execution and are refused. A complete
-0731 quantized layer/token
-path, physical NVMe overlap,
-official-payload generation and complete CUDA model inference remain unvalidated: nothing has yet
-been executed from the imported payload.
+The first official payload is local. Hash-routed layers select experts by table lookup, so the
+imported layer-0 trunk (21 ranges, 138,867,160 bytes) answers the routing question without
+needing a learned gate: `deepseek_v4_resolve_hash_route` reads the pinned
+`blk.0.ffn_gate_tid2eid` table through the governed rehashed range path. Token 0 on that
+table resolves to experts 35, 53, 200, 222, 245 and 254. Learned-router layers need the
+post-attention hidden state; hash N+1 can prefetch during N, learned N+1 cannot. Physical
+device-vs-logical byte counters are reported; do not treat logical expert bytes as SSD
+traffic.
 Windows and Linux CPU paths are tested; macOS/Metal remain unvalidated. Laguna S 2.1 remains a
 reviewed compatibility target, not a validated execution path.
 
@@ -132,10 +150,11 @@ disagree, and treat bit-exactness as a property of the storage decoders rather t
 order: this reference sums in `double` where ggml sums in `float`, and their logits differ by
 0.01 to 0.06 by construction.
 
-Measured position: a token moves 8.00 GB of weights, so 1.8 tokens per second needs 14.4 GB/s of
-effective bandwidth and this engine delivers 1.16 — roughly 3% of a desktop memory bus, and 14×
-slower than llama.cpp on CPU alone. The gap is in the kernels rather than the device or the memory
-hierarchy. Do not describe any throughput here as competitive.
+Measured position: a token still moves 8.76 GB of weights (6.99 GB always-active trunk plus
+globals, 1.77 GB selected experts). After the opt-in ggml backend the remaining gap to
+llama.cpp is streaming structure and expert I/O, not missing AVX-512 kernels. Do not describe
+any throughput here as competitive. Do not compare an IQ2_XXS second-per-token to an older
+IQ1_S figure as if they were the same experiment.
 
 Before trusting a number, ask under what conditions it was taken. Five checks in this milestone
 could not fail: dyadic parity values that cannot separate f32 from f64; a cost breakdown by
@@ -151,6 +170,8 @@ used to justify the regime where it is.
 - Treat original model weights as immutable. Publish derived artifacts only after temporary
   creation, validation, checksum and atomic rename.
 - Never add generic uncontrolled swap, implicit precision loss or unverified fallback behavior.
+- Do not execute or advertise IQ1 / UD-IQ1_S as the product path. Execution is IQ2_XXS or
+  higher.
 - On pressure, reduce cache/prefetch/speculation first. On emergency, abort generation and release
   resources instead of risking host instability.
 - Keep Windows paths Unicode-safe and common code portable to Linux.

@@ -5,6 +5,7 @@
 #include <chrono>
 #include <cmath>
 #include <cstddef>
+#include <cstdlib>
 #include <filesystem>
 #include <fstream>
 #include <iostream>
@@ -17,7 +18,24 @@
 #include <thread>
 #include <vector>
 
+#ifdef _WIN32
+#ifndef NOMINMAX
+#define NOMINMAX
+#endif
+#ifndef WIN32_LEAN_AND_MEAN
+#define WIN32_LEAN_AND_MEAN
+#endif
+#include <winsock2.h>
+#include <ws2tcpip.h>
+#else
+#include <arpa/inet.h>
+#include <netinet/in.h>
+#include <sys/socket.h>
+#include <unistd.h>
+#endif
+
 #include "vastloom/api/openai_protocol.hpp"
+#include "vastloom/api/loopback_server.hpp"
 #include "vastloom/core/bytes.hpp"
 #include "vastloom/hardware/hardware_probe.hpp"
 #include "vastloom/inference/gpt2_tokenizer.hpp"
@@ -27,6 +45,7 @@
 #include "vastloom/inference/deepseek_v4_model.hpp"
 #include "vastloom/inference/deepseek_v4_range_artifact.hpp"
 #include "vastloom/inference/deepseek_v4_reference.hpp"
+#include "vastloom/inference/deepseek_v4_preflight.hpp"
 #include "vastloom/inference/llama_model.hpp"
 #include "vastloom/inference/olmoe_model.hpp"
 #include "vastloom/inference/olmoe_runtime.hpp"
@@ -7013,6 +7032,84 @@ void test_planner() {
         overflow_hardware, manifest, vastloom::planner::Profile::balanced));
 }
 
+void test_deepseek_v4_preflight() {
+    using vastloom::ByteCount;
+    const ByteCount MiB = 1024U * 1024U;
+    auto base = [&]() {
+        vastloom::inference::DeepseekV4ForwardPreflightInput in;
+        in.trunk_bytes = 4300U * MiB;
+        in.global_bytes = 600U * MiB;
+        in.largest_expert_bundle = 8U * MiB;
+        in.largest_source_range = 32U * MiB;
+        in.depth = 43U;
+        in.experts_per_token = 6U;
+        in.expert_count = 256U;
+        in.prompt_tokens = 12U;
+        in.expert_cache_entries = 8U;
+        in.trunk_window = 43U;
+        in.max_tokens = 12U;
+        in.staging_hard_limit = 512U * MiB;
+        return in;
+    };
+
+    // resident trunk at a full window is the whole trunk; the prefill expert set is the larger
+    // of the prompt union and the cache; staging is the worst-case single range.
+    {
+        auto in = base();
+        in.ram_budget = 5508U * MiB;  // 4300 trunk + 600 globals + 576 experts + 32 staging
+        const auto plan = vastloom::inference::deepseek_v4_forward_preflight(in);
+        CHECK(plan.resident_trunk_bytes == 4300U * MiB);
+        CHECK(plan.expert_cache_bytes == 576U * MiB);
+        CHECK(plan.staging_charge == 32U * MiB);
+        CHECK(plan.ggml_charge == 0U);
+        CHECK(plan.required_bytes == 5508U * MiB);
+        CHECK(plan.fits);
+        CHECK(!plan.persist_decode);  // persist set (2064 MiB) does not fit this budget
+    }
+
+    // The compute pool and staging are charged up front: a budget that fits the weights alone
+    // must refuse once the backend pool is added, so an approved preflight cannot be surprised
+    // by a reservation it never counted.
+    {
+        auto in = base();
+        in.ram_budget = 5508U * MiB;
+        in.ggml_pool_bytes = 8U * MiB;
+        const auto plan = vastloom::inference::deepseek_v4_forward_preflight(in);
+        CHECK(plan.ggml_charge == 8U * MiB);
+        CHECK(plan.required_bytes == 5516U * MiB);
+        CHECK(!plan.fits);
+    }
+
+    // Persist decode engages only when the whole resident set, overhead included, fits.
+    {
+        auto in = base();
+        in.ram_budget = 7004U * MiB;  // 4300 + 600 + 2064 persist + 40 overhead
+        in.ggml_pool_bytes = 8U * MiB;
+        const auto plan = vastloom::inference::deepseek_v4_forward_preflight(in);
+        CHECK(plan.persist_decode);
+        CHECK(plan.expert_cache_bytes == 2064U * MiB);
+        CHECK(plan.fits);
+    }
+    {
+        auto in = base();
+        in.ram_budget = 7003U * MiB;  // one byte short of the persist set
+        in.ggml_pool_bytes = 8U * MiB;
+        const auto plan = vastloom::inference::deepseek_v4_forward_preflight(in);
+        CHECK(!plan.persist_decode);
+        CHECK(plan.expert_cache_bytes == 576U * MiB);
+        CHECK(plan.fits);
+    }
+
+    // Staging never exceeds its Governor limit even when one range is larger.
+    {
+        auto in = base();
+        in.largest_source_range = 1024U * MiB;
+        in.ram_budget = 6000U * MiB;
+        const auto plan = vastloom::inference::deepseek_v4_forward_preflight(in);
+        CHECK(plan.staging_charge == 512U * MiB);
+    }
+}
+
 void test_io_pool(const std::filesystem::path& root) {
     const auto path = root / std::filesystem::path(std::u8string(u8"io-àccènt.bin"));
     {
@@ -7411,6 +7508,208 @@ void test_tiny_model(const std::filesystem::path& root) {
     CHECK(!vastloom::inference::TinyModel::load(model_path, tiny_governor));
 }
 
+namespace {
+struct RawHttpResponse {
+    int status = 0;
+    std::string body;
+};
+
+// Minimal loopback HTTP client for exercising the server end to end.
+RawHttpResponse http_round_trip(std::uint16_t port, const std::string& method,
+                                const std::string& path, const std::string& body) {
+    RawHttpResponse out;
+#ifdef _WIN32
+    using sock_t = SOCKET;
+    constexpr sock_t kInvalid = INVALID_SOCKET;
+    auto close_sock = [](sock_t s) { closesocket(s); };
+#else
+    using sock_t = int;
+    constexpr sock_t kInvalid = -1;
+    auto close_sock = [](sock_t s) { ::close(s); };
+#endif
+    sock_t s = ::socket(AF_INET, SOCK_STREAM, IPPROTO_TCP);
+    if (s == kInvalid) return out;
+    sockaddr_in addr{};
+    addr.sin_family = AF_INET;
+    addr.sin_addr.s_addr = ::htonl(INADDR_LOOPBACK);
+    addr.sin_port = ::htons(port);
+    if (::connect(s, reinterpret_cast<sockaddr*>(&addr), sizeof(addr)) != 0) {
+        close_sock(s);
+        return out;
+    }
+    std::string request = method + " " + path + " HTTP/1.1\r\nHost: 127.0.0.1\r\n";
+    if (!body.empty()) request += "Content-Length: " + std::to_string(body.size()) + "\r\n";
+    request += "Connection: close\r\n\r\n" + body;
+    std::size_t sent = 0U;
+    while (sent < request.size()) {
+        const int n = ::send(s, request.data() + sent,
+                             static_cast<int>(request.size() - sent), 0);
+        if (n <= 0) break;
+        sent += static_cast<std::size_t>(n);
+    }
+    std::string raw;
+    char buf[4096];
+    for (;;) {
+        const int n = ::recv(s, buf, sizeof(buf), 0);
+        if (n <= 0) break;
+        raw.append(buf, static_cast<std::size_t>(n));
+    }
+    close_sock(s);
+    const auto space = raw.find(' ');
+    if (space != std::string::npos) out.status = std::atoi(raw.c_str() + space + 1);
+    const auto header_end = raw.find("\r\n\r\n");
+    if (header_end != std::string::npos) out.body = raw.substr(header_end + 4);
+    return out;
+}
+}  // namespace
+
+void test_loopback_server() {
+    const auto model_path = std::filesystem::path(VASTLOOM_SOURCE_DIR) /
+                            "examples/models/vastloom-tinychat-v1.sgtm";
+    vastloom::safety::ResourceLimits limits;
+    limits.ram_hard_limit = 128U * vastloom::MiB;
+    limits.vram_hard_limit = 1U * vastloom::MiB;
+    limits.staging_hard_limit = 16U * vastloom::MiB;
+    limits.scratch_hard_limit = 64U * vastloom::MiB;
+    auto governor = std::make_unique<vastloom::safety::ResourceGovernor>(limits);
+    auto model = vastloom::inference::TinyModel::load(model_path, *governor);
+    CHECK(model);
+    if (!model) return;
+
+    auto* model_ptr = &model.value();
+    auto* governor_ptr = governor.get();
+    const std::string model_id = model.value().config().model_id;
+    vastloom::api::LoopbackHandler handler =
+        [model_ptr, governor_ptr, model_id](const vastloom::api::HttpRequest& request) {
+            vastloom::api::HttpResponse response;
+            if (request.method == "GET" && request.path == "/v1/models") {
+                auto body = vastloom::api::serialize_model_list(model_id, 0U);
+                response.body = body ? body.take_value() : "[]";
+                return response;
+            }
+            if (request.method == "POST" && request.path == "/v1/chat/completions") {
+                auto parsed = vastloom::api::parse_chat_completion_request(request.body);
+                if (!parsed) {
+                    response.status = vastloom::api::http_status_for(parsed.error().code);
+                    response.body = vastloom::api::serialize_error(parsed.error().message, "invalid_request_error", response.status);
+                    return response;
+                }
+                std::string prompt;
+                for (const auto& message : parsed.value().messages) {
+                    if (!prompt.empty()) prompt += '\n';
+                    prompt += message.content;
+                }
+                if (parsed.value().stream) {
+                    vastloom::api::ChatCompletionResponse skeleton;
+                    skeleton.id = "chatcmpl-test";
+                    skeleton.model = model_id;
+                    skeleton.created = 0U;
+                    const std::size_t stream_max = parsed.value().max_tokens;
+                    response.streaming = true;
+                    response.status = 200;
+                    response.produce = [model_ptr, governor_ptr, prompt, skeleton,
+                                        stream_max](const std::function<bool(std::string_view)>& emit) {
+                        vastloom::inference::GenerationOptions options;
+                        options.max_new_tokens = stream_max;
+                        options.temperature = 0.0F;
+                        options.top_k = 1U;
+                        auto skel = skeleton;
+                        bool first = true;
+                        bool alive = true;
+                        options.on_text = [&](std::string_view piece) {
+                            if (!alive) return;
+                            auto chunk = vastloom::api::serialize_chat_completion_chunk(skel, piece, first, false);
+                            first = false;
+                            if (!chunk) { alive = false; return; }
+                            alive = emit("data: " + chunk.take_value() + "\n\n");
+                        };
+                        auto result = model_ptr->generate(prompt, options, *governor_ptr);
+                        skel.finish_reason =
+                            (result && result.value().stats.stopped_on_max_tokens) ? "length" : "stop";
+                        if (alive) {
+                            auto last = vastloom::api::serialize_chat_completion_chunk(skel, "", false, true);
+                            if (last) alive = emit("data: " + last.take_value() + "\n\n");
+                        }
+                        if (alive) emit("data: [DONE]\n\n");
+                    };
+                    return response;
+                }
+                vastloom::inference::GenerationOptions options;
+                options.max_new_tokens = parsed.value().max_tokens;
+                options.temperature = parsed.value().temperature.has_value()
+                                          ? static_cast<float>(*parsed.value().temperature)
+                                          : 0.0F;
+                options.top_k = parsed.value().temperature.has_value() ? 40U : 1U;
+                auto result = model_ptr->generate(prompt, options, *governor_ptr);
+                if (!result) {
+                    response.status = vastloom::api::http_status_for(result.error().code);
+                    response.body = vastloom::api::serialize_error(result.error().message, "api_error", response.status);
+                    return response;
+                }
+                vastloom::api::ChatCompletionResponse completion;
+                completion.id = "chatcmpl-test";
+                completion.model = model_id;
+                completion.content = result.value().text;
+                completion.finish_reason = result.value().stats.stopped_on_max_tokens ? "length" : "stop";
+                completion.prompt_tokens = result.value().stats.prompt_tokens;
+                completion.completion_tokens = result.value().stats.generated_tokens;
+                auto body = vastloom::api::serialize_chat_completion_response(completion);
+                response.body = body ? body.take_value() : "{}";
+                return response;
+            }
+            response.status = 404;
+            response.body = vastloom::api::serialize_error("unknown route", "not_found", 404);
+            return response;
+        };
+
+    vastloom::api::LoopbackServer server;
+    auto started = server.start(0, std::move(handler), 1U * 1024U * 1024U);
+    CHECK(started);
+    if (!started) return;
+    CHECK(server.running());
+    const auto port = server.port();
+    CHECK(port != 0);
+
+    const auto models = http_round_trip(port, "GET", "/v1/models", "");
+    CHECK(models.status == 200);
+    CHECK(models.body.find(model_id) != std::string::npos);
+
+    const std::string chat_body =
+        "{\"model\":\"" + model_id +
+        "\",\"messages\":[{\"role\":\"user\",\"content\":\"Quanto fa 2+2?\"}]}";
+    const auto chat = http_round_trip(port, "POST", "/v1/chat/completions", chat_body);
+    CHECK(chat.status == 200);
+    CHECK(chat.body.find("4") != std::string::npos);  // deterministic vector: "2+2 fa 4."
+    CHECK(chat.body.find("\"finish_reason\":\"stop\"") != std::string::npos);
+
+    const std::string stream_body =
+        "{\"model\":\"" + model_id +
+        "\",\"stream\":true,\"messages\":[{\"role\":\"user\",\"content\":\"Quanto fa 2+2?\"}]}";
+    const auto streamed = http_round_trip(port, "POST", "/v1/chat/completions", stream_body);
+    CHECK(streamed.status == 200);
+    CHECK(streamed.body.find("data:") != std::string::npos);
+    CHECK(streamed.body.find("chat.completion.chunk") != std::string::npos);
+    CHECK(streamed.body.find("4") != std::string::npos);  // streamed delta carries the answer
+    CHECK(streamed.body.find("data: [DONE]") != std::string::npos);
+
+    const auto missing = http_round_trip(port, "GET", "/nope", "");
+    CHECK(missing.status == 404);
+
+    // temperature > 0 is honoured with the model's own top-k sampler, not served greedy in disguise
+    const std::string temp_body =
+        "{\"model\":\"" + model_id +
+        "\",\"temperature\":0.7,\"messages\":[{\"role\":\"user\",\"content\":\"ciao\"}]}";
+    const auto with_temp = http_round_trip(port, "POST", "/v1/chat/completions", temp_body);
+    CHECK(with_temp.status == 200);
+
+    const std::string too_big((1U * 1024U * 1024U) + 1U, 'x');
+    const auto big = http_round_trip(port, "POST", "/v1/chat/completions", too_big);
+    CHECK(big.status == 413);
+
+    server.stop();
+    CHECK(!server.running());
+}
+
 void test_heartbeat(const std::filesystem::path& root) {
     const auto path = root / "heartbeat";
     vastloom::safety::HeartbeatRecord heartbeat;
@@ -7459,10 +7758,12 @@ int main() {
     test_manifest_and_verifier(root);
     test_governor();
     test_planner();
+    test_deepseek_v4_preflight();
     test_io_pool(root);
     test_device_io_counters(root);
     test_trace(root);
     test_tiny_model(root);
+    test_loopback_server();
     test_heartbeat(root);
     std::error_code error;
     std::filesystem::remove_all(root, error);

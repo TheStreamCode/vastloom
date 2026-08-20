@@ -32,6 +32,8 @@
 #include "vastloom/inference/deepseek_v4_range_artifact.hpp"
 #include "vastloom/inference/deepseek_v4_model.hpp"
 #include "vastloom/inference/deepseek_v4_reference.hpp"
+#include "vastloom/inference/ggml_compute.hpp"
+#include "vastloom/inference/deepseek_v4_preflight.hpp"
 #include "vastloom/inference/llama_model.hpp"
 #include "vastloom/inference/olmoe_model.hpp"
 #include "vastloom/inference/olmoe_runtime.hpp"
@@ -233,6 +235,8 @@ void print_help() {
         << "      Inspect a runnable TinyChat or imported SmolLM2 checkpoint.\n\n"
         << "  self-test MODEL_OR_MANIFEST [--no-verify] [--json]\n"
         << "      Run adapter-specific deterministic end-to-end generation probes.\n\n"
+        << "  serve MODEL_OR_MANIFEST [--port N] [--no-verify]\n"
+        << "      Expose an OpenAI-compatible chat-completions endpoint on 127.0.0.1 only.\n\n"
         << "  doctor [--storage PATH] [--json]\n"
         << "      Detect CPU, RAM, NVIDIA VRAM and storage without allocating model memory.\n\n"
         << "  cuda-info [--allocation-smoke SIZE|--rmsnorm-smoke]"
@@ -2598,7 +2602,7 @@ int command_deepseek_forward(const std::vector<std::string>& args) {
         {"--token", "--layers", "--context", "--batch-size", "--expert-cache", "--trunk-window", "--prompt",
          "--tokenizer", "--max-tokens", "--continue-ids", "--gpu-limit", "--gpu-reserve",
          "--dump-hidden"},
-        {"--json", "--dry-run", "--chat", "--cpu-only"});
+        {"--json", "--dry-run", "--chat", "--cpu-only", "--ggml-compute"});
     if (!valid) return print_error(valid.error(), json);
     if (args.empty() || vastloom::util::starts_with(args.front(), "--")) {
         return print_error(
@@ -2727,6 +2731,7 @@ int command_deepseek_forward(const std::vector<std::string>& args) {
     vastloom::ByteCount trunk_bytes = 0U;
     vastloom::ByteCount global_bytes = 0U;
     vastloom::ByteCount largest_expert = 0U;
+    vastloom::ByteCount largest_source_range = 0U;
     for (const auto& tensor : report.value().catalog.tensors) {
         if (tensor.role == vastloom::model::TensorRole::routed_expert) continue;
         if (!tensor.layer.has_value()) {
@@ -2734,35 +2739,49 @@ int command_deepseek_forward(const std::vector<std::string>& args) {
         } else if (*tensor.layer < depth) {
             trunk_bytes += tensor.source.bytes;
         }
+        largest_source_range = std::max(largest_source_range, tensor.source.bytes);
     }
     for (const auto& bundle : report.value().catalog.experts) {
         largest_expert = std::max(largest_expert, bundle.bytes);
+        for (const auto& range : bundle.read_ranges) {
+            largest_source_range = std::max(largest_source_range, range.bytes);
+        }
     }
-    // A synchronous resolve hands the graph every expert the layer selected at once, so one layer's
-    // cache must hold all of them: up to one distinct bundle per token per slot. Earlier layers
-    // release theirs as the graph advances, so the peak is two layers' worth rather than all 43 -
-    // the outgoing one may still be releasing while the incoming one loads.
+    auto trunk_window = optional_size(args, "--trunk-window", 2U);
+    if (!trunk_window) return print_error(trunk_window.error(), json);
+    std::size_t trunk_window_capacity = std::max<std::size_t>(1U, trunk_window.value());
+    const auto budget = policy.value().resources.ram_hard_limit;
+
+    // The runtime reserves, against the same host budget this preflight checks, more than the
+    // weights themselves: bounded reads hold staging for their largest range, and the opt-in
+    // ggml backend holds its graph pool as scratch. Charge both up front so an approved
+    // preflight cannot be surprised by a reservation it never counted - the failure mode that
+    // used to die in the expert loader with bad_alloc after a green preflight.
+    vastloom::inference::DeepseekV4ForwardPreflightInput preflight_input;
+    preflight_input.trunk_bytes = trunk_bytes;
+    preflight_input.global_bytes = global_bytes;
+    preflight_input.largest_expert_bundle = largest_expert;
+    preflight_input.largest_source_range = largest_source_range;
+    preflight_input.depth = depth;
+    preflight_input.experts_per_token = config.value().experts_per_token;
+    preflight_input.expert_count = config.value().expert_count;
+    preflight_input.prompt_tokens = token_ids.size();
+    preflight_input.expert_cache_entries = expert_cache.value();
+    preflight_input.trunk_window = trunk_window_capacity;
+    preflight_input.max_tokens = max_tokens.value();
+    preflight_input.ram_budget = budget;
+    preflight_input.staging_hard_limit = policy.value().resources.staging_hard_limit;
+    preflight_input.ggml_pool_bytes =
+        has_flag(args, "--ggml-compute")
+            ? static_cast<vastloom::ByteCount>(vastloom::inference::GgmlComputeOptions{}.pool_bytes)
+            : 0U;
+    const auto preflight = vastloom::inference::deepseek_v4_forward_preflight(preflight_input);
+    const auto expert_bytes = preflight.expert_cache_bytes;
+    const bool persist_decode = preflight.persist_decode;
+    const auto required = preflight.required_bytes;
     const auto per_layer_experts = std::min<std::size_t>(
         token_ids.size() * config.value().experts_per_token, config.value().expert_count);
     const auto cache_size = std::max<std::size_t>(expert_cache.value(), per_layer_experts);
-    const auto expert_bytes = largest_expert * cache_size * std::min<std::size_t>(depth, 2U);
-    // Trunks are streamed through a bounded window rather than all held, so what a pass needs is a
-    // few layers' worth, not the whole depth. This is what lets a machine run a model larger than
-    // its RAM: the floor stops scaling with the model and starts scaling with one layer. Charged as
-    // the window's capacity plus one spare layer, and against the largest layer rather than the
-    // average, because a refusal that comes too late is worse than one that comes too early.
-    // How many layer trunks stay resident. Two is enough to execute, but reloading each layer on
-    // every token is itself expensive, and holding more trades host RAM - and therefore the
-    // accelerator's ceiling - against that I/O. Which side wins depends on the machine, so it is a
-    // knob rather than a constant.
-    auto trunk_window = optional_size(args, "--trunk-window", 2U);
-    if (!trunk_window) return print_error(trunk_window.error(), json);
-    const std::size_t kTrunkWindowCapacity = std::max<std::size_t>(1U, trunk_window.value());
-    const auto average_trunk = depth == 0U ? 0U : trunk_bytes / depth;
-    const auto resident_trunk_bytes =
-        std::min(trunk_bytes, average_trunk * (kTrunkWindowCapacity + 1U) * 2U);
-    const auto required = resident_trunk_bytes + global_bytes + expert_bytes;
-    const auto budget = policy.value().resources.ram_hard_limit;
 
     // Planning works from metadata alone; executing does not. Say which of the two this store
     // supports rather than letting a green preflight imply a runnable model.
@@ -2774,6 +2793,10 @@ int command_deepseek_forward(const std::vector<std::string>& args) {
                   << ",\"trunk_bytes\":" << trunk_bytes
                   << ",\"global_bytes\":" << global_bytes
                   << ",\"expert_cache_bytes\":" << expert_bytes
+                  << ",\"trunk_window\":" << trunk_window_capacity
+                  << ",\"persist_decode\":" << (persist_decode ? "true" : "false")
+                  << ",\"staging_bytes\":" << preflight.staging_charge
+                  << ",\"ggml_pool_bytes\":" << preflight.ggml_charge
                   << ",\"required_bytes\":" << required
                   << ",\"ram_budget_bytes\":" << budget
                   << ",\"system_headroom_bytes\":"
@@ -2788,6 +2811,8 @@ int command_deepseek_forward(const std::vector<std::string>& args) {
                   << "Globals:              " << global_bytes << " bytes\n"
                   << "Expert cache ceiling: " << expert_bytes << " bytes ("
                   << expert_cache.value() << " bundles)\n"
+                  << "Read staging:         " << preflight.staging_charge << " bytes\n"
+                  << "Compute pool:         " << preflight.ggml_charge << " bytes\n"
                   << "Required:             " << required << " bytes\n"
                   << "Safe RAM budget:      " << budget << " bytes\n"
                   << "Host headroom kept:   "
@@ -2807,6 +2832,21 @@ int command_deepseek_forward(const std::vector<std::string>& args) {
     if (has_flag(args, "--dry-run")) return 0;
 
     vastloom::safety::ResourceGovernor governor(policy.value().resources);
+    // Opt-in: delegate CPU matvecs to the pinned ggml checkout instead of the scalar reference
+    // kernels. The Governor charges the backend's fixed pool up front, before anything allocates.
+    struct GgmlComputeScope {
+        bool active{false};
+        ~GgmlComputeScope() {
+            if (active) vastloom::inference::ggml_compute_disable();
+        }
+    } ggml_scope;
+    if (has_flag(args, "--ggml-compute")) {
+        vastloom::inference::GgmlComputeOptions ggml_options;
+        ggml_options.threads = policy.value().cpu_threads;
+        auto ggml_ready = vastloom::inference::ggml_compute_enable(governor, ggml_options);
+        if (!ggml_ready) return print_error(ggml_ready.error(), json);
+        ggml_scope.active = true;
+    }
     auto layer_config = config.value();
     // The Governor's thread budget, not the machine's core count: the policy already decided how
     // much of the CPU this process may take while leaving the host usable.
@@ -3036,7 +3076,7 @@ int command_deepseek_forward(const std::vector<std::string>& args) {
     window.catalog = &report.value().catalog;
     window.config = &graph.config;
     window.governor = &governor;
-    window.capacity = kTrunkWindowCapacity;
+    window.capacity = trunk_window_capacity;
     window.accelerator = accelerator.get();
 
     // Each layer keeps its own bounded expert cache: the 256 bundles of layer N are a different set
@@ -3120,30 +3160,33 @@ int command_deepseek_forward(const std::vector<std::string>& args) {
         cache_options.block_prefix = "layers." + std::to_string(layer) + ".ffn";
         cache_options.max_cached_experts = cache_size;
         cache_options.max_experts_per_request = per_layer_experts;
+        // Four workers submit every selected miss after routing. The graph then computes the
+        // shared expert (trunk-resident) while those loads run, and acquires each routed
+        // expert at its compute turn. Two workers left expert I/O on the critical path
+        // (24 s of a 33 s IQ2 generate); four is the cache bound. Queue equals the per-layer
+        // request cap so a batch never waits on itself.
+        cache_options.asynchronous_workers = 4U;
+        cache_options.asynchronous_queue_capacity = per_layer_experts;
         auto cache = vastloom::inference::DeepseekV4BoundedExpertCache::create(
             bindings.take_value(), governor, cache_options);
         if (!cache) return print_error(cache.error(), json);
 
-        // A layer's experts are dead the moment the next layer asks for its own, and the graph
-        // walks layers in order. Releasing the earlier caches here caps expert residency at one
-        // layer's working set instead of letting it accumulate across all 43 - which is what
-        // otherwise makes the cost scale with prompt length. A release that fails leaves the memory
-        // charged rather than pretending it is free; the Governor then refuses later work.
-        auto binding = cache.value()->provider_binding();
-        vastloom::inference::DeepseekV4ExpertProviderBinding staged;
-        staged.max_experts_per_request = binding.max_experts_per_request;
-        auto* live = &caches;
-        staged.resolve = [live, layer, resolve = binding.resolve](
-                             std::string_view block_prefix,
-                             std::span<const std::uint32_t> ids) {
-            for (std::size_t earlier = 0U; earlier < layer && earlier < live->size(); ++earlier) {
-                [[maybe_unused]] const auto released = (*live)[earlier]->clear();
-            }
-            return resolve(block_prefix, ids);
-        };
-        graph.expert_providers.emplace(cache_options.block_prefix, std::move(staged));
+        // Release happens after the layer finishes, not when the next layer begins, so a
+        // hash-routed N+1 prefetch can load while N still holds its experts. Peak residency is
+        // two layers (current plus one prefetched hash layer), which the preflight already
+        // budgets. A release that fails leaves the memory charged.
+        graph.expert_providers.emplace(cache_options.block_prefix,
+                                       cache.value()->provider_binding());
         caches.push_back(cache.take_value());
     }
+    graph.release_layer_experts = [&caches, persist_decode](std::size_t layer, bool persist) {
+        if (layer >= caches.size()) return;
+        if (persist && persist_decode) {
+            [[maybe_unused]] const auto kept = caches[layer]->retain_last_selected();
+        } else {
+            [[maybe_unused]] const auto released = caches[layer]->clear();
+        }
+    };
     graph.matrix_provider = [&window](std::string_view name) { return window.get(name); };
     const auto load_elapsed = std::chrono::duration<double, std::milli>(
         std::chrono::steady_clock::now() - load_started).count();
@@ -3220,11 +3263,24 @@ int command_deepseek_forward(const std::vector<std::string>& args) {
                       << ",\"finish_reason\":\""
                       << vastloom::inference::to_string(generated.value().finish_reason)
                       << "\",\"text\":\"" << vastloom::util::json_escape(text)
-                      << "\",\"expert_bytes_read\":" << stats.logical_expert_bytes_read
+                      << "\",\"expert_bytes_read\":" << stats.logical_expert_bytes_read;
+        {
+            std::size_t recurrent = 0U;
+            std::size_t requested = 0U;
+            for (const auto& cache : caches) {
+                const auto snap = cache->snapshot();
+                recurrent += snap.recurrent_experts;
+                requested += snap.requested_experts;
+            }
+            std::cout << ",\"expert_recurrent\":" << recurrent
+                      << ",\"expert_requested\":" << requested;
+        }
+        std::cout
                       // Where a token's time actually goes: reading experts off NVMe against
                       // multiplying by them. Optimising the wrong one of these is easy to do blind.
                       << ",\"expert_load_ms\":" << stats.expert_load_service_ms
                       << ",\"expert_compute_ms\":" << stats.expert_compute_ms
+                      << ",\"io_compute_overlap_ms\":" << stats.io_compute_overlap_ms
                       << ",\"forward_passes\":" << stats.forward_passes
                       << ",\"resident_bytes\":" << required
                       // What the process actually peaked at, against what the preflight charged.
@@ -3238,6 +3294,14 @@ int command_deepseek_forward(const std::vector<std::string>& args) {
                       // What the accelerator was allowed to hold, so a run that declines most of
                       // its matvecs shows whether it ran out of room or out of supported types.
                       << ",\"gpu_resident_limit\":" << gpu_resident_limit
+                      // What the opt-in ggml backend took, against what fell back to the scalar
+                      // reference kernels. Zero and zero means the backend was not enabled.
+                      << ",\"ggml_matvecs\":" << vastloom::inference::ggml_compute_accelerated_count()
+                      << ",\"ggml_fallbacks\":" << vastloom::inference::ggml_compute_fallback_count()
+                      << ",\"ggml_input_quantizes\":"
+                      << vastloom::inference::ggml_compute_input_quantize_count()
+                      << ",\"ggml_input_quantize_hits\":"
+                      << vastloom::inference::ggml_compute_input_quantize_hits()
                       // Trunk reads that happened, against requests served from the device without
                       // one. The second number is I/O the streaming window did not have to pay.
                       << ",\"trunk_reloads\":" << window.reloads
@@ -3283,9 +3347,22 @@ int command_deepseek_forward(const std::vector<std::string>& args) {
                       << vastloom::inference::to_string(generated.value().finish_reason) << ")\n"
                       << "Output:               " << text << '\n'
                       << "GPU matvecs:          " << gpu_stats.accelerated << " accelerated, "
-                      << gpu_stats.declined << " on CPU ("
-                      << vastloom::format_bytes(gpu_stats.resident_bytes) << " resident)\n"
-                      << "Expert bytes read:    " << stats.logical_expert_bytes_read << '\n'
+                       << gpu_stats.declined << " on CPU ("
+                       << vastloom::format_bytes(gpu_stats.resident_bytes) << " resident)\n";
+            if (vastloom::inference::ggml_compute_enabled() ||
+                vastloom::inference::ggml_compute_accelerated_count() != 0U) {
+                std::cout << "ggml matvecs:         "
+                          << vastloom::inference::ggml_compute_accelerated_count()
+                          << " accelerated, "
+                          << vastloom::inference::ggml_compute_fallback_count()
+                          << " fell back to scalar\n"
+                          << "ggml activations:     "
+                          << vastloom::inference::ggml_compute_input_quantize_count()
+                          << " quantized, "
+                          << vastloom::inference::ggml_compute_input_quantize_hits()
+                          << " reused\n";
+            }
+            std::cout << "Expert bytes read:    " << stats.logical_expert_bytes_read << '\n'
                       << "Weight load:          " << load_elapsed << " ms\n"
                       << "Generation:           " << generate_elapsed << " ms";
             if (stats.generated_tokens != 0U) {
@@ -4050,6 +4127,9 @@ int dispatch_cli(const std::vector<std::string>& arguments) {
             std::error_code error;
             if (!args.empty() && std::filesystem::is_directory(cli_path(args[0]), error)) return command_real_self_test(args);
             return vastloom::cli::command_self_test(args);
+        }
+        if (command == "serve") {
+            return vastloom::cli::command_serve(args);
         }
         if (command == "doctor") return command_doctor(args);
         if (command == "cuda-info") return command_cuda_info(args);

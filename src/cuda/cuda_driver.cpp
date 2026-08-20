@@ -2989,10 +2989,13 @@ Result<CudaAllocation> CudaDriver::allocate(
         }
         if (!cleanup_succeeded) {
             reservation.value().abandon_accounting_on_external_release_failure();
+            // The device allocation is still live, so its host commit is too. Releasing the paired
+            // host reservation here would hand the Governor back RAM the machine cannot supply.
+            host_reservation.abandon_accounting_on_external_release_failure();
             quarantine_backend(backend_);
             return make_error(
                 ErrorCode::integrity_error,
-                "CUDA backend returned an invalid handle and cleanup failed; VRAM accounting remains charged");
+                "CUDA backend returned an invalid handle and cleanup failed; VRAM and host accounting remain charged");
         }
         return make_error(ErrorCode::integrity_error,
                           "CUDA backend returned an invalid allocation handle");

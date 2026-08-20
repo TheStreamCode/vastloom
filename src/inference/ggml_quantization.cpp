@@ -16,6 +16,8 @@
 #include <utility>
 #include <vector>
 
+#include "vastloom/inference/ggml_compute.hpp"
+
 namespace vastloom::inference {
 namespace {
 
@@ -1575,6 +1577,19 @@ Result<void> matvec_ggml_f32_transactional(
     }
 
     Result<void> status;
+    // Opt-in ggml backend: when it is enabled and can take this exact call, run it; otherwise
+    // stay on the validated scalar path. A backend error is a real failure, not a reason to
+    // switch silently, so only shape/type/alignment mismatches fall back.
+    if (ggml_compute_enabled()) {
+        if (ggml_compute_can_run(ggml_type, encoded_matrix.data(), rows, columns)) {
+            status = matvec_ggml_backend(
+                ggml_type, encoded_matrix, rows, columns, input, scratch);
+            if (!status) return status.error();
+            std::copy(scratch.begin(), scratch.end(), output.begin());
+            return {};
+        }
+        ggml_compute_note_fallback();
+    }
     switch (ggml_type) {
         case kGgmlTypeF32:
             status = matvec_f32_le_f32(
@@ -1656,11 +1671,31 @@ Result<void> routed_expert_iq1_s_iq3_xxs_f32(
     }
 
     const std::size_t expert_width = scratch.gate.size();
-    auto gate_status = matvec_iq1_s_f32(
-        gate_matrix, expert_width, input.size(), input, scratch.gate, limits);
+    // One expert matvec, through the opt-in ggml backend when it can take the call and through
+    // the bounded scalar reference kernel otherwise. The fused path keeps its scalar SwiGLU; only
+    // the three products move.
+    const auto multiply = [&limits](std::uint32_t type,
+                                    std::span<const std::byte> matrix,
+                                    std::size_t rows,
+                                    std::size_t columns,
+                                    std::span<const float> vector,
+                                    std::span<float> destination) -> Result<void> {
+        if (ggml_compute_enabled()) {
+            if (ggml_compute_can_run(type, matrix.data(), rows, columns)) {
+                return matvec_ggml_backend(type, matrix, rows, columns, vector, destination);
+            }
+            ggml_compute_note_fallback();
+        }
+        if (type == kGgmlTypeIq1S) {
+            return matvec_iq1_s_f32(matrix, rows, columns, vector, destination, limits);
+        }
+        return matvec_iq3_xxs_f32(matrix, rows, columns, vector, destination, limits);
+    };
+    auto gate_status = multiply(
+        kGgmlTypeIq1S, gate_matrix, expert_width, input.size(), input, scratch.gate);
     if (!gate_status) return gate_status.error();
-    auto up_status = matvec_iq1_s_f32(
-        up_matrix, expert_width, input.size(), input, scratch.up, limits);
+    auto up_status = multiply(
+        kGgmlTypeIq1S, up_matrix, expert_width, input.size(), input, scratch.up);
     if (!up_status) return up_status.error();
     for (std::size_t index = 0U; index < expert_width; ++index) {
         const float gate = scratch.gate[index];
@@ -1671,8 +1706,8 @@ Result<void> routed_expert_iq1_s_iq3_xxs_f32(
         }
         scratch.gate[index] = activated;
     }
-    auto down_status = matvec_iq3_xxs_f32(
-        down_matrix, output.size(), expert_width, scratch.gate, scratch.down, limits);
+    auto down_status = multiply(
+        kGgmlTypeIq3Xxs, down_matrix, output.size(), expert_width, scratch.gate, scratch.down);
     if (!down_status) return down_status.error();
     std::copy(scratch.down.begin(), scratch.down.end(), output.begin());
     return {};

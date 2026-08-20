@@ -8,6 +8,7 @@
 #include <filesystem>
 #include <functional>
 #include <future>
+#include <memory>
 #include <mutex>
 #include <span>
 #include <string>
@@ -31,6 +32,25 @@ enum class IoCacheMode : std::uint8_t {
 [[nodiscard]] Result<void> read_buffered_range_into(const std::filesystem::path& path,
                                                      ByteCount offset,
                                                      std::span<std::byte> destination);
+
+// Keeps a few shard handles open for the life of one worker. Expert generate hits the same
+// two or three GGUF files thousands of times; this is not a process-wide cache, so a later
+// overwrite of a fixture file still goes through a fresh open.
+class BufferedReadSession {
+public:
+    BufferedReadSession();
+    BufferedReadSession(const BufferedReadSession&) = delete;
+    BufferedReadSession& operator=(const BufferedReadSession&) = delete;
+    ~BufferedReadSession();
+
+    [[nodiscard]] Result<void> read_into(const std::filesystem::path& path,
+                                         ByteCount offset,
+                                         std::span<std::byte> destination);
+
+private:
+    struct Impl;
+    std::unique_ptr<Impl> impl_;
+};
 
 // Reads a range with the caller's choice of page-cache behaviour.
 //

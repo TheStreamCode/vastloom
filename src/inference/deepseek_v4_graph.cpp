@@ -2,6 +2,7 @@
 
 #include "vastloom/inference/deepseek_v4_gguf.hpp"
 #include "vastloom/inference/deepseek_v4_range_artifact.hpp"
+#include "vastloom/inference/ggml_compute.hpp"
 #include "vastloom/inference/ggml_quantization.hpp"
 #include "vastloom/model/expert_loader.hpp"
 #include "vastloom/model/layer_streaming.hpp"
@@ -647,6 +648,90 @@ Result<std::vector<std::uint32_t>> integer_tensor(
     return found->second;
 }
 
+Result<std::vector<std::uint32_t>> unique_hash_experts(
+    const DeepseekV4ReferenceGraph& graph,
+    std::string_view block_prefix,
+    std::span<const std::uint32_t> token_ids) {
+    const auto& config = graph.config;
+    const std::string base = std::string(block_prefix) + ".ffn";
+    auto table = integer_tensor(graph, base + ".gate.tid2eid",
+                                {config.vocabulary_size, config.experts_per_token});
+    if (!table) return table.error();
+    try {
+        std::vector<std::uint32_t> unique;
+        unique.reserve(std::min(token_ids.size() * config.experts_per_token,
+                                config.expert_count));
+        for (const auto token : token_ids) {
+            if (token >= config.vocabulary_size) {
+                return make_error(ErrorCode::invalid_argument,
+                                  "DeepSeek hash route token id exceeds its table",
+                                  std::to_string(token));
+            }
+            for (std::size_t slot = 0U; slot < config.experts_per_token; ++slot) {
+                const auto expert_id =
+                    table.value()[token * config.experts_per_token + slot];
+                if (expert_id >= config.expert_count) {
+                    return make_error(ErrorCode::invalid_format,
+                                      "DeepSeek router selected an out-of-range expert",
+                                      base);
+                }
+                if (std::find(unique.begin(), unique.end(), expert_id) == unique.end()) {
+                    unique.push_back(expert_id);
+                }
+            }
+        }
+        return unique;
+    } catch (const std::bad_alloc&) {
+        return make_error(ErrorCode::resource_exhausted,
+                          "Unable to allocate the bounded selected-expert set", base);
+    }
+}
+
+Result<void> prefetch_hash_layer(const DeepseekV4ReferenceGraph& graph,
+                                 std::size_t layer,
+                                 std::span<const std::uint32_t> token_ids) {
+    if (layer >= graph.config.hash_layer_count || token_ids.size() != 1U) return {};
+    const std::string base = "layers." + std::to_string(layer) + ".ffn";
+    if (graph.prefetched_batches != nullptr &&
+        graph.prefetched_batches->batches.contains(base)) {
+        return {};
+    }
+    const auto provider = graph.expert_providers.find(base);
+    if (provider == graph.expert_providers.end() || !provider->second.begin) return {};
+    auto ids = unique_hash_experts(graph, "layers." + std::to_string(layer), token_ids);
+    if (!ids) return ids.error();
+    if (ids.value().empty() ||
+        ids.value().size() > provider->second.max_experts_per_request) {
+        return make_error(ErrorCode::resource_exhausted,
+                          "Selected-expert request exceeds its configured bound", base);
+    }
+    auto begun = provider->second.begin(base, ids.value());
+    if (!begun) return begun.error();
+    if (begun.value() == nullptr) {
+        return make_error(ErrorCode::integrity_error,
+                          "Selected-expert provider returned an empty batch", base);
+    }
+    try {
+        if (graph.prefetched_batches == nullptr) {
+            graph.prefetched_batches = std::make_shared<DeepseekV4ReferenceGraph::PrefetchTable>();
+        }
+        graph.prefetched_batches->batches[base] = begun.take_value();
+    } catch (const std::bad_alloc&) {
+        return make_error(ErrorCode::resource_exhausted,
+                          "Unable to retain a prefetched expert batch", base);
+    }
+    return {};
+}
+
+void release_layer_experts(const DeepseekV4ReferenceGraph& graph, std::size_t layer,
+                           bool persist) {
+    const std::string base = "layers." + std::to_string(layer) + ".ffn";
+    if (graph.prefetched_batches != nullptr) {
+        graph.prefetched_batches->batches.erase(base);
+    }
+    if (graph.release_layer_experts) graph.release_layer_experts(layer, persist);
+}
+
 Result<std::vector<float>> linear(std::span<const float> input,
                                   std::span<const float> weight,
                                   std::size_t rows,
@@ -728,9 +813,14 @@ Result<std::vector<float>> linear_packed_matrix(
     }
     auto finite = finite_values(input, context);
     if (!finite) return finite.error();
-    std::vector<float> padded_input(matrix.storage_columns, 0.0F);
-    std::vector<float> scratch(output_width);
-    std::vector<float> row_output(output_width);
+    // Decode is one token and one matrix at a time. Reusing these three buffers across the
+    // thousands of matvecs in a pass avoids a malloc/free pair on every call.
+    thread_local std::vector<float> padded_input;
+    thread_local std::vector<float> scratch;
+    thread_local std::vector<float> row_output;
+    padded_input.assign(matrix.storage_columns, 0.0F);
+    scratch.resize(output_width);
+    row_output.resize(output_width);
     std::vector<float> output(output_count.value());
     QuantizedKernelLimits limits;
     limits.max_elements = storage_count.value();
@@ -753,12 +843,26 @@ Result<std::vector<float>> linear_packed_matrix(
         if (!accelerated) {
             auto encoded = host_payload();
             if (!encoded) return encoded.error();
-            auto multiplied = matvec_ggml_f32_transactional(
-                matrix.ggml_type, encoded.value(), matrix.rows, matrix.storage_columns,
-                padded_input, scratch, row_output, limits);
-            if (!multiplied) {
-                return make_error(multiplied.error().code, multiplied.error().message,
-                                  std::string(name) + ": " + multiplied.error().context);
+            // ggml writes the row directly. The transactional scratch copy exists for the
+            // scalar path, where a mid-row failure must not publish a partial result.
+            if (ggml_compute_enabled() &&
+                ggml_compute_can_run(matrix.ggml_type, encoded.value().data(), matrix.rows,
+                                     matrix.storage_columns)) {
+                auto multiplied = matvec_ggml_backend(
+                    matrix.ggml_type, encoded.value(), matrix.rows, matrix.storage_columns,
+                    padded_input, row_output);
+                if (!multiplied) {
+                    return make_error(multiplied.error().code, multiplied.error().message,
+                                      std::string(name) + ": " + multiplied.error().context);
+                }
+            } else {
+                auto multiplied = matvec_ggml_f32_transactional(
+                    matrix.ggml_type, encoded.value(), matrix.rows, matrix.storage_columns,
+                    padded_input, scratch, row_output, limits);
+                if (!multiplied) {
+                    return make_error(multiplied.error().code, multiplied.error().message,
+                                      std::string(name) + ": " + multiplied.error().context);
+                }
             }
         }
         std::copy(row_output.begin(), row_output.end(),
@@ -1821,49 +1925,9 @@ Result<MoeResult> moe_forward(const DeepseekV4ReferenceGraph& graph,
     const float shared_swiglu_limit = has_schedules
         ? config.shared_expert_swiglu_limits[clamp_layer]
         : config.swiglu_limit;
-    auto gate_logits = linear_tensor(graph, base + ".gate.weight", input,
-                                     token_count, config.width,
-                                     config.expert_count, base + ".gate");
-    if (!gate_logits) return gate_logits.error();
-    Result<DeepseekV4RouteResult> route = make_error(
-        ErrorCode::internal_error, "DeepSeek route was not initialized");
-    if (hash_route) {
-        auto table = integer_tensor(graph, base + ".gate.tid2eid",
-                                    {config.vocabulary_size, config.experts_per_token});
-        if (!table) return table.error();
-        route = deepseek_v4_route_hash_logits(
-            gate_logits.value(), token_ids, table.value(), token_count,
-            config.vocabulary_size, config.expert_count,
-            config.experts_per_token, config.route_scale);
-    } else {
-        auto bias = float_tensor(graph, base + ".gate.bias", {config.expert_count});
-        if (!bias) return bias.error();
-        route = deepseek_v4_route_learned_logits(
-            gate_logits.value(), bias.value(), token_count, config.expert_count,
-            config.experts_per_token, config.route_scale);
-    }
-    if (!route) return route.error();
-    std::vector<std::uint32_t> requested_experts;
-    try {
-        requested_experts.reserve(std::min(route.value().indices.size(),
-                                           config.expert_count));
-        for (const auto expert_id : route.value().indices) {
-            if (expert_id >= config.expert_count) {
-                return make_error(ErrorCode::invalid_format,
-                                  "DeepSeek router selected an out-of-range expert",
-                                  base);
-            }
-            if (std::find(requested_experts.begin(), requested_experts.end(),
-                          expert_id) == requested_experts.end()) {
-                requested_experts.push_back(expert_id);
-            }
-        }
-    } catch (const std::bad_alloc&) {
-        return make_error(ErrorCode::resource_exhausted,
-                          "Unable to allocate the bounded selected-expert set",
-                          base);
-    }
 
+    std::vector<std::uint32_t> hash_table;
+    std::vector<std::uint32_t> requested_experts;
     std::vector<DeepseekV4ResolvedExpert> resolved_experts;
     std::unique_ptr<DeepseekV4ExpertBatch> pending_batch;
     std::vector<std::pair<std::uint32_t, DeepseekV4LayerTrace::ExpertAccess>>
@@ -1872,7 +1936,40 @@ Result<MoeResult> moe_forward(const DeepseekV4ReferenceGraph& graph,
                           std::chrono::steady_clock::time_point>>
         compute_windows;
     const auto provider = graph.expert_providers.find(base);
-    if (provider != graph.expert_providers.end()) {
+    if (graph.prefetched_batches != nullptr) {
+        if (auto prefetched = graph.prefetched_batches->batches.find(base);
+            prefetched != graph.prefetched_batches->batches.end()) {
+            pending_batch = std::move(prefetched->second);
+            graph.prefetched_batches->batches.erase(prefetched);
+        }
+    }
+
+    const auto collect_unique =
+        [&](std::span<const std::uint32_t> ids) -> Result<void> {
+        try {
+            requested_experts.clear();
+            requested_experts.reserve(std::min(ids.size(), config.expert_count));
+            for (const auto expert_id : ids) {
+                if (expert_id >= config.expert_count) {
+                    return make_error(ErrorCode::invalid_format,
+                                      "DeepSeek router selected an out-of-range expert",
+                                      base);
+                }
+                if (std::find(requested_experts.begin(), requested_experts.end(),
+                              expert_id) == requested_experts.end()) {
+                    requested_experts.push_back(expert_id);
+                }
+            }
+        } catch (const std::bad_alloc&) {
+            return make_error(ErrorCode::resource_exhausted,
+                              "Unable to allocate the bounded selected-expert set",
+                              base);
+        }
+        return {};
+    };
+
+    const auto start_provider = [&]() -> Result<void> {
+        if (provider == graph.expert_providers.end()) return {};
         if ((!provider->second.resolve && !provider->second.begin) ||
             provider->second.max_experts_per_request == 0U ||
             requested_experts.size() > provider->second.max_experts_per_request) {
@@ -1928,7 +2025,82 @@ Result<MoeResult> moe_forward(const DeepseekV4ReferenceGraph& graph,
                               "Selected-expert provider failed",
                               base);
         }
+        return {};
+    };
+
+    // Hash routing selects by table lookup on the token id. Those identities are known
+    // before the gate matvec, so an asynchronous batch can start loading while the gate
+    // scores (needed only for weights) still run. Learned routing cannot: it needs the
+    // post-attention hidden state.
+    if (hash_route) {
+        auto table = integer_tensor(graph, base + ".gate.tid2eid",
+                                    {config.vocabulary_size, config.experts_per_token});
+        if (!table) return table.error();
+        hash_table = table.take_value();
+        if (provider != graph.expert_providers.end() && provider->second.begin &&
+            pending_batch == nullptr) {
+            try {
+                std::vector<std::uint32_t> hash_ids;
+                hash_ids.reserve(token_count * config.experts_per_token);
+                for (std::size_t token = 0U; token < token_count; ++token) {
+                    if (token_ids[token] >= config.vocabulary_size) {
+                        return make_error(
+                            ErrorCode::invalid_argument,
+                            "DeepSeek hash route token id exceeds its table",
+                            std::to_string(token_ids[token]));
+                    }
+                    for (std::size_t slot = 0U; slot < config.experts_per_token; ++slot) {
+                        hash_ids.push_back(
+                            hash_table[token_ids[token] * config.experts_per_token + slot]);
+                    }
+                }
+                auto collected = collect_unique(hash_ids);
+                if (!collected) return collected.error();
+            } catch (const std::bad_alloc&) {
+                return make_error(ErrorCode::resource_exhausted,
+                                  "Unable to allocate the bounded selected-expert set",
+                                  base);
+            }
+            auto started = start_provider();
+            if (!started) return started.error();
+        }
     }
+
+    auto gate_logits = linear_tensor(graph, base + ".gate.weight", input,
+                                     token_count, config.width,
+                                     config.expert_count, base + ".gate");
+    if (!gate_logits) return gate_logits.error();
+    Result<DeepseekV4RouteResult> route = make_error(
+        ErrorCode::internal_error, "DeepSeek route was not initialized");
+    if (hash_route) {
+        route = deepseek_v4_route_hash_logits(
+            gate_logits.value(), token_ids, hash_table, token_count,
+            config.vocabulary_size, config.expert_count,
+            config.experts_per_token, config.route_scale);
+    } else {
+        auto bias = float_tensor(graph, base + ".gate.bias", {config.expert_count});
+        if (!bias) return bias.error();
+        route = deepseek_v4_route_learned_logits(
+            gate_logits.value(), bias.value(), token_count, config.expert_count,
+            config.experts_per_token, config.route_scale);
+    }
+    if (!route) return route.error();
+    if (requested_experts.empty()) {
+        auto collected = collect_unique(route.value().indices);
+        if (!collected) return collected.error();
+    }
+    if (provider != graph.expert_providers.end() && pending_batch == nullptr &&
+        resolved_experts.empty()) {
+        auto started = start_provider();
+        if (!started) return started.error();
+    }
+
+    // Shared-expert weights live in the trunk. After `begin` has submitted the routed misses,
+    // compute the shared expert immediately so that work overlaps the loads. The synchronous
+    // resolve path has already finished I/O, so this is only a reorder there.
+    auto shared = execute_expert(graph, base + ".shared_experts", input, {}, token_count,
+                                 shared_swiglu_limit);
+    if (!shared) return shared.error();
 
     const auto validate_resolved = [&](const DeepseekV4ResolvedExpert& expert,
                                        std::uint32_t expected_id) -> Result<void> {
@@ -2089,9 +2261,6 @@ Result<MoeResult> moe_forward(const DeepseekV4ReferenceGraph& graph,
                           "Unable to retain selected-expert telemetry",
                           base);
     }
-    auto shared = execute_expert(graph, base + ".shared_experts", input, {}, token_count,
-                                 shared_swiglu_limit);
-    if (!shared) return shared.error();
     for (std::size_t index = 0U; index < output.size(); ++index) {
         output[index] += shared.value()[index];
     }
@@ -4519,6 +4688,8 @@ Result<DeepseekV4ReferenceForwardResult> deepseek_v4_reference_prefill(
     for (std::size_t layer = 0U; layer < config.layer_count; ++layer) {
         valid = execution_checkpoint(control);
         if (!valid) return valid.error();
+        auto prefetched = prefetch_hash_layer(graph, layer + 1U, token_ids);
+        if (!prefetched) return prefetched.error();
         const std::string layer_base = "layers." + std::to_string(layer);
         auto block = block_prefill(graph, layer_base, layer,
                                    config.compression_ratios[layer],
@@ -4527,6 +4698,7 @@ Result<DeepseekV4ReferenceForwardResult> deepseek_v4_reference_prefill(
         if (!block) return block.error();
         hidden = std::move(block.value().hidden);
         result.layers.push_back(std::move(block.value().trace));
+        release_layer_experts(graph, layer, false);
     }
     valid = execution_checkpoint(control);
     if (!valid) return valid.error();
@@ -4638,6 +4810,8 @@ Result<DeepseekV4ReferenceForwardResult> deepseek_v4_reference_decode(
     for (std::size_t layer = 0U; layer < config.layer_count; ++layer) {
         state_valid = execution_checkpoint(control);
         if (!state_valid) return state_valid.error();
+        auto prefetched = prefetch_hash_layer(graph, layer + 1U, token_ids);
+        if (!prefetched) return prefetched.error();
         const std::string layer_base = "layers." + std::to_string(layer);
         auto block = block_incremental(
             graph, layer_base, layer, config.compression_ratios[layer],
@@ -4646,6 +4820,7 @@ Result<DeepseekV4ReferenceForwardResult> deepseek_v4_reference_decode(
         if (!block) return block.error();
         hidden = std::move(block.value().hidden);
         result.layers.push_back(std::move(block.value().trace));
+        release_layer_experts(graph, layer, true);
     }
     state_valid = execution_checkpoint(control);
     if (!state_valid) return state_valid.error();

@@ -2,7 +2,6 @@
 
 #include <algorithm>
 #include <chrono>
-#include <cstring>
 #include <exception>
 #include <limits>
 #include <new>
@@ -113,8 +112,8 @@ Result<LoadedExpert> load_prepared_expert_bundle(const ExpertBundle& bundle,
 
     auto loaded = [&]() -> Result<LoadedExpert> {
         try {
+            (void)largest_range;
             std::vector<std::byte> destination(static_cast<std::size_t>(bundle.bytes));
-            std::vector<std::byte> scratch(static_cast<std::size_t>(largest_range));
             std::size_t cursor = 0U;
             for (const auto& range : bundle.read_ranges) {
                 auto cancelled = cancellation_requested(options.cancelled);
@@ -123,15 +122,16 @@ Result<LoadedExpert> load_prepared_expert_bundle(const ExpertBundle& bundle,
                     return make_error(ErrorCode::resource_exhausted, "Expert load cancelled safely");
                 }
                 const auto range_size = static_cast<std::size_t>(range.bytes);
-                // Buffered on purpose. Bypassing the page cache here was tried and was three times
-                // slower: with top-6 routing over 256 experts some bundles recur often enough that
-                // the OS cache was serving a large share of these reads from RAM for free. The
-                // 1.77 GB/s this path appears to sustain is that mixture, not device bandwidth -
-                // unbuffered reads of the same ranges measure 0.57 GB/s.
-                auto read = io::read_buffered_range_into(
-                    range.shard, range.offset, std::span<std::byte>(scratch.data(), range_size));
+                // Read straight into the published buffer. A bounce copy through a second
+                // scratch allocation was doubling every expert byte in RAM (about 2.37 GB per
+                // token) without changing the Governor staging reservation, which still bounds
+                // the largest range. Buffered on purpose: unbuffered reads of the same ranges
+                // were three times slower because the page cache already holds most recurrences.
+                const auto dest = std::span<std::byte>(destination).subspan(cursor, range_size);
+                auto read = options.read_session != nullptr
+                                ? options.read_session->read_into(range.shard, range.offset, dest)
+                                : io::read_buffered_range_into(range.shard, range.offset, dest);
                 if (!read) return read.error();
-                std::memcpy(destination.data() + cursor, scratch.data(), range_size);
                 cursor += range_size;
             }
             auto cancelled = cancellation_requested(options.cancelled);
@@ -142,7 +142,6 @@ Result<LoadedExpert> load_prepared_expert_bundle(const ExpertBundle& bundle,
             if (cursor != destination.size()) {
                 return make_error(ErrorCode::integrity_error, "Expert load did not fill its destination buffer");
             }
-            std::vector<std::byte>().swap(scratch);
             auto published = residency.publish_ram_ready();
             if (!published) return published.error();
             auto lease = residency.acquire_use();
@@ -261,7 +260,12 @@ BoundedExpertLoadPool::BoundedExpertLoadPool(ExpertLoadPoolOptions options,
                                              safety::ResourceGovernor& governor)
     : options_(std::move(options)), governor_(governor) {
     options_.workers = std::clamp(options_.workers, 1U, 4U);
-    options_.max_queued_requests = std::clamp<std::size_t>(options_.max_queued_requests, 1U, 64U);
+    // A batch must be able to submit its whole selected set without waiting on itself, and a
+    // prefill selects up to one bundle per token per slot. At 64 the clamp silently cut a caller
+    // that the cache had already validated as legal, and the surplus submissions failed the batch
+    // mid-layer. Every request is still reserved through the Governor before enqueue, so this
+    // ceiling bounds the queue rather than the memory.
+    options_.max_queued_requests = std::clamp<std::size_t>(options_.max_queued_requests, 1U, 256U);
     try {
         workers_.reserve(options_.workers);
         for (unsigned index = 0U; index < options_.workers; ++index) {
@@ -411,8 +415,11 @@ void BoundedExpertLoadPool::worker_loop() {
             queue_.pop_front();
         }
         const auto service_started = std::chrono::steady_clock::now();
+        thread_local io::BufferedReadSession session;
+        auto options = task->options;
+        options.read_session = &session;
         auto loaded = load_prepared_expert_bundle(
-            task->bundle, task->residency, task->transfer, task->options, task->largest_range);
+            task->bundle, task->residency, task->transfer, options, task->largest_range);
         const auto completed = std::chrono::steady_clock::now();
         if (loaded) {
             auto& telemetry = loaded.value().telemetry_;

@@ -62,12 +62,17 @@ Result<std::size_t> read_file_range(const std::filesystem::path& path,
         HANDLE handle_{INVALID_HANDLE_VALUE};
     };
 
-    const DWORD flags = FILE_ATTRIBUTE_NORMAL | FILE_FLAG_RANDOM_ACCESS |
-                        (cache_mode == IoCacheMode::bypass ? FILE_FLAG_NO_BUFFERING : 0U);
-    FileHandle file(CreateFileW(path.c_str(), GENERIC_READ, FILE_SHARE_READ | FILE_SHARE_DELETE,
-                                nullptr, OPEN_EXISTING, flags,
-                                nullptr));
-    if (file.get() == INVALID_HANDLE_VALUE) {
+    // Expert bundles are large sequential ranges. RANDOM_ACCESS disables Windows read-ahead
+    // and was the wrong hint for this path. Bypass still uses it because unbuffered I/O is
+    // aligned sector traffic, not a stream.
+    const DWORD flags = FILE_ATTRIBUTE_NORMAL |
+                        (cache_mode == IoCacheMode::bypass
+                             ? (FILE_FLAG_RANDOM_ACCESS | FILE_FLAG_NO_BUFFERING)
+                             : FILE_FLAG_SEQUENTIAL_SCAN);
+    FileHandle owned(CreateFileW(path.c_str(), GENERIC_READ, FILE_SHARE_READ | FILE_SHARE_DELETE,
+                                 nullptr, OPEN_EXISTING, flags, nullptr));
+    const HANDLE file = owned.get();
+    if (file == INVALID_HANDLE_VALUE) {
         return make_error(ErrorCode::io_error, "Unable to open I/O source",
                           path.string() + ": Windows error " + std::to_string(GetLastError()));
     }
@@ -84,7 +89,7 @@ Result<std::size_t> read_file_range(const std::filesystem::path& path,
         query.QueryType = PropertyStandardQuery;
         STORAGE_ACCESS_ALIGNMENT_DESCRIPTOR descriptor{};
         DWORD returned = 0U;
-        if (DeviceIoControl(file.get(), IOCTL_STORAGE_QUERY_PROPERTY,
+        if (DeviceIoControl(file, IOCTL_STORAGE_QUERY_PROPERTY,
                             &query, static_cast<DWORD>(sizeof(query)),
                             &descriptor, static_cast<DWORD>(sizeof(descriptor)),
                             &returned, nullptr) != 0 &&
@@ -119,7 +124,7 @@ Result<std::size_t> read_file_range(const std::filesystem::path& path,
 
     LARGE_INTEGER position{};
     position.QuadPart = static_cast<LONGLONG>(read_offset);
-    if (SetFilePointerEx(file.get(), position, nullptr, FILE_BEGIN) == 0) {
+    if (SetFilePointerEx(file, position, nullptr, FILE_BEGIN) == 0) {
         const DWORD seek_error = GetLastError();
         if (aligned_buffer != nullptr) _aligned_free(aligned_buffer);
         return make_error(ErrorCode::io_error, "Unable to seek I/O source",
@@ -136,7 +141,7 @@ Result<std::size_t> read_file_range(const std::filesystem::path& path,
         if (cache_mode == IoCacheMode::bypass) maximum_chunk -= maximum_chunk % offset_alignment;
         const DWORD chunk = static_cast<DWORD>(std::min(remaining, maximum_chunk));
         DWORD completed = 0U;
-        if (ReadFile(file.get(), read_destination + total, chunk, &completed, nullptr) == 0) {
+        if (ReadFile(file, read_destination + total, chunk, &completed, nullptr) == 0) {
             const DWORD read_error = GetLastError();
             release_aligned();
             return make_error(ErrorCode::io_error, "Unable to read I/O source",
@@ -283,6 +288,168 @@ Result<void> read_buffered_range_into(const std::filesystem::path& path,
         return make_error(ErrorCode::io_error, "Short buffered range read", path.string());
     }
     return {};
+}
+
+struct BufferedReadSession::Impl {
+#if defined(_WIN32)
+    struct Entry {
+        std::filesystem::path path;
+        HANDLE handle{INVALID_HANDLE_VALUE};
+        Entry() = default;
+        Entry(std::filesystem::path source, HANDLE value)
+            : path(std::move(source)), handle(value) {}
+        Entry(const Entry&) = delete;
+        Entry& operator=(const Entry&) = delete;
+        Entry(Entry&& other) noexcept : path(std::move(other.path)), handle(other.handle) {
+            other.handle = INVALID_HANDLE_VALUE;
+        }
+        Entry& operator=(Entry&& other) noexcept {
+            if (this == &other) return *this;
+            if (handle != INVALID_HANDLE_VALUE) CloseHandle(handle);
+            path = std::move(other.path);
+            handle = other.handle;
+            other.handle = INVALID_HANDLE_VALUE;
+            return *this;
+        }
+        ~Entry() {
+            if (handle != INVALID_HANDLE_VALUE) CloseHandle(handle);
+        }
+    };
+    std::vector<Entry> files;
+
+    HANDLE open(const std::filesystem::path& source) {
+        for (auto& entry : files) {
+            if (entry.path == source && entry.handle != INVALID_HANDLE_VALUE) return entry.handle;
+        }
+        HANDLE opened = CreateFileW(source.c_str(), GENERIC_READ, FILE_SHARE_READ | FILE_SHARE_DELETE,
+                                    nullptr, OPEN_EXISTING,
+                                    FILE_ATTRIBUTE_NORMAL | FILE_FLAG_SEQUENTIAL_SCAN, nullptr);
+        if (opened == INVALID_HANDLE_VALUE) return opened;
+        if (files.size() == 8U) files.erase(files.begin());
+        files.emplace_back(source, opened);
+        return opened;
+    }
+#elif defined(__linux__)
+    struct Entry {
+        std::filesystem::path path;
+        int fd{-1};
+        Entry() = default;
+        Entry(std::filesystem::path source, int value) : path(std::move(source)), fd(value) {}
+        Entry(const Entry&) = delete;
+        Entry& operator=(const Entry&) = delete;
+        Entry(Entry&& other) noexcept : path(std::move(other.path)), fd(other.fd) { other.fd = -1; }
+        Entry& operator=(Entry&& other) noexcept {
+            if (this == &other) return *this;
+            if (fd >= 0) ::close(fd);
+            path = std::move(other.path);
+            fd = other.fd;
+            other.fd = -1;
+            return *this;
+        }
+        ~Entry() {
+            if (fd >= 0) ::close(fd);
+        }
+    };
+    std::vector<Entry> files;
+
+    int open(const std::filesystem::path& source) {
+        for (auto& entry : files) {
+            if (entry.path == source && entry.fd >= 0) return entry.fd;
+        }
+        const int opened = ::open(source.c_str(), O_RDONLY | O_CLOEXEC);
+        if (opened < 0) return opened;
+        if (files.size() == 8U) files.erase(files.begin());
+        files.emplace_back(source, opened);
+        return opened;
+    }
+#endif
+};
+
+BufferedReadSession::BufferedReadSession() : impl_(std::make_unique<Impl>()) {}
+BufferedReadSession::~BufferedReadSession() = default;
+
+Result<void> BufferedReadSession::read_into(const std::filesystem::path& path,
+                                            ByteCount offset,
+                                            std::span<std::byte> destination) {
+    if (impl_ == nullptr) {
+        return make_error(ErrorCode::internal_error, "Buffered read session is empty");
+    }
+    if (path.empty() || destination.empty()) {
+        return make_error(ErrorCode::invalid_argument, "Buffered range read requires a path and destination");
+    }
+    const ByteCount bytes = static_cast<ByteCount>(destination.size());
+    if (offset > std::numeric_limits<ByteCount>::max() - bytes) {
+        return make_error(ErrorCode::unsupported, "Buffered range read exceeds platform limits", path.string());
+    }
+    std::error_code error;
+    const bool symlink = std::filesystem::is_symlink(path, error);
+    if (error) {
+        return make_error(ErrorCode::io_error, "Unable to inspect buffered I/O source", path.string());
+    }
+    if (symlink) {
+        return make_error(ErrorCode::unsafe_path, "Refusing a symlinked buffered I/O source", path.string());
+    }
+    const auto file_size = std::filesystem::file_size(path, error);
+    if (error) return make_error(ErrorCode::io_error, "Unable to stat buffered I/O source", path.string());
+    if (offset > file_size || bytes > file_size - offset) {
+        return make_error(ErrorCode::invalid_argument, "Buffered range read exceeds file bounds", path.string());
+    }
+#if defined(_WIN32)
+    HANDLE file = impl_->open(path);
+    if (file == INVALID_HANDLE_VALUE) {
+        return make_error(ErrorCode::io_error, "Unable to open I/O source",
+                          path.string() + ": Windows error " + std::to_string(GetLastError()));
+    }
+    LARGE_INTEGER position{};
+    position.QuadPart = static_cast<LONGLONG>(offset);
+    if (SetFilePointerEx(file, position, nullptr, FILE_BEGIN) == 0) {
+        return make_error(ErrorCode::io_error, "Unable to seek I/O source",
+                          path.string() + ": Windows error " + std::to_string(GetLastError()));
+    }
+    std::size_t total = 0U;
+    const std::size_t requested = destination.size();
+    while (total < requested) {
+        const DWORD chunk = static_cast<DWORD>(
+            std::min(requested - total, static_cast<std::size_t>(std::numeric_limits<DWORD>::max())));
+        DWORD completed = 0U;
+        if (ReadFile(file, destination.data() + total, chunk, &completed, nullptr) == 0) {
+            return make_error(ErrorCode::io_error, "Unable to read I/O source",
+                              path.string() + ": Windows error " + std::to_string(GetLastError()));
+        }
+        total += completed;
+        if (completed == 0U) break;
+    }
+    if (total != requested) {
+        return make_error(ErrorCode::io_error, "Short buffered range read", path.string());
+    }
+    return {};
+#elif defined(__linux__)
+    const int fd = impl_->open(path);
+    if (fd < 0) {
+        return make_error(ErrorCode::io_error, "Unable to open I/O source",
+                          path.string() + ": errno " + std::to_string(errno));
+    }
+    std::size_t total = 0U;
+    while (total < destination.size()) {
+        ssize_t completed = -1;
+        do {
+            completed = ::pread(fd, destination.data() + total, destination.size() - total,
+                                static_cast<off_t>(offset + total));
+        } while (completed < 0 && errno == EINTR);
+        if (completed < 0) {
+            return make_error(ErrorCode::io_error, "Unable to read I/O source",
+                              path.string() + ": errno " + std::to_string(errno));
+        }
+        if (completed == 0) break;
+        total += static_cast<std::size_t>(completed);
+    }
+    if (total != destination.size()) {
+        return make_error(ErrorCode::io_error, "Short buffered range read", path.string());
+    }
+    return {};
+#else
+    return read_buffered_range_into(path, offset, destination);
+#endif
 }
 
 BoundedIoPool::BoundedIoPool(IoPoolOptions options, safety::ResourceGovernor& governor)

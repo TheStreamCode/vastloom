@@ -473,6 +473,17 @@ struct DeepseekV4ReferenceGraph {
     // Names the provider can supply. The graph chooses architecture paths by asking whether a
     // tensor exists, so that question has to be answerable without paying to load it.
     std::set<std::string, std::less<>> provided_matrix_names;
+
+    // Hash-routed expert batches started before the layer's own MoE. Held behind a shared
+    // pointer so the graph stays copyable; the table is created on first prefetch.
+    struct PrefetchTable {
+        std::map<std::string, std::unique_ptr<DeepseekV4ExpertBatch>, std::less<>> batches;
+    };
+    mutable std::shared_ptr<PrefetchTable> prefetched_batches;
+
+    // Optional: release one layer's expert cache after that layer has finished. The CLI uses
+    // this so prefetch of N+1 does not have to evict N.
+    std::function<void(std::size_t layer, bool persist)> release_layer_experts;
 };
 
 struct DeepseekV4ReferenceCompressorState {

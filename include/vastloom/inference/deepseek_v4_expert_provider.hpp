@@ -58,6 +58,10 @@ struct DeepseekV4ExpertCacheSnapshot {
     std::size_t requested_experts{0U};
     std::size_t hits{0U};
     std::size_t misses{0U};
+    // Selected identities that were also selected on this cache's previous begin.
+    // Independent of whether the payload is still resident: release-after-layer
+    // zeros hits but this still says whether a decode persist would pay.
+    std::size_t recurrent_experts{0U};
     std::size_t evictions{0U};
     std::size_t abandoned_loads{0U};
     ByteCount logical_bytes_read{0U};
@@ -104,6 +108,9 @@ public:
     [[nodiscard]] DeepseekV4ExpertProviderBinding provider_binding();
     [[nodiscard]] DeepseekV4ExpertCacheSnapshot snapshot() const;
     [[nodiscard]] Result<void> clear();
+    // Drops everyone except the last begin's identities. Decode uses this instead of
+    // clear so the next token can hit without holding a whole prefill union.
+    [[nodiscard]] Result<void> retain_last_selected();
 
 private:
     class AsyncBatch;
@@ -134,6 +141,7 @@ private:
     std::map<std::uint32_t, CacheEntry> cache_;
     std::unique_ptr<model::BoundedExpertLoadPool> load_pool_;
     DeepseekV4ExpertCacheSnapshot telemetry_;
+    std::vector<std::uint32_t> last_selected_ids_;
     std::size_t tick_{0U};
     bool async_batch_active_{false};
 };

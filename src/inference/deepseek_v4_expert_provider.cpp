@@ -290,8 +290,8 @@ DeepseekV4BoundedExpertCache::create(
         (options.asynchronous_workers == 0U &&
          options.asynchronous_queue_capacity != 0U) ||
         (options.asynchronous_workers != 0U &&
-         (options.asynchronous_queue_capacity < options.max_experts_per_request ||
-          options.asynchronous_queue_capacity > 64U)) ||
+          (options.asynchronous_queue_capacity < options.max_experts_per_request ||
+           options.asynchronous_queue_capacity > 256U)) ||
         options.load.max_expert_bytes == 0U ||
         options.load.max_range_bytes == 0U || options.load.max_ranges == 0U) {
         return make_error(ErrorCode::invalid_argument,
@@ -485,6 +485,20 @@ public:
             }
             ++cache_->telemetry_.requests;
             cache_->telemetry_.requested_experts += requested_ids_.size();
+            for (const auto expert_id : requested_ids_) {
+                if (std::find(cache_->last_selected_ids_.begin(),
+                              cache_->last_selected_ids_.end(),
+                              expert_id) != cache_->last_selected_ids_.end()) {
+                    if (cache_->telemetry_.recurrent_experts ==
+                        std::numeric_limits<std::size_t>::max()) {
+                        return make_error(ErrorCode::resource_exhausted,
+                                          "DeepSeek expert cache recurrent telemetry overflow",
+                                          block_prefix_);
+                    }
+                    ++cache_->telemetry_.recurrent_experts;
+                }
+            }
+            cache_->last_selected_ids_ = requested_ids_;
         }
 
         for (auto& entry : entries_) {
@@ -894,6 +908,30 @@ Result<void> DeepseekV4BoundedExpertCache::clear() {
     while (!cache_.empty()) {
         std::array<std::uint32_t, 0U> none{};
         auto evicted = evict_one(none);
+        if (!evicted) return evicted.error();
+    }
+    return {};
+}
+
+Result<void> DeepseekV4BoundedExpertCache::retain_last_selected() {
+    std::scoped_lock lock(mutex_);
+    if (async_batch_active_) {
+        return make_error(ErrorCode::resource_exhausted,
+                          "DeepSeek expert cache cannot retain during an active asynchronous batch",
+                          options_.block_prefix);
+    }
+    while (true) {
+        bool extra = false;
+        for (const auto& [expert_id, entry] : cache_) {
+            (void)entry;
+            if (std::find(last_selected_ids_.begin(), last_selected_ids_.end(), expert_id) ==
+                last_selected_ids_.end()) {
+                extra = true;
+                break;
+            }
+        }
+        if (!extra) break;
+        auto evicted = evict_one(last_selected_ids_);
         if (!evicted) return evicted.error();
     }
     return {};

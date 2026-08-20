@@ -57,6 +57,8 @@ set(VASTLOOM_DEEPSEEK_V4_IQ1S_UP_SLICE "" CACHE FILEPATH
     "Optional pinned DeepSeek V4 Flash 0731 layer-0 expert-0 IQ1_S up slice")
 set(VASTLOOM_DEEPSEEK_V4_IQ3XXS_SLICE "" CACHE FILEPATH
     "Optional pinned DeepSeek V4 Flash 0731 layer-0 expert-0 IQ3_XXS down slice")
+set(VASTLOOM_GGML_ROOT "" CACHE PATH
+    "Optional pinned ggml source checkout; enables the opt-in ggml compute backend")
 
 option(VASTLOOM_BUILD_TESTS "Build Vastloom tests" ON)
 option(VASTLOOM_ENABLE_SANITIZERS "Enable AddressSanitizer and UndefinedBehaviorSanitizer" OFF)
@@ -76,6 +78,7 @@ include(CMakePackageConfigHelpers)
 
 add_library(vastloom_core STATIC
     src/api/openai_protocol.cpp
+    src/api/loopback_server.cpp
     src/core/bytes.cpp
     src/cuda/cuda_driver.cpp
     src/cuda/cuda_matvec_accelerator.cpp
@@ -83,6 +86,8 @@ add_library(vastloom_core STATIC
     src/hardware/hardware_probe.cpp
     src/inference/gpt2_tokenizer.cpp
     src/inference/ggml_quantization.cpp
+    src/inference/ggml_compute.cpp
+    src/inference/deepseek_v4_preflight.cpp
     src/inference/deepseek_v4_gguf.cpp
     src/inference/deepseek_v4_probe.cpp
     src/inference/deepseek_v4_range_artifact.cpp
@@ -137,7 +142,25 @@ vastloom_enable_sanitizers(vastloom_core)
 
 if(WIN32)
     target_compile_definitions(vastloom_core PRIVATE NOMINMAX WIN32_LEAN_AND_MEAN)
-    target_link_libraries(vastloom_core PRIVATE Psapi)
+    target_link_libraries(vastloom_core PRIVATE Psapi ws2_32)
+endif()
+
+# Opt-in ggml compute backend. The checkout stays external and pinned by the caller (see NOTICE
+# for the pinned commit); without it the bounded scalar reference kernels are the only compute
+# path, exactly as before.
+if(NOT VASTLOOM_GGML_ROOT STREQUAL "")
+    if(NOT EXISTS "${VASTLOOM_GGML_ROOT}/CMakeLists.txt")
+        message(FATAL_ERROR "VASTLOOM_GGML_ROOT must point at a ggml source checkout")
+    endif()
+    # Vastloom links statically; ggml's own default on MSVC is shared, which would put DLLs on
+    # the runtime path of every test. The normal variable shadows ggml's option() for this
+    # subproject only.
+    set(BUILD_SHARED_LIBS OFF)
+    add_subdirectory("${VASTLOOM_GGML_ROOT}" vastloom-ggml EXCLUDE_FROM_ALL)
+    # BUILD_INTERFACE only: the pinned checkout is a build-time dependency of the static core and
+    # is not part of the installed export set.
+    target_link_libraries(vastloom_core PRIVATE $<BUILD_INTERFACE:ggml>)
+    target_compile_definitions(vastloom_core PRIVATE VASTLOOM_HAVE_GGML)
 endif()
 
 add_executable(vastloom
@@ -182,6 +205,14 @@ if(BUILD_TESTING AND VASTLOOM_BUILD_TESTS)
     vastloom_set_project_warnings(vastloom_cuda_driver_test)
     vastloom_enable_sanitizers(vastloom_cuda_driver_test)
     add_test(NAME vastloom_cuda_driver COMMAND vastloom_cuda_driver_test)
+    add_executable(vastloom_ggml_compute_test
+        tests/test_ggml_compute.cpp
+    )
+    target_link_libraries(vastloom_ggml_compute_test PRIVATE Vastloom::Core)
+    target_compile_features(vastloom_ggml_compute_test PRIVATE cxx_std_20)
+    vastloom_set_project_warnings(vastloom_ggml_compute_test)
+    vastloom_enable_sanitizers(vastloom_ggml_compute_test)
+    add_test(NAME vastloom_ggml_compute COMMAND vastloom_ggml_compute_test)
     if(VASTLOOM_DEEPSEEK_V4_IQ1S_SLICE)
         add_executable(vastloom_iq1s_slice_test tests/test_iq1s_slice.cpp)
         target_link_libraries(vastloom_iq1s_slice_test PRIVATE Vastloom::Core)

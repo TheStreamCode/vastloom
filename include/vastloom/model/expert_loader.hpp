@@ -16,6 +16,7 @@
 
 #include "vastloom/core/bytes.hpp"
 #include "vastloom/core/status.hpp"
+#include "vastloom/io/bounded_io_pool.hpp"
 #include "vastloom/io/device_io_counters.hpp"
 #include "vastloom/io/process_io_counters.hpp"
 #include "vastloom/model/residency.hpp"
@@ -31,6 +32,7 @@ struct ExpertLoadOptions {
     bool measure_process_io{true};
     bool measure_device_io{false};
     std::function<bool()> cancelled;
+    io::BufferedReadSession* read_session{nullptr};
 };
 
 struct ExpertLoadTelemetry {

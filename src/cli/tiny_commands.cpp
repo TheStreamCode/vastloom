@@ -15,6 +15,7 @@
 #include <string>
 #include <string_view>
 #include <system_error>
+#include <thread>
 #include <utility>
 #include <vector>
 
@@ -22,6 +23,8 @@
 #include "vastloom/core/status.hpp"
 #include "vastloom/hardware/hardware_probe.hpp"
 #include "vastloom/inference/tiny_model.hpp"
+#include "vastloom/api/loopback_server.hpp"
+#include "vastloom/api/openai_protocol.hpp"
 #include "vastloom/model/manifest.hpp"
 #include "vastloom/model/verifier.hpp"
 #include "vastloom/safety/resource_governor.hpp"
@@ -554,6 +557,127 @@ int command_chat(const std::vector<std::string>& args) {
             std::cerr << "Generation stopped safely after reaching the configured timeout.\n";
         }
         last_result = result.take_value();
+    }
+    return 0;
+}
+
+int command_serve(const std::vector<std::string>& args) {
+    if (args.size() == 1U && (args.front() == "--help" || args.front() == "-h")) {
+        std::cout << "Usage: vastloom serve MODEL_OR_MANIFEST [--port N] [--no-verify]\n";
+        return 0;
+    }
+    if (args.empty() || util::starts_with(args.front(), "--") || args.front() == "-h") {
+        return print_error(make_error(ErrorCode::invalid_argument, "serve requires a model or manifest path"));
+    }
+    auto validation = validate_options(args, {"--port"}, {"--no-verify"});
+    if (!validation) return print_error(validation.error());
+    const bool verify_hash = !has_flag(args, "--no-verify");
+    auto port = parse_size_option(args, "--port", 8099U, 0U, 65535U);
+    if (!port) return print_error(port.error());
+    auto loaded = load_model(args[0], verify_hash);
+    if (!loaded) return print_error(loaded.error());
+
+    auto* model = &loaded.value().model;
+    auto* governor = loaded.value().governor.get();
+    const std::string model_id = model->config().model_id;
+    api::LoopbackHandler handler = [model, governor, model_id](const api::HttpRequest& request) {
+        api::HttpResponse response;
+        const auto now = static_cast<std::uint64_t>(
+            std::chrono::duration_cast<std::chrono::seconds>(
+                std::chrono::system_clock::now().time_since_epoch())
+                .count());
+        if (request.method == "GET" && request.path == "/v1/models") {
+            auto body = api::serialize_model_list(model_id, now);
+            if (!body) { response.status = 500; response.body = api::serialize_error(body.error().message, "api_error", 500); return response; }
+            response.body = body.take_value();
+            return response;
+        }
+        if (request.method == "POST" && request.path == "/v1/chat/completions") {
+            auto parsed = api::parse_chat_completion_request(request.body);
+            if (!parsed) {
+                response.status = api::http_status_for(parsed.error().code);
+                response.body = api::serialize_error(parsed.error().message, "invalid_request_error", response.status);
+                return response;
+            }
+            std::string prompt;
+            for (const auto& message : parsed.value().messages) {
+                if (!prompt.empty()) prompt += '\n';
+                prompt += message.content;
+            }
+                if (parsed.value().stream) {
+                    api::ChatCompletionResponse skeleton;
+                    skeleton.id = "chatcmpl-vastloom";
+                    skeleton.model = model_id;
+                    skeleton.created = now;
+                    const std::size_t stream_max = parsed.value().max_tokens;
+                    const float stream_temperature =
+                        parsed.value().temperature.has_value()
+                            ? static_cast<float>(*parsed.value().temperature)
+                            : 0.0F;
+                    response.streaming = true;
+                    response.status = 200;
+                    response.produce = [model, governor, prompt, skeleton, stream_max,
+                                        stream_temperature](const std::function<bool(std::string_view)>& emit) {
+                        GenerationOptions options;
+                        options.max_new_tokens = stream_max;
+                        options.temperature = stream_temperature;
+                    auto skel = skeleton;
+                    bool first = true;
+                    bool alive = true;
+                    options.on_text = [&](std::string_view piece) {
+                        if (!alive) return;
+                        auto chunk = api::serialize_chat_completion_chunk(skel, piece, first, false);
+                        first = false;
+                        if (!chunk) { alive = false; return; }
+                        alive = emit("data: " + chunk.take_value() + "\n\n");
+                    };
+                    auto result = model->generate(prompt, options, *governor);
+                    skel.finish_reason =
+                        (result && result.value().stats.stopped_on_max_tokens) ? "length" : "stop";
+                    if (alive) {
+                        auto last = api::serialize_chat_completion_chunk(skel, "", false, true);
+                        if (last) alive = emit("data: " + last.take_value() + "\n\n");
+                    }
+                    if (alive) emit("data: [DONE]\n\n");
+                };
+                return response;
+            }
+            GenerationOptions options;
+            options.max_new_tokens = parsed.value().max_tokens;
+            if (parsed.value().temperature.has_value()) {
+                options.temperature = static_cast<float>(*parsed.value().temperature);
+            }
+            auto result = model->generate(prompt, options, *governor);
+            if (!result) {
+                response.status = api::http_status_for(result.error().code);
+                response.body = api::serialize_error(result.error().message, "api_error", response.status);
+                return response;
+            }
+            api::ChatCompletionResponse completion;
+            completion.id = "chatcmpl-vastloom";
+            completion.model = model_id;
+            completion.content = result.value().text;
+            completion.finish_reason = result.value().stats.stopped_on_max_tokens ? "length" : "stop";
+            completion.created = now;
+            completion.prompt_tokens = result.value().stats.prompt_tokens;
+            completion.completion_tokens = result.value().stats.generated_tokens;
+            auto body = api::serialize_chat_completion_response(completion);
+            if (!body) { response.status = 500; response.body = api::serialize_error(body.error().message, "api_error", 500); return response; }
+            response.body = body.take_value();
+            return response;
+        }
+        response.status = 404;
+        response.body = api::serialize_error("unknown route", "not_found", 404);
+        return response;
+    };
+
+    api::LoopbackServer server;
+    auto started = server.start(static_cast<std::uint16_t>(port.value()), std::move(handler), 1U * 1024U * 1024U);
+    if (!started) return print_error(started.error());
+    std::cout << "Vastloom loopback API serving model " << model_id << " on http://127.0.0.1:"
+              << server.port() << " (Ctrl+C to stop)\n";
+    while (server.running()) {
+        std::this_thread::sleep_for(std::chrono::milliseconds(100));
     }
     return 0;
 }

@@ -8014,6 +8014,79 @@ void test_capability_module(const std::filesystem::path& root) {
     CHECK(!vastloom::inference::fit_lm_head_lora(6U, 4U, 2U, 10U, 1.0, 0.0, 7U, bad_target));
     auto bad_reg = fit_pairs;
     CHECK(!vastloom::inference::fit_lm_head_lora(6U, 4U, 2U, 10U, 1.0, -1.0, 7U, bad_reg));
+
+    // Hidden-site distillation: the adapter reshapes the final hidden state BEFORE the frozen
+    // head consumes it, so its oracle carries the head matrix itself. Same contracts apply:
+    // parity start, decay collapse at huge regularization, finite everywhere.
+    std::vector<float> head_weights(6U * 4U);
+    for (std::size_t index = 0; index < head_weights.size(); ++index) {
+        head_weights[index] = 0.1F * static_cast<float>((static_cast<int>(index) % 9) - 4);
+    }
+    std::vector<vastloom::inference::HiddenFitSample> hidden_fit(2U);
+    hidden_fit[0].hidden = {1.0F, 0.5F, -0.5F, 0.25F};
+    hidden_fit[0].target_id = 2U;
+    hidden_fit[1].hidden = {-0.25F, 1.0F, 0.0F, 1.5F};
+    hidden_fit[1].target_id = 4U;
+    auto hfitted = vastloom::inference::fit_final_hidden_lora(
+        6U, 4U, 2U, 400U, 0.3, 0.05, 11U, head_weights, hidden_fit);
+    CHECK(hfitted);
+    if (hfitted) {
+        CHECK(hfitted.value().positions == 2U);
+        CHECK(hfitted.value().final_loss < hfitted.value().initial_loss);
+        const auto finite_value = [](float value) { return std::isfinite(value); };
+        CHECK(std::all_of(hfitted.value().a.begin(), hfitted.value().a.end(), finite_value));
+        CHECK(std::all_of(hfitted.value().b.begin(), hfitted.value().b.end(), finite_value));
+        // A is rank x hidden; B maps rank back into hidden space.
+        CHECK(hfitted.value().a.size() == 2U * 4U && hfitted.value().b.size() == 4U * 2U);
+    }
+    auto hpinned = vastloom::inference::fit_final_hidden_lora(
+        6U, 4U, 2U, 200U, 0.05, 1.0e5, 11U, head_weights, hidden_fit);
+    CHECK(hpinned);
+    if (hpinned) {
+        CHECK(std::abs(hpinned.value().final_loss - hpinned.value().initial_loss) < 1.0e-6);
+    }
+    CHECK(!vastloom::inference::fit_final_hidden_lora(6U, 4U, 2U, 10U, 1.0, 0.0, 7U,
+                                                      std::vector<float>(head_weights.size() + 1U, 0.0F),
+                                                      hidden_fit));
+
+    // Gradient clipping keeps even aggressive rates bounded on the head-transpose path.
+    auto hhot = vastloom::inference::fit_final_hidden_lora(
+        6U, 4U, 2U, 400U, 0.3, 0.05, 11U, head_weights, hidden_fit);
+    CHECK(hhot);
+    if (hhot) {
+        const auto finite_value = [](float value) { return std::isfinite(value); };
+        CHECK(std::all_of(hhot.value().a.begin(), hhot.value().a.end(), finite_value));
+        CHECK(std::all_of(hhot.value().b.begin(), hhot.value().b.end(), finite_value));
+    }
+
+    // Container/loader/builder accept a final-hidden target keyed at its reserved layer.
+    vastloom::inference::CapabilityModule hidden_module = module;
+    hidden_module.name = "hidden-site";
+    hidden_module.targets.clear();
+    hidden_module.targets.push_back(
+        make_target(vastloom::inference::kCapabilityFinalHiddenLayer,
+                    vastloom::inference::CapabilityTarget::final_hidden, 16U, 16U, 0.25F));
+    const auto hidden_module_path = directory / "hidden-site.vlcm";
+    CHECK(vastloom::inference::write_capability_module(hidden_module_path, hidden_module));
+    auto hidden_loaded =
+        vastloom::inference::load_capability_module(hidden_module_path);
+    CHECK(hidden_loaded);
+    if (hidden_loaded) {
+        CHECK(hidden_loaded.value().targets.front().spec.target ==
+              vastloom::inference::CapabilityTarget::final_hidden);
+    }
+    auto hidden_bound = build_with(hidden_module);
+    CHECK(hidden_bound);
+    if (hidden_bound) {
+        CHECK(hidden_bound.value().find(vastloom::inference::kCapabilityFinalHiddenLayer,
+                                        vastloom::inference::CapabilityTarget::final_hidden) !=
+              nullptr);
+    }
+
+    auto wrong_reserved = hidden_module;
+    wrong_reserved.targets.front().spec.layer =
+        vastloom::inference::kCapabilityLmHeadLayer;
+    CHECK(!build_with(wrong_reserved));
 }
 
 void test_heartbeat(const std::filesystem::path& root) {

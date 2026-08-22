@@ -82,12 +82,13 @@ std::string_view to_string(CapabilityTarget target) noexcept {
         case CapabilityTarget::up: return "up";
         case CapabilityTarget::down: return "down";
         case CapabilityTarget::lm_head: return "lm_head";
+        case CapabilityTarget::final_hidden: return "final_hidden";
     }
     return "unknown";
 }
 
 std::optional<CapabilityTarget> capability_target_from_u32(std::uint32_t raw) noexcept {
-    if (raw <= static_cast<std::uint32_t>(CapabilityTarget::lm_head)) {
+    if (raw <= static_cast<std::uint32_t>(CapabilityTarget::final_hidden)) {
         return static_cast<CapabilityTarget>(raw);
     }
     return std::nullopt;
@@ -533,7 +534,7 @@ Result<CapabilityFitResult> fit_lm_head_lora(
     result.a.resize(rank * hidden_size);
     for (float& value : result.a) {
         value = static_cast<float>(
-            static_cast<double>(next_random() % 2'000'001U - 1'000'000U) / 1.0e10);
+            static_cast<double>(static_cast<std::int64_t>(next_random() % 2'000'001U) - 1'000'000) / 1.0e10);
     }
     result.b.assign(vocab_size * rank, 0.0F);
     result.positions = pairs.size();
@@ -634,7 +635,210 @@ Result<CapabilityFitResult> fit_lm_head_lora(
                 value = static_cast<float>(static_cast<double>(value) * decay_factor);
             }
         }
-    }    result.final_loss = run_step(false);
+    }
+    result.final_loss = run_step(false);
+    return result;
+}
+
+Result<CapabilityFitResult> fit_final_hidden_lora(
+    std::size_t vocab_size, std::size_t hidden_size, std::size_t rank, std::size_t steps,
+    double learning_rate, double regularization, std::uint64_t seed,
+    std::span<const float> head_weights,
+    const std::vector<HiddenFitSample>& samples) {
+    if (samples.empty() || samples.size() > 4'096U) {
+        return make_error(ErrorCode::invalid_argument,
+                          "Final-hidden fitting needs between 1 and 4096 supervised positions");
+    }
+    if (vocab_size < 2U || hidden_size == 0U || rank == 0U || rank > kMaxModuleRank ||
+        steps == 0U || steps > 100'000U || !(learning_rate > 0.0) || learning_rate > 10.0 ||
+        !std::isfinite(regularization) || regularization < 0.0 || regularization > 1.0e6) {
+        return make_error(ErrorCode::invalid_argument,
+                          "Final-hidden fitting bounds are invalid");
+    }
+    if (head_weights.size() != vocab_size * hidden_size) {
+        return make_error(ErrorCode::invalid_argument,
+                          "Head weight matrix does not match the declared dimensions");
+    }
+    const auto finite = [](double value) { return std::isfinite(value); };
+    for (const auto& sample : samples) {
+        if (sample.hidden.size() != hidden_size || sample.target_id >= vocab_size ||
+            !std::all_of(sample.hidden.begin(), sample.hidden.end(), finite)) {
+            return make_error(ErrorCode::invalid_argument,
+                              "A fitting sample does not match the declared dimensions");
+        }
+    }
+
+    // splitmix64 again: identical initialization on every platform.
+    std::uint64_t state = seed;
+    const auto next_random = [&state]() {
+        state += 0x9E3779B97F4A7C15ULL;
+        std::uint64_t mixed = state;
+        mixed = (mixed ^ (mixed >> 30U)) * 0xBF58476D1CE4E5B9ULL;
+        mixed = (mixed ^ (mixed >> 27U)) * 0x94D049BB133111EBULL;
+        return mixed ^ (mixed >> 31U);
+    };
+
+    CapabilityFitResult result;
+    // Unlike the LM-head fitter, here the projection sits inside a double multiplication
+    // chain (u = A h feeds both the forward delta and its own gradient), so a tiny init
+    // attenuates the learning signal by u^2 and training stalls flat - measured. B still
+    // starts at zero, which alone preserves the parity-before-capability start.
+    result.a.resize(rank * hidden_size);
+    for (float& value : result.a) {
+        value = static_cast<float>(
+            static_cast<double>(static_cast<std::int64_t>(next_random() % 2'000'001U) - 1'000'000) / 2.0e7);
+    }
+    // B maps the rank bottleneck back into hidden space: rows = hidden, cols = rank.
+    result.b.assign(hidden_size * rank, 0.0F);
+    result.positions = samples.size();
+
+    // Base logits are adapter-independent: one head sweep up front removes them from every
+    // later inner loop.
+    std::vector<std::vector<float>> base_logits(samples.size());
+    for (std::size_t s = 0; s < samples.size(); ++s) {
+        base_logits[s].resize(vocab_size);
+        const float* sample_hidden = samples[s].hidden.data();
+        for (std::size_t i = 0; i < vocab_size; ++i) {
+            const float* row = head_weights.data() + i * hidden_size;
+            double sum = 0.0;
+            for (std::size_t h = 0; h < hidden_size; ++h) {
+                sum += static_cast<double>(row[h]) *
+                       static_cast<double>(sample_hidden[h]);
+            }
+            if (!std::isfinite(sum)) {
+                return make_error(ErrorCode::invalid_argument,
+                                  "Head product produced a non-finite logit");
+            }
+            base_logits[s][i] = static_cast<float>(sum);
+        }
+    }
+
+    const double position_scale =
+        learning_rate / static_cast<double>(samples.size());
+    const double decay_factor =
+        std::max(0.0, 1.0 - position_scale * regularization);
+    // The projection A stays frozen at its deterministic random initialization and only B
+    // trains. Measured fact: letting both factors move creates an A<->B feedback loop through
+    // ||W*B|| that diverges within tens of steps at any learning rate, clipping included -
+    // freezing A removes the resonance term entirely while keeping the gradients closed-form.
+    // G = W*B is rebuilt once per step: forward deltas become rank-wide dots against it, and
+    // the gradient folds back through the same factor in a second head-sized sweep - two
+    // passes per step regardless of how many supervised positions ride on them.
+    std::vector<double> g_matrix(vocab_size * rank);
+    std::vector<double> grad_g(vocab_size * rank);
+    std::vector<double> grad_b(hidden_size * rank);
+    std::vector<double> probabilities(vocab_size);
+    std::vector<std::vector<double>> fixed_u(samples.size(), std::vector<double>(rank));
+    for (std::size_t s = 0; s < samples.size(); ++s) {
+        for (std::size_t r = 0; r < rank; ++r) {
+            const float* row = result.a.data() + r * hidden_size;
+            double sum = 0.0;
+            for (std::size_t h = 0; h < hidden_size; ++h) {
+                sum += static_cast<double>(row[h]) *
+                       static_cast<double>(samples[s].hidden[h]);
+            }
+            fixed_u[s][r] = sum;
+        }
+    }
+
+    auto rebuild_g_matrix = [&] {
+        for (std::size_t i = 0; i < vocab_size; ++i) {
+            const float* w_row = head_weights.data() + i * hidden_size;
+            double* g_row = g_matrix.data() + i * rank;
+            for (std::size_t r = 0; r < rank; ++r) g_row[r] = 0.0;
+            for (std::size_t h = 0; h < hidden_size; ++h) {
+                const double weight = static_cast<double>(w_row[h]);
+                if (weight == 0.0) continue;
+                const float* b_row = result.b.data() + h * rank;
+                for (std::size_t r = 0; r < rank; ++r) g_row[r] += weight * b_row[r];
+            }
+        }
+    };
+
+    auto run_step = [&](bool accumulate) {
+        rebuild_g_matrix();
+        double total_loss = 0.0;
+        if (accumulate) {
+            std::fill(grad_g.begin(), grad_g.end(), 0.0);
+            std::fill(grad_b.begin(), grad_b.end(), 0.0);
+        }
+        for (std::size_t s = 0; s < samples.size(); ++s) {
+            const auto& sample = samples[s];
+            const auto& base = base_logits[s];
+            const auto& sample_u = fixed_u[s];
+            double maximum = -std::numeric_limits<double>::infinity();
+            for (std::size_t i = 0; i < vocab_size; ++i) {
+                const double* g_row = g_matrix.data() + i * rank;
+                double delta = 0.0;
+                for (std::size_t r = 0; r < rank; ++r) delta += g_row[r] * sample_u[r];
+                const double z = static_cast<double>(base[i]) + delta;
+                probabilities[i] = z;
+                if (z > maximum) maximum = z;
+            }
+            double denominator = 0.0;
+            for (std::size_t i = 0; i < vocab_size; ++i) {
+                probabilities[i] = std::exp(probabilities[i] - maximum);
+                denominator += probabilities[i];
+            }
+            total_loss += -std::log(probabilities[sample.target_id] / denominator);
+            if (!accumulate) continue;
+            for (std::size_t i = 0; i < vocab_size; ++i) {
+                const double g = probabilities[i] / denominator -
+                                 (i == sample.target_id ? 1.0 : 0.0);
+                if (g == 0.0) continue;
+                double* grad_g_row = grad_g.data() + i * rank;
+                for (std::size_t r = 0; r < rank; ++r) grad_g_row[r] += g * sample_u[r];
+            }
+        }
+        if (accumulate) {
+            // dL/dB[h][r] = sum_i W[i][h] * dL/dG[i][r]: the second head-sized sweep.
+            for (std::size_t i = 0; i < vocab_size; ++i) {
+                const float* w_row = head_weights.data() + i * hidden_size;
+                const double* dg_row = grad_g.data() + i * rank;
+                for (std::size_t h = 0; h < hidden_size; ++h) {
+                    const double weight = static_cast<double>(w_row[h]);
+                    if (weight == 0.0) continue;
+                    double* grad_row = grad_b.data() + h * rank;
+                    for (std::size_t r = 0; r < rank; ++r) grad_row[r] += weight * dg_row[r];
+                }
+            }
+        }
+        return total_loss / static_cast<double>(samples.size());
+    };
+
+    result.initial_loss = run_step(false);
+    // Two measured stabilizers stack here. Freezing the projection A removes the A<->B
+    // resonance that diverged within tens of steps when both factors trained; the global-norm
+    // clip additionally bounds every B step while preserving its direction, because the
+    // head-transpose path still amplifies gradients through 49k vocabulary rows.
+    constexpr double kMaxGradientNorm = 1.0;
+    for (std::size_t step = 0; step < steps; ++step) {
+        std::fill(grad_b.begin(), grad_b.end(), 0.0);
+        static_cast<void>(run_step(true));
+        double squared_norm = 0.0;
+        for (const double value : grad_b) squared_norm += value * value;
+        const double clip = squared_norm > kMaxGradientNorm * kMaxGradientNorm
+                                ? kMaxGradientNorm / std::sqrt(squared_norm)
+                                : 1.0;
+        bool diverged = false;
+        for (std::size_t index = 0; index < result.b.size() && !diverged; ++index) {
+            const float updated = static_cast<float>(
+                static_cast<double>(result.b[index]) - position_scale * clip * grad_b[index]);
+            if (!std::isfinite(updated)) diverged = true;
+            else result.b[index] = updated;
+        }
+        if (diverged) {
+            return make_error(ErrorCode::resource_exhausted,
+                              "Final-hidden fitting diverged to a non-finite weight",
+                              "step " + std::to_string(step));
+        }
+        if (decay_factor != 1.0) {
+            for (float& value : result.b) {
+                value = static_cast<float>(static_cast<double>(value) * decay_factor);
+            }
+        }
+    }
+    result.final_loss = run_step(false);
     return result;
 }
 

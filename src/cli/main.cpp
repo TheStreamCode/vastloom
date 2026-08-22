@@ -251,9 +251,9 @@ void print_help() {
         << "  module-init MODEL OUT --name NAME [--rank N] [--scale F] [--seed N] [--layers N]\n"
         << "      [--targets LIST] [--zero-a] [--json]\n"
         << "      Write a deterministic synthetic capability module sized to a pinned SmolLM2 checkpoint.\n\n"
-        << "  module-fit MODEL TRANSCRIPT OUT --name NAME [--rank N] [--steps N] [--lr F] [--seed N]\n"
-        << "      [--max-records N] [--no-verify] [--json]\n"
-        << "      Distil an LM-head capability module from a teacher transcript artifact.\n\n"
+        << "  module-fit MODEL TRANSCRIPT OUT --name NAME [--rank N] [--steps N] [--lr F] [--reg F]\n"
+        << "      [--seed N] [--max-records N] [--site lm-head|hidden] [--no-verify] [--json]\n"
+        << "      Distil a capability module from a teacher transcript artifact.\n\n"
         << "  doctor [--storage PATH] [--json]\n"
         << "      Detect CPU, RAM, NVIDIA VRAM and storage without allocating model memory.\n\n"
         << "  cuda-info [--allocation-smoke SIZE|--rmsnorm-smoke]"
@@ -4259,7 +4259,7 @@ int command_module_init(const std::vector<std::string>& args) {
     };
     const auto next_weight = [&next_random]() {
         return static_cast<float>(
-            static_cast<double>(next_random() % 2'000'001U - 1'000'000U) / 1.0e9);
+            static_cast<double>(static_cast<std::int64_t>(next_random() % 2'000'001U) - 1'000'000) / 1.0e9);
     };
     const bool zero_a = has_flag(args, "--zero-a");
 
@@ -4308,11 +4308,13 @@ int command_module_fit(const std::vector<std::string>& args) {
     const bool json = has_flag(args, "--json");
     if (!args.empty() && (args[0] == "--help" || args[0] == "-h")) {
         std::cout << "Usage: vastloom module-fit MODEL TRANSCRIPT OUT --name NAME [--rank N]"
-                     " [--steps N] [--lr F] [--reg F] [--seed N] [--max-records N] [--no-verify] [--json]\n";
+                     " [--steps N] [--lr F] [--reg F] [--seed N] [--max-records N]"
+                     " [--site lm-head|hidden] [--no-verify] [--json]\n";
         return 0;
     }
     auto valid = validate_options(args, 3U,
-                                  {"--name", "--rank", "--steps", "--lr", "--reg", "--seed", "--max-records"},
+                                  {"--name", "--rank", "--steps", "--lr", "--reg", "--seed",
+                                   "--max-records", "--site"},
                                   {"--json", "--no-verify"});
     if (!valid) return print_error(valid.error(), json);
 
@@ -4347,6 +4349,16 @@ int command_module_fit(const std::vector<std::string>& args) {
     if (!max_records || max_records.value() == 0U || max_records.value() > 64U) {
         return print_error(vastloom::make_error(vastloom::ErrorCode::invalid_argument,
                                                 "--max-records must be between 1 and 64"), json);
+    }
+    const auto site = option_value(args, "--site");
+    if (!site) {
+        return print_error(vastloom::make_error(vastloom::ErrorCode::invalid_argument,
+                                                "module-fit requires --site lm-head or --site hidden"), json);
+    }
+    const bool hidden_site = *site == "hidden";
+    if (!hidden_site && *site != "lm-head") {
+        return print_error(vastloom::make_error(vastloom::ErrorCode::invalid_argument,
+                                                "--site must be 'lm-head' or 'hidden'"), json);
     }
 
     // The transcript is untrusted input like everything else that crosses the CLI: bounded
@@ -4412,6 +4424,7 @@ int command_module_fit(const std::vector<std::string>& args) {
     const auto& config = model.value().config();
 
     std::vector<vastloom::inference::CapabilityFitPair> pairs;
+    std::vector<vastloom::inference::HiddenFitSample> hidden_samples;
     for (const auto& record : usable) {
         auto framed = model.value().tokenizer().apply_smol_chat_template(
             {{vastloom::inference::ChatMessage{"user", record.prompt}}}, true);
@@ -4441,6 +4454,13 @@ int command_module_fit(const std::vector<std::string>& args) {
                                json);
         }
         for (std::size_t k = 0; k < target_ids.value().size(); ++k) {
+            if (hidden_site) {
+                vastloom::inference::HiddenFitSample sample;
+                sample.hidden = states.value()[offset + k];
+                sample.target_id = target_ids.value()[k];
+                hidden_samples.push_back(std::move(sample));
+                continue;
+            }
             auto head = model.value().head_dot(states.value()[offset + k]);
             if (!head) return print_error(head.error(), json);
             vastloom::inference::CapabilityFitPair pair;
@@ -4451,9 +4471,37 @@ int command_module_fit(const std::vector<std::string>& args) {
         }
     }
 
-    auto fitted = vastloom::inference::fit_lm_head_lora(
-        config.vocab_size, config.hidden_size, rank.value(), steps.value(),
-        static_cast<double>(lr.value()), static_cast<double>(reg.value()), seed.value(), pairs);
+    std::optional<vastloom::safety::Reservation> head_copy_reservation;
+    std::vector<float> head_matrix;
+    if (hidden_site) {
+        // The hidden-site fitter reads the frozen head every step; the copy is Governor-
+        // charged like any other large resident buffer and released when the fit returns.
+        const ByteCount copy_bytes = static_cast<ByteCount>(config.vocab_size) *
+                                     config.hidden_size * sizeof(float);
+        auto reserved = runtime.value().governor->try_reserve(
+            vastloom::safety::ResourceKind::ram, copy_bytes,
+            "Final-hidden capability head matrix copy");
+        if (!reserved) return print_error(reserved.error(), json);
+        head_copy_reservation = reserved.take_value();
+        head_matrix.resize(static_cast<std::size_t>(config.vocab_size) * config.hidden_size);
+        auto filled = model.value().head_weights_into(head_matrix);
+        if (!filled) return print_error(filled.error(), json);
+    }
+
+    Result<vastloom::inference::CapabilityFitResult> fitted =
+        vastloom::make_error(vastloom::ErrorCode::internal_error, "unreachable");
+    if (hidden_site) {
+        fitted = vastloom::inference::fit_final_hidden_lora(
+            config.vocab_size, config.hidden_size, rank.value(), steps.value(),
+            static_cast<double>(lr.value()), static_cast<double>(reg.value()),
+            seed.value(), head_matrix, hidden_samples);
+    } else {
+        fitted = vastloom::inference::fit_lm_head_lora(
+            config.vocab_size, config.hidden_size, rank.value(), steps.value(),
+            static_cast<double>(lr.value()), static_cast<double>(reg.value()),
+            seed.value(), pairs);
+    }
+    head_copy_reservation.reset();
     if (!fitted) return print_error(fitted.error(), json);
 
     vastloom::inference::CapabilityModule module;
@@ -4461,14 +4509,21 @@ int command_module_fit(const std::vector<std::string>& args) {
     module.rank = static_cast<std::uint32_t>(rank.value());
     module.scale = 1.0F;
     module.routing_embedding = vastloom::inference::embed_request(module.name);
-    vastloom::inference::ModuleTarget head_target;
-    head_target.spec.layer = vastloom::inference::kCapabilityLmHeadLayer;
-    head_target.spec.target = vastloom::inference::CapabilityTarget::lm_head;
-    head_target.spec.rows = config.vocab_size;
-    head_target.spec.cols = config.hidden_size;
-    head_target.a = fitted.value().a;
-    head_target.b = fitted.value().b;
-    module.targets.push_back(std::move(head_target));
+    vastloom::inference::ModuleTarget trained_target;
+    if (hidden_site) {
+        trained_target.spec.layer = vastloom::inference::kCapabilityFinalHiddenLayer;
+        trained_target.spec.target = vastloom::inference::CapabilityTarget::final_hidden;
+        trained_target.spec.rows = config.hidden_size;
+        trained_target.spec.cols = config.hidden_size;
+    } else {
+        trained_target.spec.layer = vastloom::inference::kCapabilityLmHeadLayer;
+        trained_target.spec.target = vastloom::inference::CapabilityTarget::lm_head;
+        trained_target.spec.rows = config.vocab_size;
+        trained_target.spec.cols = config.hidden_size;
+    }
+    trained_target.a = fitted.value().a;
+    trained_target.b = fitted.value().b;
+    module.targets.push_back(std::move(trained_target));
 
     auto written = vastloom::inference::write_capability_module(output_path, module);
     if (!written) return print_error(written.error(), json);
@@ -4476,7 +4531,8 @@ int command_module_fit(const std::vector<std::string>& args) {
     const auto bytes = std::filesystem::file_size(output_path, size_error);
     if (json) {
         std::cout << "{\"ok\":true,\"name\":\"" << vastloom::util::json_escape(*name)
-                  << "\",\"file_bytes\":" << (size_error ? 0U : bytes)
+                  << "\",\"site\":\"" << *site << "\""
+                  << ",\"file_bytes\":" << (size_error ? 0U : bytes)
                   << ",\"records_used\":" << usable.size()
                   << ",\"skipped_teacher_incorrect\":" << skipped_uncorrect
                   << ",\"positions\":" << fitted.value().positions

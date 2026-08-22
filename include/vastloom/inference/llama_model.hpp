@@ -97,6 +97,11 @@ public:
     // per-position logits without any new inference machinery.
     [[nodiscard]] Result<std::vector<float>> head_dot(
         const std::vector<float>& normalized) const;
+
+    // Fills `destination` (vocab x hidden, row-major, FP32) with the frozen tied-embedding
+    // head matrix for the offline compiler's hidden-site fitter. The caller owns and
+    // Governor-reserves the destination storage.
+    [[nodiscard]] Result<void> head_weights_into(std::span<float> destination) const;
     [[nodiscard]] Result<LlamaGenerationResult> generate(
         const std::vector<ChatMessage>& messages,
         const LlamaGenerationOptions& options,

@@ -22,6 +22,9 @@ namespace vastloom::inference {
 
 // Which frozen linear projection a target rewires. Norms and embeddings are not linear layers,
 // so they are not addressable; the LM head is, keyed at the synthetic layer index below.
+// final_hidden rewires the final-norm output BEFORE the frozen head consumes it:
+// logits = W * (h + B(A h)) instead of W h + delta - strictly more expressive, and its
+// gradients stay closed-form because only the head's transpose is needed.
 enum class CapabilityTarget : std::uint8_t {
     q = 0,
     k = 1,
@@ -31,18 +34,19 @@ enum class CapabilityTarget : std::uint8_t {
     up = 5,
     down = 6,
     lm_head = 7,
+    final_hidden = 8,
 };
 
 [[nodiscard]] std::string_view to_string(CapabilityTarget target) noexcept;
 [[nodiscard]] std::optional<CapabilityTarget> capability_target_from_u32(std::uint32_t raw) noexcept;
 
-inline constexpr std::array<CapabilityTarget, 8> kAllCapabilityTargets{
+inline constexpr std::uint32_t kCapabilityLmHeadLayer = 0xFFFF'FFFEU;
+inline constexpr std::uint32_t kCapabilityFinalHiddenLayer = 0xFFFF'FFFDU;
+
+inline constexpr std::array<CapabilityTarget, 9> kAllCapabilityTargets{
     CapabilityTarget::q,    CapabilityTarget::k,     CapabilityTarget::v,
     CapabilityTarget::o,    CapabilityTarget::gate,  CapabilityTarget::up,
-    CapabilityTarget::down, CapabilityTarget::lm_head};
-
-// Synthetic layer index under which the LM head binding is stored.
-inline constexpr std::uint32_t kCapabilityLmHeadLayer = 0xFFFF'FFFEU;
+    CapabilityTarget::down, CapabilityTarget::lm_head, CapabilityTarget::final_hidden};
 
 struct ModuleTargetSpec {
     std::uint32_t layer{0};
@@ -157,6 +161,13 @@ struct CapabilityFitPair {
     std::uint32_t target_id{0};
 };
 
+// One supervised position for final-hidden distillation. The base logits are computed inside
+// the fitter from the head weights, so no precomputed distribution is carried here.
+struct HiddenFitSample {
+    std::vector<float> hidden;
+    std::uint32_t target_id{0};
+};
+
 struct CapabilityFitResult {
     std::vector<float> a;  // rank x hidden, row-major
     std::vector<float> b;  // vocab x rank, row-major
@@ -178,5 +189,20 @@ struct CapabilityFitResult {
     std::size_t vocab_size, std::size_t hidden_size, std::size_t rank, std::size_t steps,
     double learning_rate, double regularization, std::uint64_t seed,
     const std::vector<CapabilityFitPair>& pairs);
+
+// Same contract as fit_lm_head_lora - parity-before-capability start, decoupled weight-decay
+// contraction clamped at zero, fail-closed divergence guard - but the adapter reshapes the
+// final hidden state before the frozen head: logits = W(h + B(A h)). The projection A stays
+// frozen at its deterministic random initialization and only B trains: letting both factors
+// move created an A<->B resonance through ||W*B|| that diverged within tens of steps at any
+// learning rate (measured), while the frozen projection removes that feedback term entirely.
+// `head_weights` is the vocab x hidden row-major frozen head in FP32; it is read every step
+// (forward pass and its transpose for gradients), so callers should expect the fit to cost
+// roughly two head-sized sweeps per step.
+[[nodiscard]] Result<CapabilityFitResult> fit_final_hidden_lora(
+    std::size_t vocab_size, std::size_t hidden_size, std::size_t rank, std::size_t steps,
+    double learning_rate, double regularization, std::uint64_t seed,
+    std::span<const float> head_weights,
+    const std::vector<HiddenFitSample>& samples);
 
 }  // namespace vastloom::inference

@@ -452,6 +452,7 @@ Result<std::vector<float>> evaluate_tokens(const LlamaModel& model,
     std::vector<float> scores(maximum_sequence);
     std::vector<float> logits(config.vocab_size);
     std::vector<float> capability_scratch(static_cast<std::size_t>(kMaxModuleRank));
+    std::vector<float> final_hidden_input(hidden_size);
 
     if (start_position > maximum_sequence || token_ids.size() > maximum_sequence - start_position) {
         return make_error(ErrorCode::invalid_argument, "Incremental Llama evaluation exceeds allocated context");
@@ -595,6 +596,21 @@ Result<std::vector<float>> evaluate_tokens(const LlamaModel& model,
             for (std::size_t index = 0; index < hidden_size; ++index) hidden[index] += down[index];
         }
         rms_norm(model, model.final_norm_view(), hidden, normalized, config.rms_norm_eps);
+        if (capability_overlay != nullptr) {
+            const auto* hidden_binding = capability_overlay->find(
+                kCapabilityFinalHiddenLayer, CapabilityTarget::final_hidden);
+            if (hidden_binding != nullptr) {
+                std::copy(normalized.begin(), normalized.end(), final_hidden_input.begin());
+                if (const auto applied = apply_capability_delta(
+                        *hidden_binding, final_hidden_input, capability_scratch, normalized);
+                    !applied) {
+                    return applied.error();
+                }
+                capability_overlay->note_macs(
+                    static_cast<std::uint64_t>(hidden_binding->rank) *
+                    (static_cast<std::uint64_t>(hidden_binding->cols) + hidden_binding->rows));
+            }
+        }
         if (hidden_capture != nullptr) {
             hidden_capture->push_back(normalized);
         }
@@ -702,6 +718,23 @@ Result<std::vector<float>> LlamaModel::head_dot(const std::vector<float>& normal
     return output;
 }
 
+Result<void> LlamaModel::head_weights_into(std::span<float> destination) const {
+    if (destination.size() != static_cast<std::size_t>(config_.vocab_size) * config_.hidden_size) {
+        return make_error(ErrorCode::invalid_argument,
+                          "Head matrix destination does not match the model dimensions");
+    }
+    const auto& weights = raw_weights();
+    const auto& head = embedding_view();
+    for (std::size_t row = 0; row < config_.vocab_size; ++row) {
+        const std::size_t source = head.offset + row * config_.hidden_size;
+        float* out_row = destination.data() + row * config_.hidden_size;
+        for (std::size_t column = 0; column < config_.hidden_size; ++column) {
+            out_row[column] = bf16_to_float(weights[source + column]);
+        }
+    }
+    return {};
+}
+
 Result<LlamaGenerationResult> LlamaModel::generate(const std::vector<ChatMessage>& messages,
                                                    const LlamaGenerationOptions& options,
                                                    safety::ResourceGovernor& governor,
@@ -794,6 +827,7 @@ std::pair<std::uint32_t, std::uint32_t> capability_target_dims(const LlamaConfig
         case CapabilityTarget::up: return {config.intermediate_size, config.hidden_size};
         case CapabilityTarget::down: return {config.hidden_size, config.intermediate_size};
         case CapabilityTarget::lm_head: return {config.vocab_size, config.hidden_size};
+        case CapabilityTarget::final_hidden: return {config.hidden_size, config.hidden_size};
     }
     return {0U, 0U};
 }
@@ -809,6 +843,12 @@ Result<CapabilityOverlay> build_capability_overlay(const LlamaConfig& config,
             if (target.spec.layer != kCapabilityLmHeadLayer) {
                 return make_error(ErrorCode::invalid_argument,
                                   "Capability module LM-head target must use the reserved layer id",
+                                  module.name);
+            }
+        } else if (target.spec.target == CapabilityTarget::final_hidden) {
+            if (target.spec.layer != kCapabilityFinalHiddenLayer) {
+                return make_error(ErrorCode::invalid_argument,
+                                  "Capability module final-hidden target must use its reserved layer id",
                                   module.name);
             }
         } else if (target.spec.layer >= config.num_hidden_layers) {

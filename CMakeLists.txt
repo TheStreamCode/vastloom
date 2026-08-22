@@ -87,6 +87,7 @@ add_library(vastloom_core STATIC
     src/inference/gpt2_tokenizer.cpp
     src/inference/ggml_quantization.cpp
     src/inference/ggml_compute.cpp
+    src/inference/capability_module.cpp
     src/inference/deepseek_v4_preflight.cpp
     src/inference/deepseek_v4_gguf.cpp
     src/inference/deepseek_v4_probe.cpp

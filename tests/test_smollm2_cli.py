@@ -96,6 +96,60 @@ def main() -> int:
     sampled_two, _ = json_command(sampled_command)
     require(sampled_one["generated_ids"] == sampled_two["generated_ids"], "seeded sampling is not deterministic")
 
+    # E1 capability-module mechanics on the frozen base: a stored-but-inert module must not move
+    # a single greedy token, an active module must be routed, bound and cost-accounted, and the
+    # whole thing must be deterministic.
+    import tempfile
+
+    base_case = fixture["generation_cases"][0]
+    chat_prefix = [
+        executable, "chat", model, "--prompt", base_case["prompt"],
+        "--max-tokens", str(base_case["max_tokens"]), "--no-verify", "--json",
+    ]
+    baseline, _ = json_command(chat_prefix)
+
+    with tempfile.TemporaryDirectory() as scratch:
+        zero_module = Path(scratch) / "parity-zero.vlcm"
+        payload, process = json_command([
+            executable, "module-init", model, str(zero_module),
+            "--name", "parity-zero", "--rank", "4", "--scale", "0.5", "--seed", "7",
+            "--zero-a", "--json",
+        ])
+        require(payload["ok"] is True and payload["targets"] == 150, "module-init did not report its targets", process)
+
+        inert, _ = json_command(chat_prefix + ["--capability-module", str(zero_module)])
+        require(inert["text"] == baseline["text"], "inert module changed the generated text", process)
+        require(inert["generated_ids"] == baseline["generated_ids"], "inert module changed generated tokens", process)
+        capability = inert.get("capability")
+        require(capability is not None, "capability accounting missing from JSON output", process)
+        require(capability["selected"] == "parity-zero", "router did not select the only module", process)
+        require(capability["added_macs"] > 0, "inert module reported no injection cost", process)
+        require(capability["bindings"] > 0, "capability binding count missing", process)
+
+        live_module = Path(scratch) / "live-skill.vlcm"
+        payload, process = json_command([
+            executable, "module-init", model, str(live_module),
+            "--name", "live-skill", "--rank", "8", "--scale", "0.05", "--seed", "9", "--json",
+        ])
+        require(payload["ok"] is True, "live module was not written", process)
+        active_one, _ = json_command(chat_prefix + ["--capability-module", str(live_module)])
+        active_two, _ = json_command(chat_prefix + ["--capability-module", str(live_module)])
+        require(active_one["capability"]["selected"] == "live-skill", "active module was not selected", process)
+        require(active_one["generated_ids"] == active_two["generated_ids"],
+                "active module generation is not deterministic", process)
+        require(active_one["capability"]["added_macs"] > 0, "active module reported no cost", process)
+
+        both_one, _ = json_command(
+            chat_prefix + ["--capability-module", str(zero_module), "--capability-module", str(live_module)])
+        both_two, _ = json_command(
+            chat_prefix + ["--capability-module", str(zero_module), "--capability-module", str(live_module)])
+        require(both_one["capability"]["considered"] == 2, "router did not see both modules", process)
+        require(both_one["capability"]["selected"] == both_two["capability"]["selected"],
+                "routing is not stable across identical requests", process)
+
+        missing = run(chat_prefix + ["--capability-module", str(Path(scratch) / "absent.vlcm")])
+        require(missing.returncode != 0, "a missing capability module was accepted", missing)
+
     conversation = "\n".join(fixture["multi_turn"]["inputs"] + ["/stats", "/model", "/exit", ""])
     interactive = run([
         executable, "chat", model, "--max-tokens", "64", "--no-verify", "--no-stream", "--no-stats"

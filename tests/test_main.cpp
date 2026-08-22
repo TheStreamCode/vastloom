@@ -7710,6 +7710,312 @@ void test_loopback_server() {
     CHECK(!server.running());
 }
 
+void test_capability_module(const std::filesystem::path& root) {
+    const auto directory = root / "capability";
+    std::filesystem::create_directories(directory);
+
+    const auto read_bytes = [](const std::filesystem::path& path) {
+        std::ifstream input(path, std::ios::binary);
+        std::vector<char> characters{std::istreambuf_iterator<char>(input),
+                                     std::istreambuf_iterator<char>()};
+        std::vector<std::byte> bytes;
+        bytes.reserve(characters.size());
+        for (const char character : characters) {
+            bytes.push_back(static_cast<std::byte>(character));
+        }
+        return bytes;
+    };
+    const auto write_bytes = [](const std::filesystem::path& path,
+                                const std::vector<std::byte>& bytes) {
+        std::ofstream output(path, std::ios::binary);
+        output.write(reinterpret_cast<const char*>(bytes.data()),
+                     static_cast<std::streamsize>(bytes.size()));
+    };
+    const auto make_target = [](std::uint32_t layer, vastloom::inference::CapabilityTarget target,
+                                std::uint32_t rows, std::uint32_t cols, float fill_b) {
+        vastloom::inference::ModuleTarget entry;
+        entry.spec.layer = layer;
+        entry.spec.target = target;
+        entry.spec.rows = rows;
+        entry.spec.cols = cols;
+        entry.a.assign(static_cast<std::size_t>(4U) * cols, 0.0F);
+        entry.b.assign(static_cast<std::size_t>(rows) * 4U, fill_b);
+        return entry;
+    };
+
+    // Container round trip: what the writer serializes is exactly what the loader hands back.
+    vastloom::inference::CapabilityModule module;
+    module.name = "parity-zero";
+    module.rank = 4U;
+    module.scale = 0.5F;
+    module.routing_embedding.fill(0.0F);
+    module.routing_embedding[3] = 2.0F;
+    module.targets.push_back(make_target(0U, vastloom::inference::CapabilityTarget::q, 16U, 16U, 0.25F));
+    module.targets.push_back(make_target(1U, vastloom::inference::CapabilityTarget::gate, 8U, 16U, 0.5F));
+    const auto module_path = directory / "roundtrip.vlcm";
+    auto written = vastloom::inference::write_capability_module(module_path, module);
+    CHECK(written);
+    if (written) {
+        auto loaded = vastloom::inference::load_capability_module(module_path);
+        CHECK(loaded);
+        if (loaded) {
+            const auto& parsed = loaded.value();
+            CHECK(parsed.name == "parity-zero");
+            CHECK(parsed.rank == 4U && parsed.scale == 0.5F);
+            CHECK(parsed.targets.size() == 2U && parsed.file_bytes >= 512U);
+            CHECK(parsed.targets[0].spec.target == vastloom::inference::CapabilityTarget::q);
+            CHECK(parsed.targets[1].a.size() == 64U && parsed.targets[1].b.size() == 32U);
+            CHECK(parsed.routing_embedding[3] == 2.0F);
+        }
+    }
+
+    // Every mutation an attacker or a buggy writer could produce must be refused before a
+    // single field is trusted.
+    const auto original = read_bytes(module_path);
+    CHECK(original.size() > 600U);
+
+    auto corrupted = original;
+    corrupted[1] = std::byte{0x58};
+    const auto bad_magic = directory / "bad-magic.vlcm";
+    write_bytes(bad_magic, corrupted);
+    CHECK(!vastloom::inference::load_capability_module(bad_magic));
+
+    corrupted = original;
+    corrupted[7] = std::byte{0x09};
+    const auto bad_version = directory / "bad-version.vlcm";
+    write_bytes(bad_version, corrupted);
+    CHECK(!vastloom::inference::load_capability_module(bad_version));
+
+    corrupted = original;
+    corrupted.resize(original.size() - 40U);
+    const auto truncated = directory / "truncated.vlcm";
+    write_bytes(truncated, corrupted);
+    CHECK(!vastloom::inference::load_capability_module(truncated));
+
+    corrupted = original;
+    corrupted[original.size() - 33U] ^= std::byte{0x01};
+    const auto flipped = directory / "flipped.vlcm";
+    write_bytes(flipped, corrupted);
+    CHECK(!vastloom::inference::load_capability_module(flipped));
+
+    vastloom::inference::CapabilityModule duplicated = module;
+    duplicated.targets.push_back(duplicated.targets.front());
+    const auto duplicate_path = directory / "duplicate.vlcm";
+    auto duplicate_written =
+        vastloom::inference::write_capability_module(duplicate_path, duplicated);
+    CHECK(duplicate_written);
+    CHECK(!vastloom::inference::load_capability_module(duplicate_path));
+
+    vastloom::inference::CapabilityModule negative = module;
+    negative.scale = -1.0F;
+    CHECK(!vastloom::inference::write_capability_module(directory / "negative.vlcm", negative));
+    vastloom::inference::CapabilityModule zero_rank = module;
+    zero_rank.rank = 0U;
+    CHECK(!vastloom::inference::write_capability_module(directory / "zero-rank.vlcm", zero_rank));
+    vastloom::inference::CapabilityModule nan_weight = module;
+    nan_weight.targets[0].b.front() = std::numeric_limits<float>::quiet_NaN();
+    CHECK(!vastloom::inference::write_capability_module(directory / "nan.vlcm", nan_weight));
+    std::error_code cleanup_error;
+    std::filesystem::remove(directory / "negative.vlcm", cleanup_error);
+
+    // Routing: nearest embedding wins, ties and truncation are deterministic run to run.
+    const auto query = vastloom::inference::embed_request("hello world");
+    std::vector<vastloom::inference::CapabilityModule> pool(3U);
+    pool[0].name = "aligned";
+    pool[0].routing_embedding = query;
+    pool[1].name = "rotated";
+    for (std::size_t index = 0; index < query.size(); ++index) {
+        pool[1].routing_embedding[index] = query[(index + 1U) % query.size()];
+    }
+    pool[2].name = "anti";
+    for (std::size_t index = 0; index < query.size(); ++index) {
+        pool[2].routing_embedding[index] = -query[index];
+    }
+    const auto ranked_first = vastloom::inference::route_modules(pool, "hello world", 3U);
+    const auto ranked_second = vastloom::inference::route_modules(pool, "hello world", 3U);
+    CHECK(ranked_first.size() == 3U);
+    CHECK(ranked_first.front().index == 0U);
+    CHECK(ranked_first.back().index == 2U);
+    CHECK(ranked_first[1].similarity >= ranked_first.back().similarity);
+    CHECK(std::equal(ranked_first.begin(), ranked_first.end(), ranked_second.begin(),
+                     [](const auto& left, const auto& right) {
+                         return left.index == right.index &&
+                                left.similarity == right.similarity;
+                     }));
+    CHECK(vastloom::inference::route_modules(pool, "hello world", 2U).size() == 2U);
+    CHECK(vastloom::inference::route_modules({}, "hello world", 4U).empty());
+
+    // The injection kernel against an independent double-precision oracle.
+    constexpr std::size_t kRows = 8U;
+    constexpr std::size_t kCols = 6U;
+    constexpr std::uint32_t kRank = 3U;
+    vastloom::inference::CapabilityOverlayBinding binding;
+    binding.layer = 0U;
+    binding.target = vastloom::inference::CapabilityTarget::q;
+    binding.rows = static_cast<std::uint32_t>(kRows);
+    binding.cols = static_cast<std::uint32_t>(kCols);
+    binding.rank = kRank;
+    binding.scale = 0.25F;
+    std::array<float, kRank * kCols> adapter_a{};
+    std::array<float, kRows * kRank> adapter_b{};
+    for (std::size_t index = 0; index < adapter_a.size(); ++index) {
+        adapter_a[index] = 0.05F * static_cast<float>((static_cast<int>(index) % 7) - 3);
+    }
+    for (std::size_t index = 0; index < adapter_b.size(); ++index) {
+        adapter_b[index] = 0.05F * static_cast<float>((static_cast<int>(index) % 5) - 2);
+    }
+    binding.a = adapter_a.data();
+    binding.b = adapter_b.data();
+    const std::array<float, kCols> input{0.5F, -1.25F, 2.0F, 0.0F, -0.75F, 1.5F};
+    std::array<double, kRows> expected{};
+    for (std::size_t r = 0; r < kRank; ++r) {
+        double sum = 0.0;
+        for (std::size_t c = 0; c < kCols; ++c) {
+            sum += static_cast<double>(adapter_a[r * kCols + c]) * static_cast<double>(input[c]);
+        }
+        for (std::size_t i = 0; i < kRows; ++i) {
+            expected[i] += 0.25 * static_cast<double>(adapter_b[i * kRank + r]) * sum;
+        }
+    }
+    std::array<float, kRows> output{1.0F, 2.0F, 3.0F, 4.0F, 5.0F, 6.0F, 7.0F, 8.0F};
+    std::vector<float> scratch(kRank);
+    auto applied = vastloom::inference::apply_capability_delta(binding, input, scratch, output);
+    CHECK(applied);
+    for (std::size_t i = 0; i < kRows; ++i) {
+        const double wanted = static_cast<double>(i) + 1.0 + expected[i];
+        CHECK(std::abs(static_cast<double>(output[i]) - wanted) < 1.0e-5);
+    }
+
+    // Zero scale is machinery-without-effect: adding zero must not move any bit.
+    std::array<float, kRows> untouched{1.0F, 2.0F, 3.0F, 4.0F, 5.0F, 6.0F, 7.0F, 8.0F};
+    binding.scale = 0.0F;
+    applied = vastloom::inference::apply_capability_delta(binding, input, scratch, untouched);
+    CHECK(applied);
+    bool bitwise_unchanged = true;
+    for (std::size_t i = 0; i < kRows; ++i) {
+        if (untouched[i] != static_cast<float>(i) + 1.0F) bitwise_unchanged = false;
+    }
+    CHECK(bitwise_unchanged);
+
+    scratch.resize(2U);
+    CHECK(!vastloom::inference::apply_capability_delta(binding, input, scratch, untouched));
+    scratch.resize(kRank);
+    CHECK(vastloom::inference::apply_capability_delta(binding, input, scratch, untouched));
+
+    // Binding validation against a synthetic model config.
+    vastloom::inference::LlamaConfig config;
+    config.vocab_size = 100U;
+    config.hidden_size = 16U;
+    config.intermediate_size = 32U;
+    config.num_hidden_layers = 2U;
+    config.num_attention_heads = 2U;
+    config.num_key_value_heads = 1U;
+    config.max_position_embeddings = 128U;
+    config.bos_token_id = 1U;
+    config.eos_token_id = 2U;
+    config.pad_token_id = 2U;
+    config.rms_norm_eps = 1.0e-5F;
+    config.rope_theta = 10000.0F;
+    config.tie_word_embeddings = true;
+
+    const auto build_with = [&](vastloom::inference::CapabilityModule candidate) {
+        return vastloom::inference::build_capability_overlay(config, candidate);
+    };
+
+    auto out_of_range = module;
+    out_of_range.name = "out-of-range";
+    out_of_range.targets.clear();
+    out_of_range.targets.push_back(
+        make_target(5U, vastloom::inference::CapabilityTarget::q, 16U, 16U, 0.25F));
+    CHECK(!build_with(out_of_range));
+
+    auto wrong_dims = module;
+    wrong_dims.name = "wrong-dims";
+    wrong_dims.targets.clear();
+    wrong_dims.targets.push_back(
+        make_target(0U, vastloom::inference::CapabilityTarget::q, 15U, 16U, 0.25F));
+    CHECK(!build_with(wrong_dims));
+
+    auto bad_head = module;
+    bad_head.name = "bad-head";
+    bad_head.targets.clear();
+    bad_head.targets.push_back(make_target(7U, vastloom::inference::CapabilityTarget::lm_head,
+                                           100U, 16U, 0.25F));
+    CHECK(!build_with(bad_head));
+
+    auto good = module;
+    good.name = "good";
+    good.targets.clear();
+    good.targets.push_back(
+        make_target(0U, vastloom::inference::CapabilityTarget::q, 16U, 16U, 0.25F));
+    good.targets.push_back(
+        make_target(1U, vastloom::inference::CapabilityTarget::down, 16U, 32U, 0.25F));
+    good.targets.push_back(
+        make_target(vastloom::inference::kCapabilityLmHeadLayer,
+                    vastloom::inference::CapabilityTarget::lm_head, 100U, 16U, 0.25F));
+    auto bound = build_with(good);
+    CHECK(bound);
+    if (bound) {
+        CHECK(bound.value().binding_count() == 3U);
+        CHECK(bound.value().selected_name() == "good");
+        CHECK(bound.value().find(1U, vastloom::inference::CapabilityTarget::down) != nullptr);
+        const auto before = bound.value().applied_macs();
+        bound.value().note_macs(10U);
+        CHECK(bound.value().applied_macs() == before + 10U);
+    }
+
+    // Closed-form LM-head distillation: B starts at zero so the first step's loss equals the
+    // base cross-entropy exactly, and gradient descent must then move it down.
+    std::vector<vastloom::inference::CapabilityFitPair> fit_pairs(2U);
+    fit_pairs[0].hidden = {1.0F, 0.5F, -0.5F, 0.25F};
+    fit_pairs[0].base_logits = {3.0F, -1.0F, -1.0F, -1.0F, -1.0F, -1.0F};
+    fit_pairs[0].target_id = 2U;
+    fit_pairs[1].hidden = {-0.25F, 1.0F, 0.0F, 1.5F};
+    fit_pairs[1].base_logits = {2.5F, 0.5F, 0.0F, 0.0F, 0.0F, 0.0F};
+    fit_pairs[1].target_id = 4U;
+    // Stable hyperparameters mirroring the executed real-compiler regime: loss must decrease
+    // from the base-parity start and every weight must stay finite.
+    auto fitted = vastloom::inference::fit_lm_head_lora(6U, 4U, 2U, 400U, 0.05, 0.05, 7U,
+                                                        fit_pairs);
+    CHECK(fitted);
+    if (fitted) {
+        CHECK(fitted.value().positions == 2U);
+        CHECK(fitted.value().final_loss < fitted.value().initial_loss);
+        const auto finite_value = [](float value) { return std::isfinite(value); };
+        CHECK(std::all_of(fitted.value().a.begin(), fitted.value().a.end(), finite_value));
+        CHECK(std::all_of(fitted.value().b.begin(), fitted.value().b.end(), finite_value));
+        CHECK(fitted.value().a.size() == 2U * 4U && fitted.value().b.size() == 6U * 2U);
+    }
+    // Weight decay contracts the adapter toward zero: with an enormous weight the fitted
+    // loss must return to the frozen base's own cross-entropy instead of trading generality
+    // for the targets.
+    auto pinned = vastloom::inference::fit_lm_head_lora(6U, 4U, 2U, 400U, 0.05, 1.0e5, 7U,
+                                                        fit_pairs);
+    CHECK(pinned);
+    if (pinned) {
+        CHECK(std::abs(pinned.value().final_loss - pinned.value().initial_loss) < 1.0e-6);
+    }
+    // Even an aggressive learning rate stays bounded: the decoupled contraction caps the
+    // adapter's reach every step, so the hot configuration must fit, not refuse.
+    auto hot = vastloom::inference::fit_lm_head_lora(6U, 4U, 2U, 300U, 2.0, 0.05, 7U,
+                                                     fit_pairs);
+    CHECK(hot);
+    if (hot) {
+        const auto finite_value = [](float value) { return std::isfinite(value); };
+        CHECK(std::all_of(hot.value().a.begin(), hot.value().a.end(), finite_value));
+        CHECK(std::all_of(hot.value().b.begin(), hot.value().b.end(), finite_value));
+    }
+    CHECK(!vastloom::inference::fit_lm_head_lora(6U, 4U, 2U, 10U, 1.0, 0.0, 7U, {}));
+    auto mismatched = fit_pairs;
+    mismatched[0].hidden.pop_back();
+    CHECK(!vastloom::inference::fit_lm_head_lora(6U, 4U, 2U, 10U, 1.0, 0.0, 7U, mismatched));
+    auto bad_target = fit_pairs;
+    bad_target[0].target_id = 6U;
+    CHECK(!vastloom::inference::fit_lm_head_lora(6U, 4U, 2U, 10U, 1.0, 0.0, 7U, bad_target));
+    auto bad_reg = fit_pairs;
+    CHECK(!vastloom::inference::fit_lm_head_lora(6U, 4U, 2U, 10U, 1.0, -1.0, 7U, bad_reg));
+}
+
 void test_heartbeat(const std::filesystem::path& root) {
     const auto path = root / "heartbeat";
     vastloom::safety::HeartbeatRecord heartbeat;
@@ -7763,6 +8069,7 @@ int main() {
     test_device_io_counters(root);
     test_trace(root);
     test_tiny_model(root);
+    test_capability_module(root);
     test_loopback_server();
     test_heartbeat(root);
     std::error_code error;

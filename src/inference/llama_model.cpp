@@ -12,6 +12,7 @@
 #include <random>
 #include <span>
 #include <thread>
+#include <utility>
 
 #include "vastloom/model/imported_checkpoint.hpp"
 #include "vastloom/model/safetensors.hpp"
@@ -402,13 +403,34 @@ void matvec(const LlamaModel& model,
     });
 }
 
+// Adds one frozen-target delta on top of a completed base matvec. A null overlay is the
+// everyday path: the reference generation is untouched by any of this machinery.
+Result<void> inject_capability_delta(const CapabilityOverlay* overlay,
+                                     std::uint32_t layer,
+                                     CapabilityTarget target,
+                                     std::span<const float> input,
+                                     std::span<float> scratch,
+                                     std::span<float> output) {
+    if (overlay == nullptr) return {};
+    const CapabilityOverlayBinding* binding = overlay->find(layer, target);
+    if (binding == nullptr) return {};
+    if (const auto applied = apply_capability_delta(*binding, input, scratch, output); !applied) {
+        return applied.error();
+    }
+    overlay->note_macs(static_cast<std::uint64_t>(binding->rank) *
+                       (static_cast<std::uint64_t>(binding->cols) + binding->rows));
+    return {};
+}
+
 Result<std::vector<float>> evaluate_tokens(const LlamaModel& model,
                                            const std::vector<std::uint32_t>& token_ids,
                                            std::size_t maximum_sequence,
                                            std::size_t start_position,
                                            const safety::ProcessSafetyGuard* process_guard,
                                            const std::function<bool()>* cancelled,
-                                           InferenceSession* session) {
+                                           InferenceSession* session,
+                                           const CapabilityOverlay* capability_overlay,
+                                           std::vector<std::vector<float>>* hidden_capture) {
     const auto& config = model.config();
     const std::size_t hidden_size = config.hidden_size;
     const std::size_t intermediate_size = config.intermediate_size;
@@ -429,6 +451,7 @@ Result<std::vector<float>> evaluate_tokens(const LlamaModel& model,
     std::vector<float> down(hidden_size);
     std::vector<float> scores(maximum_sequence);
     std::vector<float> logits(config.vocab_size);
+    std::vector<float> capability_scratch(static_cast<std::size_t>(kMaxModuleRank));
 
     if (start_position > maximum_sequence || token_ids.size() > maximum_sequence - start_position) {
         return make_error(ErrorCode::invalid_argument, "Incremental Llama evaluation exceeds allocated context");
@@ -449,10 +472,29 @@ Result<std::vector<float>> evaluate_tokens(const LlamaModel& model,
 
         for (std::size_t layer = 0; layer < model.layer_views().size(); ++layer) {
             const auto& weights = model.layer_views()[layer];
+            const std::uint32_t target_layer = static_cast<std::uint32_t>(layer);
             rms_norm(model, weights.input_norm, hidden, normalized, config.rms_norm_eps);
             matvec(model, session->executor, weights.q, normalized, q);
+            if (const auto injected = inject_capability_delta(capability_overlay, target_layer,
+                                                              CapabilityTarget::q, normalized,
+                                                              capability_scratch, q);
+                !injected) {
+                return injected.error();
+            }
             matvec(model, session->executor, weights.k, normalized, k);
+            if (const auto injected = inject_capability_delta(capability_overlay, target_layer,
+                                                              CapabilityTarget::k, normalized,
+                                                              capability_scratch, k);
+                !injected) {
+                return injected.error();
+            }
             matvec(model, session->executor, weights.v, normalized, v);
+            if (const auto injected = inject_capability_delta(capability_overlay, target_layer,
+                                                              CapabilityTarget::v, normalized,
+                                                              capability_scratch, v);
+                !injected) {
+                return injected.error();
+            }
 
             const std::size_t half_head = head_size / 2U;
             for (std::size_t head = 0; head < head_count; ++head) {
@@ -516,20 +558,54 @@ Result<std::vector<float>> evaluate_tokens(const LlamaModel& model,
                 }
             }
             matvec(model, session->executor, weights.o, attention, projected);
+            if (const auto injected = inject_capability_delta(capability_overlay, target_layer,
+                                                              CapabilityTarget::o, attention,
+                                                              capability_scratch, projected);
+                !injected) {
+                return injected.error();
+            }
             for (std::size_t index = 0; index < hidden_size; ++index) hidden[index] += projected[index];
 
             rms_norm(model, weights.post_norm, hidden, normalized, config.rms_norm_eps);
             matvec(model, session->executor, weights.gate, normalized, gate);
+            if (const auto injected = inject_capability_delta(capability_overlay, target_layer,
+                                                              CapabilityTarget::gate, normalized,
+                                                              capability_scratch, gate);
+                !injected) {
+                return injected.error();
+            }
             matvec(model, session->executor, weights.up, normalized, up);
+            if (const auto injected = inject_capability_delta(capability_overlay, target_layer,
+                                                              CapabilityTarget::up, normalized,
+                                                              capability_scratch, up);
+                !injected) {
+                return injected.error();
+            }
             for (std::size_t index = 0; index < intermediate_size; ++index) {
                 const float silu = gate[index] / (1.0F + std::exp(-gate[index]));
                 product[index] = silu * up[index];
             }
             matvec(model, session->executor, weights.down, product, down);
+            if (const auto injected = inject_capability_delta(capability_overlay, target_layer,
+                                                              CapabilityTarget::down, product,
+                                                              capability_scratch, down);
+                !injected) {
+                return injected.error();
+            }
             for (std::size_t index = 0; index < hidden_size; ++index) hidden[index] += down[index];
         }
         rms_norm(model, model.final_norm_view(), hidden, normalized, config.rms_norm_eps);
+        if (hidden_capture != nullptr) {
+            hidden_capture->push_back(normalized);
+        }
         matvec(model, session->executor, model.embedding_view(), normalized, logits);
+        if (const auto injected =
+                inject_capability_delta(capability_overlay, kCapabilityLmHeadLayer,
+                                        CapabilityTarget::lm_head, normalized, capability_scratch,
+                                        logits);
+            !injected) {
+            return injected.error();
+        }
     }
     return logits;
 }
@@ -570,17 +646,68 @@ Result<std::vector<float>> LlamaModel::logits(const std::vector<std::uint32_t>& 
     if (!scratch) return scratch.error();
     try {
         InferenceSession session(*this, cpu_threads_, token_ids.size());
-        return evaluate_tokens(*this, token_ids, token_ids.size(), 0U, process_guard, nullptr, &session);
+        return evaluate_tokens(*this, token_ids, token_ids.size(), 0U, process_guard, nullptr, &session, nullptr, nullptr);
     } catch (const std::bad_alloc&) {
         return make_error(ErrorCode::resource_exhausted, "Unable to allocate reserved Llama KV or activation buffers");
     }
+}
+
+Result<std::vector<std::vector<float>>> LlamaModel::hidden_states(
+    const std::vector<std::uint32_t>& token_ids,
+    safety::ResourceGovernor& governor,
+    const safety::ProcessSafetyGuard* process_guard) const {
+    if (token_ids.empty() || token_ids.size() > config_.max_position_embeddings) {
+        return make_error(ErrorCode::invalid_argument,
+                          "Llama hidden-states input is empty or exceeds context");
+    }
+    auto kv_bytes = kv_cache_bytes(config_, token_ids.size());
+    if (!kv_bytes) return kv_bytes.error();
+    auto kv_reservation = governor.try_reserve(safety::ResourceKind::ram, kv_bytes.value(),
+                                               "Llama reference KV cache");
+    if (!kv_reservation) return kv_reservation.error();
+    auto scratch = governor.try_reserve(safety::ResourceKind::scratch, 8U * MiB,
+                                        "Llama reference activation scratch");
+    if (!scratch) return scratch.error();
+    try {
+        InferenceSession session(*this, cpu_threads_, token_ids.size());
+        std::vector<std::vector<float>> capture;
+        capture.reserve(token_ids.size());
+        auto result = evaluate_tokens(*this, token_ids, token_ids.size(), 0U, process_guard,
+                                      nullptr, &session, nullptr, &capture);
+        if (!result) return result.error();
+        return capture;
+    } catch (const std::bad_alloc&) {
+        return make_error(ErrorCode::resource_exhausted,
+                          "Unable to allocate reserved Llama hidden-state buffers");
+    }
+}
+
+Result<std::vector<float>> LlamaModel::head_dot(const std::vector<float>& normalized) const {
+    if (normalized.size() != config_.hidden_size) {
+        return make_error(ErrorCode::invalid_argument,
+                          "LM-head input does not match the model width");
+    }
+    std::vector<float> output(config_.vocab_size);
+    const auto& weights = raw_weights();
+    const auto& head = embedding_view();
+    for (std::size_t row = 0; row < config_.vocab_size; ++row) {
+        const std::size_t base = head.offset + row * config_.hidden_size;
+        double sum = 0.0;
+        for (std::size_t column = 0; column < config_.hidden_size; ++column) {
+            sum += static_cast<double>(bf16_to_float(weights[base + column])) *
+                   static_cast<double>(normalized[column]);
+        }
+        output[row] = static_cast<float>(sum);
+    }
+    return output;
 }
 
 Result<LlamaGenerationResult> LlamaModel::generate(const std::vector<ChatMessage>& messages,
                                                    const LlamaGenerationOptions& options,
                                                    safety::ResourceGovernor& governor,
                                                    const safety::ProcessSafetyGuard* process_guard,
-                                                   const std::function<void(std::string_view)>& stream) const {
+                                                   const std::function<void(std::string_view)>& stream,
+                                                   const CapabilityOverlay* capability_overlay) const {
     if (options.max_new_tokens == 0U || options.top_k == 0U || !std::isfinite(options.temperature) ||
         options.temperature < 0.0F || options.timeout <= std::chrono::milliseconds::zero()) {
         return make_error(ErrorCode::invalid_argument, "Invalid Llama generation options");
@@ -610,7 +737,7 @@ Result<LlamaGenerationResult> LlamaModel::generate(const std::vector<ChatMessage
     try {
         InferenceSession session(*this, cpu_threads_, maximum_sequence);
         const auto* cancelled = options.cancelled ? &options.cancelled : nullptr;
-        auto logits_result = evaluate_tokens(*this, result.prompt_ids, maximum_sequence, 0U, process_guard, cancelled, &session);
+        auto logits_result = evaluate_tokens(*this, result.prompt_ids, maximum_sequence, 0U, process_guard, cancelled, &session, capability_overlay, nullptr);
         if (!logits_result) return logits_result.error();
         std::vector<float> current_logits = logits_result.take_value();
         const auto prompt_finished = std::chrono::steady_clock::now();
@@ -633,7 +760,7 @@ Result<LlamaGenerationResult> LlamaModel::generate(const std::vector<ChatMessage
             if (index + 1U < maximum_new) {
                 const std::vector<std::uint32_t> incremental{next};
                 const std::size_t token_position = result.prompt_ids.size() + result.generated_ids.size() - 1U;
-                auto evaluated = evaluate_tokens(*this, incremental, maximum_sequence, token_position, process_guard, cancelled, &session);
+                auto evaluated = evaluate_tokens(*this, incremental, maximum_sequence, token_position, process_guard, cancelled, &session, capability_overlay, nullptr);
                 if (!evaluated) return evaluated.error();
                 current_logits = evaluated.take_value();
             }
@@ -650,6 +777,67 @@ Result<LlamaGenerationResult> LlamaModel::generate(const std::vector<ChatMessage
     } catch (const std::bad_alloc&) {
         return make_error(ErrorCode::resource_exhausted, "Unable to allocate reserved Llama generation buffers");
     }
+}
+
+std::pair<std::uint32_t, std::uint32_t> capability_target_dims(const LlamaConfig& config,
+                                                               CapabilityTarget target) {
+    const std::uint64_t head_size =
+        static_cast<std::uint64_t>(config.hidden_size) / config.num_attention_heads;
+    switch (target) {
+        case CapabilityTarget::q:
+        case CapabilityTarget::o: return {config.hidden_size, config.hidden_size};
+        case CapabilityTarget::k:
+        case CapabilityTarget::v:
+            return {config.num_key_value_heads * static_cast<std::uint32_t>(head_size),
+                    config.hidden_size};
+        case CapabilityTarget::gate:
+        case CapabilityTarget::up: return {config.intermediate_size, config.hidden_size};
+        case CapabilityTarget::down: return {config.hidden_size, config.intermediate_size};
+        case CapabilityTarget::lm_head: return {config.vocab_size, config.hidden_size};
+    }
+    return {0U, 0U};
+}
+
+Result<CapabilityOverlay> build_capability_overlay(const LlamaConfig& config,
+                                                   const CapabilityModule& module) {
+    // Bindings borrow the module's storage, so the overlay is only valid while the module lives.
+    CapabilityOverlay overlay;
+    overlay.set_module_bytes(module.file_bytes);
+    overlay.set_selected_name(module.name);
+    for (const auto& target : module.targets) {
+        if (target.spec.target == CapabilityTarget::lm_head) {
+            if (target.spec.layer != kCapabilityLmHeadLayer) {
+                return make_error(ErrorCode::invalid_argument,
+                                  "Capability module LM-head target must use the reserved layer id",
+                                  module.name);
+            }
+        } else if (target.spec.layer >= config.num_hidden_layers) {
+            return make_error(ErrorCode::invalid_argument,
+                              "Capability module targets a layer outside the model",
+                              module.name + " layer " + std::to_string(target.spec.layer));
+        }
+        const auto [rows, cols] = capability_target_dims(config, target.spec.target);
+        if (target.spec.rows != rows || target.spec.cols != cols) {
+            return make_error(
+                ErrorCode::integrity_error,
+                "Capability module target does not match the model's dimensions",
+                module.name + " " + std::string(to_string(target.spec.target)) + ": module " +
+                    std::to_string(target.spec.rows) + "x" + std::to_string(target.spec.cols) +
+                    ", model " + std::to_string(rows) + "x" + std::to_string(cols));
+        }
+        CapabilityOverlayBinding binding;
+        binding.layer = target.spec.layer;
+        binding.target = target.spec.target;
+        binding.rows = target.spec.rows;
+        binding.cols = target.spec.cols;
+        binding.rank = module.rank;
+        binding.scale = module.scale;
+        binding.a = target.a.data();
+        binding.b = target.b.data();
+        binding.source_name = module.name;
+        overlay.add_binding(std::move(binding));
+    }
+    return overlay;
 }
 
 }  // namespace vastloom::inference

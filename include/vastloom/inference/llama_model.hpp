@@ -7,10 +7,12 @@
 #include <functional>
 #include <map>
 #include <string>
+#include <utility>
 #include <vector>
 
 #include "vastloom/core/bytes.hpp"
 #include "vastloom/core/status.hpp"
+#include "vastloom/inference/capability_module.hpp"
 #include "vastloom/inference/gpt2_tokenizer.hpp"
 #include "vastloom/safety/resource_governor.hpp"
 #include "vastloom/safety/runtime_policy.hpp"
@@ -81,12 +83,27 @@ public:
     [[nodiscard]] Result<std::vector<float>> logits(const std::vector<std::uint32_t>& token_ids,
                                                     safety::ResourceGovernor& governor,
                                                     const safety::ProcessSafetyGuard* process_guard = nullptr) const;
+
+    // Final-norm outputs for one teacher-forced sequence: one vector per input position, in
+    // order. This is what the offline module compiler trains against; applying the frozen LM
+    // head to each vector reproduces logits() exactly.
+    [[nodiscard]] Result<std::vector<std::vector<float>>> hidden_states(
+        const std::vector<std::uint32_t>& token_ids,
+        safety::ResourceGovernor& governor,
+        const safety::ProcessSafetyGuard* process_guard = nullptr) const;
+
+    // The frozen LM head applied to one final-norm vector. This is the offline compiler's only
+    // window into the base output distribution; combined with hidden_states it reproduces
+    // per-position logits without any new inference machinery.
+    [[nodiscard]] Result<std::vector<float>> head_dot(
+        const std::vector<float>& normalized) const;
     [[nodiscard]] Result<LlamaGenerationResult> generate(
         const std::vector<ChatMessage>& messages,
         const LlamaGenerationOptions& options,
         safety::ResourceGovernor& governor,
         const safety::ProcessSafetyGuard* process_guard = nullptr,
-        const std::function<void(std::string_view)>& stream = {}) const;
+        const std::function<void(std::string_view)>& stream = {},
+        const CapabilityOverlay* capability_overlay = nullptr) const;
 
     [[nodiscard]] const LlamaConfig& config() const noexcept { return config_; }
     [[nodiscard]] const Gpt2Tokenizer& tokenizer() const noexcept { return tokenizer_; }
@@ -140,5 +157,16 @@ private:
 };
 
 [[nodiscard]] Result<LlamaConfig> load_llama_config(const std::filesystem::path& config_path);
+
+// Validates one capability module against this model's real dimensions and returns the overlay
+// that generate() can apply. Bindings borrow the module's storage, so the module must outlive
+// both the overlay and every generation that uses it.
+[[nodiscard]] Result<CapabilityOverlay> build_capability_overlay(const LlamaConfig& config,
+                                                                 const CapabilityModule& module);
+
+// The exact logical rows x cols this model exposes for one projection kind. Shared by the
+// overlay builder and by tooling that has to size a module before it can be bound.
+[[nodiscard]] std::pair<std::uint32_t, std::uint32_t> capability_target_dims(
+    const LlamaConfig& config, CapabilityTarget target);
 
 }  // namespace vastloom::inference

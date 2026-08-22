@@ -51,6 +51,7 @@
 #include "vastloom/safety/resource_governor.hpp"
 #include "vastloom/safety/runtime_policy.hpp"
 #include "vastloom/util/string.hpp"
+#include "vastloom/util/json.hpp"
 #include "vastloom/version.hpp"
 
 #if defined(_WIN32)
@@ -193,25 +194,35 @@ Result<vastloom::io::IoFaultInjection> parse_io_fault(std::string_view value) {
 Result<void> validate_options(const std::vector<std::string>& args,
                               std::size_t positional_count,
                               std::initializer_list<std::string_view> value_options,
-                              std::initializer_list<std::string_view> flags) {
+                              std::initializer_list<std::string_view> flags,
+                              std::initializer_list<std::string_view> repeatable_value_options = {}) {
     if (args.size() < positional_count) return vastloom::make_error(vastloom::ErrorCode::invalid_argument, "Missing positional argument");
     std::set<std::string> seen;
     for (std::size_t index = positional_count; index < args.size(); ++index) {
         const std::string_view argument = args[index];
         const bool is_value = std::find(value_options.begin(), value_options.end(), argument) != value_options.end();
         const bool is_flag = std::find(flags.begin(), flags.end(), argument) != flags.end();
-        if (!is_value && !is_flag) {
+        const bool is_repeatable = std::find(repeatable_value_options.begin(), repeatable_value_options.end(), argument) != repeatable_value_options.end();
+        if (!is_value && !is_flag && !is_repeatable) {
             return vastloom::make_error(vastloom::ErrorCode::invalid_argument, "Unknown or unexpected option", std::string(argument));
         }
-        if (!seen.insert(std::string(argument)).second) {
+        if (!is_repeatable && !seen.insert(std::string(argument)).second) {
             return vastloom::make_error(vastloom::ErrorCode::invalid_argument, "Duplicate option", std::string(argument));
         }
-        if (is_value) {
+        if (is_value || is_repeatable) {
             if (index + 1U >= args.size()) return vastloom::make_error(vastloom::ErrorCode::invalid_argument, "Option requires a value", std::string(argument));
             ++index;
         }
     }
     return {};
+}
+
+std::vector<std::string> all_option_values(const std::vector<std::string>& args, std::string_view name) {
+    std::vector<std::string> values;
+    for (std::size_t index = 0; index + 1U < args.size(); ++index) {
+        if (args[index] == name) values.push_back(args[index + 1U]);
+    }
+    return values;
 }
 
 std::uint64_t current_pid() {
@@ -237,6 +248,12 @@ void print_help() {
         << "      Run adapter-specific deterministic end-to-end generation probes.\n\n"
         << "  serve MODEL_OR_MANIFEST [--port N] [--no-verify]\n"
         << "      Expose an OpenAI-compatible chat-completions endpoint on 127.0.0.1 only.\n\n"
+        << "  module-init MODEL OUT --name NAME [--rank N] [--scale F] [--seed N] [--layers N]\n"
+        << "      [--targets LIST] [--zero-a] [--json]\n"
+        << "      Write a deterministic synthetic capability module sized to a pinned SmolLM2 checkpoint.\n\n"
+        << "  module-fit MODEL TRANSCRIPT OUT --name NAME [--rank N] [--steps N] [--lr F] [--seed N]\n"
+        << "      [--max-records N] [--no-verify] [--json]\n"
+        << "      Distil an LM-head capability module from a teacher transcript artifact.\n\n"
         << "  doctor [--storage PATH] [--json]\n"
         << "      Detect CPU, RAM, NVIDIA VRAM and storage without allocating model memory.\n\n"
         << "  cuda-info [--allocation-smoke SIZE|--rmsnorm-smoke]"
@@ -3898,7 +3915,8 @@ int command_real_chat(const std::vector<std::string>& args) {
     if (args.empty()) return print_error(vastloom::make_error(vastloom::ErrorCode::invalid_argument, "chat requires a model directory"), json);
     auto valid = validate_options(args, 1U,
                                   {"--prompt", "--max-tokens", "--top-k", "--seed", "--temperature", "--timeout-ms", "--system"},
-                                  {"--json", "--no-stream", "--no-stats", "--no-verify"});
+                                  {"--json", "--no-stream", "--no-stats", "--no-verify"},
+                                  {"--capability-module"});
     if (!valid) return print_error(valid.error(), json);
     const auto prompt = option_value(args, "--prompt");
     if (!prompt && json) return print_error(vastloom::make_error(vastloom::ErrorCode::invalid_argument, "Interactive real-model chat does not support --json"), json);
@@ -3919,6 +3937,23 @@ int command_real_chat(const std::vector<std::string>& args) {
     if (!runtime) return print_error(runtime.error(), json);
     auto model = load_real_model(model_path, runtime.value(), !has_flag(args, "--no-verify"));
     if (!model) return print_error(model.error(), json);
+
+    auto capability_paths = all_option_values(args, "--capability-module");
+    if (capability_paths.size() > 8U) {
+        return print_error(vastloom::make_error(vastloom::ErrorCode::invalid_argument,
+                                                "At most eight capability modules can be registered"), json);
+    }
+    if (!capability_paths.empty() && !prompt) {
+        return print_error(vastloom::make_error(vastloom::ErrorCode::invalid_argument,
+                                                "--capability-module currently requires --prompt"), json);
+    }
+    std::vector<vastloom::inference::CapabilityModule> capability_modules;
+    for (const auto& path_text : capability_paths) {
+        auto module = vastloom::inference::load_capability_module(cli_path(path_text));
+        if (!module) return print_error(module.error(), json);
+        capability_modules.push_back(module.take_value());
+    }
+
     std::vector<vastloom::inference::ChatMessage> messages;
     if (const auto system = option_value(args, "--system")) messages.push_back({"system", *system});
     vastloom::inference::LlamaGenerationOptions options;
@@ -3932,13 +3967,15 @@ int command_real_chat(const std::vector<std::string>& args) {
     static_cast<void>(std::signal(SIGINT, handle_real_interrupt));
 
     const auto run_generation = [&](std::vector<vastloom::inference::ChatMessage>& history,
-                                    bool interactive) -> Result<vastloom::inference::LlamaGenerationResult> {
+                                    bool interactive,
+                                    const vastloom::inference::CapabilityOverlay* capability_overlay) -> Result<vastloom::inference::LlamaGenerationResult> {
         real_generation_cancelled = 0;
         if (interactive) std::cout << "assistant> " << std::flush;
         auto generated = model.value().generate(history, options, *runtime.value().governor,
                                                 &runtime.value().process_guard,
                                                 stream_enabled ? [](std::string_view piece) { std::cout << piece << std::flush; }
-                                                               : std::function<void(std::string_view)>{});
+                                                               : std::function<void(std::string_view)>{},
+                                                capability_overlay);
         if (generated && stream_enabled) std::cout << '\n';
         if (generated && !stream_enabled && interactive) std::cout << generated.value().text << '\n';
         return generated;
@@ -3955,7 +3992,17 @@ int command_real_chat(const std::vector<std::string>& args) {
 
     if (prompt) {
         messages.push_back({"user", *prompt});
-        auto generated = run_generation(messages, false);
+        std::optional<vastloom::inference::CapabilityOverlay> capability_overlay;
+        if (!capability_modules.empty()) {
+            const auto routed = vastloom::inference::route_modules(capability_modules, *prompt, 1U);
+            const auto& selected = capability_modules.at(routed.front().index);
+            auto bound = vastloom::inference::build_capability_overlay(model.value().config(), selected);
+            if (!bound) return print_error(bound.error(), json);
+            capability_overlay.emplace(bound.take_value());
+        }
+        auto generated = run_generation(messages, false,
+                                        capability_overlay.has_value() ? &capability_overlay.value()
+                                                                       : nullptr);
         if (!generated) return print_error(generated.error(), json);
         const std::string finish = generated.value().stats.stopped_on_eos ? "end_of_turn" :
                                    (generated.value().stats.stopped_on_context_limit ? "context_limit" : "max_tokens");
@@ -3972,7 +4019,17 @@ int command_real_chat(const std::vector<std::string>& args) {
                       << ",\"load_ms\":" << generated.value().stats.load_ms
                       << ",\"prompt_eval_ms\":" << generated.value().stats.prompt_eval_ms
                       << ",\"generation_ms\":" << generated.value().stats.generation_ms
-                      << ",\"tokens_per_second\":" << generated.value().stats.tokens_per_second << "}}\n";
+                      << ",\"tokens_per_second\":" << generated.value().stats.tokens_per_second
+                      << "}";
+        if (capability_overlay.has_value()) {
+            std::cout << ",\"capability\":{\"selected\":\""
+                      << vastloom::util::json_escape(capability_overlay->selected_name())
+                      << "\",\"considered\":" << capability_modules.size()
+                      << ",\"bindings\":" << capability_overlay->binding_count()
+                      << ",\"added_macs\":" << capability_overlay->applied_macs()
+                      << ",\"module_bytes\":" << capability_overlay->module_bytes() << "}";
+        }
+        std::cout << "}\n";
         } else {
             if (!stream_enabled) std::cout << generated.value().text << '\n';
             print_stats(generated.value());
@@ -4010,7 +4067,7 @@ int command_real_chat(const std::vector<std::string>& args) {
         }
         if (input.empty()) continue;
         messages.push_back({"user", std::move(input)});
-        auto generated = run_generation(messages, true);
+        auto generated = run_generation(messages, true, nullptr);
         if (!generated) {
             messages.pop_back();
             if (real_generation_cancelled != 0) {
@@ -4089,6 +4146,354 @@ int command_real_self_test(const std::vector<std::string>& args) {
     return passed ? 0 : 1;
 }
 
+int command_module_init(const std::vector<std::string>& args) {
+    const bool json = has_flag(args, "--json");
+    if (!args.empty() && (args[0] == "--help" || args[0] == "-h")) {
+        std::cout << "Usage: vastloom module-init MODEL OUT --name NAME [--rank N] [--scale F]\n"
+                  << "                     [--seed N] [--layers N] [--targets LIST] [--zero-a] [--json]\n";
+        return 0;
+    }
+    auto valid = validate_options(args, 2U,
+                                  {"--name", "--rank", "--scale", "--seed", "--layers", "--targets"},
+                                  {"--zero-a", "--json"});
+    if (!valid) return print_error(valid.error(), json);
+
+    const auto name = option_value(args, "--name");
+    if (!name || name->empty() || name->size() > 128U) {
+        return print_error(vastloom::make_error(vastloom::ErrorCode::invalid_argument,
+                                                "module-init requires a --name of 1 to 128 bytes"), json);
+    }
+    auto rank = optional_size(args, "--rank", 16U);
+    auto scale = optional_float(args, "--scale", 0.05F);
+    auto seed = optional_u64(args, "--seed", 0x564153544C4F4F4DULL);
+    auto layers = optional_size(args, "--layers", 0U);
+    if (!rank || rank.value() < 1U || rank.value() > vastloom::inference::kMaxModuleRank) {
+        return print_error(vastloom::make_error(vastloom::ErrorCode::invalid_argument,
+                                                "--rank must be between 1 and 64"), json);
+    }
+    if (!scale || !std::isfinite(scale.value()) || scale.value() < 0.0F || scale.value() > 1.0e6F) {
+        return print_error(vastloom::make_error(vastloom::ErrorCode::invalid_argument,
+                                                "--scale must be a finite number between 0 and 1e6"), json);
+    }
+    if (!seed) return print_error(seed.error(), json);
+
+    const auto model_path = cli_path(args[0]);
+    const auto output_path = cli_path(args[1]);
+    auto config = vastloom::inference::load_llama_config(model_path / "config.json");
+    if (!config) return print_error(config.error(), json);
+    std::size_t layer_count = layers.value() != 0U ? layers.value()
+                                                   : config.value().num_hidden_layers;
+    if (layer_count > config.value().num_hidden_layers) {
+        return print_error(vastloom::make_error(vastloom::ErrorCode::invalid_argument,
+                                                "--layers exceeds the model's layer count"), json);
+    }
+
+    // --targets is a comma-separated list of projection names; lm_head is opt-in because it is
+    // the largest matrix in the module and E1 mechanics do not need it by default.
+    std::vector<vastloom::inference::CapabilityTarget> selected_targets;
+    bool include_lm_head = false;
+    {
+        const std::string raw = option_value(args, "--targets").value_or("q,o,gate,up,down");
+        std::string lower;
+        lower.reserve(raw.size());
+        for (const char character : raw) {
+            lower.push_back(character >= 'A' && character <= 'Z'
+                                ? static_cast<char>(character - 'A' + 'a')
+                                : character);
+        }
+        std::set<std::string> seen_pieces;
+        std::size_t start = 0;
+        while (true) {
+            const std::size_t comma = lower.find(',', start);
+            const std::string piece =
+                lower.substr(start, comma == std::string::npos ? std::string::npos : comma - start);
+            if (piece.empty()) {
+                return print_error(vastloom::make_error(vastloom::ErrorCode::invalid_argument,
+                                                        "--targets contains an empty name"), json);
+            }
+            if (!seen_pieces.insert(piece).second) {
+                return print_error(vastloom::make_error(vastloom::ErrorCode::invalid_argument,
+                                                        "--targets repeats a name", piece), json);
+            }
+            if (piece == "lm_head") {
+                include_lm_head = true;
+            } else {
+                const auto match = std::find_if(
+                    vastloom::inference::kAllCapabilityTargets.begin(),
+                    vastloom::inference::kAllCapabilityTargets.end(),
+                    [&piece](vastloom::inference::CapabilityTarget candidate) {
+                        return vastloom::inference::to_string(candidate) == piece;
+                    });
+                if (match == vastloom::inference::kAllCapabilityTargets.end()) {
+                    return print_error(vastloom::make_error(vastloom::ErrorCode::invalid_argument,
+                                                            "Unknown target in --targets", piece),
+                                       json);
+                }
+                selected_targets.push_back(*match);
+            }
+            if (comma == std::string::npos) break;
+            start = comma + 1U;
+        }
+    }
+    if (selected_targets.empty() && !include_lm_head) {
+        return print_error(vastloom::make_error(vastloom::ErrorCode::invalid_argument,
+                                                "--targets produced no usable projections"), json);
+    }
+
+    vastloom::inference::CapabilityModule module;
+    module.name = *name;
+    module.rank = static_cast<std::uint32_t>(rank.value());
+    module.scale = scale.value();
+    // The routing embedding is derived from the module's own name: distinct names route
+    // distinctly, deterministically, with no extra flag to forget.
+    module.routing_embedding = vastloom::inference::embed_request(module.name);
+
+    // splitmix64 is fully specified, so the same seed produces the same bytes everywhere.
+    std::uint64_t state = seed.value();
+    const auto next_random = [&state]() {
+        state += 0x9E3779B97F4A7C15ULL;
+        std::uint64_t mixed = state;
+        mixed = (mixed ^ (mixed >> 30U)) * 0xBF58476D1CE4E5B9ULL;
+        mixed = (mixed ^ (mixed >> 27U)) * 0x94D049BB133111EBULL;
+        return mixed ^ (mixed >> 31U);
+    };
+    const auto next_weight = [&next_random]() {
+        return static_cast<float>(
+            static_cast<double>(next_random() % 2'000'001U - 1'000'000U) / 1.0e9);
+    };
+    const bool zero_a = has_flag(args, "--zero-a");
+
+    const auto append_target = [&](std::uint32_t layer_id,
+                                   vastloom::inference::CapabilityTarget target) {
+        vastloom::inference::ModuleTarget entry;
+        entry.spec.layer = layer_id;
+        entry.spec.target = target;
+        const auto dims =
+            vastloom::inference::capability_target_dims(config.value(), target);
+        entry.spec.rows = dims.first;
+        entry.spec.cols = dims.second;
+        entry.a.resize(static_cast<std::size_t>(module.rank) * entry.spec.cols);
+        entry.b.resize(static_cast<std::size_t>(entry.spec.rows) * module.rank);
+        for (float& value : entry.a) value = zero_a ? 0.0F : next_weight();
+        for (float& value : entry.b) value = next_weight();
+        module.targets.push_back(std::move(entry));
+    };
+    for (std::size_t layer = 0; layer < layer_count; ++layer) {
+        for (const auto target : selected_targets) {
+            append_target(static_cast<std::uint32_t>(layer), target);
+        }
+    }
+    if (include_lm_head) {
+        append_target(vastloom::inference::kCapabilityLmHeadLayer,
+                      vastloom::inference::CapabilityTarget::lm_head);
+    }
+
+    auto written = vastloom::inference::write_capability_module(output_path, module);
+    if (!written) return print_error(written.error(), json);
+    if (json) {
+        std::error_code size_error;
+        const auto bytes = std::filesystem::file_size(output_path, size_error);
+        std::cout << "{\"ok\":true,\"path\":\"" << vastloom::util::json_escape(output_path.string())
+                  << "\",\"file_bytes\":" << (size_error ? 0U : bytes)
+                  << ",\"rank\":" << module.rank
+                  << ",\"targets\":" << module.targets.size()
+                  << ",\"scale\":" << module.scale << "}\n";
+    } else {
+        std::cout << "Wrote capability module " << output_path.string() << '\n';
+    }
+    return 0;
+}
+
+int command_module_fit(const std::vector<std::string>& args) {
+    const bool json = has_flag(args, "--json");
+    if (!args.empty() && (args[0] == "--help" || args[0] == "-h")) {
+        std::cout << "Usage: vastloom module-fit MODEL TRANSCRIPT OUT --name NAME [--rank N]"
+                     " [--steps N] [--lr F] [--reg F] [--seed N] [--max-records N] [--no-verify] [--json]\n";
+        return 0;
+    }
+    auto valid = validate_options(args, 3U,
+                                  {"--name", "--rank", "--steps", "--lr", "--reg", "--seed", "--max-records"},
+                                  {"--json", "--no-verify"});
+    if (!valid) return print_error(valid.error(), json);
+
+    const auto name = option_value(args, "--name");
+    if (!name || name->empty() || name->size() > 128U) {
+        return print_error(vastloom::make_error(vastloom::ErrorCode::invalid_argument,
+                                                "module-fit requires a --name of 1 to 128 bytes"), json);
+    }
+    auto rank = optional_size(args, "--rank", 8U);
+    auto steps = optional_size(args, "--steps", 400U);
+    auto lr = optional_float(args, "--lr", 0.5F);
+    auto reg = optional_float(args, "--reg", 0.05F);
+    auto seed = optional_u64(args, "--seed", 0xD157111CULL);
+    auto max_records = optional_size(args, "--max-records", 16U);
+    if (!rank || rank.value() < 1U || rank.value() > vastloom::inference::kMaxModuleRank) {
+        return print_error(vastloom::make_error(vastloom::ErrorCode::invalid_argument,
+                                                "--rank must be between 1 and 64"), json);
+    }
+    if (!steps || steps.value() == 0U || steps.value() > 100'000U) {
+        return print_error(vastloom::make_error(vastloom::ErrorCode::invalid_argument,
+                                                "--steps must be between 1 and 100000"), json);
+    }
+    if (!lr || !std::isfinite(lr.value()) || lr.value() <= 0.0F || lr.value() > 10.0F) {
+        return print_error(vastloom::make_error(vastloom::ErrorCode::invalid_argument,
+                                                "--lr must be between 0 and 10"), json);
+    }
+    if (!reg || !std::isfinite(reg.value()) || reg.value() < 0.0F || reg.value() > 1.0e6F) {
+        return print_error(vastloom::make_error(vastloom::ErrorCode::invalid_argument,
+                                                "--reg must be a finite number between 0 and 1e6"), json);
+    }
+    if (!seed) return print_error(seed.error(), json);
+    if (!max_records || max_records.value() == 0U || max_records.value() > 64U) {
+        return print_error(vastloom::make_error(vastloom::ErrorCode::invalid_argument,
+                                                "--max-records must be between 1 and 64"), json);
+    }
+
+    // The transcript is untrusted input like everything else that crosses the CLI: bounded
+    // parse, strict format identity, teacher-incorrect records skipped rather than trained on.
+    vastloom::util::JsonLimits limits;
+    limits.max_input_bytes = 8U * vastloom::MiB;
+    limits.max_nodes = 16'384U;
+    auto transcript = vastloom::util::load_json_file(cli_path(args[1]), limits);
+    if (!transcript) return print_error(transcript.error(), json);
+    const auto* format = transcript.value().find("format");
+    if (format == nullptr || !format->as_string() ||
+        format->as_string().value() != "vastloom.distill_transcript.v1") {
+        return print_error(vastloom::make_error(vastloom::ErrorCode::unsupported,
+                                                "Transcript format is unrecognized",
+                                                args[1]), json);
+    }
+    const auto* records_value = transcript.value().find("records");
+    auto records = records_value == nullptr ? vastloom::make_error(vastloom::ErrorCode::invalid_format,
+                                                                   "Transcript has no records")
+                                            : records_value->as_array();
+    if (!records) return print_error(records.error(), json);
+
+    struct UsableRecord { std::string id; std::string prompt; std::string completion; };
+    std::vector<UsableRecord> usable;
+    std::size_t skipped_uncorrect = 0U;
+    for (const auto& entry : *records.value()) {
+        if (usable.size() >= max_records.value()) break;
+        const auto* identifier = entry.find("id");
+        const auto* prompt = entry.find("prompt");
+        const auto* completion = entry.find("completion_text");
+        if (identifier == nullptr || prompt == nullptr || completion == nullptr) {
+            return print_error(vastloom::make_error(vastloom::ErrorCode::invalid_format,
+                                                    "A transcript record is missing fields"), json);
+        }
+        auto identifier_text = identifier->as_string();
+        auto prompt_text = prompt->as_string();
+        auto completion_text = completion->as_string();
+        if (!identifier_text || !prompt_text || !completion_text) {
+            return print_error(vastloom::make_error(vastloom::ErrorCode::invalid_format,
+                                                    "A transcript record field is not a string"), json);
+        }
+        const auto* correct = entry.find("teacher_correct");
+        if (correct != nullptr && correct->as_bool() && !correct->as_bool().value()) {
+            ++skipped_uncorrect;
+            continue;
+        }
+        usable.push_back(UsableRecord{std::string(identifier_text.value()),
+                                      std::string(prompt_text.value()),
+                                      std::string(completion_text.value())});
+    }
+    if (usable.empty()) {
+        return print_error(vastloom::make_error(vastloom::ErrorCode::invalid_argument,
+                                                "No usable transcript records remain after gating"),
+                           json);
+    }
+
+    const auto model_path = cli_path(args[0]);
+    const auto output_path = cli_path(args[2]);
+    auto runtime = start_real_runtime(model_path);
+    if (!runtime) return print_error(runtime.error(), json);
+    auto model = load_real_model(model_path, runtime.value(), !has_flag(args, "--no-verify"));
+    if (!model) return print_error(model.error(), json);
+    const auto& config = model.value().config();
+
+    std::vector<vastloom::inference::CapabilityFitPair> pairs;
+    for (const auto& record : usable) {
+        auto framed = model.value().tokenizer().apply_smol_chat_template(
+            {{vastloom::inference::ChatMessage{"user", record.prompt}}}, true);
+        if (!framed) return print_error(framed.error(), json);
+        auto framed_ids = model.value().tokenizer().encode(framed.value());
+        if (!framed_ids) return print_error(framed_ids.error(), json);
+        auto target_ids = model.value().tokenizer().encode(record.completion);
+        if (!target_ids) return print_error(target_ids.error(), json);
+        if (framed_ids.value().empty() || target_ids.value().empty()) continue;
+        // Teacher forcing: predicting targets[k] needs every token before it, so the last
+        // target itself is never an input.
+        std::vector<std::uint32_t> sequence = framed_ids.value();
+        sequence.insert(sequence.end(), target_ids.value().begin(),
+                        target_ids.value().end() - 1U);
+        if (sequence.size() > config.max_position_embeddings) {
+            return print_error(vastloom::make_error(vastloom::ErrorCode::invalid_argument,
+                                                    "A training sequence exceeds the model context",
+                                                    record.id), json);
+        }
+        auto states = model.value().hidden_states(sequence, *runtime.value().governor,
+                                                  &runtime.value().process_guard);
+        if (!states) return print_error(states.error(), json);
+        const std::size_t offset = framed_ids.value().size() - 1U;
+        if (states.value().size() < offset + target_ids.value().size()) {
+            return print_error(vastloom::make_error(vastloom::ErrorCode::internal_error,
+                                                    "Hidden states do not cover the supervised positions"),
+                               json);
+        }
+        for (std::size_t k = 0; k < target_ids.value().size(); ++k) {
+            auto head = model.value().head_dot(states.value()[offset + k]);
+            if (!head) return print_error(head.error(), json);
+            vastloom::inference::CapabilityFitPair pair;
+            pair.hidden = states.value()[offset + k];
+            pair.base_logits = head.take_value();
+            pair.target_id = target_ids.value()[k];
+            pairs.push_back(std::move(pair));
+        }
+    }
+
+    auto fitted = vastloom::inference::fit_lm_head_lora(
+        config.vocab_size, config.hidden_size, rank.value(), steps.value(),
+        static_cast<double>(lr.value()), static_cast<double>(reg.value()), seed.value(), pairs);
+    if (!fitted) return print_error(fitted.error(), json);
+
+    vastloom::inference::CapabilityModule module;
+    module.name = *name;
+    module.rank = static_cast<std::uint32_t>(rank.value());
+    module.scale = 1.0F;
+    module.routing_embedding = vastloom::inference::embed_request(module.name);
+    vastloom::inference::ModuleTarget head_target;
+    head_target.spec.layer = vastloom::inference::kCapabilityLmHeadLayer;
+    head_target.spec.target = vastloom::inference::CapabilityTarget::lm_head;
+    head_target.spec.rows = config.vocab_size;
+    head_target.spec.cols = config.hidden_size;
+    head_target.a = fitted.value().a;
+    head_target.b = fitted.value().b;
+    module.targets.push_back(std::move(head_target));
+
+    auto written = vastloom::inference::write_capability_module(output_path, module);
+    if (!written) return print_error(written.error(), json);
+    std::error_code size_error;
+    const auto bytes = std::filesystem::file_size(output_path, size_error);
+    if (json) {
+        std::cout << "{\"ok\":true,\"name\":\"" << vastloom::util::json_escape(*name)
+                  << "\",\"file_bytes\":" << (size_error ? 0U : bytes)
+                  << ",\"records_used\":" << usable.size()
+                  << ",\"skipped_teacher_incorrect\":" << skipped_uncorrect
+                  << ",\"positions\":" << fitted.value().positions
+                  << ",\"initial_loss\":" << fitted.value().initial_loss
+                  << ",\"final_loss\":" << fitted.value().final_loss
+                  << ",\"regularization\":" << reg.value()
+                  << ",\"steps\":" << steps.value()
+                  << ",\"rank\":" << rank.value() << "}\n";
+    } else {
+        std::cout << "Fitted " << usable.size() << " transcripts (" << fitted.value().positions
+                  << " positions): loss " << fitted.value().initial_loss << " -> "
+                  << fitted.value().final_loss << "\nWrote capability module "
+                  << output_path.string() << '\n';
+    }
+    return 0;
+}
+
 int command_heartbeat_write(const std::vector<std::string>& args) {
     if (args.empty()) return print_error(vastloom::make_error(vastloom::ErrorCode::invalid_argument, "heartbeat-write requires a path"));
     auto state = parse_safety_state(option_value(args, "--state").value_or("normal"));
@@ -4131,6 +4536,8 @@ int dispatch_cli(const std::vector<std::string>& arguments) {
         if (command == "serve") {
             return vastloom::cli::command_serve(args);
         }
+        if (command == "module-init") return command_module_init(args);
+        if (command == "module-fit") return command_module_fit(args);
         if (command == "doctor") return command_doctor(args);
         if (command == "cuda-info") return command_cuda_info(args);
         if (command == "inspect") return command_inspect(args);

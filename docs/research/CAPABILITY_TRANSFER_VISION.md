@@ -260,6 +260,35 @@ target spaces), which requires machinery this project deliberately does not have
 backpropagation path through the network - and therefore becomes a design decision for the
 next milestone rather than an incremental step.
 
+### Head-boundary closed 2026-08-21: both placements measured
+
+The second placement lever was then instantiated end-to-end: a **final-hidden adapter**
+(`CapabilityTarget::final_hidden`), injected before the frozen head consumes the normalized
+state - `logits = W(h + B(A h))` - with gradients still closed-form through the head
+transpose. Two real defects surfaced and were fixed by measurement, not guesswork: an
+unsigned-underflow in the shared splitmix initialization turned "negative" draws into
+~+0.33 positives (harmless at the LM-head site, explosive through Wᵀg here), and the
+two-factor adapter resonated through ‖W·B‖ until the projection was frozen at its
+deterministic init. Gradient clipping bounds every remaining step.
+
+The measured sweep on the grown transcript (29 positions, rank 8, 1200 steps) was **stable
+everywhere and behaviorally flat**: best loss 3.34 -> 3.19, zero movement on any probe,
+chitchat preserved only because the adapter barely moves anything. The three-way picture:
+
+| Placement | Fit ability | Generalization | Off-skill safety |
+|---|---|---|---|
+| LM head (logit-space) | strong (loss -> 0) | none | breaks unless reg ≈ 30 |
+| final_hidden (frozen proj., closed-form) | ~none under stable hyperparameters | none | safe |
+| mid-layer | requires backprop through the network - machinery this project deliberately lacks | untested | — |
+
+**The pre-declared criterion fires: the head boundary is closed from both sides.** Neither
+logit-space adaptation nor closed-form hidden-space adaptation induces generalizable skill;
+real capability transfer therefore requires gradients through the network itself - an
+optimizer beyond this project's deliberately closed-form scope. The remaining choice
+(offline torch trainer versus strategic pause back to M13 prefix-KV) now rests on measured
+ground rather than prediction, and every instrument built along the way - container,
+router, injector, transcript pipeline, evaluator - remains reusable under either branch.
+
 ## The phases
 
 **F0 — this document** plus the honesty rules that make it falsifiable.

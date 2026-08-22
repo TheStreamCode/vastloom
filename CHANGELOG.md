@@ -2,6 +2,25 @@
 
 ## Unreleased
 
+- **Final-hidden distillation site instantiated, and the head-boundary question closed with
+  measured evidence.** New `--site hidden` on `module-fit` trains an adapter that reshapes
+  the final hidden state BEFORE the frozen head consumes it (`logits = W(h + B(A h))`),
+  injected through a new `CapabilityTarget::final_hidden` binding; gradients stay
+  closed-form through the head transpose, and the fitter carries the same parity start,
+  decoupled decay and fail-closed divergence guard as its LM-head sibling, plus global-norm
+  gradient clipping. Two real defects were fixed along the way, both found by instrumented
+  measurement: an unsigned-underflow in the shared splitmix initialization turned "negative"
+  draws into ~+0.33 positives (harmless at the LM-head site, explosive through Wᵀg), and
+  letting both adapter factors move resonated through ‖W·B‖ until the projection was frozen
+  at its deterministic init. Measured on the grown transcript (29 positions, rank 8, 1200
+  steps): stable everywhere, behaviorally flat - best loss 3.34 -> 3.19, zero movement on
+  any probe. Combined with the earlier data-lever negative, the pre-declared criterion now
+  fires with evidence from both placements: neither induces generalizable skill, so real
+  capability transfer requires network-depth backpropagation - an offline torch trainer or
+  equivalent becomes the only credible route, versus parking capability-transfer and
+  returning to M13 prefix-KV. The decision is recorded in the vision document with the full
+  three-way placement table.
+
 - **Data-lever experiment closed with a measured negative.** The distillation probe set grew
   from three to eight train records (five capitals, three translations; 29 supervised
   positions) plus seven eval probes, transcribed through the resume loop - which also caught

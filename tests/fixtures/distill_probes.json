@@ -1,0 +1,9 @@
+[
+  {"id": "capital-1", "prompt": "Qual è la capitale del Portogallo? Rispondi con una sola parola.", "max_tokens": 12, "expected": "Lisbona", "split": "train"},
+  {"id": "capital-2", "prompt": "Qual è la capitale dell'Australia? Rispondi con una sola parola.", "max_tokens": 12, "expected": "Canberra", "split": "train"},
+  {"id": "translate-1", "prompt": "Traduci in inglese: La casa è rossa. Rispondi solo con la traduzione.", "max_tokens": 20, "expected": "The house is red", "split": "train"},
+  {"id": "capital-3", "prompt": "Qual è la capitale della Spagna? Rispondi con una sola parola.", "max_tokens": 12, "expected": "Madrid", "split": "eval"},
+  {"id": "capital-4", "prompt": "Qual è la capitale della Germania? Rispondi con una sola parola.", "max_tokens": 12, "expected": "Berlino", "split": "eval"},
+  {"id": "translate-2", "prompt": "Traduci in inglese: Il cane corre nel parco. Rispondi solo con la traduzione.", "max_tokens": 20, "expected": "The dog runs in the park", "split": "eval"},
+  {"id": "chitchat-1", "prompt": "Hello", "max_tokens": 9, "expected": "Hello! How can I help you today?", "split": "eval"}
+]

@@ -2,6 +2,23 @@
 
 ## Unreleased
 
+- **DFlash companion drafter inspected, and CPU-regime speculation measured closed.** New
+  `docs/research/DFLASH_DRAFT_FEASIBILITY.md` documents the local
+  `deepseek-v4-flash-0731-dspark` companion: a ~19.85-billion-parameter, three-layer
+  teacher-shaped drafter (same MLA/MoE/indexer family, 256-expert 6+1 MoE, hyper-
+  connections with sinkhorn) stored as 10.15 GiB of mostly MXFP4, conditioning on teacher
+  layers [41,42,43] and predicting markov blocks of five tokens - the DFlash paper's design
+  realized against this checkpoint. Vastloom's existing inspector refuses it (identity-pinned
+  catalog), so facts came from a standalone header walk. The Phase A1 RAM blocker falls:
+  both models map comfortably (~22 GiB remained free through a dual-model run). The
+  empirical ceiling check via the already-built llama.cpp reference (`--spec-type
+  draft-dspark`) then measured the speculative arm at **0.78x the plain baseline**
+  (1.4 vs 1.8 tok/s generation, lossless `Roma` continuation in both): three teacher-shaped
+  MoE layers forwarding per proposed block cost more CPU than acceptance amortizes in this
+  single-stream consumer regime. Speculative decoding is therefore closed for this project's
+  regime with data; the pairing stands as live E4 evidence for target-conditioned state
+  injection.
+
 - **Final-hidden distillation site instantiated, and the head-boundary question closed with
   measured evidence.** New `--site hidden` on `module-fit` trains an adapter that reshapes
   the final hidden state BEFORE the frozen head consumes it (`logits = W(h + B(A h))`),

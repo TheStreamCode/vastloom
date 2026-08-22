@@ -505,10 +505,11 @@ verification costs; output remains target-model correct.
 - [ ] Streaming, cancellation, structured outputs and tool calls. SSE streaming is live on the
   loopback slice and a client disconnect stops feeding it; structured outputs and tool calls
   remain open.
-- [ ] Session/prefix KV management. This is the load-bearing piece, not the JSON. A coding agent
-  resends the same long context every turn and changes only its tail; without prefix reuse each
-  request re-runs the whole prompt, and no amount of kernel work compensates for that. It needs a
-  stateful model wired to the endpoint, not the stateless TinyChat fixture.
+- [x] Session/prefix KV management. Coding agents resend the same long context every turn;
+  with a persistent session the server re-evaluates only the diverging tail. Shipped on
+  the dense SmolLM2 serve path (`--site hidden` distillation and DeepSeek streaming remain
+  separate concerns); the streaming MoE path's KV lives inside the graph sessions and is
+  not yet resumable across requests.
 - [ ] Request-level resource budgets and watchdog integration.
 - [ ] Coding-agent compatibility tests.
 

@@ -8089,6 +8089,31 @@ void test_capability_module(const std::filesystem::path& root) {
     CHECK(!build_with(wrong_reserved));
 }
 
+void test_llama_session_prefix() {
+    using vastloom::inference::common_prefix;
+    const std::vector<std::uint32_t> empty;
+    const std::vector<std::uint32_t> a123{1U, 2U, 3U};
+    const std::vector<std::uint32_t> a124{1U, 2U, 4U};
+    const std::vector<std::uint32_t> a12{1U, 2U};
+    const std::vector<std::uint32_t> single1{1U};
+    const std::vector<std::uint32_t> single2{2U};
+    const std::vector<std::uint32_t> identical{9U, 8U, 7U};
+    CHECK(common_prefix(empty, empty) == 0U);
+    CHECK(common_prefix(a123, a124) == 2U);
+    CHECK(common_prefix(a12, a12) == 2U);
+    CHECK(common_prefix(a123, a12) == 2U);
+    CHECK(common_prefix(single1, single2) == 0U);
+    CHECK(common_prefix(identical, identical) == 3U);
+
+    // Default session: inert until create_session fills it; reset only clears the cache.
+    vastloom::inference::LlamaSession session;
+    CHECK(!session.ready());
+    CHECK(session.capacity() == 0U);
+    CHECK(session.cached_token_count() == 0U);
+    session.reset();
+    CHECK(!session.ready() && session.cached_token_count() == 0U);
+}
+
 void test_heartbeat(const std::filesystem::path& root) {
     const auto path = root / "heartbeat";
     vastloom::safety::HeartbeatRecord heartbeat;
@@ -8143,6 +8168,7 @@ int main() {
     test_trace(root);
     test_tiny_model(root);
     test_capability_module(root);
+    test_llama_session_prefix();
     test_loopback_server();
     test_heartbeat(root);
     std::error_code error;

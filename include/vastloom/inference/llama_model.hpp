@@ -6,6 +6,7 @@
 #include <filesystem>
 #include <functional>
 #include <map>
+#include <span>
 #include <string>
 #include <utility>
 #include <vector>
@@ -52,6 +53,7 @@ struct LlamaGenerationOptions {
 struct LlamaGenerationStats {
     std::size_t prompt_tokens{0};
     std::size_t generated_tokens{0};
+    std::size_t cached_prefix_tokens{0};
     double load_ms{0.0};
     double prompt_eval_ms{0.0};
     double generation_ms{0.0};
@@ -60,6 +62,38 @@ struct LlamaGenerationStats {
     bool stopped_on_context_limit{false};
     bool stopped_on_max_tokens{false};
 };
+
+// A resumable KV workspace for conversational prefix reuse. Coding agents resend the whole
+// history every turn; with a session attached, generate() re-evaluates only the tail that
+// changed and reuses the cached Key/Value states for the shared prefix. The buffers are
+// Governor-reserved once at creation and owned by the session for its whole lifetime.
+class LlamaSession {
+public:
+    LlamaSession();
+    ~LlamaSession();
+    LlamaSession(LlamaSession&&) noexcept;
+    LlamaSession& operator=(LlamaSession&&) noexcept;
+    LlamaSession(const LlamaSession&) = delete;
+    LlamaSession& operator=(const LlamaSession&) = delete;
+
+    [[nodiscard]] bool ready() const noexcept;
+    [[nodiscard]] std::size_t capacity() const noexcept;
+    [[nodiscard]] std::size_t cached_token_count() const noexcept;
+    void reset();
+
+private:
+    friend class LlamaModel;
+    safety::Reservation reservation_;
+    std::size_t capacity_{0};
+    std::size_t kv_width_{0};
+    std::vector<float> keys_;
+    std::vector<float> values_;
+    std::vector<std::uint32_t> cached_ids_;
+};
+
+// Length of the longest common prefix of the two id sequences.
+[[nodiscard]] std::size_t common_prefix(std::span<const std::uint32_t> first,
+                                        std::span<const std::uint32_t> second);
 
 struct LlamaGenerationResult {
     std::string text;
@@ -108,10 +142,17 @@ public:
         safety::ResourceGovernor& governor,
         const safety::ProcessSafetyGuard* process_guard = nullptr,
         const std::function<void(std::string_view)>& stream = {},
-        const CapabilityOverlay* capability_overlay = nullptr) const;
+        const CapabilityOverlay* capability_overlay = nullptr,
+        LlamaSession* session = nullptr) const;
+
+    // Creates a resumable session whose Key/Value buffers are Governor-reserved once at
+    // `capacity` positions. generate() attached to it reuses the cached prefix across calls.
+    [[nodiscard]] Result<LlamaSession> create_session(safety::ResourceGovernor& governor,
+                                                      std::size_t capacity) const;
 
     [[nodiscard]] const LlamaConfig& config() const noexcept { return config_; }
     [[nodiscard]] const Gpt2Tokenizer& tokenizer() const noexcept { return tokenizer_; }
+    [[nodiscard]] std::string_view model_id() const noexcept;
     [[nodiscard]] ByteCount resident_bytes() const noexcept { return static_cast<ByteCount>(weights_.size()) * 2U; }
     [[nodiscard]] double load_ms() const noexcept { return load_ms_; }
     [[nodiscard]] unsigned cpu_threads() const noexcept { return cpu_threads_; }

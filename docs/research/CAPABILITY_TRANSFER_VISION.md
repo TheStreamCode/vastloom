@@ -260,6 +260,13 @@ target spaces), which requires machinery this project deliberately does not have
 backpropagation path through the network - and therefore becomes a design decision for the
 next milestone rather than an incremental step.
 
+**M13 prefix-KV shipped in parallel (same day).** The stateful serve endpoint with
+prefix-KV session reuse is now live on the dense SmolLM2 path: the coding-agent pattern of
+resending full history each turn costs only the diverging tail from turn two onward. This
+is infrastructure, not a capability-transfer result, but it removes one of the three
+prerequisites for any future torch-trainer investment: the endpoint already speaks
+sessions.
+
 ### Head-boundary closed 2026-08-21: both placements measured
 
 The second placement lever was then instantiated end-to-end: a **final-hidden adapter**

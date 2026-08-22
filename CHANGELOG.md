@@ -2,6 +2,21 @@
 
 ## Unreleased
 
+- **M13 prefix-KV session reuse: the server remembers.** `vastloom serve MODEL_DIR` now
+  dispatches to the dense SmolLM2 path when given a directory (matching the chat/model-info/
+  self-test dispatch pattern), creating a persistent `LlamaSession` whose Key/Value buffers
+  are Governor-reserved once at up to 4,096 positions and held across requests. Each turn,
+  the framed conversation is diffed against the cached sequence via a new pure
+  `common_prefix` function; only the diverging tail is evaluated (`start_position` was
+  already supported inside `evaluate_tokens` - this opens it). Divergence or overflow
+  degrades safely to the stateless path; the response carries a non-standard
+  `vastloom_cached_prefix_tokens` field so clients can observe reuse. The internal
+  `InferenceSession` was refactored from owned vectors to spans, letting the same buffers
+  serve both per-call and persistent lifetimes without copies. Always-on tests gate the
+  prefix function and session contracts; the opt-in SmolLM2 suite proves on the real
+  checkpoint that turn two reports nonzero cached tokens while turn one reports zero.
+  ROADMAP M13's session/prefix-KV checkbox is now checked (dense path scope).
+
 - **DFlash companion drafter inspected, and CPU-regime speculation measured closed.** New
   `docs/research/DFLASH_DRAFT_FEASIBILITY.md` documents the local
   `deepseek-v4-flash-0731-dspark` companion: a ~19.85-billion-parameter, three-layer

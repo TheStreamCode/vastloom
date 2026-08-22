@@ -21,6 +21,8 @@
 #include <vector>
 
 #include "vastloom/cli/tiny_commands.hpp"
+#include "vastloom/api/loopback_server.hpp"
+#include "vastloom/api/openai_protocol.hpp"
 #include "vastloom/core/bytes.hpp"
 #include "vastloom/cuda/cuda_driver.hpp"
 #include "vastloom/cuda/cuda_rms_norm.hpp"
@@ -4550,6 +4552,158 @@ int command_module_fit(const std::vector<std::string>& args) {
     return 0;
 }
 
+int command_serve_real(const std::vector<std::string>& args) {
+    auto valid = validate_options(args, 1U, {"--port"}, {"--no-verify"});
+    if (!valid) return print_error(valid.error());
+    auto port = optional_size(args, "--port", 8099U);
+    if (!port || port.value() > 65'535U) {
+        return print_error(port ? vastloom::make_error(vastloom::ErrorCode::invalid_argument,
+                                                 "--port must be between 0 and 65535")
+                                : port.error());
+    }
+    const auto model_path = cli_path(args[0]);
+    auto runtime = start_real_runtime(model_path);
+    if (!runtime) return print_error(runtime.error());
+    auto model = load_real_model(model_path, runtime.value(), !has_flag(args, "--no-verify"));
+    if (!model) return print_error(model.error());
+
+    // The session is the whole point of serving a stateful dense model: one live workspace
+    // for the single allowed connection, sized to a bounded slice of the model context.
+    const std::size_t session_capacity =
+        std::min<std::size_t>(model.value().config().max_position_embeddings, 4096U);
+    auto created = model.value().create_session(*runtime.value().governor, session_capacity);
+    if (!created) return print_error(created.error());
+    auto conversation = created.take_value();
+
+    vastloom::inference::LlamaSession* session_ptr = &conversation;
+    const std::uint64_t started_at = static_cast<std::uint64_t>(
+        std::chrono::duration_cast<std::chrono::seconds>(
+            std::chrono::system_clock::now().time_since_epoch()).count());
+
+    vastloom::api::LoopbackHandler handler = [&](const vastloom::api::HttpRequest& request)
+                                      -> vastloom::api::HttpResponse {
+        vastloom::api::HttpResponse response;
+        if (request.method == "GET" && request.path == "/v1/models") {
+            auto body = vastloom::api::serialize_model_list(
+                std::string(model.value().model_id()), started_at);
+            if (!body) {
+                response.status = 500;
+                response.body = vastloom::api::serialize_error(body.error().message,
+                                                               "api_error", 500);
+                return response;
+            }
+            response.body = body.take_value();
+            return response;
+        }
+        if (request.method == "POST" && request.path == "/v1/chat/completions") {
+            auto parsed = vastloom::api::parse_chat_completion_request(request.body);
+            if (!parsed) {
+                response.status = vastloom::api::http_status_for(parsed.error().code);
+                response.body = vastloom::api::serialize_error(parsed.error().message,
+                                                               "invalid_request_error",
+                                                               response.status);
+                return response;
+            }
+            std::vector<vastloom::inference::ChatMessage> messages;
+            messages.reserve(parsed.value().messages.size());
+            for (const auto& message : parsed.value().messages) {
+                messages.push_back({message.role, message.content});
+            }
+            vastloom::inference::LlamaGenerationOptions options;
+            options.max_new_tokens = parsed.value().max_tokens;
+            options.temperature = parsed.value().temperature.has_value()
+                                      ? static_cast<float>(*parsed.value().temperature)
+                                      : 0.0F;
+            options.top_k = options.temperature > 0.0F ? 40U : 1U;
+
+            const bool wants_stream = parsed.value().stream;
+            if (wants_stream) {
+                vastloom::api::ChatCompletionResponse skeleton;
+                skeleton.id = "chatcmpl-vastloom-real";
+                skeleton.model = std::string(model.value().model_id());
+                skeleton.created = started_at;
+                response.streaming = true;
+                response.status = 200;
+                response.produce = [&, skeleton](const std::function<bool(std::string_view)>& emit) {
+                    auto skel = skeleton;
+                    bool first = true;
+                    bool alive = true;
+                    vastloom::inference::LlamaGenerationOptions stream_options = options;
+                    stream_options.cancelled = [&alive] { return !alive; };
+                    auto result = model.value().generate(messages, stream_options,
+                                                         *runtime.value().governor,
+                                                         &runtime.value().process_guard,
+                                                         [&](std::string_view piece) {
+                                                             if (!alive) return;
+                                                             auto chunk = vastloom::api::serialize_chat_completion_chunk(skel, piece, first, false);
+                                                             first = false;
+                                                             if (!chunk) { alive = false; return; }
+                                                             alive = emit("data: " + chunk.take_value() + "\n\n");
+                                                         },
+                                                         nullptr,
+                                                         session_ptr);
+                    skel.finish_reason =
+                        (result && result.value().stats.stopped_on_max_tokens) ? "length" : "stop";
+                    if (alive) {
+                        auto last = vastloom::api::serialize_chat_completion_chunk(skel, "", false, true);
+                        if (last) alive = emit("data: " + last.take_value() + "\n\n");
+                    }
+                    if (alive) emit("data: [DONE]\n\n");
+                };
+                return response;
+            }
+
+            auto generated = model.value().generate(messages, options,
+                                                    *runtime.value().governor,
+                                                    &runtime.value().process_guard,
+                                                    {}, nullptr, session_ptr);
+            if (!generated) {
+                response.status = vastloom::api::http_status_for(generated.error().code);
+                response.body = vastloom::api::serialize_error(generated.error().message,
+                                                               "api_error", response.status);
+                return response;
+            }
+            vastloom::api::ChatCompletionResponse completion;
+            completion.id = "chatcmpl-vastloom-real";
+            completion.model = std::string(model.value().model_id());
+            completion.content = generated.value().text;
+            completion.finish_reason =
+                generated.value().stats.stopped_on_max_tokens ? "length" : "stop";
+            completion.created = started_at;
+            completion.prompt_tokens = generated.value().stats.prompt_tokens;
+            completion.completion_tokens = generated.value().stats.generated_tokens;
+            auto body = vastloom::api::serialize_chat_completion_response(completion);
+            if (!body) {
+                response.status = 500;
+                response.body = vastloom::api::serialize_error(body.error().message, "api_error", 500);
+                return response;
+            }
+            // Non-standard observability field: how many prompt tokens were served from the
+            // session's KV cache instead of re-prefilled. Zero on the first turn.
+            std::string payload = body.take_value();
+            payload.insert(payload.size() - 1U,
+                           std::string(",\"vastloom_cached_prefix_tokens\":") +
+                               std::to_string(generated.value().stats.cached_prefix_tokens));
+            response.body = std::move(payload);
+            return response;
+        }
+        response.status = 404;
+        response.body = vastloom::api::serialize_error("unknown route", "not_found", 404);
+        return response;
+    };
+
+    vastloom::api::LoopbackServer server;
+    auto started = server.start(static_cast<std::uint16_t>(port.value()), std::move(handler),
+                                1U * 1024U * 1024U);    if (!started) return print_error(started.error());
+    std::cout << "Vastloom real-model API serving " << model.value().model_id()
+              << " (prefix-KV session: " << session_capacity << " tokens) on http://127.0.0.1:"
+              << server.port() << " (Ctrl+C to stop)\n";
+    while (server.running()) {
+        std::this_thread::sleep_for(std::chrono::milliseconds(100));
+    }
+    return 0;
+}
+
 int command_heartbeat_write(const std::vector<std::string>& args) {
     if (args.empty()) return print_error(vastloom::make_error(vastloom::ErrorCode::invalid_argument, "heartbeat-write requires a path"));
     auto state = parse_safety_state(option_value(args, "--state").value_or("normal"));
@@ -4590,6 +4744,10 @@ int dispatch_cli(const std::vector<std::string>& arguments) {
             return vastloom::cli::command_self_test(args);
         }
         if (command == "serve") {
+            std::error_code serve_error;
+            if (!args.empty() && std::filesystem::is_directory(cli_path(args[0]), serve_error)) {
+                return command_serve_real(args);
+            }
             return vastloom::cli::command_serve(args);
         }
         if (command == "module-init") return command_module_init(args);

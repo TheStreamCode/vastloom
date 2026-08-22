@@ -173,6 +173,55 @@ def main() -> int:
     ])
     require(oversized.returncode != 0 and "context" in oversized.stderr.lower(), "oversized prompt was not rejected safely", oversized)
 
+    # M13: stateful serve with prefix-KV reuse. Turn one fills the cache; turn two resends
+    # the same history plus a tail and must report the shared prefix as cache-served.
+    import tempfile
+    import time
+    import urllib.request
+
+    def http_post(port, body):
+        request = urllib.request.Request(
+            f"http://127.0.0.1:{port}/v1/chat/completions",
+            data=json.dumps(body).encode("utf-8"),
+            headers={"Content-Type": "application/json"}, method="POST")
+        with urllib.request.urlopen(request, timeout=120) as response:
+            return json.loads(response.read().decode("utf-8"))
+
+    serve_port = 18123
+    server_proc = subprocess.Popen(
+        [executable, "serve", model, "--port", str(serve_port), "--no-verify"],
+        stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    try:
+        ready = False
+        deadline = time.time() + 60
+        while time.time() < deadline and not ready:
+            try:
+                urllib.request.urlopen(f"http://127.0.0.1:{serve_port}/v1/models", timeout=2)
+                ready = True
+            except Exception:
+                time.sleep(0.5)
+        require(ready, "serve did not become ready within 60 s")
+
+        turn1 = http_post(serve_port, {
+            "model": "smollm2", "max_tokens": 16,
+            "messages": [{"role": "user", "content": "Say hello."}]})
+        require(len(turn1["choices"][0]["message"]["content"]) > 0, "turn 1 produced no text")
+        require(turn1["vastloom_cached_prefix_tokens"] == 0, "turn 1 must report zero cached tokens")
+
+        history = [
+            {"role": "user", "content": "Say hello."},
+            {"role": "assistant", "content": turn1["choices"][0]["message"]["content"]},
+            {"role": "user", "content": "And goodbye."},
+        ]
+        turn2 = http_post(serve_port, {
+            "model": "smollm2", "max_tokens": 16, "messages": history})
+        require(turn2["vastloom_cached_prefix_tokens"] > 0,
+                "turn 2 must report prefix reuse")
+        require(len(turn2["choices"][0]["message"]["content"]) > 0, "turn 2 produced no text")
+    finally:
+        server_proc.terminate()
+        server_proc.wait(timeout=10)
+
     print("SmolLM2 native CLI/reference tests: PASS")
     return 0
 

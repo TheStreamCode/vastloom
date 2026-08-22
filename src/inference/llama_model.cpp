@@ -7,8 +7,10 @@
 #include <condition_variable>
 #include <functional>
 #include <limits>
+#include <memory>
 #include <mutex>
 #include <numeric>
+#include <optional>
 #include <random>
 #include <span>
 #include <thread>
@@ -148,19 +150,16 @@ Result<ByteCount> kv_cache_bytes(const LlamaConfig& config, std::size_t sequence
 }
 
 struct InferenceSession {
-    const LlamaModel& model;
     ParallelExecutor executor;
     std::size_t maximum_sequence{0};
     std::size_t kv_width{0};
-    std::vector<float> keys;
-    std::vector<float> values;
+    std::span<float> keys;
+    std::span<float> values;
 
-    InferenceSession(const LlamaModel& source, unsigned threads, std::size_t sequence)
-        : model(source), executor(threads), maximum_sequence(sequence),
-          kv_width(static_cast<std::size_t>(source.config().num_key_value_heads) *
-                   (source.config().hidden_size / source.config().num_attention_heads)),
-          keys(static_cast<std::size_t>(source.config().num_hidden_layers) * sequence * kv_width),
-          values(keys.size()) {}
+    InferenceSession(unsigned threads, std::size_t sequence, std::size_t width,
+                     std::span<float> key_storage, std::span<float> value_storage)
+        : executor(threads), maximum_sequence(sequence), kv_width(width),
+          keys(key_storage), values(value_storage) {}
 };
 
 }  // namespace
@@ -648,6 +647,55 @@ std::uint32_t sample_token(const std::vector<float>& logits,
 
 }  // namespace
 
+std::string_view LlamaModel::model_id() const noexcept {
+    return kModelId;
+}
+
+LlamaSession::LlamaSession() = default;
+LlamaSession::~LlamaSession() = default;
+LlamaSession::LlamaSession(LlamaSession&&) noexcept = default;
+LlamaSession& LlamaSession::operator=(LlamaSession&&) noexcept = default;
+
+bool LlamaSession::ready() const noexcept { return capacity_ != 0U; }
+std::size_t LlamaSession::capacity() const noexcept { return capacity_; }
+std::size_t LlamaSession::cached_token_count() const noexcept { return cached_ids_.size(); }
+void LlamaSession::reset() { cached_ids_.clear(); }
+
+std::size_t common_prefix(std::span<const std::uint32_t> first,
+                          std::span<const std::uint32_t> second) {
+    const std::size_t limit = std::min(first.size(), second.size());
+    std::size_t matched = 0U;
+    while (matched < limit && first[matched] == second[matched]) ++matched;
+    return matched;
+}
+
+Result<LlamaSession> LlamaModel::create_session(safety::ResourceGovernor& governor,
+                                                std::size_t capacity) const {
+    if (capacity == 0U || capacity > config_.max_position_embeddings) {
+        return make_error(ErrorCode::invalid_argument,
+                          "Session capacity is outside the model context",
+                          std::to_string(capacity));
+    }
+    auto kv_bytes = kv_cache_bytes(config_, capacity);
+    if (!kv_bytes) return kv_bytes.error();
+    auto reservation = governor.try_reserve(safety::ResourceKind::ram, kv_bytes.value(),
+                                            "Llama persistent session KV cache");
+    if (!reservation) return reservation.error();
+    try {
+        LlamaSession session;
+        session.reservation_ = reservation.take_value();
+        session.capacity_ = capacity;
+        session.kv_width_ = config_.num_key_value_heads *
+                            (config_.hidden_size / config_.num_attention_heads);
+        session.keys_.assign(config_.num_hidden_layers * capacity * session.kv_width_, 0.0F);
+        session.values_.assign(session.keys_.size(), 0.0F);
+        return session;
+    } catch (const std::bad_alloc&) {
+        return make_error(ErrorCode::resource_exhausted,
+                          "Unable to allocate reserved persistent session buffers");
+    }
+}
+
 Result<std::vector<float>> LlamaModel::logits(const std::vector<std::uint32_t>& token_ids,
                                               safety::ResourceGovernor& governor,
                                               const safety::ProcessSafetyGuard* process_guard) const {
@@ -661,7 +709,11 @@ Result<std::vector<float>> LlamaModel::logits(const std::vector<std::uint32_t>& 
     auto scratch = governor.try_reserve(safety::ResourceKind::scratch, 8U * MiB, "Llama reference activation scratch");
     if (!scratch) return scratch.error();
     try {
-        InferenceSession session(*this, cpu_threads_, token_ids.size());
+        const std::size_t kv_width = static_cast<std::size_t>(config_.num_key_value_heads) *
+                                     (config_.hidden_size / config_.num_attention_heads);
+        std::vector<float> keys(config_.num_hidden_layers * token_ids.size() * kv_width);
+        std::vector<float> values(keys.size());
+        InferenceSession session(cpu_threads_, token_ids.size(), kv_width, keys, values);
         return evaluate_tokens(*this, token_ids, token_ids.size(), 0U, process_guard, nullptr, &session, nullptr, nullptr);
     } catch (const std::bad_alloc&) {
         return make_error(ErrorCode::resource_exhausted, "Unable to allocate reserved Llama KV or activation buffers");
@@ -685,7 +737,11 @@ Result<std::vector<std::vector<float>>> LlamaModel::hidden_states(
                                         "Llama reference activation scratch");
     if (!scratch) return scratch.error();
     try {
-        InferenceSession session(*this, cpu_threads_, token_ids.size());
+        const std::size_t kv_width = static_cast<std::size_t>(config_.num_key_value_heads) *
+                                     (config_.hidden_size / config_.num_attention_heads);
+        std::vector<float> keys(config_.num_hidden_layers * token_ids.size() * kv_width);
+        std::vector<float> values(keys.size());
+        InferenceSession session(cpu_threads_, token_ids.size(), kv_width, keys, values);
         std::vector<std::vector<float>> capture;
         capture.reserve(token_ids.size());
         auto result = evaluate_tokens(*this, token_ids, token_ids.size(), 0U, process_guard,
@@ -740,7 +796,8 @@ Result<LlamaGenerationResult> LlamaModel::generate(const std::vector<ChatMessage
                                                    safety::ResourceGovernor& governor,
                                                    const safety::ProcessSafetyGuard* process_guard,
                                                    const std::function<void(std::string_view)>& stream,
-                                                   const CapabilityOverlay* capability_overlay) const {
+                                                   const CapabilityOverlay* capability_overlay,
+                                                   LlamaSession* session) const {
     if (options.max_new_tokens == 0U || options.top_k == 0U || !std::isfinite(options.temperature) ||
         options.temperature < 0.0F || options.timeout <= std::chrono::milliseconds::zero()) {
         return make_error(ErrorCode::invalid_argument, "Invalid Llama generation options");
@@ -754,23 +811,64 @@ Result<LlamaGenerationResult> LlamaModel::generate(const std::vector<ChatMessage
     }
     const std::size_t maximum_new = std::min(options.max_new_tokens,
         static_cast<std::size_t>(config_.max_position_embeddings) - prompt.value().size());
-    const std::size_t maximum_sequence = prompt.value().size() + maximum_new;
-    auto kv_bytes = kv_cache_bytes(config_, maximum_sequence);
-    if (!kv_bytes) return kv_bytes.error();
-    auto kv_reservation = governor.try_reserve(safety::ResourceKind::ram, kv_bytes.value(), "Llama generation KV cache");
-    if (!kv_reservation) return kv_reservation.error();
+
+    // Prefix reuse: when a ready session carries the whole framed prefix and the request fits
+    // its buffers, only the diverging tail is evaluated. Divergence, a duplicate request with
+    // no tail, or an overflow degrade to today's stateless path - never to wrong output.
+    std::size_t start_position = 0U;
+    std::size_t maximum_sequence = prompt.value().size() + maximum_new;
+    bool prefix_reuse = false;
+    if (session != nullptr && session->ready()) {
+        const std::size_t shared = common_prefix(prompt.value(), session->cached_ids_);
+        if (shared == session->cached_ids_.size() && shared < prompt.value().size() &&
+            maximum_sequence <= session->capacity_) {
+            start_position = shared;
+            prefix_reuse = true;
+            maximum_sequence = session->capacity_;
+        } else {
+            session->reset();
+        }
+    }
+
+    std::optional<safety::Reservation> kv_reservation;
+    if (!prefix_reuse) {
+        auto kv_bytes = kv_cache_bytes(config_, maximum_sequence);
+        if (!kv_bytes) return kv_bytes.error();
+        auto reserved = governor.try_reserve(safety::ResourceKind::ram, kv_bytes.value(), "Llama generation KV cache");
+        if (!reserved) return reserved.error();
+        kv_reservation.emplace(reserved.take_value());
+    }
     auto scratch = governor.try_reserve(safety::ResourceKind::scratch, 8U * MiB, "Llama generation activation scratch");
     if (!scratch) return scratch.error();
+
+    const std::vector<std::uint32_t> eval_ids(
+        prompt.value().begin() + static_cast<std::ptrdiff_t>(start_position), prompt.value().end());
 
     LlamaGenerationResult result;
     result.prompt_ids = prompt.value();
     result.stats.prompt_tokens = result.prompt_ids.size();
+    result.stats.cached_prefix_tokens = start_position;
     result.stats.load_ms = load_ms_;
     const auto started = std::chrono::steady_clock::now();
+    const std::size_t kv_width = static_cast<std::size_t>(config_.num_key_value_heads) *
+                                 (config_.hidden_size / config_.num_attention_heads);
     try {
-        InferenceSession session(*this, cpu_threads_, maximum_sequence);
+        std::vector<float> fresh_keys;
+        std::vector<float> fresh_values;
+        std::span<float> keys_storage;
+        std::span<float> values_storage;
+        if (prefix_reuse && session != nullptr) {
+            keys_storage = std::span<float>(session->keys_);
+            values_storage = std::span<float>(session->values_);
+        } else {
+            fresh_keys.assign(config_.num_hidden_layers * maximum_sequence * kv_width, 0.0F);
+            fresh_values.assign(fresh_keys.size(), 0.0F);
+            keys_storage = std::span<float>(fresh_keys);
+            values_storage = std::span<float>(fresh_values);
+        }
+        InferenceSession active(cpu_threads_, maximum_sequence, kv_width, keys_storage, values_storage);
         const auto* cancelled = options.cancelled ? &options.cancelled : nullptr;
-        auto logits_result = evaluate_tokens(*this, result.prompt_ids, maximum_sequence, 0U, process_guard, cancelled, &session, capability_overlay, nullptr);
+        auto logits_result = evaluate_tokens(*this, eval_ids, maximum_sequence, start_position, process_guard, cancelled, &active, capability_overlay, nullptr);
         if (!logits_result) return logits_result.error();
         std::vector<float> current_logits = logits_result.take_value();
         const auto prompt_finished = std::chrono::steady_clock::now();
@@ -792,8 +890,8 @@ Result<LlamaGenerationResult> LlamaModel::generate(const std::vector<ChatMessage
             if (stream) stream(piece.value());
             if (index + 1U < maximum_new) {
                 const std::vector<std::uint32_t> incremental{next};
-                const std::size_t token_position = result.prompt_ids.size() + result.generated_ids.size() - 1U;
-                auto evaluated = evaluate_tokens(*this, incremental, maximum_sequence, token_position, process_guard, cancelled, &session, capability_overlay, nullptr);
+                const std::size_t token_position = start_position + eval_ids.size() + result.generated_ids.size() - 1U;
+                auto evaluated = evaluate_tokens(*this, incremental, maximum_sequence, token_position, process_guard, cancelled, &active, capability_overlay, nullptr);
                 if (!evaluated) return evaluated.error();
                 current_logits = evaluated.take_value();
             }
@@ -801,6 +899,18 @@ Result<LlamaGenerationResult> LlamaModel::generate(const std::vector<ChatMessage
         result.stats.generated_tokens = result.generated_ids.size();
         result.stats.stopped_on_context_limit = !result.stats.stopped_on_eos && maximum_new < options.max_new_tokens;
         result.stats.stopped_on_max_tokens = !result.stats.stopped_on_eos && maximum_new == options.max_new_tokens;
+        // Hand the updated Key/Value states and the full evaluated sequence back to the
+        // session so the next request can reuse them. Only sequences that fit the session's
+        // capacity are cached; anything longer leaves it empty for a clean future start.
+        if (session != nullptr) {
+            std::vector<std::uint32_t> updated = result.prompt_ids;
+            updated.insert(updated.end(), result.generated_ids.begin(), result.generated_ids.end());
+            if (updated.size() <= session->capacity_ && prefix_reuse) {
+                session->cached_ids_ = std::move(updated);
+            } else {
+                session->reset();
+            }
+        }
         result.stats.generation_ms = std::chrono::duration<double, std::milli>(
             std::chrono::steady_clock::now() - prompt_finished).count();
         if (result.stats.generation_ms > 0.0) {

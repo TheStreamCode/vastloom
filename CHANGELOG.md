@@ -2,6 +2,19 @@
 
 ## Unreleased
 
+- **Data-lever experiment closed with a measured negative.** The distillation probe set grew
+  from three to eight train records (five capitals, three translations; 29 supervised
+  positions) plus seven eval probes, transcribed through the resume loop - which also caught
+  the author, not the teacher: DeepSeek answered "Brasília" with its proper accent and the
+  accuracy gate rightly refused the fixture's accent-less expectation until the fixture was
+  fixed and the record backfilled from stored text without a new teacher run. Refit sweep at
+  rank 8 across `--reg {10,30,100}`: full train coverage appeared (5/5 leads-with at reg 10)
+  but held-out same-skill generalization stayed 0/7 at every weight, and chitchat broke again
+  exactly when the fit saturated. Conclusion recorded in the vision document: an LM-head-only
+  adapter performs retrieval of trained answers rather than induced skill, so growing data is
+  closed as a dead end for this placement; adapter placement beyond the LM head becomes the
+  blocking lever and a design decision for a future milestone.
+
 - **E2 compiler executed and completed: closed-form LM-head distillation with decoupled
   weight decay, measured across a train/eval split.** New `vastloom module-fit MODEL
   TRANSCRIPT OUT` distils a capability module straight from a teacher-transcript artifact:

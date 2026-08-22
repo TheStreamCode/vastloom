@@ -2,8 +2,16 @@
   {"id": "capital-1", "prompt": "Qual è la capitale del Portogallo? Rispondi con una sola parola.", "max_tokens": 12, "expected": "Lisbona", "split": "train"},
   {"id": "capital-2", "prompt": "Qual è la capitale dell'Australia? Rispondi con una sola parola.", "max_tokens": 12, "expected": "Canberra", "split": "train"},
   {"id": "translate-1", "prompt": "Traduci in inglese: La casa è rossa. Rispondi solo con la traduzione.", "max_tokens": 20, "expected": "The house is red", "split": "train"},
+  {"id": "capital-5", "prompt": "Qual è la capitale della Francia? Rispondi con una sola parola.", "max_tokens": 12, "expected": "Parigi", "split": "train"},
+  {"id": "capital-6", "prompt": "Qual è la capitale del Giappone? Rispondi con una sola parola.", "max_tokens": 12, "expected": "Tokyo", "split": "train"},
+  {"id": "capital-7", "prompt": "Qual è la capitale del Brasile? Rispondi con una sola parola.", "max_tokens": 12, "expected": "Brasília", "split": "train"},
+  {"id": "translate-3", "prompt": "Traduci in inglese: La porta è aperta. Rispondi solo con la traduzione.", "max_tokens": 20, "expected": "The door is open", "split": "train"},
+  {"id": "translate-4", "prompt": "Traduci in inglese: Il libro è nuovo. Rispondi solo con la traduzione.", "max_tokens": 20, "expected": "The book is new", "split": "train"},
   {"id": "capital-3", "prompt": "Qual è la capitale della Spagna? Rispondi con una sola parola.", "max_tokens": 12, "expected": "Madrid", "split": "eval"},
   {"id": "capital-4", "prompt": "Qual è la capitale della Germania? Rispondi con una sola parola.", "max_tokens": 12, "expected": "Berlino", "split": "eval"},
   {"id": "translate-2", "prompt": "Traduci in inglese: Il cane corre nel parco. Rispondi solo con la traduzione.", "max_tokens": 20, "expected": "The dog runs in the park", "split": "eval"},
+  {"id": "capital-8", "prompt": "Qual è la capitale della Norvegia? Rispondi con una sola parola.", "max_tokens": 12, "expected": "Oslo", "split": "eval"},
+  {"id": "capital-9", "prompt": "Qual è la capitale della Russia? Rispondi con una sola parola.", "max_tokens": 12, "expected": "Mosca", "split": "eval"},
+  {"id": "translate-5", "prompt": "Traduci in inglese: La sedia è comoda. Rispondi solo con la traduzione.", "max_tokens": 20, "expected": "The chair is comfortable", "split": "eval"},
   {"id": "chitchat-1", "prompt": "Hello", "max_tokens": 9, "expected": "Hello! How can I help you today?", "split": "eval"}
 ]

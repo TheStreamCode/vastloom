@@ -99,7 +99,7 @@ class CommandLineTests(unittest.TestCase):
             payload = json.loads(out.read_text(encoding="utf-8"))
             self.assertEqual(payload["format"], evaluate_tool.EVALUATE_FORMAT)
             self.assertEqual(payload["module"], "fitted.vlcm")
-            self.assertEqual(len(payload["records"]), 7)
+            self.assertEqual(len(payload["records"]), 15)
             self.assertTrue(all(r["base_correct"] for r in payload["records"]))
             self.assertTrue(all(r["adapted_correct"] for r in payload["records"]))
 

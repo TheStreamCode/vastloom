@@ -235,6 +235,31 @@ same skill does not exist yet. The remaining levers are data and placement, not 
 more transcript records, KL anchors over generic contexts, adapter placement beyond the LM
 head, and an explicit train/eval transcript split grown beyond three records.
 
+### Data lever executed 2026-08-21: measured negative for this placement
+
+The first named lever - more transcript records - was tested directly. The probe set grew
+to eight train probes (five capitals, three translations) and seven eval probes; the
+teacher transcribed all eight correctly under the resume loop (one expected-answer fix:
+the teacher wrote "Brasília" with its proper accent and the accuracy gate rightly flagged
+the fixture's accent-less expectation - corrected fixture-side, backfilled from the stored
+text without a new teacher run). Refit at rank 8 / 600 steps / lr 0.05, swept:
+
+| Config (29 positions) | Train exact | Train leads-with | Eval correct | chitchat-1 |
+|---|---|---|---|---|
+| `--reg 10` (loss -> 0.00) | 3/8 | 5/5 | **0/7** | broken |
+| `--reg 30` (loss -> 0.78) | 2/8 | 1/1 graded | 1/7 | preserved |
+| `--reg 100` (loss -> 2.22) | 0/8 | 0/0 | 1/7 | preserved |
+
+Growing the data nearly tripled the supervised positions and full train coverage appeared -
+but held-out same-skill generalization stayed at zero for every weight, and the
+fit-versus-off-skill tradeoff sharpened rather than softened. The conclusion is now
+measured, not speculated: **with an LM-head-only adapter, capability transfer is retrieval
+of trained answers, not an induced skill.** Data growth alone is closed as a dead end for
+this placement; the blocking lever is adapter placement beyond the LM head (or richer
+target spaces), which requires machinery this project deliberately does not have - a
+backpropagation path through the network - and therefore becomes a design decision for the
+next milestone rather than an incremental step.
+
 ## The phases
 
 **F0 — this document** plus the honesty rules that make it falsifiable.

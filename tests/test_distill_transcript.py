@@ -31,13 +31,12 @@ def fake_process(returncode: int = 0, payload: dict | None = None,
 class ProbeValidationTests(unittest.TestCase):
     def test_loads_the_committed_probe_set(self) -> None:
         probes = distill.load_probes(PROBES)
-        self.assertEqual(len(probes), 7)
-        self.assertEqual([p["id"] for p in probes],
-                         ["capital-1", "capital-2", "translate-1",
-                          "capital-3", "capital-4", "translate-2",
-                          "chitchat-1"])
+        self.assertEqual(len(probes), 15)
         self.assertEqual([p["id"] for p in probes if p["split"] == "train"],
-                         ["capital-1", "capital-2", "translate-1"])
+                         ["capital-1", "capital-2", "translate-1",
+                          "capital-5", "capital-6", "capital-7",
+                          "translate-3", "translate-4"])
+        self.assertEqual(len([p for p in probes if p["split"] == "eval"]), 7)
         self.assertTrue(all(1 <= p["max_tokens"] <= 512 for p in probes))
         self.assertTrue(all("expected" in p for p in probes))
 
@@ -184,9 +183,9 @@ class CommandLineTests(unittest.TestCase):
             )
             self.assertEqual(code, 0)
             # Only the train split reaches the teacher; eval probes cost nothing.
-            self.assertEqual(len(seen), 3)
+            self.assertEqual(len(seen), 8)
             payload = json.loads(out.read_text(encoding="utf-8"))
-            self.assertEqual(len(payload["records"]), 3)
+            self.assertEqual(len(payload["records"]), 8)
             self.assertEqual(payload["records"][0]["completion_text"], "risposta")
             self.assertFalse((Path(temporary) / "out.json.tmp").exists())
 
@@ -212,9 +211,11 @@ class CommandLineTests(unittest.TestCase):
 
             self.assertEqual(distill.main(arguments, runner=lambda c: fake_process()), 0)
             payload = distill.read_transcript(out)
-            self.assertEqual(len(payload["records"]), 3)
+            self.assertEqual(len(payload["records"]), 8)
             self.assertEqual([r["id"] for r in payload["records"]],
-                             ["capital-1", "capital-2", "translate-1"])
+                             ["capital-1", "capital-2", "translate-1",
+                              "capital-5", "capital-6", "capital-7",
+                              "translate-3", "translate-4"])
             self.assertEqual(payload["records"][0]["completion_ids"], [1],
                              "the resumed run must keep the earlier record verbatim")
             self.assertEqual(payload["records"][1]["runtime"]["trunk_window"], 43)

@@ -33,7 +33,7 @@ need a Python 3 interpreter, which CMake detects with `find_package(Python3)`.
 
 | Test | Claim it defends |
 |---|---|
-| `vastloom_tests` | core, safety, planner, catalog, residency, quantization and graph unit contracts; loopback OpenAI endpoint end-to-end (models list, deterministic completion, SSE stream, 404/413) |
+| `vastloom_tests` | core, safety, planner, catalog, residency, quantization and graph unit contracts; loopback OpenAI endpoint end-to-end (models list, deterministic completion, SSE stream, 404/413); capability-module container/router/injection contracts (round-trip, corruption refusals, deterministic routing, double-precision delta oracle, zero-scale bit parity, binding validation); closed-form LM-head distillation core with decoupled weight-decay contraction (loss decreases from the base-parity start, huge regularization collapses back to the base loss, aggressive learning rates stay finite) |
 | `vastloom_range_artifact` | closed-world range-artifact reader, rehashing and forged-binding refusal |
 | `vastloom_cuda_driver` | CUDA driver boundary against the deterministic fake backend, including injected faults |
 | `vastloom_ggml_compute` | ggml backend parity against the scalar reference, a corruption probe built to fail, and the input-quantization reuse contract. Registered unconditionally, but it exits 75 (skipped) unless the build was configured with `VASTLOOM_GGML_ROOT` |
@@ -55,7 +55,7 @@ obtained. Sizes are the bytes that must exist locally, not the size of the publi
 
 | Test | CMake variable | Required artifact | How to obtain it |
 |---|---|---|---|
-| `vastloom_smollm2_reference` | `VASTLOOM_SMOLLM2_MODEL` | pinned SmolLM2-135M-Instruct checkpoint | `tools/import_hf_model.py` |
+| `vastloom_smollm2_reference` | `VASTLOOM_SMOLLM2_MODEL` | pinned SmolLM2-135M-Instruct checkpoint; includes the E1 capability-module section: an inert (`--zero-a`) module leaves greedy output bit-identical, an active module is routed, bound and cost-accounted deterministically, routing across two modules is stable, and a missing module file is refused | `tools/import_hf_model.py` |
 | `vastloom_olmoe_inspection` | `VASTLOOM_OLMOE_MODEL` | OLMoE metadata-only import | `tools/import_hf_model.py --metadata-only` |
 | `vastloom_olmoe_runtime_reference` | `VASTLOOM_OLMOE_FULL_MODEL` | complete 13.84 GB OLMoE checkpoint | `tools/import_hf_model.py` |
 | `vastloom_deepseek_v4_inspection` | `VASTLOOM_DEEPSEEK_V4_MODEL` | DeepSeek V4 Flash preview metadata (19,404,391 bytes) | `tools/import_hf_model.py --metadata-only` |

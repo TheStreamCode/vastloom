@@ -8,6 +8,16 @@ This file applies to the entire repository. Human-facing contribution rules are 
 Vastloom is a native, hardware-adaptive local inference runtime that treats VRAM, RAM and
 NVMe as a model-aware hierarchy.
 
+**North star.** The capability-transfer vision lives in
+`docs/research/CAPABILITY_TRANSFER_VISION.md`: a fast, dense, resident **frontman**
+(default `gemma-4-12B-it` QAT Q4) expanded at runtime by a **dormant brain**
+(`deepseek-v4-flash-0731` on NVMe) through bounded bridges — offline distillation into
+compact low-rank modules, a selective oracle wake-up, and retrieval. It is explicitly *not*
+a claim: nothing in it is implemented or measured, splicing teacher parameters across
+architectures is listed as excluded, and "x100 intelligence" is replaced by a task-scoped
+falsification ladder. Treat it as a compass; do not let it rewrite the execution checkpoint
+below or any present-tense validation claim.
+
 **Execution checkpoint.** Official DeepSeek V4 Flash 0731 generate on the reference PC uses
 only `UD-IQ2_XXS` (`deepseek-v4-flash-0731-iq2xxs`). Do not run, measure, or claim product
 quality on IQ1 / `UD-IQ1_S`; that store was deleted. The IQ1_S decoder and reduced-graph
@@ -207,6 +217,8 @@ ctest --preset debug
 
 python -m compileall -q tools tests
 python -m unittest tests/test_manifest_tool.py -v
+python -m unittest tests/test_distill_transcript.py -v
+python -m unittest tests/test_distill_evaluate.py -v
 python tests/test_import_hf_model.py
 ```
 

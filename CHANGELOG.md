@@ -2,6 +2,107 @@
 
 ## Unreleased
 
+- **E2 compiler executed and completed: closed-form LM-head distillation with decoupled
+  weight decay, measured across a train/eval split.** New `vastloom module-fit MODEL
+  TRANSCRIPT OUT` distils a capability module straight from a teacher-transcript artifact:
+  teacher-forced sequences are framed with the pinned SmolLM2 chat template, final-norm
+  hidden states come from the new `LlamaModel::hidden_states`, base logits from the new
+  `head_dot`, and `inference::fit_lm_head_lora` runs exact small-matrix-gradient
+  cross-entropy descent on the adapter (B starts at zero, so step-one loss equals the frozen
+  base's - parity before capability; no autograd engine exists in this project by design).
+  The first unregularized run memorized all eleven positions (loss 4.26 -> 0.0) but broke an
+  off-skill probe the base answered correctly. The recorded lever was then implemented:
+  additive L2 diverged at any weight - the spring resonates through u - and was replaced by
+  **decoupled weight decay**, AdamW-style, with the contraction clamped at `max(0, 1-lr*reg)`
+  so no hyperparameter pair can overshoot; divergence now fails closed as a refused fit.
+  Probes gained `expected` answers and a train/eval split, eval probes never cost teacher
+  runs, and new `tools/distill_evaluate.py` measures baseline versus adapted arms with
+  strict-equality plus leads-with grading over one reproducible command (fifteen transcript
+  tests and eight evaluator tests cover both tools with faked runners). Measured sweep on
+  the pinned checkpoint: the operating point is **`--reg 30`** (loss 4.26 -> 0.86), which
+  preserves the off-skill "Hello" answer verbatim - the recorded interference defect is
+  closed - while capital-2 now leads with the exact teacher answer; translate-1 loses its
+  exact match at this weight and unseen same-skill probes stay unsolved, so generalization
+  is recorded as absent at eleven training positions, with data and placement named as the
+  remaining levers rather than mechanics.
+
+- **E2 slice 1: the teacher-transcript pipeline, executed for real.** New
+  `tools/distill_transcript.py` drives `deepseek-forward` over a bounded probe set and
+  publishes the `vastloom.distill_transcript.v1` artifact - prompt, completion text,
+  completion ids and finish reason per probe - which is the vocabulary-free behavioural
+  target any offline module compiler will fit against (teacher and student tokenizers do
+  not share a vocabulary, so logit matching was never on the table). The runner is
+  injectable, publication is atomic with an 8 MiB ceiling, probes are validated fail-closed,
+  and resume persists after every successful probe: the first real run needed three attempts
+  because the host's available RAM fluctuated (9.42 GB required at window 43 against 8.2 GB
+  falling to 4.2 GB), which also surfaced the preflight's accounting - resident trunk is
+  charged as `min(total, average x (window+1) x 2)`, so the window only saves RAM below ~20.
+  Probes carry an `expected` answer and every record a `teacher_correct` gate, backfilled
+  over already-stored records without new teacher runs; `deepseek-forward --json` prints two
+  objects (preflight then generation) and the tool keeps whichever carries tokens. The
+  executed finding is recorded in the vision document: the IQ2_XXS greedy teacher fails
+  arithmetic word problems (1/3), so arithmetic is excluded as a distillation target; the
+  chosen skill is factual recall plus translation, where the teacher scores 3/3 against a
+  SmolLM2 baseline failing all six probes. Fifteen unit tests cover the pipeline with a
+  faked teacher; the E2 fork stands - the compiler stays offline Python tooling in the
+  importer's dependency class, and the native runtime only ever consumes published VLCM
+  modules.
+
+- **E1 executed: capability-module injection mechanics on the frozen SmolLM2 base.** New
+  `inference::CapabilityModule` container (bounded VLCM v1: rank/target ceilings, all-finite
+  weights, unique targets, SHA-256 trailer over every preceding byte), a deterministic
+  FNV-trigram request router, and a low-rank overlay kernel that adds each binding's delta
+  after the base matvec - the frozen weights are never rewritten. `vastloom module-init`
+  writes deterministic synthetic modules sized to a pinned checkpoint (splitmix64 values,
+  routing embedding derived from the module name), and `chat --capability-module` (repeatable,
+  up to eight) routes the prompt to one module, binds it against the real config dimensions
+  and reports `capability:{selected,considered,bindings,added_macs,module_bytes}` in JSON.
+  Always-on tests cover round-trip, seven corruption refusals, routing determinism, a
+  double-precision delta oracle and zero-scale bit parity; the opt-in SmolLM2 contract now
+  proves on the real checkpoint that an inert module leaves greedy output bit-identical while
+  an active module is deterministic and cost-accounted. Measured on the reference run:
+  rank-8/scale-0.05 across all 150 targets costs 78,796,800 added MACs for 8 tokens (~9.9M per
+  token, about 7% of the dense model) in an 8.3 MB module - and degenerates greedy output to
+  repeated token 0, so delta magnitude/coverage tuning is recorded as E1's first finding.
+  Parity held; cost is bounded and counted. E2 (real teacher distillation) remains the
+  milestone that decides capability.
+
+- **F1 evidence synthesis for the capability-transfer vision.** New
+  `docs/research/CAPABILITY_TRANSFER_FEASIBILITY.md` answers the vision's five evidence
+  questions against the pinned local artifacts (ggml `30bf868`, the repository's device and
+  inference layers) and dated published work. Verdicts: behaviour distillation into compact
+  low-rank modules is standard engineering with an unknown gain magnitude (E2 remains the
+  deciding experiment); retrieval and composition over adapter pools is supported by mature
+  published systems (LoraRetriever, MOLE, LoRAuter, MoLoRA - the last reporting specialized
+  modules beating a 4.7x-larger model); speculative decoding splits into frontman self-MTP
+  (shipped with the selected checkpoint), cross-model draft-verify (sound, pre-modelled at
+  3.2-3.7x in the streaming paper, blocked by the Phase A1 host envelope, heterogeneous-
+  vocabulary algorithms now exist upstream) and teacher-as-draft (rejected: it reinstates
+  per-token teacher latency); the pinned ggml carries every tensor primitive a gemma4
+  text-only forward needs including partial-dims RoPE and flash attention with logit
+  softcap, so the adapter gaps are Vastloom-side graph-builder work plus one genuinely new
+  component, a SentencePiece tokenizer; and every storage type a UD-Q4_K_XL frontman
+  contains already has a parity-validated device matvec kernel, which makes hybrid
+  CPU-graph/device-matvec offload the recommended first device route ahead of any full
+  device graph. The vision document's F1 section now records these verdicts inline.
+
+- **North-star vision: a two-model capability-transfer runtime.** New
+  `docs/research/CAPABILITY_TRANSFER_VISION.md` records the direction this project is now
+  steering toward: a fast, dense, resident **frontman** (default `gemma-4-12B-it` QAT Q4,
+  ~6.72 GB, MTP + native tool calling) expanded at runtime by a **dormant brain**
+  (`deepseek-v4-flash-0731`, streamed from NVMe), through one of three bounded bridges -
+  an offline compiler that distils the teacher into compact low-rank modules, an oracle that
+  wakes the teacher for a single hard step, and retrieval of knowledge/exemplars. The
+  document states explicitly what is excluded (splicing teacher parameters into a different
+  architecture), converts "x100 intelligence" into a task-scoped falsification ladder
+  (E1 module injection, E2 capability transfer, E3 oracle wake-up, E4 cross-model state
+  transfer), and inherits every Safety-Governor invariant unchanged. A speed-dependencies
+  section states the honest arithmetic: the "fast frontman" promise (~30-60 tok/s) requires
+  a device model backend that does not exist yet, CPU-resident execution lands in low
+  single-digit tok/s, oracle wake-ups cost seconds-to-minutes per call, and F1 carries a
+  fifth evidence question on exactly that device-compute gap. This is a north star,
+  not a claim: nothing in it is implemented or measured until a dated gate says so.
+
 - **M13 first slice: an OpenAI-compatible loopback endpoint.** New `vastloom serve
   MODEL_OR_MANIFEST [--port N]` binds `127.0.0.1` only (remote access is out of scope by
   construction) and serves `GET /v1/models` and `POST /v1/chat/completions` from the bundled

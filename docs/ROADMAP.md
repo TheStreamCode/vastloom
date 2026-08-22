@@ -6,6 +6,12 @@ A command existing in the CLI is not enough; it must run against a validated mod
 **Now.** Official generate is `UD-IQ2_XXS` on the reference PC at about 0.3 tok/s. IQ1 is
 not an execution path. See `AGENTS.md` and the note at the top of `README.md`.
 
+**North star.** The capability-transfer vision is documented in
+`docs/research/CAPABILITY_TRANSFER_VISION.md`: a fast resident frontman expanded by a dormant
+brain on NVMe through bounded bridges. It is a compass, not a milestone; its experiments
+(E1–E4) are not scheduled in the gates below until one becomes a milestone with a gate of
+its own.
+
 ## M0 — Research harness — complete in alpha.1
 
 - [x] Native C++20/CMake project.

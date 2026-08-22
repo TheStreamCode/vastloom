@@ -22,6 +22,11 @@ goal is practical local inference for giant sparse Mixture-of-Experts models on 
 consumer hardware—without uncontrolled swapping, surprise resource exhaustion or destructive
 model conversion.
 
+The further north star — a fast resident **frontman** expanded at runtime by a **dormant
+brain** on NVMe through bounded bridges — is documented separately in
+[`docs/research/CAPABILITY_TRANSFER_VISION.md`](docs/research/CAPABILITY_TRANSFER_VISION.md).
+It is a compass for future work, not a claim about what runs today.
+
 > [!NOTE]
 > **Current measured position (August 2026, reference PC: 31 GiB RAM, RTX 4070 Super).**
 > Official generate is **UD-IQ2_XXS only**. The UD-IQ1_S store was deleted; do not run or

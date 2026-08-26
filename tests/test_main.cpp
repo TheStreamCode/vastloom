@@ -47,6 +47,7 @@
 #include "vastloom/inference/deepseek_v4_reference.hpp"
 #include "vastloom/inference/deepseek_v4_preflight.hpp"
 #include "vastloom/inference/qwen3_8_flash_next.hpp"
+#include "vastloom/inference/qwen3_8_flash_next_reference.hpp"
 #include "vastloom/inference/llama_model.hpp"
 #include "vastloom/inference/olmoe_model.hpp"
 #include "vastloom/inference/olmoe_runtime.hpp"
@@ -2841,13 +2842,197 @@ void test_qwen38_flash_next_safetensors(const std::filesystem::path& root) {
     CHECK(fp8_with_companion == 3U);
     CHECK(total_in_shard == 22U);
 
-    // Each tensor has data_offsets that begin after the header and end before
-    // the file size.
-    const std::uint64_t header_end = 8U + s.shard_header.json_header_bytes;
+    // Each tensor has payload-relative data_offsets (0 == payload start).
+    const std::uint64_t payload_size = s.shard_header.total_bytes - (8U + s.shard_header.json_header_bytes);
     for (const auto& t : s.shard_header.tensors) {
-        CHECK(t.data_offset_begin >= header_end);
         CHECK(t.data_offset_end > t.data_offset_begin);
-        CHECK(t.data_offset_end <= s.shard_header.total_bytes);
+        CHECK(t.data_offset_end <= payload_size);
+    }
+}
+
+void test_qwen38_flash_next_reference_operators(const std::filesystem::path& root) {
+    using vastloom::inference::qwen38_bf16_to_f32;
+    using vastloom::inference::qwen38_decode_bf16;
+    using vastloom::inference::qwen38_decode_fp8_block_scale;
+    using vastloom::inference::qwen38_f32_to_bf16;
+    using vastloom::inference::qwen38_fp8_e4m3_to_f32;
+    using vastloom::inference::qwen38_rms_norm;
+
+    std::ignore = root;
+
+    // FP8 E4M3 scalar smoke: known bit patterns from OCP FP8 E4M3 spec.
+    {
+        // 0x00 => 0.0
+        CHECK(qwen38_fp8_e4m3_to_f32(0x00) == 0.0F);
+        // 0x38 => 1.0 (exp=7, mant=0 => 1.0 * 2^0)
+        CHECK(std::abs(qwen38_fp8_e4m3_to_f32(0x38) - 1.0F) < 1e-6F);
+        // 0xB8 => -1.0
+        CHECK(std::abs(qwen38_fp8_e4m3_to_f32(0xB8) - (-1.0F)) < 1e-6F);
+        // 0x3C => 1.5 (exp=7, mant=4 => 1+4/8=1.5)
+        CHECK(std::abs(qwen38_fp8_e4m3_to_f32(0x3C) - 1.5F) < 1e-6F);
+        // 0x7F => NaN (exp=15)
+        CHECK(std::isnan(qwen38_fp8_e4m3_to_f32(0x7F)));
+        // 0xFF => NaN (negative NaN)
+        CHECK(std::isnan(qwen38_fp8_e4m3_to_f32(0xFF)));
+        // 0x01 => subnormal: 1/8 * 2^-6 = 1/512 ≈ 0.001953
+        CHECK(std::abs(qwen38_fp8_e4m3_to_f32(0x01) - (1.0F / 512.0F)) < 1e-7F);
+    }
+
+    // BF16 round-trip: F32 -> BF16 -> F32 must be stable for values that are
+    // exactly representable in BF16.
+    {
+        const float vals[] = {0.0F, 1.0F, -1.0F, 0.5F, 2.0F, 448.0F, -448.0F};
+        for (float v : vals) {
+            const std::uint16_t bf = qwen38_f32_to_bf16(v);
+            const float back = qwen38_bf16_to_f32(bf);
+            CHECK(std::abs(back - v) < 1e-6F);
+        }
+    }
+
+    // BF16 decode: 2x2 matrix [[1.0, 2.0],[3.0, 4.0]] encoded as BF16 LE.
+    {
+        const float src[4] = {1.0F, 2.0F, 3.0F, 4.0F};
+        std::vector<std::byte> payload;
+        payload.reserve(8);
+        for (float v : src) {
+            const std::uint16_t bf = qwen38_f32_to_bf16(v);
+            payload.push_back(static_cast<std::byte>(bf & 0xFF));
+            payload.push_back(static_cast<std::byte>((bf >> 8) & 0xFF));
+        }
+        auto decoded = qwen38_decode_bf16(payload, {2, 2});
+        CHECK(decoded);
+        if (decoded) {
+            CHECK(decoded.value().size() == 4U);
+            for (std::size_t i = 0; i < 4; ++i) {
+                CHECK(std::abs(decoded.value()[i] - src[i]) < 1e-5F);
+            }
+        }
+        // Wrong size must be rejected.
+        auto bad = qwen38_decode_bf16(payload, {3, 3});
+        CHECK(!bad);
+    }
+
+    // FP8 block-scale decode: 4x4 weight with 2x2 scale blocks.
+    // block_rows=2, block_cols=2 => 4 blocks total.
+    // Each block has its own BF16 scale.
+    {
+        const std::vector<std::int64_t> w_shape{4, 4};
+        const std::vector<std::int64_t> s_shape{2, 2};
+        // Weight bytes: all 0x38 => 1.0 in FP8 E4M3.
+        std::vector<std::byte> w_payload(16, static_cast<std::byte>(0x38));
+        // Scale bytes: BF16 2.0 in each block => 2.0
+        const std::uint16_t scale_bf = qwen38_f32_to_bf16(2.0F);
+        std::vector<std::byte> s_payload;
+        s_payload.reserve(8);
+        for (int i = 0; i < 4; ++i) {
+            s_payload.push_back(static_cast<std::byte>(scale_bf & 0xFF));
+            s_payload.push_back(static_cast<std::byte>((scale_bf >> 8) & 0xFF));
+        }
+        auto decoded = qwen38_decode_fp8_block_scale(
+            w_payload, s_payload, w_shape, s_shape, 2, 2);
+        CHECK(decoded);
+        if (decoded) {
+            CHECK(decoded.value().size() == 16U);
+            for (float v : decoded.value()) {
+                CHECK(std::abs(v - 2.0F) < 1e-5F);
+            }
+        }
+
+        // Per-block scale: top-left 1.0, top-right 2.0, bottom-left 3.0, bottom-right 4.0
+        std::vector<std::byte> s_payload2;
+        const float scales[4] = {1.0F, 2.0F, 3.0F, 4.0F};
+        for (float sv : scales) {
+            const std::uint16_t bf = qwen38_f32_to_bf16(sv);
+            s_payload2.push_back(static_cast<std::byte>(bf & 0xFF));
+            s_payload2.push_back(static_cast<std::byte>((bf >> 8) & 0xFF));
+        }
+        auto decoded2 = qwen38_decode_fp8_block_scale(
+            w_payload, s_payload2, w_shape, s_shape, 2, 2);
+        CHECK(decoded2);
+        if (decoded2) {
+            // Element (0,0) in block (0,0) => scale 1.0 => 1.0
+            CHECK(std::abs(decoded2.value()[0] - 1.0F) < 1e-5F);
+            // Element (0,2) in block (0,1) => scale 2.0 => 2.0
+            CHECK(std::abs(decoded2.value()[2] - 2.0F) < 1e-5F);
+            // Element (2,0) in block (1,0) => scale 3.0 => 3.0
+            CHECK(std::abs(decoded2.value()[8] - 3.0F) < 1e-5F);
+            // Element (2,3) in block (1,1) => scale 4.0 => 4.0
+            CHECK(std::abs(decoded2.value()[11] - 4.0F) < 1e-5F);
+        }
+
+        // Wrong scale shape must be rejected.
+        auto bad_scale = qwen38_decode_fp8_block_scale(
+            w_payload, s_payload, w_shape, std::vector<std::int64_t>{1, 1}, 2, 2);
+        CHECK(!bad_scale);
+    }
+
+    // RMSNorm: input [1,2,3], weight [1,1,1], eps=1e-6
+    {
+        const std::vector<float> input{1.0F, 2.0F, 3.0F};
+        const std::vector<float> weight{1.0F, 1.0F, 1.0F};
+        auto out = qwen38_rms_norm(input, weight, 1e-6F);
+        CHECK(out);
+        if (out) {
+            CHECK(out.value().size() == 3U);
+            // mean_sq = (1+4+9)/3 = 14/3 ≈ 4.666, rms = sqrt(4.666) ≈ 2.160
+            // out[0] ≈ 0.4629, out[1] ≈ 0.9258, out[2] ≈ 1.3887
+            CHECK(std::abs(out.value()[0] - 0.4629F) < 1e-3F);
+            CHECK(std::abs(out.value()[1] - 0.9258F) < 1e-3F);
+            CHECK(std::abs(out.value()[2] - 1.3887F) < 1e-3F);
+        }
+        // Mismatched sizes must be rejected.
+        auto bad = qwen38_rms_norm(input, std::vector<float>{1.0F, 1.0F}, 1e-6F);
+        CHECK(!bad);
+    }
+
+    // End-to-end with the mock shard fixture: read the BF16 tensor payload
+    // for layers.0.linear_attn.A_log and decode it.
+    {
+        const std::filesystem::path fixture_dir =
+            std::filesystem::path(VASTLOOM_SOURCE_DIR) / "tests" / "fixtures" /
+            "qwen38_flash_next";
+        const auto shard_path = fixture_dir / "model-00001-of-00131.safetensors";
+        CHECK(std::filesystem::exists(shard_path));
+        auto hdr = vastloom::inference::read_qwen38_safetensors_header(
+            shard_path,
+            std::filesystem::file_size(shard_path));
+        CHECK(hdr);
+        if (!hdr) return;
+        // Find the BF16 tensor A_log in the shard.
+        const vastloom::inference::Qwen38TensorDescriptor* desc = nullptr;
+        for (const auto& t : hdr.value().tensors) {
+            if (t.name == "model.language_model.layers.0.linear_attn.A_log") {
+                desc = &t;
+                break;
+            }
+        }
+        CHECK(desc != nullptr);
+        if (desc == nullptr) return;
+        CHECK(desc->dtype == "BF16");
+        CHECK(desc->shape.size() == 1 && desc->shape[0] == 4);
+        // Read payload bytes: file offset = 8 + json_header_bytes + data_offset
+        // But our descriptor data_offsets are relative to payload start (as stored in
+        // the safetensors header). The file layout is [8-byte len][json_header][payload].
+        // So file offset = 8 + json_header_bytes + data_offset_begin.
+        const std::uint64_t file_offset = 8U + hdr.value().json_header_bytes + desc->data_offset_begin;
+        const std::size_t payload_bytes = static_cast<std::size_t>(desc->data_offset_end - desc->data_offset_begin);
+        CHECK(payload_bytes == 8U); // 4 * BF16 = 8 bytes
+        std::ifstream in(shard_path, std::ios::binary);
+        CHECK(in.good());
+        in.seekg(static_cast<std::streamoff>(file_offset));
+        std::vector<std::byte> payload(payload_bytes);
+        in.read(reinterpret_cast<char*>(payload.data()), static_cast<std::streamsize>(payload_bytes));
+        CHECK(static_cast<std::size_t>(in.gcount()) == payload_bytes);
+        auto decoded = qwen38_decode_bf16(payload, desc->shape);
+        CHECK(decoded);
+        if (decoded) {
+            CHECK(decoded.value().size() == 4U);
+            // Our mock writes deterministic non-zero pattern, so we just check
+            // that decoding succeeds and produces finite values.
+            for (float v : decoded.value()) {
+                CHECK(std::isfinite(v));
+            }
+        }
     }
 }
 
@@ -8393,6 +8578,7 @@ int main() {
     test_deepseek_v4_config(root);
     test_qwen38_flash_next_config(root);
     test_qwen38_flash_next_safetensors(root);
+    test_qwen38_flash_next_reference_operators(root);
     test_deepseek_v4_reference_operators();
     test_deepseek_v4_reference_graph(root);
     test_model_store_and_runtime_policy(root);

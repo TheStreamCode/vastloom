@@ -2,6 +2,25 @@
 
 ## Unreleased
 
+- **Q2 - Qwen3.8-Flash-Next reference operators (FP8/BF16/RMSNorm).** Upstream
+  `llama.cpp` `d0132a6` still has no `qwen4_exp` (only `qwen3next`/`qwen35` with
+  DeltaNet + full-attention ibrida; QSA / n-gram / Gated Residual are missing),
+  so the original Q2 gate “5 token oracolari pinned-ggml via llama.cpp” is blocked.
+  Q2 is redefined as self-pinned reference kernels: new header
+  `qwen3_8_flash_next_reference.hpp` with `qwen38_fp8_e4m3_to_f32` (OCP E4M3,
+  exp 15 => NaN, subnormal 2^-6), `qwen38_bf16_to_f32`/`f32_to_bf16` (bit-exact),
+  `qwen38_decode_bf16`, `qwen38_decode_fp8_block_scale` (F8_E4M3 + BF16 scale per
+  block `[128,128]`, verified against real SHARD 2 header: `gate_proj.weight`
+  `[640,2560]` F8_E4M3 + `weight_scale_inv` `[5,20]` BF16), and `qwen38_rms_norm`.
+  Mock shard `model-00001-of-00131.safetensors` regenerated with BF16 `scale_inv`
+  (`1.0` => `[0x80,0x3F]`) and payload-relative `data_offsets` (0-based) plus
+  non-zero payload. Always-on test `test_qwen38_flash_next_reference_operators`
+  covers FP8 scalar smoke (0x00/0x38/0xB8/0x3C/0x01/0x7F/0xFF), BF16 round-trip,
+  BF16 2x2 decode, FP8 block-scale 4x4 with uniform and per-block scales,
+  RMSNorm, and real payload read for `A_log` BF16 `[4]` from the fixture.
+  Remote header fetch for `model-00002-of-00131` confirms 282800-byte header,
+  2048 tensors (1024 BF16 + 1024 F8_E4M3) per shard.
+
 - **Q1 - Qwen3.8-Flash-Next safetensors catalog reader.** Header-only POC of the
   125B FP8 model (`unsloth/Qwen3.8-Flash-Next-FP8`, 131 shards, ~170 GB total)
   downloaded and inspected: confirmed `model_type=qwen4_exp` with 48 layers, 512

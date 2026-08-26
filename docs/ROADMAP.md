@@ -33,8 +33,9 @@ ctest verde. Niente download di pesi reali a questo punto.
 - [x] POC scaricato (`model-00001-of-00131.safetensors` ~1 GB) per ispezione byte-level
   reale del safetensors header.
 - [x] Scoperte architetturali dal POC reale:
-  - Esperti MoE in **FP8 block-scale** (`weight` FP8 + `weight_scale_inv` F32,
-    `quant_method=fp8`, `weight_block_size=[128,128]`).
+  - Esperti MoE in **FP8 block-scale** (`weight` F8_E4M3 + `weight_scale_inv` BF16,
+    `quant_method=fp8`, `weight_block_size=[128,128]`, shape scale `[5,20]` per
+    `gate_proj` `[640,2560]`).
   - **hyper_connection_mixer** globale = Gated Residual di Qwen (4 branch,
     `hc_count=4`, `hc_lowrank=320`).
   - **attn_hyper_connection** per-layer = istanza locale della Gated Residual.
@@ -63,10 +64,43 @@ fuori scala per POC). L'opzione "POC su 27B FP8" è stata scartata dopo
 ispezione: il 27B è un modello **diverso** (`qwen3_5`, 64 layer, dense, no MoE,
 no n-gram, no Gated Residual) e non avrebbe validato le tre primitive nuove.
 
-**Prossimo passo (Q2):** clone llama.cpp upstream con supporto `qwen4_exp`
-(e DeltaNet/QSA/n-gram), build pinned, produrre 5 token oracolari sul
-POC shard 1 (1 GB) per convalidare l'end-to-end pinned-ggml prima di
-investire nel 125B completo.
+## Q2 - Reference operators per Qwen3.8-Flash-Next FP8 - complete
+
+> **Upstream bloccato:** llama.cpp `d0132a6` (2026-08-27) non ha ancora `qwen4_exp`.
+> Nessun `src/models/qwen4*.cpp`, nessun supporto QSA / n-gram / Gated Residual
+> upstream. Il gate originale “5 token oracolari pinned-ggml via llama.cpp” è
+> quindi **non eseguibile** e Q2 è stato ridefinito su reference self-pinned.
+
+- [x] Implementati reference operator puri in
+  `include/vastloom/inference/qwen3_8_flash_next_reference.hpp` /
+  `src/inference/qwen3_8_flash_next_reference.cpp`:
+  - `qwen38_fp8_e4m3_to_f32` (OCP E4M3, exp 15 => NaN, subnormal 2^-6),
+  - `qwen38_bf16_to_f32` / `qwen38_f32_to_bf16` (bit-exact),
+  - `qwen38_decode_bf16` (payload -> F32 row-major),
+  - `qwen38_decode_fp8_block_scale` (weight F8_E4M3 + scale BF16 per block
+    `[128,128]`, shape scale `[ceil(R/128), ceil(C/128)]`),
+  - `qwen38_rms_norm` (reference RMSNorm).
+- [x] Mock shard rigenerato con `weight_scale_inv` in **BF16** (shape `[1,1]`,
+  valore `1.0` => bytes `[0x80,0x3F]`) e payload non-zero deterministico,
+  con `data_offsets` payload-relative (0-based) corretti.
+- [x] Test always-on `test_qwen38_flash_next_reference_operators` che esercita:
+  - FP8 E4M3 scalar smoke (0x00=0, 0x38=1.0, 0xB8=-1.0, 0x3C=1.5, 0x01 subnormal
+    1/512, 0x7F/0xFF=NaN),
+  - BF16 round-trip (0,1,-1,0.5,2,448,-448),
+  - BF16 decode 2x2,
+  - FP8 block-scale 4x4 con block 2x2 (scale uniforme e per-block),
+  - RMSNorm 3-elementi,
+  - lettura payload reale da mock shard (`A_log` BF16 [4]).
+- [x] Verifica header remoto SHARD 2 (`model-00002-of-00131`): header 282800 byte,
+  `gate_proj.weight` F8_E4M3 `[640,2560]` + `gate_proj.weight_scale_inv` BF16
+  `[5,20]`, 2048 tensori per shard (1024 BF16 + 1024 F8_E4M3).
+
+**Gate:** `vastloom_tests` ALL PASSED, `ctest --preset release` 13/14 (1 skipped),
+`compileall` verde. Nessun download del 125B completo oltre al POC shard 1.
+
+**Prossimo passo (Q3):** estendere `Qwen38InspectionResult` con enumeration
+completa dei 152.089 tensori dal `model.safetensors.index.json` (tutti i 131 shard)
+e aggiungere test che confronta il catalog con lo stesso index parsato in Python.
 
 ## Q3 - Tensor & expert catalog Qwen3.8-Flash-Next FP8
 

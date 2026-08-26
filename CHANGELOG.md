@@ -2,6 +2,23 @@
 
 ## Unreleased
 
+- **Q4 - Qwen3.8-Flash-Next range importer + safety governor.** New
+  `qwen38_read_tensor_payload(shard, header, tensor_name)` reads exactly one
+  tensor's payload (and its optional `weight_scale_inv` companion) from a
+  safetensors shard with strict bounds checks against the header JSON length
+  and file size, computing the SHA-256 on the fly. New
+  `qwen38_import_tensor_transaction(request, header, governor)` implements the
+  three-object gate: source range (tensor + scale) -> expected SHA-256 verified
+  before any write -> bounded temp write + atomic rename. The Governor must
+  admit the aggregate (weight+scale) as a RAM reservation or the transaction
+  fails with `resource_exhausted`. Atomic refusals for out-of-bounds range,
+  hash mismatch, destination collision and missing shard/dir, with no `.tmp`
+  leftover on rejected paths. Always-on test `test_qwen38_import_transaction`
+  on the 3.6 KiB mock shard covers: BF16 `A_log` read (no scale), F8_E4M3
+  `up_proj.weight` [6,5] + BF16 `scale_inv` [1,1] read, missing tensor refused,
+  successful import producing `al_log_range.bin`, wrong-hash refusal, existing
+  destination collision, and governor-full refusal.
+
 - **Q3 - Qwen3.8-Flash-Next tensor & expert catalog.** Extended `Qwen38InspectionResult`
   with `Qwen38LayerSummary` (48 entries, per-layer total 3094, layer 1 3232 with
   138 PLE). New constants `Qwen38ExpectedCatalog` (152089 tensors, 131 shards,

@@ -3221,6 +3221,128 @@ void test_qwen38_catalog_validation(const std::filesystem::path& root) {
     }
 }
 
+void test_qwen38_import_transaction(const std::filesystem::path& root) {
+    using vastloom::inference::Qwen38TensorImportRequest;
+    using vastloom::inference::qwen38_import_tensor_transaction;
+    using vastloom::inference::qwen38_read_tensor_payload;
+    using vastloom::inference::read_qwen38_safetensors_header;
+    using vastloom::safety::ResourceGovernor;
+    using vastloom::safety::ResourceLimits;
+    using vastloom::safety::ResourceKind;
+
+    const std::filesystem::path fixture_dir =
+        std::filesystem::path(VASTLOOM_SOURCE_DIR) / "tests" / "fixtures" /
+        "qwen38_flash_next";
+    const auto shard_path = fixture_dir / "model-00001-of-00131.safetensors";
+    CHECK(std::filesystem::exists(shard_path));
+    auto hdr = read_qwen38_safetensors_header(
+        shard_path, std::filesystem::file_size(shard_path));
+    CHECK(hdr);
+    if (!hdr) return;
+    const auto& header = hdr.value();
+
+    // (a) Read a BF16 tensor payload: layers.0.linear_attn.A_log [4].
+    {
+        auto payload = qwen38_read_tensor_payload(
+            shard_path, header, "model.language_model.layers.0.linear_attn.A_log");
+        CHECK(payload);
+        if (payload) {
+            CHECK(payload.value().payload_bytes == 8U);      // 4 * BF16
+            CHECK(payload.value().bytes.size() == 8U);
+            CHECK(payload.value().scale_bytes.empty());      // no scale companion
+            CHECK(payload.value().sha256_hex.size() == 64U); // hex sha256
+            CHECK(vastloom::util::is_sha256_hex(payload.value().sha256_hex));
+        }
+    }
+
+    // (b) Read an FP8 block-scale tensor + its scale_inv companion.
+    {
+        auto payload = qwen38_read_tensor_payload(
+            shard_path, header,
+            "model.language_model.layers.0.mlp.experts.0.up_proj.weight");
+        CHECK(payload);
+        if (payload) {
+            CHECK(payload.value().dtype == "F8_E4M3");
+            CHECK(payload.value().payload_bytes == 30U);     // 6*5 * 1 byte
+            CHECK(!payload.value().scale_bytes.empty());     // scale_inv BF16 [1,1] = 2 bytes
+            CHECK(payload.value().scale_bytes.size() == 2U);
+        }
+    }
+
+    // (c) Out-of-bounds / missing tensor must fail.
+    {
+        auto missing = qwen38_read_tensor_payload(
+            shard_path, header, "model.language_model.layers.99.nope");
+        CHECK(!missing);
+    }
+
+    // (d) Full three-object transaction: import BF16 A_log into a fresh dir.
+    ResourceLimits limits;
+    limits.ram_hard_limit = 1U * vastloom::MiB;
+    ResourceGovernor governor(limits);
+    const auto dest = root / "qwen38-import";
+    std::filesystem::create_directories(dest);
+
+    auto read = qwen38_read_tensor_payload(
+        shard_path, header, "model.language_model.layers.0.linear_attn.A_log");
+    CHECK(read);
+    if (!read) return;
+    Qwen38TensorImportRequest req;
+    req.source_shard = shard_path;
+    req.tensor_name = "model.language_model.layers.0.linear_attn.A_log";
+    req.expected_sha256 = read.value().sha256_hex;
+    req.destination_dir = dest;
+    req.artifact_name = "al_log_range";
+    auto imported = qwen38_import_tensor_transaction(req, header, governor);
+    CHECK(imported);
+    if (imported) {
+        CHECK(imported.value().payload_bytes == 8U);
+        CHECK(!imported.value().scale_included);
+        CHECK(std::filesystem::exists(imported.value().artifact_path));
+    }
+
+    // (e) Wrong hash must be refused atomically (no file left).
+    {
+        Qwen38TensorImportRequest bad = req;
+        bad.artifact_name = "bad_hash";
+        bad.expected_sha256 = std::string(64, '0');
+        auto refused = qwen38_import_tensor_transaction(bad, header, governor);
+        CHECK(!refused);
+        CHECK(!std::filesystem::exists(dest / "bad_hash.bin"));
+        // No .tmp leftover either.
+        bool tmp_leftover = false;
+        for (const auto& e : std::filesystem::directory_iterator(dest)) {
+            if (e.path().extension() == ".tmp" || e.path().filename().string().find(".bad_hash.tmp") != std::string::npos) {
+                tmp_leftover = true;
+            }
+        }
+        CHECK(!tmp_leftover);
+    }
+
+    // (f) Existing destination must be refused (collision).
+    {
+        Qwen38TensorImportRequest collide = req;
+        collide.artifact_name = "al_log_range"; // same as (d)
+        auto refused = qwen38_import_tensor_transaction(collide, header, governor);
+        CHECK(!refused);
+    }
+
+    // (g) Governor refusal: reserve all RAM so the import must fail with
+    // resource_exhausted before writing.
+    {
+        auto held = governor.try_reserve(ResourceKind::ram, 1U * vastloom::MiB, "qwen38_test_fill");
+        CHECK(held);
+        Qwen38TensorImportRequest g = req;
+        g.artifact_name = "governor_refused";
+        auto refused = qwen38_import_tensor_transaction(g, header, governor);
+        CHECK(!refused);
+        if (!refused) {
+            CHECK(refused.error().code == vastloom::ErrorCode::resource_exhausted);
+        }
+        CHECK(!std::filesystem::exists(dest / "governor_refused.bin"));
+    }
+}
+
 void test_qwen38_flash_next_config(const std::filesystem::path& root) {
     // Phase 0 skeleton test: parse a minimal mock config.json that mirrors
     // the official Qwen3.8-Flash-Next config values from
@@ -8765,6 +8887,7 @@ int main() {
     test_qwen38_flash_next_safetensors(root);
     test_qwen38_flash_next_reference_operators(root);
     test_qwen38_catalog_validation(root);
+    test_qwen38_import_transaction(root);
     test_deepseek_v4_reference_operators();
     test_deepseek_v4_reference_graph(root);
     test_model_store_and_runtime_policy(root);

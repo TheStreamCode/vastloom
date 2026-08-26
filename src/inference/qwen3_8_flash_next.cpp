@@ -1,6 +1,7 @@
 #include "vastloom/inference/qwen3_8_flash_next.hpp"
 
 #include <algorithm>
+#include <chrono>
 #include <cstdint>
 #include <filesystem>
 #include <fstream>
@@ -13,6 +14,7 @@
 
 #include "vastloom/core/status.hpp"
 #include "vastloom/util/json.hpp"
+#include "vastloom/util/sha256.hpp"
 
 namespace vastloom::inference {
 namespace {
@@ -812,6 +814,169 @@ Result<Qwen38InspectionResult> inspect_qwen38_flash_next_safetensors(
         result.shard_loaded = true;
     }
 
+    return result;
+}
+
+Result<Qwen38TensorPayload> qwen38_read_tensor_payload(
+    const std::filesystem::path& shard_path,
+    const Qwen38ShardHeader& header,
+    std::string_view tensor_name) {
+    const Qwen38TensorDescriptor* desc = nullptr;
+    for (const auto& t : header.tensors) {
+        if (t.name == tensor_name) { desc = &t; break; }
+    }
+    if (desc == nullptr) {
+        return make_error(ErrorCode::not_found,
+            "tensor not present in shard header", std::string(tensor_name));
+    }
+
+    const std::uint64_t payload_offset = 8U + header.json_header_bytes;
+    const std::uint64_t weight_begin = payload_offset + desc->data_offset_begin;
+    const std::uint64_t weight_end = payload_offset + desc->data_offset_end;
+    if (weight_end > header.total_bytes || weight_begin > weight_end) {
+        return make_error(ErrorCode::invalid_format,
+            "weight range out of bounds",
+            "tensor=" + std::string(tensor_name)
+                + " range=[" + std::to_string(weight_begin) + "," + std::to_string(weight_end)
+                + "] file_size=" + std::to_string(header.total_bytes));
+    }
+
+    std::ifstream in(shard_path, std::ios::binary);
+    if (!in) {
+        return make_error(ErrorCode::io_error,
+            "cannot open shard file", shard_path.string());
+    }
+
+    Qwen38TensorPayload payload;
+    payload.tensor_name = std::string(tensor_name);
+    payload.dtype = desc->dtype;
+    payload.payload_bytes = desc->data_offset_end - desc->data_offset_begin;
+
+    in.seekg(static_cast<std::streamoff>(weight_begin));
+    payload.bytes.resize(static_cast<std::size_t>(payload.payload_bytes));
+    in.read(reinterpret_cast<char*>(payload.bytes.data()),
+            static_cast<std::streamsize>(payload.bytes.size()));
+    if (static_cast<std::uint64_t>(in.gcount()) != payload.bytes.size()) {
+        return make_error(ErrorCode::io_error,
+            "short read of weight payload", std::string(tensor_name));
+    }
+
+    // Optional scale_inv companion: also payload-relative offsets.
+    if (!desc->scale_inv_name.empty()) {
+        const std::uint64_t sb = payload_offset + desc->scale_inv_offset_begin;
+        const std::uint64_t se = payload_offset + desc->scale_inv_offset_end;
+        if (se > header.total_bytes || sb > se) {
+            return make_error(ErrorCode::invalid_format,
+                "scale range out of bounds",
+                "tensor=" + std::string(tensor_name));
+        }
+        in.seekg(static_cast<std::streamoff>(sb));
+        payload.scale_bytes.resize(static_cast<std::size_t>(se - sb));
+        in.read(reinterpret_cast<char*>(payload.scale_bytes.data()),
+                static_cast<std::streamsize>(payload.scale_bytes.size()));
+        if (static_cast<std::uint64_t>(in.gcount()) != payload.scale_bytes.size()) {
+            return make_error(ErrorCode::io_error,
+                "short read of scale payload", std::string(tensor_name));
+        }
+    }
+
+    vastloom::util::Sha256 hasher;
+    hasher.update(payload.bytes);
+    payload.sha256_hex = hasher.finalize_hex();
+
+    return payload;
+}
+
+Result<Qwen38TensorImportResult> qwen38_import_tensor_transaction(
+    const Qwen38TensorImportRequest& request,
+    const Qwen38ShardHeader& header,
+    safety::ResourceGovernor& governor) {
+    if (!std::filesystem::exists(request.source_shard)) {
+        return make_error(ErrorCode::not_found,
+            "source shard missing", request.source_shard.string());
+    }
+    if (!std::filesystem::is_directory(request.destination_dir)) {
+        return make_error(ErrorCode::not_found,
+            "destination dir missing", request.destination_dir.string());
+    }
+    if (!vastloom::util::is_sha256_hex(request.expected_sha256)) {
+        return make_error(ErrorCode::invalid_argument,
+            "expected_sha256 is not valid hex", request.expected_sha256);
+    }
+
+    auto loaded = qwen38_read_tensor_payload(
+        request.source_shard, header, request.tensor_name);
+    if (!loaded) return loaded.error();
+
+    // Object (2): hash verification before any write.
+    if (loaded.value().sha256_hex != request.expected_sha256) {
+        return make_error(ErrorCode::integrity_error,
+            "SHA-256 mismatch on tensor payload",
+            "tensor=" + request.tensor_name
+                + " expected=" + request.expected_sha256
+                + " got=" + loaded.value().sha256_hex);
+    }
+
+    // Governor must admit the aggregate payload (weight + scale) as RAM.
+    const ByteCount aggregate = loaded.value().bytes.size() + loaded.value().scale_bytes.size();
+    auto reservation = governor.try_reserve(
+        safety::ResourceKind::ram, aggregate,
+        "qwen38_import:" + request.tensor_name);
+    if (!reservation) {
+        return make_error(reservation.error().code, reservation.error().message,
+            "governor refused qwen38 import of " + request.tensor_name);
+    }
+
+    // Object (3): bounded write to temp then atomic rename.
+    const std::filesystem::path artifact = request.destination_dir /
+        (request.artifact_name + ".bin");
+    const std::filesystem::path tmp = request.destination_dir /
+        ("." + request.artifact_name + ".tmp" + std::to_string(
+            static_cast<unsigned long long>(std::chrono::steady_clock::now()
+                .time_since_epoch().count())));
+
+    {
+        std::ofstream out(tmp, std::ios::binary | std::ios::trunc);
+        if (!out) {
+            return make_error(ErrorCode::io_error,
+                "cannot create temp artifact", tmp.string());
+        }
+        out.write(reinterpret_cast<const char*>(loaded.value().bytes.data()),
+                  static_cast<std::streamsize>(loaded.value().bytes.size()));
+        if (!loaded.value().scale_bytes.empty()) {
+            out.write(reinterpret_cast<const char*>(loaded.value().scale_bytes.data()),
+                      static_cast<std::streamsize>(loaded.value().scale_bytes.size()));
+        }
+        out.flush();
+        if (!out) {
+            std::error_code ec;
+            std::filesystem::remove(tmp, ec);
+            return make_error(ErrorCode::io_error,
+                "failed writing temp artifact", tmp.string());
+        }
+    }
+
+    std::error_code ec;
+    if (std::filesystem::exists(artifact)) {
+        std::filesystem::remove(tmp, ec);
+        return make_error(ErrorCode::resource_exhausted,
+            "destination artifact already exists",
+            artifact.string());
+    }
+    std::filesystem::rename(tmp, artifact, ec);
+    if (ec) {
+        std::filesystem::remove(tmp, ec);
+        return make_error(ErrorCode::io_error,
+            "atomic rename failed", artifact.string() + ": " + ec.message());
+    }
+
+    Qwen38TensorImportResult result;
+    result.tensor_name = request.tensor_name;
+    result.artifact_path = artifact;
+    result.payload_bytes = loaded.value().bytes.size();
+    result.scale_bytes = loaded.value().scale_bytes.size();
+    result.sha256_hex = loaded.value().sha256_hex;
+    result.scale_included = !loaded.value().scale_bytes.empty();
     return result;
 }
 

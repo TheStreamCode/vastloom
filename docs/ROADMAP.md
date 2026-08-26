@@ -134,13 +134,31 @@ transazione bounded, in preparazione al download del 125B).
 `compileall` verde. Nessun file da 17 MB committato: il full catalog è
 sintetico in-memory per il gate, mentre il mock fixture resta 3.6 KiB.
 
-## Q4 - Range importer + safety governor
+## Q4 - Range importer + safety governor - complete
 
-- [ ] Range-binding esatto (tre-object gate come per DeepSeek 0731).
-- [ ] Hash SHA-256 del payload FP8 vs pinned upstream.
-- [ ] Importatore pubblica artifact read-only con rename atomico.
+- [x] `qwen38_read_tensor_payload(shard, header, tensor_name)`: legge il payload
+  esatto di un tensore dal file safetensors con bounds-check contro
+  `json_header_bytes` e `total_bytes`. Se il tensore ha companion
+  `weight_scale_inv`, lo legge insieme e lo restituisce separato.
+- [x] Hash SHA-256 del payload calcolato al volo (`Sha256`), senza scrivere nulla.
+- [x] `qwen38_import_tensor_transaction(request, header, governor)`: transazione
+  tre-oggetti — (1) source range dal shard (tensor + scale), (2) expected
+  SHA-256 verificato **prima** di qualsiasi write, (3) scrittura bounded su
+  temp + atomic rename nel destination dir. Il Governor deve ammettere
+  l'aggregato (weight+scale) come riserva RAM.
+- [x] Rifiuti atomici: range out-of-bounds, hash mismatch, destination
+  collision, governor refusal (`resource_exhausted`), shard/dir mancanti.
+  Nessun `.tmp` residuo sui path rifiutati.
+- [x] Test always-on `test_qwen38_import_transaction` su mock shard:
+  (a) legge `A_log` BF16 [4] senza scale, (b) legge `up_proj.weight` F8_E4M3
+  [6,5] + scale_inv BF16 [1,1], (c) tensore mancante rifiutato,
+  (d) transazione completa crea `al_log_range.bin` verificato,
+  (e) hash sbagliato rifiutato senza file residuo, (f) collisione
+  destination rifiutata, (g) governor pieno => `resource_exhausted`.
 
-**Gate:** transazione fallisce su duplicati, source sbagliato, hash corrotto.
+**Gate:** `vastloom_tests` ALL PASSED, `ctest --preset release` 13/14 (1 skipped),
+`compileall` verde. Import reale del payload 125B rimandato a Q5 (richiede
+download).
 
 ## Q5 - Operatori nativi pinned-ggml per le tre primitive
 

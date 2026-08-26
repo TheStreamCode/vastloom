@@ -9,6 +9,7 @@
 #include "vastloom/core/bytes.hpp"
 #include "vastloom/core/status.hpp"
 #include "vastloom/model/tensor_catalog.hpp"
+#include "vastloom/safety/resource_governor.hpp"
 
 namespace vastloom::inference {
 
@@ -234,6 +235,56 @@ struct Qwen38ExpectedCatalog {
     const std::filesystem::path& shard_path,
     std::uint64_t file_size_bytes,
     std::uint64_t json_header_bytes_to_read = 256U * 1024U);
+
+// --- Q4: payload read + three-object import transaction ---
+
+struct Qwen38TensorPayload {
+    std::string tensor_name;
+    std::string dtype;
+    std::vector<std::byte> bytes;           // weight bytes (and scale bytes appended if present)
+    std::vector<std::byte> scale_bytes;     // weight_scale_inv companion, empty if none
+    std::string sha256_hex;                 // hash of `bytes` only (weight payload)
+    ByteCount payload_bytes{0U};
+};
+
+// Reads exactly one tensor's payload from a shard file using the parsed
+// header. Bounds are checked against the header JSON length and file size.
+// If the descriptor has a scale_inv companion, the companion payload is also
+// read and returned separately. No hashing is performed here.
+[[nodiscard]] Result<Qwen38TensorPayload> qwen38_read_tensor_payload(
+    const std::filesystem::path& shard_path,
+    const Qwen38ShardHeader& header,
+    std::string_view tensor_name);
+
+struct Qwen38TensorImportRequest {
+    std::filesystem::path source_shard;     // safetensors shard file
+    std::string tensor_name;
+    std::string expected_sha256;            // hex of the weight payload bytes
+    std::filesystem::path destination_dir;  // artifact root (must exist)
+    std::string artifact_name;              // output file name (without extension)
+};
+
+struct Qwen38TensorImportResult {
+    std::string tensor_name;
+    std::filesystem::path artifact_path;
+    ByteCount payload_bytes{0U};
+    ByteCount scale_bytes{0U};
+    std::string sha256_hex;
+    bool scale_included{false};
+};
+
+// Three-object import transaction for a single safetensors tensor range:
+//   (1) source range from the shard (tensor + optional scale_inv),
+//   (2) expected SHA-256 of the weight payload,
+//   (3) bounded destination write with atomic rename.
+// The Governor must admit the aggregate payload (weight + scale) as a RAM
+// reservation before any byte is written. Fails atomically on: missing
+// shard/header entry, out-of-bounds range, hash mismatch, destination
+// collision or governor refusal (ErrorCode::resource_exhausted).
+[[nodiscard]] Result<Qwen38TensorImportResult> qwen38_import_tensor_transaction(
+    const Qwen38TensorImportRequest& request,
+    const Qwen38ShardHeader& header,
+    safety::ResourceGovernor& governor);
 
 // Returns the strict expected values for Qwen3.8-Flash-Next (committed 2026-08-26).
 // Used by tests as a "this is the model we're targeting" constant, decoupled

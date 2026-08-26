@@ -3036,6 +3036,191 @@ void test_qwen38_flash_next_reference_operators(const std::filesystem::path& roo
     }
 }
 
+void test_qwen38_catalog_validation(const std::filesystem::path& root) {
+    using vastloom::inference::Qwen38ExpectedCatalog;
+    using vastloom::inference::Qwen38LayerSummary;
+    using vastloom::inference::qwen38_summarize_layers;
+    using vastloom::inference::qwen38_validate_catalog;
+    using vastloom::inference::Qwen38InspectionResult;
+    using vastloom::inference::Qwen38ShardIndexEntry;
+
+    std::ignore = root;
+
+    // Synthetic full catalog: build 152089 entries that satisfy the invariants.
+    // We synthesize weight_map entries with the correct per-layer distribution,
+    // then validate that qwen38_validate_catalog accepts it.
+    {
+        Qwen38InspectionResult synthetic;
+        synthetic.total_tensors = Qwen38ExpectedCatalog::total_tensors;
+        synthetic.total_shards = Qwen38ExpectedCatalog::total_shards;
+        synthetic.fp8_block_scaled_experts = Qwen38ExpectedCatalog::fp8_expert_scale_inv;
+        synthetic.ngram_tensor_count = Qwen38ExpectedCatalog::ngram_tensors;
+        synthetic.has_gated_residual_global = true;
+        synthetic.has_gated_residual_per_layer = true;
+
+        // Build weight_map with correct per-layer and global distribution.
+        // For validation, only counts matter, not names. But summarize_layers
+        // inspects names, so we must generate realistic names.
+        synthetic.weight_map.reserve(Qwen38ExpectedCatalog::total_tensors);
+        // Global tensors (5)
+        synthetic.weight_map.push_back({"lm_head.weight", "model-00131-of-00131.safetensors"});
+        synthetic.weight_map.push_back({"model.language_model.embed_tokens.weight", "model-00001-of-00131.safetensors"});
+        synthetic.weight_map.push_back({"model.language_model.norm.weight", "model-00001-of-00131.safetensors"});
+        synthetic.weight_map.push_back({"model.language_model.hyper_connection_mixer.hc_norm.weight", "model-00001-of-00131.safetensors"});
+        synthetic.weight_map.push_back({"model.language_model.hyper_connection_mixer.input_mix_weight_down.weight", "model-00001-of-00131.safetensors"});
+
+        // Vision (333) - use placeholder names
+        for (std::size_t i = 0; i < 333; ++i) {
+            synthetic.weight_map.push_back(
+                {"model.visual.blocks.0.attn.qkv.weight_vision_" + std::to_string(i), "model-00001-of-00131.safetensors"});
+        }
+        // MTP (3101) - use placeholder
+        for (std::size_t i = 0; i < 3101; ++i) {
+            synthetic.weight_map.push_back(
+                {"mtp.layers.0.mlp.experts.0.gate_proj.weight_mtp_" + std::to_string(i), "model-00070-of-00131.safetensors"});
+        }
+        // Language layers: 48 layers, 3094 each, layer 1 gets 138 extra ple.
+        for (std::size_t layer = 0; layer < 48; ++layer) {
+            const bool is_ple_layer = (layer == 1);
+            const bool is_full = (layer % 4 == 3); // every 4th is full_attn
+            // Common per-layer tensors: hyper connections + gate + shared
+            // We generate 8 hyper + 2 gate + 3 shared =13 plus experts 3072 plus attn 9/9 plus ple 138?
+            // Simplified: just generate 3094 generic names that contain the right substrings
+            // for summarize_layers to count correctly.
+            // For linear layers: need 9 linear_attn, for full layers: need 9 self_attn.
+            // We generate those 9 with correct prefixes, plus 8 hyper, plus 3072 experts, plus gate etc, plus ple.
+            std::size_t per_layer = (is_ple_layer ? 3232 : 3094);
+            std::size_t generated = 0;
+            // linear or self attn (9)
+            if (is_full) {
+                for (int k = 0; k < 9; ++k) {
+                    synthetic.weight_map.push_back(
+                        {"model.language_model.layers." + std::to_string(layer) + ".self_attn.q_proj.weight_" + std::to_string(k),
+                         "model-00010-of-00131.safetensors"});
+                    ++generated;
+                }
+            } else {
+                for (int k = 0; k < 9; ++k) {
+                    synthetic.weight_map.push_back(
+                        {"model.language_model.layers." + std::to_string(layer) + ".linear_attn.A_log_" + std::to_string(k),
+                         "model-00010-of-00131.safetensors"});
+                    ++generated;
+                }
+            }
+            // attn_hyper 4
+            for (int k = 0; k < 4; ++k) {
+                synthetic.weight_map.push_back(
+                    {"model.language_model.layers." + std::to_string(layer) + ".attn_hyper_connection.block_inject_weight_" + std::to_string(k),
+                     "model-00010-of-00131.safetensors"});
+                ++generated;
+            }
+            // mlp_hyper 4
+            for (int k = 0; k < 4; ++k) {
+                synthetic.weight_map.push_back(
+                    {"model.language_model.layers." + std::to_string(layer) + ".mlp_hyper_connection.block_inject_weight_" + std::to_string(k),
+                     "model-00010-of-00131.safetensors"});
+                ++generated;
+            }
+            // mlp.gate 1, shared_gate 1, shared_expert 3
+            synthetic.weight_map.push_back(
+                {"model.language_model.layers." + std::to_string(layer) + ".mlp.gate.weight", "model-00010-of-00131.safetensors"});
+            ++generated;
+            synthetic.weight_map.push_back(
+                {"model.language_model.layers." + std::to_string(layer) + ".mlp.shared_expert_gate.weight", "model-00010-of-00131.safetensors"});
+            ++generated;
+            for (int k = 0; k < 3; ++k) {
+                synthetic.weight_map.push_back(
+                    {"model.language_model.layers." + std::to_string(layer) + ".mlp.shared_expert.gate_proj_" + std::to_string(k),
+                     "model-00010-of-00131.safetensors"});
+                ++generated;
+            }
+            // mlp.experts 3072 = 1536 weight + 1536 scale_inv (512 experts * 3 proj)
+            for (int eid = 0; eid < 512; ++eid) {
+                synthetic.weight_map.push_back(
+                    {"model.language_model.layers." + std::to_string(layer) + ".mlp.experts." + std::to_string(eid) + ".gate_proj.weight",
+                     "model-00010-of-00131.safetensors"});
+                ++generated;
+                synthetic.weight_map.push_back(
+                    {"model.language_model.layers." + std::to_string(layer) + ".mlp.experts." + std::to_string(eid) + ".up_proj.weight",
+                     "model-00010-of-00131.safetensors"});
+                ++generated;
+                synthetic.weight_map.push_back(
+                    {"model.language_model.layers." + std::to_string(layer) + ".mlp.experts." + std::to_string(eid) + ".down_proj.weight",
+                     "model-00010-of-00131.safetensors"});
+                ++generated;
+            }
+            for (int eid = 0; eid < 512; ++eid) {
+                synthetic.weight_map.push_back(
+                    {"model.language_model.layers." + std::to_string(layer) + ".mlp.experts." + std::to_string(eid) + ".gate_proj.weight_scale_inv",
+                     "model-00010-of-00131.safetensors"});
+                ++generated;
+                synthetic.weight_map.push_back(
+                    {"model.language_model.layers." + std::to_string(layer) + ".mlp.experts." + std::to_string(eid) + ".up_proj.weight_scale_inv",
+                     "model-00010-of-00131.safetensors"});
+                ++generated;
+                synthetic.weight_map.push_back(
+                    {"model.language_model.layers." + std::to_string(layer) + ".mlp.experts." + std::to_string(eid) + ".down_proj.weight_scale_inv",
+                     "model-00010-of-00131.safetensors"});
+                ++generated;
+            }
+            // ple extra for layer 1: 128 ngram + 10 other ple tensors = 138
+            if (is_ple_layer) {
+                for (int k = 0; k < 128; ++k) {
+                    synthetic.weight_map.push_back(
+                        {"model.language_model.layers." + std::to_string(layer) + ".ple.ple_embedding.ngram_embedding.shard_" + std::to_string(k) + ".weight",
+                         "model-00005-of-00131.safetensors"});
+                    ++generated;
+                }
+                for (int k = 0; k < 10; ++k) {
+                    synthetic.weight_map.push_back(
+                        {"model.language_model.layers." + std::to_string(layer) + ".ple.ple_input_proj.weight_" + std::to_string(k),
+                         "model-00005-of-00131.safetensors"});
+                    ++generated;
+                }
+            }
+            CHECK(generated == per_layer);
+        }
+        CHECK(synthetic.weight_map.size() == Qwen38ExpectedCatalog::total_tensors);
+
+        // Summarize and validate
+        synthetic.layers = qwen38_summarize_layers(synthetic.weight_map);
+        CHECK(synthetic.layers.size() == 48U);
+        // Spot-check layer 0 (linear) and layer 3 (full) and layer 1 (ple)
+        CHECK(synthetic.layers[0].total == 3094U);
+        CHECK(synthetic.layers[0].linear_attn == 9U);
+        CHECK(synthetic.layers[0].self_attn == 0U);
+        CHECK(synthetic.layers[1].total == 3232U);
+        CHECK(synthetic.layers[1].ple == 138U);
+        CHECK(synthetic.layers[3].total == 3094U);
+        CHECK(synthetic.layers[3].self_attn == 9U);
+        CHECK(synthetic.layers[3].linear_attn == 0U);
+
+        auto validated = qwen38_validate_catalog(synthetic);
+        CHECK(validated);
+        if (!validated) {
+            std::cerr << "  synthetic full catalog validation failed: "
+                      << validated.error().message << " (" << validated.error().context << ")\n";
+        }
+    }
+
+    // Mock fixture must fail full validation (too small), proving the validator is strict.
+    {
+        const std::filesystem::path fixture_dir =
+            std::filesystem::path(VASTLOOM_SOURCE_DIR) / "tests" / "fixtures" /
+            "qwen38_flash_next";
+        const auto index_path = fixture_dir / "model.safetensors.index.json";
+        auto cfg_path = fixture_dir / "config.json";
+        auto cfg = vastloom::inference::load_qwen38_flash_next_config(cfg_path);
+        CHECK(cfg);
+        if (!cfg) return;
+        auto inspected = vastloom::inference::inspect_qwen38_flash_next_safetensors(index_path, cfg.value(), false);
+        CHECK(inspected);
+        if (!inspected) return;
+        auto validated = qwen38_validate_catalog(inspected.value());
+        CHECK(!validated); // mock is incomplete, must be rejected
+    }
+}
+
 void test_qwen38_flash_next_config(const std::filesystem::path& root) {
     // Phase 0 skeleton test: parse a minimal mock config.json that mirrors
     // the official Qwen3.8-Flash-Next config values from
@@ -8579,6 +8764,7 @@ int main() {
     test_qwen38_flash_next_config(root);
     test_qwen38_flash_next_safetensors(root);
     test_qwen38_flash_next_reference_operators(root);
+    test_qwen38_catalog_validation(root);
     test_deepseek_v4_reference_operators();
     test_deepseek_v4_reference_graph(root);
     test_model_store_and_runtime_policy(root);

@@ -159,6 +159,20 @@ struct Qwen38ShardIndexEntry {
     std::filesystem::path shard_path;      // relative to checkpoint root
 };
 
+struct Qwen38LayerSummary {
+    std::size_t layer{0};
+    std::size_t total{0};
+    std::size_t linear_attn{0};      // Gated DeltaNet tensors (9 per linear layer)
+    std::size_t self_attn{0};        // full attention tensors (9 per full layer)
+    std::size_t attn_hyper{0};       // per-layer Gated Residual attn (4)
+    std::size_t mlp_hyper{0};        // per-layer Gated Residual mlp (4)
+    std::size_t mlp_gate{0};         // router gate (1)
+    std::size_t mlp_shared_gate{0};  // shared expert gate (1)
+    std::size_t mlp_shared_expert{0}; // shared expert weights (3)
+    std::size_t mlp_experts{0};      // routed experts (3072 per layer)
+    std::size_t ple{0};              // N-gram PLE tensors (0 or 138 for layer 1)
+};
+
 struct Qwen38InspectionResult {
     std::filesystem::path root;
     std::string model_id;
@@ -171,10 +185,41 @@ struct Qwen38InspectionResult {
     std::size_t ngram_tensor_count{0};
     bool has_gated_residual_global{false};   // hyper_connection_mixer
     bool has_gated_residual_per_layer{false}; // attn_hyper_connection, mlp_hyper_connection
+    // Per-layer breakdown (48 entries for language_model.layers.0..47).
+    std::vector<Qwen38LayerSummary> layers;
+    // Non-layer aggregates.
+    std::size_t vision_tensors{0};
+    std::size_t mtp_tensors{0};
+    std::size_t global_tensors{0};
     // Header-level result for a single loaded shard.
     Qwen38ShardHeader shard_header;
     bool shard_loaded{false};
 };
+
+struct Qwen38ExpectedCatalog {
+    static constexpr std::size_t total_tensors = 152089;
+    static constexpr std::size_t total_shards = 131;
+    static constexpr std::size_t language_layers = 48;
+    static constexpr std::size_t language_tensors = 148650; // 47*3094 + 3232
+    static constexpr std::size_t per_layer_linear = 3094;
+    static constexpr std::size_t per_layer_full = 3094;
+    static constexpr std::size_t per_layer_ple_extra = 138; // added to layer 1
+    static constexpr std::size_t vision_tensors = 333;
+    static constexpr std::size_t mtp_tensors = 3101;
+    static constexpr std::size_t global_tensors = 5; // embed + lm_head + norm + 3 hyper global
+    static constexpr std::size_t ngram_tensors = 128; // shard_0..127 weights
+    static constexpr std::size_t ngram_with_proj = 138; // + ple_input_proj etc
+    static constexpr std::size_t fp8_expert_scale_inv = 75264; // counted as fp8_block_scaled_experts
+};
+
+// Validates a full inspection result against Qwen38ExpectedCatalog.
+// Returns the result on success, error with context on mismatch.
+[[nodiscard]] Result<Qwen38InspectionResult> qwen38_validate_catalog(
+    const Qwen38InspectionResult& result);
+
+// Builds a per-layer summary from a weight_map without touching shard files.
+[[nodiscard]] std::vector<Qwen38LayerSummary> qwen38_summarize_layers(
+    const std::vector<Qwen38ShardIndexEntry>& weight_map);
 
 // Parses model.safetensors.index.json and walks the JSON object {name -> shard_path}.
 [[nodiscard]] Result<Qwen38InspectionResult> inspect_qwen38_flash_next_safetensors(

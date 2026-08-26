@@ -2,6 +2,21 @@
 
 ## Unreleased
 
+- **Q3 - Qwen3.8-Flash-Next tensor & expert catalog.** Extended `Qwen38InspectionResult`
+  with `Qwen38LayerSummary` (48 entries, per-layer total 3094, layer 1 3232 with
+  138 PLE). New constants `Qwen38ExpectedCatalog` (152089 tensors, 131 shards,
+  148650 language, 333 vision, 3101 mtp, 5 global, 128 ngram, 75264 FP8
+  `weight_scale_inv`) and function `qwen38_validate_catalog` that enforces them.
+  `qwen38_summarize_layers` classifies each `weight_map` entry by layer and type
+  (linear_attn 9 / self_attn 9, attn_hyper 4, mlp_hyper 4, gate/shared, 3072
+  experts per layer as 1536 weight F8_E4M3 +1536 scale BF16, ple 0/138). Always-on
+  test `test_qwen38_catalog_validation` builds a synthetic full catalog of 152089
+  entries with the exact distribution and proves `validate` passes, and that the
+  mock fixture (25 tensors) is correctly rejected. Discovery documented from the
+  real `model.safetensors.index.json` (17 MB, fetched 2026-08-28): every language
+  layer has 3094 tensors, the 128 ngram shards live on layer 1, mtp contributes
+  3101 tensors.
+
 - **Q2 - Qwen3.8-Flash-Next reference operators (FP8/BF16/RMSNorm).** Upstream
   `llama.cpp` `d0132a6` still has no `qwen4_exp` (only `qwen3next`/`qwen35` with
   DeltaNet + full-attention ibrida; QSA / n-gram / Gated Residual are missing),

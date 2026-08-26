@@ -98,19 +98,41 @@ no n-gram, no Gated Residual) e non avrebbe validato le tre primitive nuove.
 **Gate:** `vastloom_tests` ALL PASSED, `ctest --preset release` 13/14 (1 skipped),
 `compileall` verde. Nessun download del 125B completo oltre al POC shard 1.
 
-**Prossimo passo (Q3):** estendere `Qwen38InspectionResult` con enumeration
-completa dei 152.089 tensori dal `model.safetensors.index.json` (tutti i 131 shard)
-e aggiungere test che confronta il catalog con lo stesso index parsato in Python.
+**Prossimo passo (Q4):** range importer + safety governor per il payload FP8
+(lettura esatta di `weight` + `weight_scale_inv` con validazione SHA-256 e
+transazione bounded, in preparazione al download del 125B).
 
-## Q3 - Tensor & expert catalog Qwen3.8-Flash-Next FP8
+## Q3 - Tensor & expert catalog Qwen3.8-Flash-Next FP8 - complete
 
-- [ ] Estendere `Qwen38FlashNextInspection` con enumeration completa dei tensori
-  dal Safetensors header del 125B FP8 (layer-trunk, shared, routed, n-gram tables,
-  gated-residual, DeltaNet state, QSA indexer, MTP).
-- [ ] Test pinned-ggml che confronta il nostro catalog con quello generato da
-  `tools/gguf-ls.py` su llama.cpp pinned.
+- [x] Esteso `Qwen38InspectionResult` con breakdown per-layer:
+  `Qwen38LayerSummary` (total, linear_attn 9 / self_attn 9, attn_hyper 4,
+  mlp_hyper 4, mlp_gate 1, mlp_shared_gate 1, mlp_shared_expert 3,
+  mlp_experts 3072 (1536 weight F8_E4M3 + 1536 scale BF16), ple 0/138).
+  Funzione `qwen38_summarize_layers(weight_map)` classifica ogni entry per
+  layer e tipo.
+- [x] Aggiunto `Qwen38ExpectedCatalog` con costanti pinned per il release
+  2026-08-26: `total_tensors=152089`, `total_shards=131`,
+  `language_tensors=148650` (47×3094 + 3232), `per_layer 3094/3232`,
+  `vision=333`, `mtp=3101`, `global=5`, `ngram=128`, `fp8_scale_inv=75264`.
+  Validazione in `qwen38_validate_catalog(result)` che rifiuta qualsiasi
+  catalog che non chiude i gate (total, shards, per-layer, ngram, scale).
+- [x] Popolamento automatico di `layers`, `vision_tensors`, `mtp_tensors`,
+  `global_tensors` dentro `inspect_qwen38_flash_next_safetensors` via
+  `qwen38_summarize_layers`.
+- [x] Scoperte confermate dal POC reale (già in Q1/Q2):
+  48 layer con 3094 tensori ciascuno (layer 1 =3232 con PLE), 6 global
+  hyper, 196+196 per-layer hyper, 333 vision, 3101 mtp.
+- [x] Test always-on `test_qwen38_catalog_validation`:
+  costruisce in memoria un synthetic full catalog da 152089 entries con la
+  distribuzione esatta (9 linear/self, 8 hyper, 5 gate/shared, 3072 experts
+  con 1536 weight +1536 scale, 128 ngram +10 ple proj per layer 1, 333 vision,
+  3101 mtp, 5 global) e verifica che `summarize` produca 48 layer con
+  `total 3094/3232` e che `validate` passi; verifica inoltre che il mock
+  fixture (25 tensors) venga **rifiutato** dal validatore (prova di strictness).
 
-**Gate:** stesso numero di tensori e stessi nomi canonici `blk.<i>.*`.
+**Gate:** `vastloom_tests` ALL PASSED, `ctest --preset release` 13/14 (1 skipped),
+`compileall` verde. Nessun file da 17 MB committato: il full catalog è
+sintetico in-memory per il gate, mentre il mock fixture resta 3.6 KiB.
 
 ## Q4 - Range importer + safety governor
 

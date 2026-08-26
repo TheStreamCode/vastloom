@@ -635,6 +635,82 @@ Result<Qwen38ShardHeader> read_qwen38_safetensors_header(
     return hdr;
 }
 
+std::vector<Qwen38LayerSummary> qwen38_summarize_layers(
+    const std::vector<Qwen38ShardIndexEntry>& weight_map) {
+    std::vector<Qwen38LayerSummary> layers(48);
+    for (std::size_t i = 0; i < 48; ++i) layers[i].layer = i;
+    for (const auto& e : weight_map) {
+        const std::string& name = e.tensor_name;
+        if (name.find("language_model.layers.") == std::string::npos) continue;
+        // Extract layer index: "model.language_model.layers.<N>."
+        const std::string marker = "language_model.layers.";
+        auto pos = name.find(marker);
+        if (pos == std::string::npos) continue;
+        pos += marker.size();
+        auto dot = name.find('.', pos);
+        if (dot == std::string::npos) continue;
+        int layer = 0;
+        try {
+            layer = std::stoi(name.substr(pos, dot - pos));
+        } catch (...) { continue; }
+        if (layer < 0 || layer >= 48) continue;
+        auto& s = layers[layer];
+        ++s.total;
+        if (name.find("linear_attn.") != std::string::npos) ++s.linear_attn;
+        else if (name.find("self_attn.") != std::string::npos) ++s.self_attn;
+        if (name.find("attn_hyper_connection.") != std::string::npos) ++s.attn_hyper;
+        if (name.find("mlp_hyper_connection.") != std::string::npos) ++s.mlp_hyper;
+        if (name.find("mlp.gate.weight") != std::string::npos) ++s.mlp_gate;
+        if (name.find("mlp.shared_expert_gate") != std::string::npos) ++s.mlp_shared_gate;
+        if (name.find("mlp.shared_expert.") != std::string::npos) ++s.mlp_shared_expert;
+        if (name.find("mlp.experts.") != std::string::npos) ++s.mlp_experts;
+        if (name.find("ple") != std::string::npos) ++s.ple;
+    }
+    return layers;
+}
+
+Result<Qwen38InspectionResult> qwen38_validate_catalog(
+    const Qwen38InspectionResult& result) {
+    using Exp = Qwen38ExpectedCatalog;
+    if (result.total_tensors != Exp::total_tensors) {
+        return make_error(ErrorCode::invalid_format,
+            "catalog total_tensors mismatch",
+            "expected=" + std::to_string(Exp::total_tensors) + " got=" + std::to_string(result.total_tensors));
+    }
+    if (result.total_shards != Exp::total_shards) {
+        return make_error(ErrorCode::invalid_format,
+            "catalog total_shards mismatch",
+            "expected=" + std::to_string(Exp::total_shards) + " got=" + std::to_string(result.total_shards));
+    }
+    if (result.fp8_block_scaled_experts != Exp::fp8_expert_scale_inv) {
+        return make_error(ErrorCode::invalid_format,
+            "catalog fp8 scale_inv count mismatch",
+            "expected=" + std::to_string(Exp::fp8_expert_scale_inv) + " got=" + std::to_string(result.fp8_block_scaled_experts));
+    }
+    if (result.ngram_tensor_count != Exp::ngram_tensors) {
+        return make_error(ErrorCode::invalid_format,
+            "catalog ngram tensor count mismatch",
+            "expected=" + std::to_string(Exp::ngram_tensors) + " got=" + std::to_string(result.ngram_tensor_count));
+    }
+    if (result.layers.size() != Exp::language_layers) {
+        return make_error(ErrorCode::invalid_format,
+            "catalog layer count mismatch",
+            "expected=" + std::to_string(Exp::language_layers) + " got=" + std::to_string(result.layers.size()));
+    }
+    for (std::size_t i = 0; i < result.layers.size(); ++i) {
+        const auto& s = result.layers[i];
+        const std::size_t expected = (i == 1 ? Exp::per_layer_linear + Exp::per_layer_ple_extra : Exp::per_layer_linear);
+        // Both linear and full layers have 3094; layer 1 is 3232.
+        if (s.total != expected) {
+            return make_error(ErrorCode::invalid_format,
+                "catalog per-layer total mismatch",
+                "layer=" + std::to_string(i) + " expected=" + std::to_string(expected) + " got=" + std::to_string(s.total));
+        }
+    }
+    Qwen38InspectionResult copy = result;
+    return copy;
+}
+
 Result<Qwen38InspectionResult> inspect_qwen38_flash_next_safetensors(
     const std::filesystem::path& index_json_path,
     const Qwen38FlashNextConfig& config,
@@ -705,6 +781,16 @@ Result<Qwen38InspectionResult> inspect_qwen38_flash_next_safetensors(
     result.ngram_tensor_count = ngram_count;
     result.has_gated_residual_global = has_global_hc;
     result.has_gated_residual_per_layer = has_layer_hc;
+    result.layers = qwen38_summarize_layers(result.weight_map);
+    result.vision_tensors = 0;
+    result.mtp_tensors = 0;
+    result.global_tensors = 0;
+    for (const auto& e : result.weight_map) {
+        const std::string& n = e.tensor_name;
+        if (n.find("visual.") != std::string::npos) ++result.vision_tensors;
+        else if (n.rfind("mtp.", 0) == 0) ++result.mtp_tensors;
+        else if (n.find("language_model.layers.") == std::string::npos) ++result.global_tensors;
+    }
 
     if (load_first_shard_header && !unique_shards.empty()) {
         // First shard alphabetically.

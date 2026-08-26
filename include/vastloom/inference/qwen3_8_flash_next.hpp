@@ -130,6 +130,66 @@ struct Qwen38FlashNextInspection {
 [[nodiscard]] Result<Qwen38FlashNextInspection> inspect_qwen38_flash_next_config(
     const Qwen38FlashNextConfig& config);
 
+// Safetensors header parsing: a single shard file begins with a 64-bit
+// little-endian byte length, followed by that many bytes of UTF-8 JSON
+// describing every tensor in the shard. The payload bytes follow the JSON.
+struct Qwen38TensorDescriptor {
+    std::string name;       // logical name, e.g. "model.language_model.layers.0.linear_attn.A_log"
+    std::string dtype;      // "BF16", "F8_E4M3", "F16", ...
+    std::vector<std::int64_t> shape;
+    std::uint64_t data_offset_begin{0};
+    std::uint64_t data_offset_end{0};
+    // Optional block-scale companion (FP8 block-scale quantization).
+    // When `weight` is FP8 (F8_E4M3), `scale_inv_name` carries the matching
+    // `weight_scale_inv` tensor that is read alongside the weight tensor.
+    std::string scale_inv_name;
+    std::uint64_t scale_inv_offset_begin{0};
+    std::uint64_t scale_inv_offset_end{0};
+};
+
+struct Qwen38ShardHeader {
+    std::filesystem::path path;
+    std::uint64_t json_header_bytes{0};   // size of the JSON header section
+    std::uint64_t total_bytes{0};          // total shard bytes (file size)
+    std::vector<Qwen38TensorDescriptor> tensors;
+};
+
+struct Qwen38ShardIndexEntry {
+    std::string tensor_name;
+    std::filesystem::path shard_path;      // relative to checkpoint root
+};
+
+struct Qwen38InspectionResult {
+    std::filesystem::path root;
+    std::string model_id;
+    Qwen38FlashNextConfig config;
+    // Index-level results: full catalog of tensors across all shards.
+    std::vector<Qwen38ShardIndexEntry> weight_map;
+    std::size_t total_tensors{0};
+    std::size_t total_shards{0};
+    std::size_t fp8_block_scaled_experts{0};
+    std::size_t ngram_tensor_count{0};
+    bool has_gated_residual_global{false};   // hyper_connection_mixer
+    bool has_gated_residual_per_layer{false}; // attn_hyper_connection, mlp_hyper_connection
+    // Header-level result for a single loaded shard.
+    Qwen38ShardHeader shard_header;
+    bool shard_loaded{false};
+};
+
+// Parses model.safetensors.index.json and walks the JSON object {name -> shard_path}.
+[[nodiscard]] Result<Qwen38InspectionResult> inspect_qwen38_flash_next_safetensors(
+    const std::filesystem::path& index_json_path,
+    const Qwen38FlashNextConfig& config,
+    bool load_first_shard_header = false);
+
+// Parses the safetensors header of a single shard file (does not read
+// tensor payload bytes). Caller passes the file path and the file size
+// (Content-Length from HTTP HEAD or filesystem stat).
+[[nodiscard]] Result<Qwen38ShardHeader> read_qwen38_safetensors_header(
+    const std::filesystem::path& shard_path,
+    std::uint64_t file_size_bytes,
+    std::uint64_t json_header_bytes_to_read = 256U * 1024U);
+
 // Returns the strict expected values for Qwen3.8-Flash-Next (committed 2026-08-26).
 // Used by tests as a "this is the model we're targeting" constant, decoupled
 // from any parsed JSON. If the official config drifts, this constant does not

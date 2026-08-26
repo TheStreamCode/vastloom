@@ -4,9 +4,11 @@
 #include <cstdint>
 #include <filesystem>
 #include <fstream>
+#include <set>
 #include <sstream>
 #include <string>
 #include <string_view>
+#include <tuple>
 #include <vector>
 
 #include "vastloom/core/status.hpp"
@@ -491,6 +493,240 @@ Result<Qwen38FlashNextInspection> inspect_qwen38_flash_next_config(
 
     ins.config = config;
     return ins;
+}
+
+Result<Qwen38ShardHeader> read_qwen38_safetensors_header(
+    const std::filesystem::path& shard_path,
+    std::uint64_t file_size_bytes,
+    std::uint64_t json_header_bytes_to_read) {
+    if (!std::filesystem::exists(shard_path)) {
+        return make_error(ErrorCode::not_found,
+            "shard file not found", shard_path.string());
+    }
+    std::ifstream in(shard_path, std::ios::binary);
+    if (!in) {
+        return make_error(ErrorCode::io_error,
+            "cannot open shard file", shard_path.string());
+    }
+
+    // 8-byte little-endian length prefix.
+    unsigned char lenbuf[8];
+    in.read(reinterpret_cast<char*>(lenbuf), 8);
+    if (in.gcount() != 8) {
+        return make_error(ErrorCode::invalid_format,
+            "shard too short to contain length prefix", shard_path.string());
+    }
+    const std::uint64_t header_len = static_cast<std::uint64_t>(lenbuf[0])
+        | (static_cast<std::uint64_t>(lenbuf[1]) << 8)
+        | (static_cast<std::uint64_t>(lenbuf[2]) << 16)
+        | (static_cast<std::uint64_t>(lenbuf[3]) << 24)
+        | (static_cast<std::uint64_t>(lenbuf[4]) << 32)
+        | (static_cast<std::uint64_t>(lenbuf[5]) << 40)
+        | (static_cast<std::uint64_t>(lenbuf[6]) << 48)
+        | (static_cast<std::uint64_t>(lenbuf[7]) << 56);
+
+    if (header_len == 0 || header_len > json_header_bytes_to_read) {
+        return make_error(ErrorCode::invalid_format,
+            "header length out of allowed range",
+            "header_len=" + std::to_string(header_len)
+                + " max=" + std::to_string(json_header_bytes_to_read));
+    }
+
+    std::string header_json(header_len, '\0');
+    in.read(header_json.data(), static_cast<std::streamsize>(header_len));
+    if (static_cast<std::uint64_t>(in.gcount()) != header_len) {
+        return make_error(ErrorCode::invalid_format,
+            "short read of header JSON", shard_path.string());
+    }
+
+    auto json = vastloom::util::parse_json(header_json);
+    if (!json) {
+        return make_error(json.error().code, json.error().message,
+            "safetensors header parse failed for " + shard_path.string());
+    }
+    const auto& root = json.value();
+    if (!root.is_object()) {
+        return make_error(ErrorCode::invalid_format,
+            "safetensors header is not a JSON object", shard_path.string());
+    }
+
+    Qwen38ShardHeader hdr;
+    hdr.path = shard_path;
+    hdr.json_header_bytes = header_len;
+    hdr.total_bytes = file_size_bytes;
+
+    // Two-pass: first record all tensors, then attach block-scale companions.
+    auto obj_res = root.as_object();
+    if (!obj_res) {
+        return make_error(ErrorCode::invalid_format,
+            "header is not a JSON object", shard_path.string());
+    }
+    const auto* obj = obj_res.value();
+    for (const auto& kv : *obj) {
+        const std::string& name = kv.first;
+        const auto& value = kv.second;
+        if (name == "__metadata__") continue;
+        const auto* tp = value.find("dtype");
+        const auto* sp = value.find("shape");
+        const auto* op = value.find("data_offsets");
+        if (tp == nullptr || sp == nullptr || op == nullptr) {
+            return make_error(ErrorCode::invalid_format,
+                "tensor descriptor missing required fields",
+                "name=" + name);
+        }
+        auto dtype = tp->as_string();
+        auto shape = sp->as_array();
+        auto offsets = op->as_array();
+        if (!dtype || !shape || !offsets) {
+            return make_error(ErrorCode::invalid_format,
+                "tensor descriptor has wrong types",
+                "name=" + name);
+        }
+        Qwen38TensorDescriptor desc;
+        desc.name = name;
+        desc.dtype = std::string(dtype.value());
+        desc.shape.reserve(shape.value()->size());
+        for (const auto& dim : *shape.value()) {
+            auto d = dim.as_i64();
+            if (!d) {
+                return make_error(ErrorCode::invalid_format,
+                    "tensor shape dim not int",
+                    "name=" + name);
+            }
+            desc.shape.push_back(d.value());
+        }
+        auto begin = (*offsets.value())[0].as_u64();
+        auto end = (*offsets.value())[1].as_u64();
+        if (!begin || !end) {
+            return make_error(ErrorCode::invalid_format,
+                "tensor data_offsets not uint",
+                "name=" + name);
+        }
+        desc.data_offset_begin = begin.value();
+        desc.data_offset_end = end.value();
+        hdr.tensors.push_back(std::move(desc));
+    }
+
+    // Attach block-scale companions: pair each `*_scale_inv` with the matching
+    // `*` tensor of the same base name. Qwen3.8-Flash-Next's FP8 block-scale
+    // uses this exact suffix convention for expert weights
+    // (`up_proj.weight` + `up_proj.weight_scale_inv`).
+    // We need to attach onto the matching non-scale tensor, which means we
+    // need a non-const view of the tensors. Iterate twice: first locate the
+    // companions, then patch via index.
+    for (std::size_t i = 0; i < hdr.tensors.size(); ++i) {
+        const std::string& name = hdr.tensors[i].name;
+        const std::string suffix = "_scale_inv";
+        if (name.size() <= suffix.size()) continue;
+        if (std::string_view(name).substr(name.size() - suffix.size())
+            != std::string_view(suffix)) continue;
+        std::string base_name = name.substr(0, name.size() - suffix.size());
+        for (std::size_t j = 0; j < hdr.tensors.size(); ++j) {
+            if (i == j) continue;
+            if (hdr.tensors[j].name == base_name) {
+                hdr.tensors[j].scale_inv_name = name;
+                hdr.tensors[j].scale_inv_offset_begin = hdr.tensors[i].data_offset_begin;
+                hdr.tensors[j].scale_inv_offset_end = hdr.tensors[i].data_offset_end;
+                break;
+            }
+        }
+    }
+
+    return hdr;
+}
+
+Result<Qwen38InspectionResult> inspect_qwen38_flash_next_safetensors(
+    const std::filesystem::path& index_json_path,
+    const Qwen38FlashNextConfig& config,
+    bool load_first_shard_header) {
+    if (!std::filesystem::exists(index_json_path)) {
+        return make_error(ErrorCode::not_found,
+            "index.json not found", index_json_path.string());
+    }
+    auto json = vastloom::util::load_json_file(index_json_path);
+    if (!json) {
+        return make_error(json.error().code, json.error().message,
+            "failed to parse index.json: " + index_json_path.string());
+    }
+    const auto& root = json.value();
+    auto* wm = root.find("weight_map");
+    auto* meta = root.find("metadata");
+    if (wm == nullptr || !wm->is_object()) {
+        return make_error(ErrorCode::invalid_format,
+            "weight_map missing or not an object", index_json_path.string());
+    }
+    auto wm_obj = wm->as_object();
+    if (!wm_obj) {
+        return make_error(ErrorCode::invalid_format,
+            "weight_map not a JSON object", index_json_path.string());
+    }
+    std::ignore = meta;
+
+    Qwen38InspectionResult result;
+    result.root = index_json_path.parent_path();
+    result.config = config;
+    result.weight_map.reserve(wm_obj.value()->size());
+    result.total_tensors = wm_obj.value()->size();
+    std::set<std::string> unique_shards;
+    std::size_t fp8_experts = 0;
+    std::size_t ngram_count = 0;
+    bool has_global_hc = false;
+    bool has_layer_hc = false;
+    for (const auto& kv : *wm_obj.value()) {
+        const std::string& name = kv.first;
+        auto shard_val = kv.second.as_string();
+        if (!shard_val) {
+            return make_error(ErrorCode::invalid_format,
+                "weight_map entry has non-string shard",
+                "name=" + name);
+        }
+        Qwen38ShardIndexEntry e;
+        e.tensor_name = name;
+        e.shard_path = std::string(shard_val.value());
+        result.weight_map.push_back(std::move(e));
+        unique_shards.insert(std::string(shard_val.value()));
+        if (name.find("mlp.experts.") != std::string::npos
+            && name.find("_scale_inv") != std::string::npos) {
+            ++fp8_experts;
+        }
+        if (name.find("ngram_embedding") != std::string::npos) {
+            ++ngram_count;
+        }
+        if (name.find("hyper_connection_mixer") != std::string::npos) {
+            has_global_hc = true;
+        }
+        if (name.find("attn_hyper_connection") != std::string::npos
+            || name.find("mlp_hyper_connection") != std::string::npos) {
+            has_layer_hc = true;
+        }
+    }
+    result.total_shards = unique_shards.size();
+    result.fp8_block_scaled_experts = fp8_experts;
+    result.ngram_tensor_count = ngram_count;
+    result.has_gated_residual_global = has_global_hc;
+    result.has_gated_residual_per_layer = has_layer_hc;
+
+    if (load_first_shard_header && !unique_shards.empty()) {
+        // First shard alphabetically.
+        const std::string first_shard = *unique_shards.begin();
+        std::filesystem::path shard_full = result.root / first_shard;
+        std::error_code ec;
+        auto size = std::filesystem::file_size(shard_full, ec);
+        if (ec) {
+            return make_error(ErrorCode::io_error,
+                "cannot stat first shard",
+                shard_full.string() + ": " + ec.message());
+        }
+        auto hdr = read_qwen38_safetensors_header(shard_full, size);
+        if (!hdr) {
+            return make_error(hdr.error().code, hdr.error().message,
+                "first shard header parse failed: " + shard_full.string());
+        }
+        result.shard_header = hdr.value();
+        result.shard_loaded = true;
+    }
+
+    return result;
 }
 
 }  // namespace vastloom::inference

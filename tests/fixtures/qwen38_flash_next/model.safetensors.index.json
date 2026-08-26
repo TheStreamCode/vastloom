@@ -1,0 +1,31 @@
+{
+  "metadata": {"format": "pt"},
+  "weight_map": {
+    "model.language_model.hyper_connection_mixer.hc_norm.weight": "model-00001-of-00131.safetensors",
+    "model.language_model.hyper_connection_mixer.input_mix_weight_down.weight": "model-00001-of-00131.safetensors",
+    "model.language_model.hyper_connection_mixer.input_mix_weight_up.weight": "model-00001-of-00131.safetensors",
+    "model.language_model.layers.0.attn_hyper_connection.block_inject_weight.weight": "model-00001-of-00131.safetensors",
+    "model.language_model.layers.0.attn_hyper_connection.hc_norm.weight": "model-00001-of-00131.safetensors",
+    "model.language_model.layers.0.attn_hyper_connection.input_mix_weight_down.weight": "model-00001-of-00131.safetensors",
+    "model.language_model.layers.0.attn_hyper_connection.input_mix_weight_up.weight": "model-00001-of-00131.safetensors",
+    "model.language_model.layers.0.linear_attn.A_log": "model-00001-of-00131.safetensors",
+    "model.language_model.layers.0.linear_attn.conv1d.weight": "model-00001-of-00131.safetensors",
+    "model.language_model.layers.0.linear_attn.dt_bias": "model-00001-of-00131.safetensors",
+    "model.language_model.layers.0.linear_attn.in_proj_a.weight": "model-00001-of-00131.safetensors",
+    "model.language_model.layers.0.linear_attn.in_proj_b.weight": "model-00001-of-00131.safetensors",
+    "model.language_model.layers.0.linear_attn.in_proj_qkv.weight": "model-00001-of-00131.safetensors",
+    "model.language_model.layers.0.linear_attn.in_proj_z.weight": "model-00001-of-00131.safetensors",
+    "model.language_model.layers.0.linear_attn.norm.weight": "model-00001-of-00131.safetensors",
+    "model.language_model.layers.0.linear_attn.out_proj.weight": "model-00001-of-00131.safetensors",
+    "model.language_model.layers.0.mlp.experts.0.down_proj.weight": "model-00003-of-00131.safetensors",
+    "model.language_model.layers.0.mlp.experts.0.down_proj.weight_scale_inv": "model-00003-of-00131.safetensors",
+    "model.language_model.layers.0.mlp.experts.0.gate_proj.weight": "model-00002-of-00131.safetensors",
+    "model.language_model.layers.0.mlp.experts.0.gate_proj.weight_scale_inv": "model-00002-of-00131.safetensors",
+    "model.language_model.layers.0.mlp.experts.0.up_proj.weight": "model-00002-of-00131.safetensors",
+    "model.language_model.layers.0.mlp.experts.0.up_proj.weight_scale_inv": "model-00002-of-00131.safetensors",
+    "model.language_model.layers.1.ple.ple_embedding.ngram_embedding.shard_0.weight": "model-00005-of-00131.safetensors",
+    "model.language_model.layers.1.ple.ple_embedding.ngram_embedding.shard_1.weight": "model-00005-of-00131.safetensors",
+    "model.language_model.layers.1.ple.ple_embedding.ngram_embedding.shard_127.weight": "model-00037-of-00131.safetensors",
+    "model.language_model.layers.1.ple.ple_input_proj.weight": "model-00005-of-00131.safetensors"
+  }
+}

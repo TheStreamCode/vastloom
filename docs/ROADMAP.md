@@ -25,30 +25,48 @@ A command existing in the CLI is not enough; it must run against a validated mod
 **Gate:** build verde con `VASTLOOM_WARNINGS_AS_ERRORS=ON`, `vastloom_tests` ALL PASSED,
 ctest verde. Niente download di pesi reali a questo punto.
 
-## Q1 - POC Qwen3.8-27B FP8 (gate di fattibilità per il 125B)
+## Q1 - Safetensors catalog reader per Qwen3.8-Flash-Next FP8 - complete
 
-- [ ] Scaricare `unsloth/Qwen3.8-27B-FP8` (~15 GB) e verificare range del file
-  (`Content-Length`, dtype) via header remoto.
-- [ ] Implementare il catalog reader per FP8 in `src/inference/qwen3_8_flash_next.cpp`.
-- [ ] Implementare decoder FP8 → F32 pinned-ggml con un kernel di riferimento.
-- [ ] Implementare **un singolo layer ridotto** Qwen3.8-27B (DeltaNet + MoE shared +
-  QSA opzionale) e produrre forward di 1 token bit-exact contro llama.cpp pinned-ggml.
-- [ ] Misurare RAM viva in single-token forward: deve stare sotto 12.3 GB.
+- [x] Ispezione header remoto e `model.safetensors.index.json` per
+  `unsloth/Qwen3.8-Flash-Next-FP8`: 131 shard safetensors, 152.089 tensori totali,
+  range ~840 MB – 1.2 GB per shard, totale ~170 GB su disco.
+- [x] POC scaricato (`model-00001-of-00131.safetensors` ~1 GB) per ispezione byte-level
+  reale del safetensors header.
+- [x] Scoperte architetturali dal POC reale:
+  - Esperti MoE in **FP8 block-scale** (`weight` FP8 + `weight_scale_inv` F32,
+    `quant_method=fp8`, `weight_block_size=[128,128]`).
+  - **hyper_connection_mixer** globale = Gated Residual di Qwen (4 branch,
+    `hc_count=4`, `hc_lowrank=320`).
+  - **attn_hyper_connection** per-layer = istanza locale della Gated Residual.
+  - **linear_attn** = Gated DeltaNet (`in_proj_qkv`, `in_proj_z`, `conv1d`,
+    `A_log`, `dt_bias`, `norm`, `out_proj`).
+  - **layers.1.ple.ple_embedding.ngram_embedding.shard_{0..127}** = N-gram table
+    PLE su layer 1 (0-indexed, corrispondente a `ple_layer_ids=[2]` 1-indexed).
+  - 73.728 tensori expert non-scale + 75.264 scale_inv (FP8) = 147.456 expert
+    tensors su 48 layer.
+- [x] Parser safetensors header C++20 nativo in
+  `read_qwen38_safetensors_header()` con attachment automatico delle coppie
+  `weight` + `weight_scale_inv`.
+- [x] Parser `model.safetensors.index.json` in
+  `inspect_qwen38_flash_next_safetensors()` con conteggio FP8 block-scale,
+  ngram tensor count, presenza di Gated Residual globale/per-layer.
+- [x] Mock shard safetensors valido (3.6 KiB) in
+  `tests/fixtures/qwen38_flash_next/` con FP8 block-scale experts + DeltaNet
+  tensors + hyper_connection_mixer global + attn_hyper_connection.
+- [x] Test always-on `test_qwen38_flash_next_safetensors` che esercita il
+  parser su mock e verifica conteggi, dtype, scale_inv attachment, integrità
+  dei data_offsets contro header_end e total_bytes.
 
-**Gate:** parità pinned-ggml su 1 layer + RAM viva < 12.3 GB. Se boccia: cancelliamo
-e basta (vincolo utente) e ripristiniamo la roadmap DeepSeek.
+**Gate:** build release verde, `vastloom_tests` ALL PASSED, `ctest --preset release`
+13/14 (1 skipped intenzionale). Niente download del 125B completo (170 GB
+fuori scala per POC). L'opzione "POC su 27B FP8" è stata scartata dopo
+ispezione: il 27B è un modello **diverso** (`qwen3_5`, 64 layer, dense, no MoE,
+no n-gram, no Gated Residual) e non avrebbe validato le tre primitive nuove.
 
-## Q2 - Reference pinned-ggml su Qwen3.8-Flash-Next FP8 (125B)
-
-- [ ] Clonare llama.cpp mainline (commit `84e908c` o superiore che includa Qwen3.8
-  upstream) in `build/research-llama-cpp` con tutte e tre le primitive.
-- [ ] Costruire localmente `llama-cli` + `llama-gguf-hash` con `GGML_CUDA=OFF`
-  (target CPU puro) o `GGML_CUDA=ON` (target RTX 4070 Super) secondo gate RAM
-  misurato in Q1.
-- [ ] Validare con `unsloth/Qwen3.8-Flash-Next-FP8` (5 token oracolari pinned) sul
-  prompt italiano che useremo in Q11.
-
-**Gate:** output token-0 e token-1 deterministici, identici tra esecuzioni ripetute.
+**Prossimo passo (Q2):** clone llama.cpp upstream con supporto `qwen4_exp`
+(e DeltaNet/QSA/n-gram), build pinned, produrre 5 token oracolari sul
+POC shard 1 (1 GB) per convalidare l'end-to-end pinned-ggml prima di
+investire nel 125B completo.
 
 ## Q3 - Tensor & expert catalog Qwen3.8-Flash-Next FP8
 

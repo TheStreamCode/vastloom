@@ -2773,6 +2773,84 @@ void test_deepseek_v4_config(const std::filesystem::path& root) {
     CHECK(!vastloom::inference::load_deepseek_v4_config(path));
 }
 
+void test_qwen38_flash_next_safetensors(const std::filesystem::path& root) {
+    // Phase Q1 always-on: validate that the native safetensors index + shard
+    // reader correctly parses a Qwen3.8-Flash-Next FP8 mock and surfaces the
+    // FP8 block-scale experts, the global gated residual (hyper_connection_mixer),
+    // the per-layer gated residual (attn_hyper_connection), the ngram PLE on
+    // layer 1, and the linear_attn (Gated DeltaNet) tensors.
+    using vastloom::inference::Qwen38ExpectedInvariants;
+    using vastloom::inference::inspect_qwen38_flash_next_config;
+    using vastloom::inference::inspect_qwen38_flash_next_safetensors;
+    using vastloom::inference::load_qwen38_flash_next_config;
+
+    std::ignore = root;
+
+    const std::filesystem::path fixture_dir =
+        std::filesystem::path(VASTLOOM_SOURCE_DIR) / "tests" / "fixtures" /
+        "qwen38_flash_next";
+    CHECK(std::filesystem::is_directory(fixture_dir));
+
+    const auto config_path = fixture_dir / "config.json";
+    CHECK(std::filesystem::exists(config_path));
+    auto cfg = load_qwen38_flash_next_config(config_path);
+    CHECK(cfg);
+    if (!cfg) {
+        std::cerr << "  qwen38 config load failed: "
+                  << cfg.error().message << " (" << cfg.error().context << ")\n";
+        return;
+    }
+    auto inspection = inspect_qwen38_flash_next_config(cfg.value());
+    CHECK(inspection);
+
+    const auto index_path = fixture_dir / "model.safetensors.index.json";
+    CHECK(std::filesystem::exists(index_path));
+    auto safetensors = inspect_qwen38_flash_next_safetensors(
+        index_path, cfg.value(), /*load_first_shard_header=*/true);
+    CHECK(safetensors);
+    if (!safetensors) {
+        std::cerr << "  qwen38 safetensors inspect failed: "
+                  << safetensors.error().message
+                  << " (" << safetensors.error().context << ")\n";
+        return;
+    }
+    const auto& s = safetensors.value();
+    CHECK(s.total_tensors >= 24U);  // at least the tensors in our mock index
+    CHECK(s.total_shards == 5U);    // mock touches 5 shards (1, 2, 3, 5, 37)
+    CHECK(s.fp8_block_scaled_experts == 3U);  // 3 FP8 weight_scale_inv pairs in mock
+    CHECK(s.ngram_tensor_count >= 3U);
+    CHECK(s.has_gated_residual_global);   // hyper_connection_mixer
+    CHECK(s.has_gated_residual_per_layer); // attn_hyper_connection
+
+    // Shard 1 is present locally. Confirm the safetensors header parses and
+    // surfaces the FP8 expert tensors + their companion scale_inv.
+    CHECK(s.shard_loaded);
+    CHECK(!s.shard_header.tensors.empty());
+    std::size_t fp8_tensor_count = 0;
+    std::size_t fp8_with_companion = 0;
+    std::size_t total_in_shard = s.shard_header.tensors.size();
+    for (const auto& t : s.shard_header.tensors) {
+        if (t.dtype == "F8_E4M3") {
+            ++fp8_tensor_count;
+            if (!t.scale_inv_name.empty()) {
+                ++fp8_with_companion;
+            }
+        }
+    }
+    CHECK(fp8_tensor_count == 3U);  // up_proj, down_proj, gate_proj
+    CHECK(fp8_with_companion == 3U);
+    CHECK(total_in_shard == 22U);
+
+    // Each tensor has data_offsets that begin after the header and end before
+    // the file size.
+    const std::uint64_t header_end = 8U + s.shard_header.json_header_bytes;
+    for (const auto& t : s.shard_header.tensors) {
+        CHECK(t.data_offset_begin >= header_end);
+        CHECK(t.data_offset_end > t.data_offset_begin);
+        CHECK(t.data_offset_end <= s.shard_header.total_bytes);
+    }
+}
+
 void test_qwen38_flash_next_config(const std::filesystem::path& root) {
     // Phase 0 skeleton test: parse a minimal mock config.json that mirrors
     // the official Qwen3.8-Flash-Next config values from
@@ -8314,6 +8392,7 @@ int main() {
     test_olmoe_config(root);
     test_deepseek_v4_config(root);
     test_qwen38_flash_next_config(root);
+    test_qwen38_flash_next_safetensors(root);
     test_deepseek_v4_reference_operators();
     test_deepseek_v4_reference_graph(root);
     test_model_store_and_runtime_policy(root);

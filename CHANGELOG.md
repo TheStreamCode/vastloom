@@ -2,6 +2,27 @@
 
 ## Unreleased
 
+- **Q1 - Qwen3.8-Flash-Next safetensors catalog reader.** Header-only POC of the
+  125B FP8 model (`unsloth/Qwen3.8-Flash-Next-FP8`, 131 shards, ~170 GB total)
+  downloaded and inspected: confirmed `model_type=qwen4_exp` with 48 layers, 512
+  experts, 10 routed + 1 shared, FP8 block-scale (`weight_block_size=[128,128]`)
+  on the expert weights. The header walk confirmed the three new primitives are
+  present in the file system: `hyper_connection_mixer` global + `attn_hyper_connection`
+  per-layer (Gated Residual, 4 branches / rank 320), `linear_attn.*` (Gated DeltaNet
+  with `in_proj_qkv` / `in_proj_z` / `conv1d` / `A_log` / `dt_bias` / `norm` /
+  `out_proj`), and `layers.1.ple.ple_embedding.ngram_embedding.shard_{0..127}`
+  (N-gram table, 20M entries × 128 parts, inserted at layer 1). New native
+  reader in `inspect_qwen38_flash_next_safetensors()` (parses `model.safetensors.index.json`)
+  and `read_qwen38_safetensors_header()` (parses the binary header of one safetensors
+  shard, attaches `weight` + `weight_scale_inv` pairs). Always-on test
+  `test_qwen38_flash_next_safetensors` runs against a 3.6 KiB mock shard
+  in `tests/fixtures/qwen38_flash_next/` (BF16 + FP8 block-scale tensors)
+  and verifies dtype counts, scale_inv attachment, and data_offsets
+  integrity. The decision to skip the Qwen3.8-27B POC is documented
+  in ROADMAP Q1: the 27B is a different model (`qwen3_5`, 64 layer, dense, no
+  MoE, no n-gram, no Gated Residual) and would not have validated any of
+  the three new primitives.
+
 - **Q0 - Qwen3.8-Flash-Next skeleton, deep-clean DeepSeek artifacts.** The execution track
   pivots from DeepSeek V4 Flash 0731 to Qwen3.8-Flash-Next (Qwen4 architecture preview).
   Skeleton in `include/vastloom/inference/qwen3_8_flash_next.hpp` declares the

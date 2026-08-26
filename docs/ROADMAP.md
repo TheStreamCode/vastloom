@@ -3,561 +3,154 @@
 Vastloom advances only when each milestone has a measurable correctness and safety gate.
 A command existing in the CLI is not enough; it must run against a validated model path.
 
-**Now.** Official generate is `UD-IQ2_XXS` on the reference PC at about 0.3 tok/s. IQ1 is
-not an execution path. See `AGENTS.md` and the note at the top of `README.md`.
+> **Pivot architetturale (2026-08-26):** il track DeepSeek V4 Flash 0731 (M0–M13) è
+> congelato in `docs/archive/deepseek_0731/`. Nuovo track: **Qwen3.8-Flash-Next**
+> (preview architettura Qwen4). Roadmap Q1–Q13 sotto.
 
-**North star.** The capability-transfer vision is documented in
-`docs/research/CAPABILITY_TRANSFER_VISION.md`: a fast resident frontman expanded by a dormant
-brain on NVMe through bounded bridges. It is a compass, not a milestone; its experiments
-(E1–E4) are not scheduled in the gates below until one becomes a milestone with a gate of
-its own.
+---
 
-## M0 — Research harness — complete in alpha.1
+## Q0 - Skeleton e budget gate Qwen3.8 - complete
 
-- [x] Native C++20/CMake project.
-- [x] Hardware report and JSON output.
-- [x] Strict model planning manifest.
-- [x] MoE expert trace simulator.
-- [x] LRU and static hot-set baselines.
-- [x] NVMe bytes/token and PCIe traffic metrics.
+- [x] Verificare supporto llama.cpp mainline per `qwen4_exp`/DeltaNet/QSA/n-gram
+  (commit `84e908c`: nessuna modella dedicata; solo `qwen3next` e `qwen35` con DeltaNet +
+  full-attention ibrida; QSA / n-gram / Gated Residual sono ancora da implementare
+  anche upstream).
+- [x] Skeleton `include/vastloom/inference/qwen3_8_flash_next.hpp` con `Qwen38FlashNextConfig`,
+  `Qwen38FlashNextInspection`, parser config.json pinned al 2026-08-26.
+- [x] Test always-on `test_qwen38_flash_next_config` che valida parse, strict invariants
+  e rejection su model_type sbagliato, senza download del checkpoint reale.
+- [x] Stima budget carta in `docs/planning/QWEN38_BUDGET_ESTIMATE.md` (FP8 Unsloth come
+  scelta vincolante; nessuna quota GGUF IQ chiude la qualità + RAM gate).
 
-**Gate:** reproducible trace results with bounded input size.
+**Gate:** build verde con `VASTLOOM_WARNINGS_AS_ERRORS=ON`, `vastloom_tests` ALL PASSED,
+ctest verde. Niente download di pesi reali a questo punto.
 
-## M1 — Safe runtime core — complete in alpha.1
+## Q1 - POC Qwen3.8-27B FP8 (gate di fattibilità per il 125B)
 
-- [x] Atomic RAM/VRAM/staging/scratch reservations.
-- [x] Safety state machine with hysteresis.
-- [x] Fail-closed capacity planner.
-- [x] Minimum-working-set and complete-expert RAM/VRAM admission gate.
-- [x] Aggregate host-memory ceiling across RAM destinations, staging and scratch.
-- [x] Bounded asynchronous I/O.
-- [x] SHA-256 model verification and path confinement.
-- [x] Atomic heartbeat and independent watchdog.
-- [x] Strict warnings, ASan/UBSan and Linux/Windows CI definitions.
+- [ ] Scaricare `unsloth/Qwen3.8-27B-FP8` (~15 GB) e verificare range del file
+  (`Content-Length`, dtype) via header remoto.
+- [ ] Implementare il catalog reader per FP8 in `src/inference/qwen3_8_flash_next.cpp`.
+- [ ] Implementare decoder FP8 → F32 pinned-ggml con un kernel di riferimento.
+- [ ] Implementare **un singolo layer ridotto** Qwen3.8-27B (DeltaNet + MoE shared +
+  QSA opzionale) e produrre forward di 1 token bit-exact contro llama.cpp pinned-ggml.
+- [ ] Misurare RAM viva in single-token forward: deve stare sotto 12.3 GB.
 
-**Gate:** no oversubscription, path escape or unbounded queue under tests; independently legal
-host-memory reservations cannot exceed their aggregate post-reserve ceiling.
+**Gate:** parità pinned-ggml su 1 layer + RAM viva < 12.3 GB. Se boccia: cancelliamo
+e basta (vincolo utente) e ripristiniamo la roadmap DeepSeek.
 
-## M2 — Native validation slice — complete in alpha.2
+## Q2 - Reference pinned-ggml su Qwen3.8-Flash-Next FP8 (125B)
 
-- [x] Bounded native model format and strict binary loader.
-- [x] Real byte-level causal Transformer fixture.
-- [x] CPU LayerNorm, causal attention, MLP and tied LM-head kernels.
-- [x] Incremental KV cache.
-- [x] Greedy and seeded top-k/temperature decoding.
-- [x] Interactive streaming chat CLI and one-shot JSON mode.
-- [x] Exact manifest verification before model loading.
-- [x] Five deterministic end-to-end response probes.
-- [x] CLI integration, corruption, malformed-file and resource-limit tests.
+- [ ] Clonare llama.cpp mainline (commit `84e908c` o superiore che includa Qwen3.8
+  upstream) in `build/research-llama-cpp` con tutte e tre le primitive.
+- [ ] Costruire localmente `llama-cli` + `llama-gguf-hash` con `GGML_CUDA=OFF`
+  (target CPU puro) o `GGML_CUDA=ON` (target RTX 4070 Super) secondo gate RAM
+  misurato in Q1.
+- [ ] Validare con `unsloth/Qwen3.8-Flash-Next-FP8` (5 token oracolari pinned) sul
+  prompt italiano che useremo in Q11.
 
-**Gate:** the native runtime reproduces every registered Python reference response and
-refuses corrupt, truncated, oversized or unsafe inputs without leaking reservations.
+**Gate:** output token-0 e token-1 deterministici, identici tra esecuzioni ripetute.
 
-## M3 — Real dense reference model — complete in alpha.3
+## Q3 - Tensor & expert catalog Qwen3.8-Flash-Next FP8
 
-- [x] Pin a published pretrained open-weight checkpoint revision.
-- [x] Import immutable files through temporary artifacts, exact sizes and SHA-256.
-- [x] Parse configuration, tokenizer metadata and Safetensors defensively.
-- [x] Implement the exact tokenizer and chat template.
-- [x] Implement CPU reference attention, MLP, normalization, RoPE and KV cache.
-- [x] Match trusted tokenizer IDs, final logits and greedy output.
-- [x] Exercise multi-turn history, EOS, sampling, context rejection and corruption.
+- [ ] Estendere `Qwen38FlashNextInspection` con enumeration completa dei tensori
+  dal Safetensors header del 125B FP8 (layer-trunk, shared, routed, n-gram tables,
+  gated-residual, DeltaNet state, QSA indexer, MTP).
+- [ ] Test pinned-ggml che confronta il nostro catalog con quello generato da
+  `tools/gguf-ls.py` su llama.cpp pinned.
 
-**Gate:** the native pinned SmolLM2 path matches the registered Transformers reference,
-passes full-checkpoint verification and refuses unsafe allocations.
+**Gate:** stesso numero di tensori e stessi nomi canonici `blk.<i>.*`.
 
-## M4 — Small real MoE reference — complete in alpha.4
+## Q4 - Range importer + safety governor
 
-- [x] Pin `allenai/OLMoE-1B-7B-0924-Instruct` to an exact revision.
-- [x] Validate exact shard sizes, hashes, tensor names, dtypes and shapes.
-- [x] Implement the checkpoint-compatible tokenizer and chat template.
-- [x] Implement authoritative top-k routing, routing weights and routed experts.
-- [x] Compare expert selections, routing weights, final logits and tokens with a trusted
-  reference.
-- [x] Record token/layer/expert/bytes/latency telemetry and repeatable route traces.
+- [ ] Range-binding esatto (tre-object gate come per DeepSeek 0731).
+- [ ] Hash SHA-256 del payload FP8 vs pinned upstream.
+- [ ] Importatore pubblica artifact read-only con rename atomico.
 
-**Gate:** every selected expert and registered output agrees with the reference without
-requiring the complete checkpoint to reside in RAM.
+**Gate:** transazione fallisce su duplicati, source sbagliato, hash corrotto.
 
-## M5 — Real NVMe-to-RAM expert streaming — complete
+## Q5 - Operatori nativi pinned-ggml per le tre primitive
 
-- [x] Separate always-active trunk weights from individually addressable experts.
-- [x] Add bounded expert reads, buffers, cancellation and exact byte accounting.
-- [x] Implement no-cache, LRU, LFU and static-hot baselines in the real token path.
-- [x] Inject short reads, missing/corrupt shards, allocation failure and I/O timeout.
-- [x] Measure logical expert file bytes/token, cache hits and synchronous expert I/O time.
-- [x] Add a bounded one-worker asynchronous path and measure read-service/CPU overlap.
-- [x] Add exact unique-expert reuse-distance reporting.
-- [x] Add process-I/O operation/byte counters with explicit platform semantics.
-- [x] Record per-expert queue, ready and compute timestamps; compare fixed-route and
-  ready-order scheduling in the trace simulator.
-- [x] Prototype an output-identical 8 MiB gate/up plus 4 MiB down staged read without
-  repacking original OLMoE weights.
-- [x] Add physical-device I/O counters and a repeatable OS-cache-bypass protocol.
+- [ ] Decoder FP8 → F32 con kernel pinned-ggml.
+- [ ] Decoder DeltaNet state (linear-conv + gated-delta update) con kernel pinned.
+- [ ] Decoder QSA indexer (MQA 4-query/1-key con budget 2048) pinned.
+- [ ] Decoder n-gram embedding table (lookup async prefetch) pinned.
+- [ ] Decoder Gated Residual (4-branch read/write gate) pinned.
 
-**Gate:** the real small MoE completes safely under a RAM cap below total checkpoint
-size, with no uncontrolled paging or unreserved buffer.
+**Gate:** decoder per ogni primitiva dà output bit-exact contro llama.cpp pinned
+su almeno 1 layer ridotto, e il prodotto `dequant * matvec` chiude la parità.
 
-The ordering and acceptance gates for the two new experiments are documented in the
-[DeepSeekV4SSD review](research/DEEPSEEK_SSD_REVIEW.md). They remain research tasks,
-not DeepSeek runtime claims. The OLMoE staged path passed parity and improved median
-warm buffered forward time by 46.0% in three paired WSL runs. Three Windows
-`direct-unbuffered-v1` runs then returned identical reference output and exactly
-1,610,743,808 whole-device bytes for 1,610,612,736 logical expert bytes per run. M5 is
-closed. The exact official DeepSeek checkpoint contract, reduced float main graph and one
-checkpoint-shaped MTP block and reduced incremental state are now validated; executable packed
-payload kernels and the speculative verification loop remain M7 work. The real 0731 metadata now
-also defines a non-executing 177,795,544-byte layer-0 trunk+top-6 range plan; authoritative routing
-and official-payload execution remain open.
+## Q6 - Layer graph non-routed 48 layer Qwen3.8
 
-## M6 — Exact DeepSeek inspector and architecture-faithful fixture — complete
+- [ ] Planner che produce un piano non-routed (3 linear_attn + 1 full_attn) × 12.
+- [ ] Mappatura dei tensori FP8 → consumer C++20 (DeltaNet state, QSA indexer,
+  Gated Residual, MoE shared, MTP).
 
-- [x] Select and pin the exact DeepSeek V4 Flash checkpoint revision.
-- [x] Parse `config.json`, tokenizer metadata and Safetensors headers without loading
-  tensor payloads.
-- [x] Generate a full immutable import catalog with per-shard size and SHA-256.
-- [x] Map exact tensor names, shapes, dtypes and shard offsets.
-- [x] Match the pinned tokenizer IDs and basic system/user/assistant chat framing.
-- [x] Add bounded reduced vectors and native reference primitives for RMSNorm, learned/hash
-  routing, routed SwiGLU, Hyper-Connections, base RoPE and selected-latent attention.
-- [x] Build a reduced but architecture-faithful DeepSeek fixture.
-- [x] Export target logits, route selections and token vectors from a trusted reference.
-- [x] Record initial routing and raw/compressed attention-index traces.
+**Gate:** piano non-routed copre esattamente 48 layer + 1 MTP layer.
 
-**Gate:** every fixture tensor and reference token/logit/route agrees within an explicit
-numerical tolerance before optimization begins.
+## Q7 - Prefill/decode reduced layer (2–3 layer + MTP)
 
-The completed metadata half is recorded in the
-[M6 DeepSeek inspection report](reports/M6_DEEPSEEK_METADATA_INSPECTION_VALIDATION.md).
-Native prompt encoding is recorded separately in the
-[M6 DeepSeek tokenizer report](reports/M6_DEEPSEEK_TOKENIZER_VALIDATION.md).
-The bounded equation-level foundation is recorded in the
-[M6 reference-operator report](reports/M6_DEEPSEEK_REFERENCE_OPERATORS_VALIDATION.md).
-The completed graph gate is recorded in the
-[M6 reduced-graph report](reports/M6_DEEPSEEK_GRAPH_VALIDATION.md).
-It pins official commit `60d8d70770c6776ff598c94bb586a859a38244f1`; the former
-“0731” label was provisional for that preview. A newer official 0731 repository now exists and
-is tracked as a separate target in the [model compatibility matrix](MODEL_COMPATIBILITY.md). Its
-derived `UD-IQ1_S` GGUF headers and one expert are now validated in M7; the official full
-Safetensors payload and complete official-payload layer/token remain unvalidated.
+- [ ] Modello ridotto: 2 layer ridotti + 1 MTP.
+- [ ] Forward deterministico, parità con grafo indipendentemente dequantizzato.
 
-## M7 — DeepSeek CPU reference inference
+**Gate:** parità pinned-ggml bit-exact.
 
-- [x] Bind the pinned preview Safetensors header catalog to universal tensor/expert roles and
-  exact coalesced source ranges.
-- [x] Parse the official 0731 `UD-IQ1_S` GGUF split headers and bind packed expert subranges to
-  the universal catalog without reading payloads.
-- [x] Derive bounded KV/compressor/scratch and resident-versus-streamed trunk working sets from
-  retained exact GGUF metadata; require one complete expert to fit a single RAM or VRAM tier.
-- [x] Pin the three exact 0731 `UD-IQ1_S` object sizes/SHA-256 values, import bounded headers or
-  complete immutable shards atomically, and expose full source ranges only after complete hash
-  verification plus live single-tier admission. The real 82.54 GB payload remains undownloaded.
-- [x] Preserve layer identity for every `blk.N.*` trunk tensor, produce deterministic per-layer
-  plans with a 64 MiB tile ceiling and validate a governed single-tile payload transaction on a
-  fault-injected fixture. No official weight payload was read.
-- [x] Match pinned ggml Q8_0/Q5_K/Q6_K storage math, add bounded BF16/F32 matvec and I32 router
-  decoding, and prove storage handling for all 1,193 / 6,390,088,008-byte layer-trunk tensors in
-  the real metadata. No official trunk payload was read or layer executed.
-- [x] Match pinned ggml IQ1_S dequantization/matvec output on one exact real 0731 expert-gate
-  slice with bounded scalar CPU code.
-- [x] Match pinned ggml IQ3_XXS output and execute one complete real 0731 gate/up/down expert
-  through the governed asynchronous loader with bit-identical final output.
-- [ ] Consume the verified full GGUF source binding through packed IQ/FP4/FP8 trunk/expert
-  kernels in one complete layer/token probe.
-- [x] Bounded operator primitives for normalization, base RoPE, selected-latent attention,
-  learned/hash routing, routed SwiGLU and Hyper-Connections.
-- [x] Reduced float main graph with YaRN, overlapping compression, learned indexer,
-  shared expert, Hyper-Connection head and official logit/route parity.
-- [x] Checkpoint-compatible tokenizer and basic system/user/assistant chat template.
-- [ ] Thinking/tool-call encoding and completion parsing.
-- [x] Transactional raw/compressed incremental KV/state path with five-step official parity.
-- [x] Bounded autoregressive reference generation with exact eight-token greedy parity, portable
-  seeded top-k sampling, explicit finish reasons, per-layer cancellation/timeout checkpoints and
-  observed expert-cache telemetry. This is reduced-fixture execution, not official GGUF generation.
-- [x] Native single-block MTP reference path with official logit/route/index parity.
-- [x] Reduced quality fixture runner.
-- [ ] Full-checkpoint probe and regression corpus.
+## Q8 - MoE routing 10 routed + 1 shared
 
-**Gate:** end-to-end tokens, logits and expert choices match the reference implementation
-on the reduced fixture and selected full-model probes.
+- [ ] Implementare router top-k 10/512 con softmax learned (no hash shortcut,
+  a differenza di DeepSeek).
+- [ ] Selected expert cache con hit/miss/eviction/logical-byte telemetry.
+- [ ] Confrontare routing decisions e final logits vs llama.cpp pinned.
 
-The completed reduced MTP slice is recorded in the
-[M7 MTP validation report](reports/M7_DEEPSEEK_MTP_VALIDATION.md). It validates the
-checkpoint-compatible component equations, not speculative decoding or full-checkpoint
-execution.
-The cache-state slice is recorded in the
-[M7 incremental validation report](reports/M7_DEEPSEEK_INCREMENTAL_VALIDATION.md).
-The bounded token lifecycle is recorded in the
-[M9 reference-generation report](reports/M9_DEEPSEEK_REFERENCE_GENERATION_VALIDATION.md).
-The model-independent tensor/expert binding is recorded in the
-[M7 logical catalog report](reports/M7_LOGICAL_TENSOR_CATALOG_VALIDATION.md).
-The separate official 0731 GGUF header binding is recorded in the
-[M7 0731 GGUF catalog report](reports/M7_DEEPSEEK_0731_GGUF_CATALOG_VALIDATION.md).
-The immutable import/source gate is recorded in the
-[M7 checkpoint-binding report](reports/M7_DEEPSEEK_GGUF_CHECKPOINT_BINDING_VALIDATION.md).
-The bounded per-layer trunk plan and tile transaction are recorded in the
-[M9 layer-trunk streaming report](reports/M9_LAYER_TRUNK_STREAMING_VALIDATION.md).
-The complete scalar layer-trunk storage-type gate is recorded in the
-[M9 trunk storage-kernel report](reports/M9_DEEPSEEK_TRUNK_STORAGE_KERNEL_VALIDATION.md).
-The first reduced architecture-level packed Q8_0 baseline is recorded in the
-[M9 packed-layer report](reports/M9_DEEPSEEK_PACKED_LAYER_VALIDATION.md).
-The ownership-preserving file-backed repetition is recorded in the
-[M9 governed-layer report](reports/M9_DEEPSEEK_GOVERNED_LAYER_VALIDATION.md).
-The router-first bounded cache and exact access telemetry are recorded in the
-[M9 selected-expert streaming report](reports/M9_DEEPSEEK_SELECTED_EXPERT_STREAMING_VALIDATION.md).
-The canonical 0731 catalog-to-cache mixed-format expert bridge is recorded in the
-[M9 real selected-expert report](reports/M9_DEEPSEEK_REAL_SELECTED_EXPERT_VALIDATION.md).
-The bounded selected-miss batch and controlled read-service/CPU-compute overlap are recorded in
-the [M9 asynchronous overlap report](reports/M9_DEEPSEEK_ASYNC_COMPUTE_OVERLAP_VALIDATION.md).
-The complete reduced Q8_0/IQ1_S/IQ3_XXS layer composition is recorded in the
-[M9 mixed-format layer report](reports/M9_DEEPSEEK_MIXED_FORMAT_LAYER_VALIDATION.md).
-The exact non-executing checkpoint-shaped range boundary is recorded in the
-[M9 layer probe plan report](reports/M9_DEEPSEEK_LAYER_PROBE_PLAN_VALIDATION.md).
-The explicit-authority bounded downloader and immutable partial-artifact publication gate are
-recorded in the
-[M9 range artifact import report](reports/M9_DEEPSEEK_RANGE_ARTIFACT_IMPORT_VALIDATION.md).
-The native closed-world verification and exact pinned-catalog trunk binding are recorded in the
-[M9 range artifact binding report](reports/M9_DEEPSEEK_RANGE_ARTIFACT_BINDING_VALIDATION.md).
-The aggregate governed tensor-set loader and reduced artifact-to-graph parity gate are recorded in
-the [M9 trunk tensor-set report](reports/M9_DEEPSEEK_TRUNK_TENSOR_SET_VALIDATION.md).
-The first real packed-matrix parity gate is recorded in the
-[M7 IQ1_S kernel report](reports/M7_DEEPSEEK_IQ1S_KERNEL_VALIDATION.md).
-The completed one-expert gate/up/SwiGLU/down path is recorded in the
-[M7 real-expert report](reports/M7_DEEPSEEK_REAL_EXPERT_VALIDATION.md); it does not yet execute a
-complete official-payload layer or token.
-The capacity-only resident/streamed trunk derivation is recorded in the
-[M7 working-set report](reports/M7_DEEPSEEK_WORKING_SET_VALIDATION.md).
+**Gate:** routing identico su un seed pinned.
 
-## M8 — CUDA path for the RTX 4070 Super
+## Q9 - Gated DeltaNet state persistence + N-gram lookup resident
 
-- [x] Native Windows/Linux CUDA Driver API capability probe without a build-time CUDA toolkit or
-  context allocation; the reference RTX 4070 Super reports compute capability 8.9 on both hosts.
-- [x] Move-only bounded CUDA allocation integrated with the Resource Governor, live VRAM reserve
-  recheck, transactional rollback and fail-closed cleanup accounting; a 4 MiB reference-PC smoke
-  passed with 1 GiB headroom.
-- [x] Toolkit-free scalar FP32 RMSNorm with bounded synchronous H2D/D2H copies, one packed
-  Governor-owned device buffer and CPU-reference parity on Windows and WSL. This is a correctness
-  kernel, not the dense/attention gate.
-- [ ] Dense and attention/state kernels.
-- [ ] Optimized packed expert kernels for the selected quantization (scalar IQ1_S/IQ3_XXS
-  complete-expert oracle exists).
-- [ ] Async copy streams, cancellation and error recovery.
-- [ ] CPU fallback for unsupported operators.
+- [ ] State FP32 (`mamba_ssm_dtype=float32`) pinned in RAM per tutti i 48 layer.
+- [ ] Lookup table n-gram 20M entries × 2560 dim × BF16 = ~102 GB; cache paginata
+  con prefetch asincrono (scenario B, 4 GB working set).
+- [ ] Convalida che un singolo forward di 1 token completa senza page-fault su disco
+  (page cache calda) e che la banda per token è entro il budget previsto.
 
-**Gate:** CUDA output passes the same token/logit/route fixtures as CPU, with no
-unbounded allocation and clean recovery from injected CUDA failures.
+**Gate:** RAM viva misurata < 12.3 GB su host reference; persist window 48 layer
+chiude.
 
-The completed control-plane portion is recorded in the
-[M8 CUDA driver validation report](reports/M8_CUDA_DRIVER_VALIDATION.md). The milestone gate stays
-open until the remaining CUDA kernels match the CPU graph fixtures. The first real operation is
-recorded in the [M8 CUDA RMSNorm report](reports/M8_CUDA_RMSNORM_VALIDATION.md).
+## Q10 - QSA sparse attention (MQA indexer + gather + matmul sparse)
 
-## M9 — Explicit multitier execution
+- [ ] Implementare indexer con 4 query heads / 1 key head (dim 128) e budget 2048.
+- [ ] Gather dei blocchi selezionati e matmul sparse pinned-ggml.
+- [ ] Test parità pinned-ggml su una lunghezza di context 4096 pinned.
 
-- [x] Universal logical tensor/expert catalog with validated immutable source ranges.
-- [x] Legal NVMe/RAM/VRAM state transitions, reservation ownership and use-lease eviction guards.
-- [x] Couple a synchronous packed buffer and validated multi-range completion to `RAM_READY`.
-- [x] Add bounded asynchronous multi-range transactions with exclusive transfer leases.
-- [x] Feed one complete real DeepSeek 0731 expert from governed packed RAM into a scalar kernel.
-- [x] Build deterministic non-routed per-layer trunk tile plans and complete a governed,
-  cancellation-aware single-tile RAM load with fault cleanup.
-- [x] Add transactional scalar handling for every GGML storage type used by those 1,193 trunk
-  tensors, including a separate non-matvec I32 router-table path.
-- [x] Bind packed tensor identities to one architecture-specific quantized DeepSeek layer
-  fixture and match an independently dequantized oracle before reading official trunk payloads.
-- [x] Retain those packed views through Governor-owned trunk/expert loader leases and repeat the
-  layer test from bounded file-backed ranges without unaccounted payload copies.
-- [x] Split execution at the router boundary and load only selected complete expert bundles;
-  trace load/hit/eviction and exact logical bytes across multiple tokens.
-- [x] Derive strict W1/W2/W3 bindings from canonical 0731 GGUF identities and feed one complete
-  real IQ1_S/IQ3_XXS expert through the bounded selected-expert cache and scalar consumer.
-- [x] Connect selected-expert futures to deterministic CPU compute and measure controlled
-  read-service/compute overlap with exact oracle parity; physical official-payload overlap remains
-  a later performance gate.
-- [x] Compose a complete reduced layer/token with Q8_0/I32 trunk, IQ1_S W1/W3 and IQ3_XXS W2
-  selected bundles through governed file-backed synchronous/asynchronous cache paths.
-- [x] Define a bounded checkpoint-shaped layer-0 range plan from verified official metadata:
-  21 trunk plus 18 selected-expert ranges, 177,795,544 logical bytes total. The six caller-supplied
-  IDs validate layout/capacity only and do not claim authoritative routing or payload execution.
-- [x] Add an explicit-authority bounded range importer with exact HTTP range/length validation,
-  per-range SHA-256, crash cleanup and read-only atomic publication. The real 138,867,160-byte
-  trunk plan passed dry-run only; no official payload was downloaded.
-- [x] Bind `vastloom.range-artifact.v1` back to exact catalog tensors in a closed-world native
-  reader, rehash all local ranges and expose exact local trunk tile views. Synthetic malformed,
-  corruption and forged-binding cases pass without an official payload download.
-- [x] Feed one complete bound F32 fixture range through an aggregate-budgeted trunk load and
-  transactional scalar matvec. Post-read hash verification, short-read, corruption, callback,
-  cancellation, reservation and retained-lease cleanup cases pass across tested toolchains.
-- [x] Assemble every required non-routed range in the reduced packed catalog into one retained
-  typed tensor set and execute the complete reduced graph from the artifact boundary. Missing,
-  duplicate, split, wrong-role/type/source, corrupt and cancelled inputs fail transactionally.
-- [x] Add retained typed F32/BF16 vector and scalar graph consumers plus an explicit canonical
-  0731 layer-0 name adapter. The 21-object reduced artifact retains one lease and matches the
-  prefill/decode oracle; the official payload remains unexecuted.
-- [x] Derive the exact reference configuration from verified 0731 GGUF metadata and validate all
-  21 official layer-0 catalog descriptors against their graph consumers without reading payload.
-  The pinned metadata now supplies the 46-entry compression schedule, distinct 43-entry
-  routed/shared SwiGLU schedules and every native consumer dimension; see the
-  [metadata-to-graph validation](reports/M9_DEEPSEEK_METADATA_TO_GRAPH_VALIDATION.md).
-- [x] Extend the zero-payload consumer contract across all 43 official main layers. The
-  uncompressed/hash, 4:1 compressor/indexer and 128:1 compressor layouts validate all 1,193
-  non-routed descriptors and 6,390,088,008 encoded bytes against native consumers; see the
-  [all-layer catalog validation](reports/M9_DEEPSEEK_ALL_LAYER_CATALOG_VALIDATION.md).
-- [x] Close the complete pinned GGUF catalog without payload access. Six global consumers,
-  11,008 routed bundles and 33,024 logical expert slices now reconcile with the 1,193 layer
-  tensors: 1,328 physical objects, 34,223 logical descriptors and 82,533,892,444 known tensor
-  bytes partition exactly. At that zero-payload gate Q4_K/IQ2_XXS/MXFP4 remained layout-only; see the
-  [checkpoint catalog validation](reports/M9_DEEPSEEK_CHECKPOINT_CATALOG_VALIDATION.md).
-- [x] Add pinned-ggml Q4_K parity, transactional matvec and bounded packed-row lookup; consume
-  reduced packed embedding/output matrices in prefill and incremental decode without allocating
-  the full FP32 table. See the
-  [Q4_K global-kernel validation](reports/M9_DEEPSEEK_Q4K_GLOBAL_KERNEL_VALIDATION.md).
-- [x] Add pinned-ggml IQ2_XXS parity, transactional matvec and bounded row lookup; execute an
-  alternate reduced MoE graph with IQ2_XXS W1/W3 and IQ3_XXS W2 through prefill and incremental
-  decode. See the
-  [IQ2_XXS expert-kernel validation](reports/M9_DEEPSEEK_IQ2XXS_EXPERT_KERNEL_VALIDATION.md).
-- [x] Add pinned-ggml MXFP4 parity, transactional matvec and bounded row lookup; execute an
-  alternate reduced MoE graph with IQ1_S W1/W3 and MXFP4 W2 through prefill and incremental
-  decode. See the
-  [MXFP4 expert-kernel validation](reports/M9_DEEPSEEK_MXFP4_EXPERT_KERNEL_VALIDATION.md).
-- [x] Bind all six retained global consumers through one governed transaction without weakening
-  the execution gate. Official metadata produces six exact ranges totaling 596,000,788 bytes
-  with a 297,861,120-byte maximum; its importer passed dry-run only. A reduced Q8_0/F32 artifact
-  retains one lease across embedding, output, norm and Hyper-Connection prefill/decode parity;
-  see the [global tensor-set validation](reports/M9_DEEPSEEK_GLOBAL_TENSOR_SET_VALIDATION.md).
-- [x] Acquire the bounded official layer-0 trunk (21 ranges, 138,867,160 bytes) and decode the real
-  `tid2eid` route from it. Hash-routed layers select by table lookup, so the imported trunk answers
-  the routing question without executing the model: token 0 resolves to experts 35, 53, 200, 222,
-  245 and 254 under `official-tid2eid-verified`. That authority opened the selected-expert scope and
-  imported those six complete bundles (18 ranges, 38,928,384 bytes). See the
-  [authoritative routing validation](reports/M9_DEEPSEEK_AUTHORITATIVE_ROUTING_VALIDATION.md).
-- [x] Execute that probe: one complete official layer runs from imported payload with the
-  checkpoint's own router selecting the experts. Token 0 executes experts 254, 222, 245, 200, 53 and
-  35 through Q8_0/Q5_K/Q6_K/BF16/I32/IQ1_S/IQ3_XXS/Q4_K kernels and produces 129,280 layer-0 logits
-  deterministically. See the
-  [official layer execution validation](reports/M9_DEEPSEEK_OFFICIAL_LAYER_EXECUTION_VALIDATION.md).
-  This is one layer of 43, not the model's output, and it is not yet matched against an independent
-  oracle.
-- [x] Execute a complete forward pass. The 82.54 GB checkpoint is local, and all 43 layers run from
-  it: 258 expert bundles resolved by the model's own routers, 1,770,651,648 expert bytes — exactly
-  the predicted no-cache figure — 129,280 logits in 29.4 s with 7.17 GB resident and the host's
-  8 GiB floor untouched. See the
-  [complete forward validation](reports/M9_DEEPSEEK_COMPLETE_FORWARD_VALIDATION.md).
-- [x] Accept text prompts. The checkpoint's vocabulary is identical to the pinned tokenizer —
-  129,280 tokens index for index, 127,741 merges — so `--prompt` encodes through the implementation
-  already validated against Hugging Face, and `--chat` applies the checkpoint's template.
-  `"La capitale d'Italia e"` runs all 43 layers and predicts `" una"`.
-- [x] Release each layer's experts when the next layer asks for its own, so expert residency is
-  bounded by two layers rather than by prompt length: the same six-token prompt fell from a 13.6 GB
-  expert working set to 632 MB.
-- [x] Generate more than one token through the reference decode loop, reusing KV state across steps.
-- [x] Pay the checkpoint verification once instead of before every prompt: a receipt of each file's
-  size, timestamp and confirmed hash takes startup from 357.6 s to 0.4 s, and any mismatch forces
-  the full pass again.
-- [x] Thread the packed matvecs and give inference half the machine rather than a fixed six workers:
-  60.3 s per token to 26 s, byte-identical output, workers drawn from a pool created once.
-- [x] First quantized CUDA kernel: Q8_0 matvec in hand-written PTX, 0.5735 ms against 3.0305 ms for
-  the twelve-threaded CPU kernel at 4096×4096, max error 3.8147e-06. Naive on purpose — one thread
-  per row, no coalescing, matrix copied per call — so the headroom above 5.28× is large.
-- [x] IQ1_S and IQ3_XXS kernels for the routed experts, which are the larger share of per-layer
-  arithmetic. A 16-layer generation went from 13,300 to 2,374 ms per token — 5.60× — with identical
-  text and identical expert traffic. Attention itself is still on the CPU.
-- [x] Wire the GPU into the graph with weights resident in VRAM: 2,728 matvecs accelerated across a
-  24-layer pass, 2.90 GB resident, identical output. Net gain is small — 24,328 ms per token to
-  22,246 — because each accelerated call still costs 2.65 ms against the kernel's own 0.558 ms.
-- [x] Collapse the per-matvec round trips into one driver entry. Worth 0.5%, which measured the
-  assumption rather than confirming it: the round trips were not the constraint.
-- [x] IQ1_S and IQ3_XXS kernels, which were indeed the 89%. IQ3_XXS carried most of the gain because
-  it is the most expensive format to decode on the CPU — 9.76 ms against Q8_0's 3.04 for the same
-  shape. All three kernels now match the reference at zero error rather than under a tolerance, by
-  accumulating in f64 in the reference's own order.
-- [x] Make the parity gates capable of failing. Built from dyadic values — a fixed 0.25 scale, a
-  0.125 delta, a k/256 input — they could not distinguish f32 from f64 accumulation and passed
-  kernels that were summing in the wrong precision.
-- [x] Key the VRAM cache on what a matrix is rather than where it happens to live. Host addresses are
-  recycled when expert buffers are released, so an address-keyed cache served one expert's weights
-  under another's name, and the model's output changed between runs of the same command.
-- [x] Obtain an external oracle and use it. llama.cpp built from source reads this checkpoint,
-  supports both `deepseek4` and `dflash`, and tokenizes the templated prompt to the identical twelve
-  ids. It disagreed on the answer, and the disagreement was ours: `deepseek_v4_hc_post` read the
-  Sinkhorn combination matrix transposed, summing a direction nothing had normalized, so every layer
-  multiplied the residual by slightly more than one and the hidden state reached RMS 4,064 by layer
-  43. All eight strongest logits now match in order, within the f64-versus-f32 gap. The M6 Python
-  operator reference carried the same transposition and was corrected with it — two implementations
-  written from one reading of the equations had been confirming each other.
-- [x] Gate every storage decoder against ggml. Q4_K and MXFP4 were the last two without a
-  standalone parity test, and Q4_K carries the LM head; both decode bit-exactly.
-- [x] Put a bandwidth budget on the target. A token moves 8.76 GB of weights — 6.99 always
-  active (6.39 trunk plus 0.60 globals) and 1.77 selected experts — so 1.8 tokens per second
-  needs 15.8 GB/s. (The original entry reported 8.00 GB and 14.4 GB/s; that was an addition
-  error, corrected with the paper's Table 1.) Of the logical bytes 88% come from page cache
-  and only 0.98 GB per pass reaches the SSD, so storage is not the constraint; PCIe carries
-  8.54 GB per pass at a reuse factor of 1.03, which is no reuse at all.
-- [ ] Then the rest of the layer — attention, normalization, RoPE, Hyper-Connection — after which
-  keeping activations resident on the device stops being an optimisation and becomes the only
-  sensible design, because nothing would need to return to the host between operations.
-- [x] Load and release layer trunks the way experts are. A bounded two-layer window took a
-  full-depth pass from 7.62 GB of host RAM to 2.12 GB, and because the accelerator's ceiling is
-  derived from what the preflight leaves unspent, that memory went straight to the device: 1.80 GB
-  to 6.06 GB, 1,490 matvecs accelerated to 4,617, 42,466 ms per token to 30,123, identical output.
-  The floor no longer scales with depth, which is the project's founding idea made operational.
-- [x] Evict rather than refuse. The accelerator filled VRAM and then declined every later matrix for
-  the rest of the run, sending 6,962 of 12,007 matvecs to the CPU to avoid transfers that cost a
-  seventh of the work they were avoiding. Least-recently-used eviction: 11,639 ms per token from
-  30,280, output unchanged.
-- [x] Dense FP32 and BF16 kernels, picked by counting declines per storage type. The assumption was
-  Q5_K; the measurement put FP32 third and BF16 fifth, both far cheaper to write. Declines 3,432 to
-  2,375.
-- [ ] Kernels for IQ2_XXS (1,092 declines), Q5_K (882), Q6_K (315) and MXFP4 (84) — all that now
-  keeps work off the device. (The CPU path no longer waits on these: the opt-in ggml backend
-  covers every one of them; this item is now device-side only.)
-- [x] Establish why per-token trunk I/O cannot be cut by reading less. Streaming one matrix instead
-  of one layer read exactly the same 65.3 GB and cost 19% more, because the device holds half the
-  matrices and a fifteenth of the bytes: what is missing is the trunk. Rejected with numbers; the
-  lever is which matrices are resident, not how finely they are fetched.
-- [ ] Cut per-token I/O by making VRAM residency follow bytes rather than recency. The forward pass
-  scans layers cyclically and touches each trunk matrix exactly once per pass, so `last_used` order
-  is arrival order and least-recently-used evicts precisely what is needed soonest — the textbook
-  pathological case. Under a fixed byte budget every trunk matrix has the same reuse probability, so
-  the value of holding one is exactly its size. Evicting the smallest rather than the oldest is the
-  untried experiment; pinning by arrival order was tried and was 25% slower, which is a different
-  policy and not evidence against this one.
-- [ ] Count the expert loader's own read buffers in the preflight. At 32 layers it approves and the
-  loader then fails on `bad_alloc`, which should have been an up-front refusal with a correct figure.
-  This is now the prerequisite for everything else rather than an accounting tidy-up. Accelerator
-  residency is a step function: the ceiling buys nothing until it exceeds the 6.39 GB trunk, and
-  4.33 GB, 5.20 GB and 1.05 GB all produce the same 8.54 GB of uploads per pass. Crossing the step
-  needs a smaller unmodelled reserve, and the reserve cannot simply be cut — shrinking it to 1 GiB
-  passed preflight and then failed in the tile loader, because the accelerator's own commit charge
-  crowded out the buffers nobody counts. Modelling them moves what the reserve stands for into the
-  arithmetic, which is the only way to shrink it honestly.
-- [ ] Pinned host buffers.
-- [ ] Direct/overlapped NVMe reads where supported.
-- [ ] Resident-trunk and bounded streamed-trunk placement profiles.
-- [ ] VRAM/RAM expert tiers.
-- [ ] Bounded staging and cancellation-aware prefetch.
-- [x] Delegate CPU matvecs to a pinned ggml checkout (opt-in `VASTLOOM_GGML_ROOT`, runtime
-  `deepseek-forward --ggml-compute`). The scalar reference kernels stay the default and the parity
-  gates; the backend is Governor-charged, static-linked, and falls back call by call. On the real
-  checkpoint: 27.9 to 4.28 s per token (6.5x), identical generated ids and text, 39,181 matvecs
-  accelerated against 276 fallbacks. The new `vastloom_ggml_compute` test gates parity (Q8_0/F32
-  within accumulation plus input-quantization noise, corruption probe built to fail) and benchmarks:
-  Q8_0 199 GB/s cache-hot and 100 GB/s streaming 71 MB, IQ1_S 16 GB/s cache-hot. Kernels are no
-  longer the constraint; streaming I/O and IQ decode are.
+**Gate:** logits identici su contesto corto.
 
-**Gate:** the selected target model starts within hard limits and survives injected
-short reads, OOM, cancellation and storage-pressure events.
+## Q11 - Full-depth generate validate (48 layer + MTP)
 
-## M10 — Adaptive expert placement
+- [ ] Generare 20+ token dal modello 125B FP8 sul prompt italiano pinned
+  (analogo al prompt "Roma" usato per DeepSeek).
+- [ ] Confronto bit-exact con llama.cpp pinned-ggml.
 
-- [x] Measure token-to-token expert identity recurrence on the official IQ2 path (1,070 /
-  4,102 = 26% on the pinned prompt). Persist of the last six experts per layer cuts expert
-  traffic (31.2 → 24.6 GB) and is enabled only when the 43-layer trunk already fits.
-  Stealing the trunk window to pay for persist made the run slower (6.48 s/token).
-- [ ] Per-layer LRU baseline in the real token path.
-- [ ] Frequency, reuse-distance and transfer/compute cost model.
-- [ ] Persisted workload heat with local-only privacy-safe state.
-- [ ] Held-out workload evaluation to detect policy overfitting.
-- [ ] Explicit wasted-byte and eviction accounting.
+**Gate:** gli ultimi 8 token generati coincidono.
 
-**Gate:** lower NVMe bytes/token than LRU on held-out traces and real prompts, without
-changing target router decisions.
+## Q12 - prefix-KV MoE stream (porting M13)
 
-## M11 — Predictive prefetch
+- [ ] Estendere `LlamaSession` al percorso MoE stream.
+- [ ] KV cache DeltaNet/QSA persistita attraverso richieste consecutive.
+- [ ] Endpoint OpenAI compatibile come per M13 SmolLM2.
 
-- [x] Exact hash-layer N+1 `begin` during layer N (three of forty-three layers). Learned
-  N+1 still cannot start until after attention.
-- [ ] One-layer router look-ahead.
-- [ ] Transfer deadline model.
-- [ ] Prefetch cancellation and stale-request handling.
-- [ ] Adaptive depth based on measured SSD, PCIe and kernel timing.
-- [ ] Predictor confidence and fallback policy.
+**Gate:** due turni consecutivi con cached_prefix_tokens > 0 sul MoE stream.
 
-**Gate:** lower GPU I/O stall and higher accepted tokens/s end-to-end after counting all
-prediction overhead and wasted I/O.
+## Q13 - vastloom serve per Qwen3.8
 
-## M12 — Speculative memory and expert superbatching
+- [ ] Dispatch `serve <directory>` che carica Qwen3.8-Flash-Next FP8.
+- [ ] Endpoint `/v1/models`, `/v1/chat/completions` (streaming + non-stream).
+- [ ] Test Python opt-in via `tests/test_qwen38_cli.py`.
 
-- [ ] Integrate the checkpoint-compatible draft/DSpark/MTP component. The draft exists and is
-  distributed separately: unsloth/DeepSeek-V4-Flash-0731-GGUF ships dspark Q8_0 at 10.9 GB and BF16
-  at 11.3 GB, and DeepSeek document support for up to seven speculative tokens. The quantized main
-  checkpoints do not contain MTP blocks - UD-IQ1_S reports mtp_enabled false - so the draft has to be
-  loaded as its own model rather than found inside the weights. 2026-08-13: llama.cpp `b1-84e908c`
-  already ships first-class `draft-dspark` support, and the reference PC cannot host target+draft
-  within its safe RAM envelope (Available Bytes reached 1.1 GiB during init), so the measurement is
-  blocked on host capacity, not on code. See
-  `docs/research/PHASE_A1_SPECULATION_FEASIBILITY.md`.
-- [ ] Produce future routing graphs from draft tokens.
-- [ ] Batch-union and deduplicate future experts.
-- [ ] Schedule one read for expert reuse across speculative tokens.
-- [ ] Verify every accepted prefix with the authoritative target model.
+**Gate:** smoke test verde end-to-end.
 
-**Gate:** benefit remains positive after draft compute, extra I/O, rejected tokens and
-verification costs; output remains target-model correct.
+---
 
-## M13 — Local service and agent integration
+## Track archiviato
 
-- [x] OpenAI-compatible loopback API. The point is not the protocol but the ecosystem: opencode,
-  Continue, Aider, Zed and Claude Code all drive an OpenAI endpoint, so one server replaces every
-  client this project would otherwise have to write. First slice shipped: `vastloom serve` binds
-  `127.0.0.1` only and serves `/v1/models` plus `/v1/chat/completions` (SSE streaming included)
-  from the validation model path.
-- [ ] Streaming, cancellation, structured outputs and tool calls. SSE streaming is live on the
-  loopback slice and a client disconnect stops feeding it; structured outputs and tool calls
-  remain open.
-- [x] Session/prefix KV management. Coding agents resend the same long context every turn;
-  with a persistent session the server re-evaluates only the diverging tail. Shipped on
-  the dense SmolLM2 serve path (`--site hidden` distillation and DeepSeek streaming remain
-  separate concerns); the streaming MoE path's KV lives inside the graph sessions and is
-  not yet resumable across requests.
-- [ ] Request-level resource budgets and watchdog integration.
-- [ ] Coding-agent compatibility tests.
-
-**Gate:** representative coding-agent workloads complete reliably on the reference PC,
-and the server binds to loopback unless remote access is explicitly configured.
-
-## M14 — Model and backend expansion
-
-- [x] Execute official DeepSeek V4 Flash 0731 generate on the reference PC (`UD-IQ2_XXS`,
-  `--cpu-only --ggml-compute --trunk-window 43`, greedy `**Roma**`). Throughput is about
-  0.3 tok/s; DSpark/speculative measurement remains blocked on host RAM.
-- [x] Reference decoder for IQ2_S, which had blocked the UD-IQ2_XXS checkpoint. 82-byte blocks, a
-  1,024-entry grid addressed by ten bits of which two come from a per-group high-bit byte, two
-  four-bit scales per group of 32 and explicit sign bytes - a different format from IQ2_XXS, not a
-  variant of it. Checked against ggml's own `dequantize_row_iq2_s` run under WSL on the same bytes:
-  the FNV hash of all 1,536 decoded values matches, as do the matvec results, at zero absolute
-  error. The gate was verified capable of failing by corrupting the expected hash. A device kernel
-  is still optional and worth two matvecs of forty-three layers.
-- [ ] Accept the DSpark draft's catalog. Its metadata already reads (both deepseek4. and dflash.
-  prefixes resolve), but the validator expects a 43-layer tensor and expert mapping where the draft
-  has three blocks.
-- [x] Add bounded GGUF v3 metadata/tensor import with explicit GGML quantization identity.
-- [ ] Laguna S 2.1 architecture adapter and expert-streaming parity.
-- [ ] MiniMax-class MoE adapter.
-- [ ] Kimi K3 metadata-only capacity and traffic study; do not download or execute it on the
-  reference PC unless an exact profile passes the minimum-working-set admission gate.
-- [ ] Vulkan and ROCm backends according to measured demand.
-- [ ] Multi-NVMe and optional LAN tier experiments.
-
-Kimi K3 remains an extreme capacity study, not a reference-PC inference target. Practical model
-validation is limited to MoE profiles whose runtime state and bounded trunk tile fit safe host RAM
-and whose complete indivisible expert bundle fits either one remaining RAM tier or one real VRAM
-tier. The gate uses dynamic budgets derived from 32 GiB RAM and 12 GiB VRAM with host headroom
-preserved; RAM and VRAM are never summed to admit one oversized expert.
-
-### Public macOS and Metal track
-
-The primary maintainer does not currently have physical Mac hardware. This track therefore stays
-public and explicitly unvalidated until evidence is produced on Apple hardware:
-
-- [ ] Add a GitHub-hosted macOS build/test job for the CPU-only runtime.
-- [ ] Replace the conservative macOS available-memory estimate with a measured, fail-closed host
-  pressure probe.
-- [ ] Pass tokenizer, dense, MoE, GGUF, malformed-input and cancellation parity on Apple Silicon.
-- [ ] Add a Metal capability probe and Governor-backed allocation limits.
-- [ ] Implement Metal kernels incrementally against the same CPU token/logit/route fixtures.
-- [ ] Validate memory pressure, thermal behavior and clean cancellation on at least one physical
-  Apple Silicon Mac before describing Metal as supported.
-
-**Gate:** macOS may be listed as CPU-supported only after its CI matrix passes. Metal may be listed
-as supported only after real-device correctness, resource-safety and performance reports exist.
+Il track M0–M13 (DeepSeek V4 Flash 0731) è congelato in `docs/archive/deepseek_0731/`.
+I test C++ che difendono la parità pinned-ggml per IQ1_S/IQ2_XXS/Q4_K restano
+compilati e verdi — sono contratti storici. Per il M14+ originale (multi-backend,
+Kimi K3, Laguna, MiniMax, Vulkan/ROCm, multi-NVMe) vedi la roadmap archiviata.

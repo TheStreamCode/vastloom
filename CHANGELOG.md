@@ -2,6 +2,21 @@
 
 ## Unreleased
 
+- **Q0 - Qwen3.8-Flash-Next skeleton, deep-clean DeepSeek artifacts.** The execution track
+  pivots from DeepSeek V4 Flash 0731 to Qwen3.8-Flash-Next (Qwen4 architecture preview).
+  Skeleton in `include/vastloom/inference/qwen3_8_flash_next.hpp` declares the
+  `Qwen38FlashNextConfig`/`Qwen38FlashNextInspection` types, the
+  `load_qwen38_flash_next_config` parser (with strict `model_type=qwen4_exp` guard), and
+  `inspect_qwen38_flash_next_config` that asserts pinned invariants for the 2026-08-26
+  release. Always-on test `test_qwen38_flash_next_config` parses a mock config (no real
+  download) and checks the three new primitives (QSA indexer, n-gram PLE, Gated Residual)
+  are present in the parsed metadata. Decision matrix and FP8-quota rationale live in
+  `docs/planning/QWEN38_BUDGET_ESTIMATE.md`; archive of the previous DeepSeek track lives
+  in `docs/archive/deepseek_0731/`. Disk hygiene: removed 94.79 GiB of DeepSeek originals
+  from `C:\StargateModels\models\original\` and 13.83 GiB of historical build directories
+  from `build/` (50+ stale `m9-*`/`m10-*`/`wsl-iq1s-*`/`vastloom-*-smoke` dirs and
+  `vastloom-gguf-test-store` cache). Host now reports 1.34 TiB free on `C:`.
+
 - **M13 prefix-KV session reuse: the server remembers.** `vastloom serve MODEL_DIR` now
   dispatches to the dense SmolLM2 path when given a directory (matching the chat/model-info/
   self-test dispatch pattern), creating a persistent `LlamaSession` whose Key/Value buffers

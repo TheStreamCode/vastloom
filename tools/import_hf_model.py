@@ -484,6 +484,9 @@ def download_file(
     next_report = ((received // GIB) + 1) * GIB
     progress(f"download {item.name}: {received}/{item.size} bytes")
     headers = {"User-Agent": "vastloom-local-ai/0.4-importer"}
+    token = os.environ.get("HF_TOKEN")
+    if token:
+        headers["Authorization"] = f"Bearer {token}"
     if item.range_prefix:
         if item.source_size is None or item.source_size < item.size:
             raise RuntimeError(f"invalid pinned range source size for {item.name}")

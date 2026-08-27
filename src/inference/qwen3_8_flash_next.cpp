@@ -10,6 +10,7 @@
 #include <string>
 #include <string_view>
 #include <tuple>
+#include <unordered_map>
 #include <vector>
 
 #include "vastloom/core/status.hpp"
@@ -978,6 +979,441 @@ Result<Qwen38TensorImportResult> qwen38_import_tensor_transaction(
     result.sha256_hex = loaded.value().sha256_hex;
     result.scale_included = !loaded.value().scale_bytes.empty();
     return result;
+}
+
+bool qwen38_is_qsa_layer(std::uint32_t layer, std::uint32_t full_attention_interval) noexcept {
+    return full_attention_interval > 0U && ((layer + 1U) % full_attention_interval) == 0U;
+}
+
+namespace {
+
+void append_planned(
+    std::vector<Qwen38PlannedTensor>& out,
+    const std::string& prefix,
+    std::string_view suffix,
+    Qwen38Consumer consumer) {
+    Qwen38PlannedTensor t;
+    t.name = prefix;
+    t.name.append(suffix);
+    t.consumer = consumer;
+    out.push_back(std::move(t));
+}
+
+void append_common_non_routed(std::vector<Qwen38PlannedTensor>& out, const std::string& prefix) {
+    append_planned(out, prefix, "attn_hyper_connection.hc_norm.weight", Qwen38Consumer::gated_residual_attn);
+    append_planned(out, prefix, "attn_hyper_connection.input_mix_weight_down.weight", Qwen38Consumer::gated_residual_attn);
+    append_planned(out, prefix, "attn_hyper_connection.input_mix_weight_up.weight", Qwen38Consumer::gated_residual_attn);
+    append_planned(out, prefix, "attn_hyper_connection.block_inject_weight.weight", Qwen38Consumer::gated_residual_attn);
+    append_planned(out, prefix, "mlp_hyper_connection.hc_norm.weight", Qwen38Consumer::gated_residual_mlp);
+    append_planned(out, prefix, "mlp_hyper_connection.input_mix_weight_down.weight", Qwen38Consumer::gated_residual_mlp);
+    append_planned(out, prefix, "mlp_hyper_connection.input_mix_weight_up.weight", Qwen38Consumer::gated_residual_mlp);
+    append_planned(out, prefix, "mlp_hyper_connection.block_inject_weight.weight", Qwen38Consumer::gated_residual_mlp);
+    append_planned(out, prefix, "mlp.gate.weight", Qwen38Consumer::moe_router);
+    append_planned(out, prefix, "mlp.shared_expert_gate.weight", Qwen38Consumer::moe_shared);
+    append_planned(out, prefix, "mlp.shared_expert.gate_proj.weight", Qwen38Consumer::moe_shared);
+    append_planned(out, prefix, "mlp.shared_expert.up_proj.weight", Qwen38Consumer::moe_shared);
+    append_planned(out, prefix, "mlp.shared_expert.down_proj.weight", Qwen38Consumer::moe_shared);
+}
+
+void append_delta_net(std::vector<Qwen38PlannedTensor>& out, const std::string& prefix) {
+    append_planned(out, prefix, "linear_attn.A_log", Qwen38Consumer::delta_net);
+    append_planned(out, prefix, "linear_attn.conv1d.weight", Qwen38Consumer::delta_net);
+    append_planned(out, prefix, "linear_attn.dt_bias", Qwen38Consumer::delta_net);
+    append_planned(out, prefix, "linear_attn.in_proj_a.weight", Qwen38Consumer::delta_net);
+    append_planned(out, prefix, "linear_attn.in_proj_b.weight", Qwen38Consumer::delta_net);
+    append_planned(out, prefix, "linear_attn.in_proj_qkv.weight", Qwen38Consumer::delta_net);
+    append_planned(out, prefix, "linear_attn.in_proj_z.weight", Qwen38Consumer::delta_net);
+    append_planned(out, prefix, "linear_attn.norm.weight", Qwen38Consumer::delta_net);
+    append_planned(out, prefix, "linear_attn.out_proj.weight", Qwen38Consumer::delta_net);
+}
+
+void append_qsa(std::vector<Qwen38PlannedTensor>& out, const std::string& prefix) {
+    append_planned(out, prefix, "self_attn.indexer.index_qk_proj.weight", Qwen38Consumer::qsa_indexer);
+    append_planned(out, prefix, "self_attn.indexer.q_layernorm.weight", Qwen38Consumer::qsa_indexer);
+    append_planned(out, prefix, "self_attn.indexer.k_layernorm.weight", Qwen38Consumer::qsa_indexer);
+    append_planned(out, prefix, "self_attn.q_proj.weight", Qwen38Consumer::qsa_attention);
+    append_planned(out, prefix, "self_attn.k_proj.weight", Qwen38Consumer::qsa_attention);
+    append_planned(out, prefix, "self_attn.v_proj.weight", Qwen38Consumer::qsa_attention);
+    append_planned(out, prefix, "self_attn.o_proj.weight", Qwen38Consumer::qsa_attention);
+    append_planned(out, prefix, "self_attn.q_norm.weight", Qwen38Consumer::qsa_attention);
+    append_planned(out, prefix, "self_attn.k_norm.weight", Qwen38Consumer::qsa_attention);
+}
+
+void append_ple(std::vector<Qwen38PlannedTensor>& out, const std::string& prefix, std::uint32_t parts) {
+    append_planned(out, prefix, "ple.conv1d.weight", Qwen38Consumer::ngram_ple);
+    append_planned(out, prefix, "ple.key_proj.weight", Qwen38Consumer::ngram_ple);
+    append_planned(out, prefix, "ple.value_proj.weight", Qwen38Consumer::ngram_ple);
+    append_planned(out, prefix, "ple.norm_conv.weight", Qwen38Consumer::ngram_ple);
+    append_planned(out, prefix, "ple.norm_key.weight", Qwen38Consumer::ngram_ple);
+    append_planned(out, prefix, "ple.norm_query.weight", Qwen38Consumer::ngram_ple);
+    append_planned(out, prefix, "ple.ple_embedding.layer_multipliers", Qwen38Consumer::ngram_ple);
+    append_planned(out, prefix, "ple.ple_embedding.ngram_embedding.weight_scale", Qwen38Consumer::ngram_ple);
+    append_planned(out, prefix, "ple.ple_embedding.ngram_heads_offsets", Qwen38Consumer::ngram_ple);
+    append_planned(out, prefix, "ple.ple_embedding.ngram_heads_vocab_sizes", Qwen38Consumer::ngram_ple);
+    for (std::uint32_t i = 0; i < parts; ++i) {
+        append_planned(out, prefix,
+            "ple.ple_embedding.ngram_embedding.shard_" + std::to_string(i) + ".weight",
+            Qwen38Consumer::ngram_ple);
+    }
+}
+
+bool layer_has_ple(const Qwen38FlashNextConfig& config, std::uint32_t layer) {
+    const std::uint32_t one_based = layer + 1U;
+    return std::find(config.ple_layer_ids.begin(), config.ple_layer_ids.end(), one_based)
+        != config.ple_layer_ids.end();
+}
+
+}  // namespace
+
+Result<Qwen38GraphPlan> qwen38_plan_non_routed_graph(const Qwen38FlashNextConfig& config) {
+    if (config.num_hidden_layers == 0U || config.full_attention_interval == 0U) {
+        return make_error(ErrorCode::invalid_argument,
+            "graph plan requires hidden layers and full_attention_interval", "qwen38_plan");
+    }
+    if (config.mtp_num_hidden_layers != 1U) {
+        return make_error(ErrorCode::invalid_argument,
+            "graph plan requires exactly one MTP layer",
+            "mtp_num_hidden_layers=" + std::to_string(config.mtp_num_hidden_layers));
+    }
+
+    Qwen38GraphPlan plan;
+    plan.language_layers = config.num_hidden_layers;
+    plan.mtp_layers = 1;
+    plan.layers.reserve(static_cast<std::size_t>(config.num_hidden_layers) + 1U);
+
+    for (std::uint32_t layer = 0; layer < config.num_hidden_layers; ++layer) {
+        Qwen38LayerPlan lp;
+        lp.layer = layer;
+        lp.is_mtp = false;
+        lp.has_ple = layer_has_ple(config, layer);
+        lp.kind = qwen38_is_qsa_layer(layer, config.full_attention_interval)
+            ? Qwen38LayerKind::qwen_sparse_attention
+            : Qwen38LayerKind::linear_attention;
+        const std::string prefix = "model.language_model.layers." + std::to_string(layer) + ".";
+        if (lp.kind == Qwen38LayerKind::qwen_sparse_attention) {
+            append_qsa(lp.tensors, prefix);
+            ++plan.qsa_layers;
+        } else {
+            append_delta_net(lp.tensors, prefix);
+            ++plan.linear_layers;
+        }
+        append_common_non_routed(lp.tensors, prefix);
+        if (lp.has_ple) {
+            append_ple(lp.tensors, prefix, config.split_ngram_parts);
+        }
+        plan.non_routed_tensor_count += lp.tensors.size();
+        plan.layers.push_back(std::move(lp));
+    }
+
+    Qwen38LayerPlan mtp;
+    mtp.layer = 0;
+    mtp.is_mtp = true;
+    mtp.kind = Qwen38LayerKind::qwen_sparse_attention;
+    const std::string mtp_prefix = "mtp.layers.0.";
+    append_qsa(mtp.tensors, mtp_prefix);
+    append_common_non_routed(mtp.tensors, mtp_prefix);
+    append_planned(mtp.tensors, "mtp.", "fc_embedding.weight", Qwen38Consumer::mtp_head);
+    append_planned(mtp.tensors, "mtp.", "fc_hidden.weight", Qwen38Consumer::mtp_head);
+    append_planned(mtp.tensors, "mtp.", "pre_fc_norm_embedding.weight", Qwen38Consumer::mtp_head);
+    append_planned(mtp.tensors, "mtp.", "pre_fc_norm_hidden.weight", Qwen38Consumer::mtp_head);
+    append_planned(mtp.tensors, "mtp.", "hyper_connection_mixer.hc_norm.weight", Qwen38Consumer::global_mixer);
+    append_planned(mtp.tensors, "mtp.", "hyper_connection_mixer.input_mix_weight_down.weight", Qwen38Consumer::global_mixer);
+    append_planned(mtp.tensors, "mtp.", "hyper_connection_mixer.input_mix_weight_up.weight", Qwen38Consumer::global_mixer);
+    plan.non_routed_tensor_count += mtp.tensors.size();
+    plan.layers.push_back(std::move(mtp));
+
+    append_planned(plan.globals, "", "model.language_model.embed_tokens.weight", Qwen38Consumer::global_embed);
+    append_planned(plan.globals, "", "lm_head.weight", Qwen38Consumer::global_lm_head);
+    append_planned(plan.globals, "", "model.language_model.hyper_connection_mixer.hc_norm.weight", Qwen38Consumer::global_mixer);
+    append_planned(plan.globals, "", "model.language_model.hyper_connection_mixer.input_mix_weight_down.weight", Qwen38Consumer::global_mixer);
+    append_planned(plan.globals, "", "model.language_model.hyper_connection_mixer.input_mix_weight_up.weight", Qwen38Consumer::global_mixer);
+    plan.non_routed_tensor_count += plan.globals.size();
+    return plan;
+}
+
+Result<Qwen38GraphPlan> qwen38_validate_non_routed_plan(const Qwen38GraphPlan& plan) {
+    using Exp = Qwen38ExpectedCatalog;
+    if (plan.language_layers != Exp::language_layers || plan.layers.size() != Exp::language_layers + Exp::mtp_layers) {
+        return make_error(ErrorCode::invalid_format,
+            "non-routed plan layer count mismatch",
+            "layers=" + std::to_string(plan.layers.size()));
+    }
+    if (plan.linear_layers != Exp::linear_layers || plan.qsa_layers != Exp::qsa_layers || plan.mtp_layers != Exp::mtp_layers) {
+        return make_error(ErrorCode::invalid_format,
+            "non-routed plan kind counts mismatch",
+            "linear=" + std::to_string(plan.linear_layers) + " qsa=" + std::to_string(plan.qsa_layers));
+    }
+    if (plan.non_routed_tensor_count != Exp::text_non_routed || plan.globals.size() != Exp::global_tensors) {
+        return make_error(ErrorCode::invalid_format,
+            "non-routed plan tensor count mismatch",
+            "count=" + std::to_string(plan.non_routed_tensor_count));
+    }
+    std::size_t language_tensors = 0;
+    for (std::size_t i = 0; i < Exp::language_layers; ++i) {
+        const auto& lp = plan.layers[i];
+        if (lp.is_mtp || lp.layer != i) {
+            return make_error(ErrorCode::invalid_format, "language layer slot mismatch", std::to_string(i));
+        }
+        const bool expect_qsa = qwen38_is_qsa_layer(static_cast<std::uint32_t>(i), 4);
+        if ((lp.kind == Qwen38LayerKind::qwen_sparse_attention) != expect_qsa) {
+            return make_error(ErrorCode::invalid_format, "layer kind mismatch", std::to_string(i));
+        }
+        const std::size_t expected = Exp::per_layer_non_routed + (i == 1 ? Exp::per_layer_ple_extra : 0);
+        if (lp.tensors.size() != expected || lp.has_ple != (i == 1)) {
+            return make_error(ErrorCode::invalid_format,
+                "per-layer non-routed count mismatch",
+                "layer=" + std::to_string(i) + " got=" + std::to_string(lp.tensors.size()));
+        }
+        language_tensors += lp.tensors.size();
+    }
+    const auto& mtp = plan.layers.back();
+    if (!mtp.is_mtp || mtp.kind != Qwen38LayerKind::qwen_sparse_attention
+        || mtp.tensors.size() != Exp::mtp_non_routed) {
+        return make_error(ErrorCode::invalid_format,
+            "MTP non-routed plan mismatch",
+            "count=" + std::to_string(mtp.tensors.size()));
+    }
+    if (language_tensors != Exp::language_non_routed) {
+        return make_error(ErrorCode::invalid_format,
+            "language non-routed total mismatch",
+            std::to_string(language_tensors));
+    }
+    return plan;
+}
+
+Result<Qwen38GraphPlan> qwen38_bind_non_routed_plan(
+    const Qwen38GraphPlan& plan,
+    const std::vector<Qwen38ShardIndexEntry>& weight_map) {
+    std::unordered_map<std::string, std::filesystem::path> by_name;
+    by_name.reserve(weight_map.size());
+    for (const auto& e : weight_map) {
+        auto [it, inserted] = by_name.emplace(e.tensor_name, e.shard_path);
+        if (!inserted) {
+            return make_error(ErrorCode::invalid_format,
+                "duplicate tensor in weight_map", e.tensor_name);
+        }
+    }
+    Qwen38GraphPlan bound = plan;
+    auto bind_one = [&](Qwen38PlannedTensor& t) -> Result<int> {
+        auto it = by_name.find(t.name);
+        if (it == by_name.end()) {
+            return make_error(ErrorCode::not_found,
+                "planned non-routed tensor missing from catalog", t.name);
+        }
+        t.shard_path = it->second;
+        t.bound = true;
+        return 0;
+    };
+    for (auto& layer : bound.layers) {
+        for (auto& t : layer.tensors) {
+            auto ok = bind_one(t);
+            if (!ok) {
+                return ok.error();
+            }
+        }
+    }
+    for (auto& t : bound.globals) {
+        auto ok = bind_one(t);
+        if (!ok) {
+            return ok.error();
+        }
+    }
+    return bound;
+}
+
+Result<Qwen38PersistBudget> qwen38_plan_persist_budget(
+    const Qwen38FlashNextConfig& config,
+    ByteCount ngram_working_set) {
+    if (config.num_hidden_layers == 0 || config.full_attention_interval == 0
+        || config.linear_num_value_heads == 0 || config.linear_num_key_heads == 0
+        || config.linear_value_head_dim == 0 || config.linear_key_head_dim == 0
+        || config.linear_conv_kernel_dim < 2) {
+        return make_error(ErrorCode::invalid_argument, "persist budget config incomplete", "persist");
+    }
+    std::uint32_t linear = 0;
+    for (std::uint32_t i = 0; i < config.num_hidden_layers; ++i) {
+        if (!qwen38_is_qsa_layer(i, config.full_attention_interval)) {
+            ++linear;
+        }
+    }
+    const ByteCount key_dim = static_cast<ByteCount>(config.linear_key_head_dim) * config.linear_num_key_heads;
+    const ByteCount value_dim = static_cast<ByteCount>(config.linear_value_head_dim) * config.linear_num_value_heads;
+    const ByteCount conv_dim = key_dim * 2U + value_dim;
+    const ByteCount conv_elems = conv_dim * (config.linear_conv_kernel_dim - 1U);
+    const ByteCount ssm_elems = static_cast<ByteCount>(config.linear_num_value_heads)
+        * config.linear_key_head_dim * config.linear_value_head_dim;
+    Qwen38PersistBudget budget;
+    budget.linear_layers = linear;
+    budget.deltanet_conv_bytes = conv_elems * sizeof(float) * linear;
+    budget.deltanet_ssm_bytes = ssm_elems * sizeof(float) * linear;
+    budget.deltanet_bytes = budget.deltanet_conv_bytes + budget.deltanet_ssm_bytes;
+    budget.ngram_working_set = ngram_working_set;
+    budget.total_resident = budget.deltanet_bytes + ngram_working_set;
+    budget.under_reference_ram_gate = budget.total_resident <= qwen38_reference_live_ram_gate;
+    return budget;
+}
+
+Result<Qwen38DeltaNetPersist> qwen38_deltanet_persist_create(
+    const Qwen38FlashNextConfig& config,
+    safety::ResourceGovernor& governor) {
+    auto budget = qwen38_plan_persist_budget(config, 0);
+    if (!budget) {
+        return budget.error();
+    }
+    if (budget.value().deltanet_bytes == 0) {
+        return make_error(ErrorCode::invalid_argument, "no DeltaNet layers to persist", "persist");
+    }
+    auto ram = governor.try_reserve(safety::ResourceKind::ram, budget.value().deltanet_bytes, "qwen38_deltanet_persist");
+    if (!ram) {
+        return ram.error();
+    }
+    const std::size_t key_dim = static_cast<std::size_t>(config.linear_key_head_dim) * config.linear_num_key_heads;
+    const std::size_t value_dim = static_cast<std::size_t>(config.linear_value_head_dim) * config.linear_num_value_heads;
+    const std::size_t conv_dim = key_dim * 2U + value_dim;
+    const std::size_t conv_elems = conv_dim * (config.linear_conv_kernel_dim - 1U);
+    const std::size_t ssm_elems = static_cast<std::size_t>(config.linear_num_value_heads)
+        * config.linear_key_head_dim * config.linear_value_head_dim;
+    Qwen38DeltaNetPersist persist;
+    persist.linear_layers = budget.value().linear_layers;
+    persist.layers.resize(persist.linear_layers);
+    for (auto& layer : persist.layers) {
+        layer.conv.assign(conv_elems, 0.0F);
+        layer.ssm.assign(ssm_elems, 0.0F);
+    }
+    persist.ram = std::move(ram.value());
+    return persist;
+}
+
+namespace {
+
+Result<void> load_ngram_page(Qwen38NgramPageCache& cache, std::uint32_t page, bool prefetch) {
+    const std::uint32_t num_pages = (cache.rows + cache.rows_per_page - 1U) / cache.rows_per_page;
+    if (page >= num_pages) {
+        return make_error(ErrorCode::invalid_argument, "ngram page out of range", std::to_string(page));
+    }
+    for (std::size_t i = 0; i < cache.lru.size(); ++i) {
+        if (cache.lru[i] == page) {
+            auto id = cache.lru[i];
+            auto data = std::move(cache.pages[i]);
+            cache.lru.erase(cache.lru.begin() + static_cast<std::ptrdiff_t>(i));
+            cache.pages.erase(cache.pages.begin() + static_cast<std::ptrdiff_t>(i));
+            cache.lru.push_back(id);
+            cache.pages.push_back(std::move(data));
+            if (!prefetch) {
+                ++cache.telemetry.hits;
+            }
+            return {};
+        }
+    }
+    if (prefetch) {
+        ++cache.telemetry.prefetches;
+    } else {
+        ++cache.telemetry.misses;
+    }
+    const std::uint32_t row0 = page * cache.rows_per_page;
+    const std::uint32_t count = (std::min)(cache.rows_per_page, cache.rows - row0);
+    const std::size_t bytes = static_cast<std::size_t>(count) * cache.dim * sizeof(float);
+    std::ifstream in(cache.path, std::ios::binary);
+    if (!in) {
+        return make_error(ErrorCode::io_error, "cannot open ngram table", cache.path.string());
+    }
+    in.seekg(static_cast<std::streamoff>(static_cast<std::uint64_t>(row0) * cache.dim * sizeof(float)));
+    std::vector<float> payload(static_cast<std::size_t>(count) * cache.dim, 0.0F);
+    in.read(reinterpret_cast<char*>(payload.data()), static_cast<std::streamsize>(bytes));
+    if (static_cast<std::size_t>(in.gcount()) != bytes) {
+        return make_error(ErrorCode::io_error, "short ngram page read", cache.path.string());
+    }
+    if (cache.lru.size() >= cache.max_pages) {
+        cache.lru.erase(cache.lru.begin());
+        cache.pages.erase(cache.pages.begin());
+        ++cache.telemetry.evictions;
+    }
+    cache.lru.push_back(page);
+    cache.pages.push_back(std::move(payload));
+    cache.telemetry.logical_bytes += bytes;
+    return {};
+}
+
+}  // namespace
+
+Result<Qwen38NgramPageCache> qwen38_ngram_page_cache_open(
+    const Qwen38NgramPageOptions& options,
+    safety::ResourceGovernor& governor) {
+    if (options.rows == 0 || options.dim == 0 || options.rows_per_page == 0 || options.max_pages == 0) {
+        return make_error(ErrorCode::invalid_argument, "ngram page cache options invalid", "ngram_page");
+    }
+    if (!std::filesystem::exists(options.table_path)) {
+        return make_error(ErrorCode::not_found, "ngram table not found", options.table_path.string());
+    }
+    const ByteCount page_bytes = static_cast<ByteCount>(options.rows_per_page) * options.dim * sizeof(float);
+    const ByteCount reserve = page_bytes * options.max_pages;
+    auto ram = governor.try_reserve(safety::ResourceKind::ram, reserve, "qwen38_ngram_pages");
+    if (!ram) {
+        return ram.error();
+    }
+    Qwen38NgramPageCache cache;
+    cache.path = options.table_path;
+    cache.rows = options.rows;
+    cache.dim = options.dim;
+    cache.rows_per_page = options.rows_per_page;
+    cache.max_pages = options.max_pages;
+    cache.ram = std::move(ram.value());
+    return cache;
+}
+
+Result<std::vector<float>> qwen38_ngram_page_gather(
+    Qwen38NgramPageCache& cache,
+    std::span<const std::int64_t> row_ids) {
+    if (row_ids.empty()) {
+        return make_error(ErrorCode::invalid_argument, "ngram gather ids must be non-empty", "ngram_page");
+    }
+    std::vector<float> out;
+    out.reserve(row_ids.size() * cache.dim);
+    std::vector<std::uint32_t> touched;
+    for (std::int64_t id : row_ids) {
+        if (id < 0 || static_cast<std::uint64_t>(id) >= cache.rows) {
+            return make_error(ErrorCode::invalid_argument, "ngram row id out of range", std::to_string(id));
+        }
+        const auto uid = static_cast<std::uint32_t>(id);
+        const std::uint32_t page = uid / cache.rows_per_page;
+        auto loaded = load_ngram_page(cache, page, false);
+        if (!loaded) {
+            return loaded.error();
+        }
+        std::uint32_t slot = 0;
+        for (; slot < cache.lru.size(); ++slot) {
+            if (cache.lru[slot] == page) {
+                break;
+            }
+        }
+        const std::uint32_t local = uid - page * cache.rows_per_page;
+        const float* row = cache.pages[slot].data() + static_cast<std::size_t>(local) * cache.dim;
+        out.insert(out.end(), row, row + cache.dim);
+        if (std::find(touched.begin(), touched.end(), page) == touched.end()) {
+            touched.push_back(page);
+        }
+    }
+    const std::uint32_t num_pages = (cache.rows + cache.rows_per_page - 1U) / cache.rows_per_page;
+    for (std::uint32_t page : touched) {
+        const std::uint32_t next = page + 1U;
+        if (next >= num_pages) {
+            continue;
+        }
+        bool resident = false;
+        for (std::uint32_t p : cache.lru) {
+            if (p == next) {
+                resident = true;
+                break;
+            }
+        }
+        if (!resident) {
+            auto loaded = load_ngram_page(cache, next, true);
+            if (!loaded) {
+                return loaded.error();
+            }
+        }
+    }
+    return out;
 }
 
 }  // namespace vastloom::inference

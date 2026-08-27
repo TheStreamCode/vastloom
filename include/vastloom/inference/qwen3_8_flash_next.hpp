@@ -3,6 +3,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <filesystem>
+#include <span>
 #include <string>
 #include <vector>
 
@@ -211,7 +212,137 @@ struct Qwen38ExpectedCatalog {
     static constexpr std::size_t ngram_tensors = 128; // shard_0..127 weights
     static constexpr std::size_t ngram_with_proj = 138; // + ple_input_proj etc
     static constexpr std::size_t fp8_expert_scale_inv = 75264; // counted as fp8_block_scaled_experts
+    static constexpr std::size_t linear_layers = 36;
+    static constexpr std::size_t qsa_layers = 12;
+    static constexpr std::size_t mtp_layers = 1;
+    static constexpr std::size_t per_layer_non_routed = 22;
+    static constexpr std::size_t mtp_non_routed = 29;
+    static constexpr std::size_t language_non_routed = 1194; // 48*22 + 138 PLE
+    static constexpr std::size_t text_non_routed = 1228;     // 1194 + 5 global + 29 mtp
 };
+
+enum class Qwen38LayerKind {
+    linear_attention,
+    qwen_sparse_attention,
+};
+
+enum class Qwen38Consumer {
+    delta_net,
+    qsa_indexer,
+    qsa_attention,
+    gated_residual_attn,
+    gated_residual_mlp,
+    moe_router,
+    moe_shared,
+    ngram_ple,
+    mtp_head,
+    global_embed,
+    global_lm_head,
+    global_mixer,
+};
+
+struct Qwen38PlannedTensor {
+    std::string name;
+    Qwen38Consumer consumer{Qwen38Consumer::delta_net};
+    std::filesystem::path shard_path;
+    bool bound{false};
+};
+
+struct Qwen38LayerPlan {
+    std::uint32_t layer{0};
+    bool is_mtp{false};
+    Qwen38LayerKind kind{Qwen38LayerKind::linear_attention};
+    bool has_ple{false};
+    std::vector<Qwen38PlannedTensor> tensors;
+};
+
+struct Qwen38GraphPlan {
+    std::uint32_t language_layers{0};
+    std::uint32_t linear_layers{0};
+    std::uint32_t qsa_layers{0};
+    std::uint32_t mtp_layers{0};
+    std::vector<Qwen38LayerPlan> layers;
+    std::vector<Qwen38PlannedTensor> globals;
+    std::size_t non_routed_tensor_count{0};
+};
+
+[[nodiscard]] bool qwen38_is_qsa_layer(std::uint32_t layer, std::uint32_t full_attention_interval) noexcept;
+
+[[nodiscard]] Result<Qwen38GraphPlan> qwen38_plan_non_routed_graph(const Qwen38FlashNextConfig& config);
+
+[[nodiscard]] Result<Qwen38GraphPlan> qwen38_validate_non_routed_plan(const Qwen38GraphPlan& plan);
+
+[[nodiscard]] Result<Qwen38GraphPlan> qwen38_bind_non_routed_plan(
+    const Qwen38GraphPlan& plan,
+    const std::vector<Qwen38ShardIndexEntry>& weight_map);
+
+static constexpr ByteCount qwen38_ngram_scenario_b_bytes = 4U * ::vastloom::GiB;
+static constexpr ByteCount qwen38_reference_live_ram_gate = (123ULL * ::vastloom::GiB) / 10ULL;
+
+struct Qwen38PersistBudget {
+    std::uint32_t linear_layers{0};
+    ByteCount deltanet_conv_bytes{0};
+    ByteCount deltanet_ssm_bytes{0};
+    ByteCount deltanet_bytes{0};
+    ByteCount ngram_working_set{0};
+    ByteCount total_resident{0};
+    bool under_reference_ram_gate{false};
+};
+
+[[nodiscard]] Result<Qwen38PersistBudget> qwen38_plan_persist_budget(
+    const Qwen38FlashNextConfig& config,
+    ByteCount ngram_working_set = qwen38_ngram_scenario_b_bytes);
+
+struct Qwen38DeltaNetLayerState {
+    std::vector<float> conv;
+    std::vector<float> ssm;
+};
+
+struct Qwen38DeltaNetPersist {
+    std::uint32_t linear_layers{0};
+    std::vector<Qwen38DeltaNetLayerState> layers;
+    safety::Reservation ram;
+};
+
+[[nodiscard]] Result<Qwen38DeltaNetPersist> qwen38_deltanet_persist_create(
+    const Qwen38FlashNextConfig& config,
+    safety::ResourceGovernor& governor);
+
+struct Qwen38NgramPageTelemetry {
+    std::size_t hits{0};
+    std::size_t misses{0};
+    std::size_t evictions{0};
+    std::size_t prefetches{0};
+    std::uint64_t logical_bytes{0};
+};
+
+struct Qwen38NgramPageCache {
+    std::filesystem::path path;
+    std::uint32_t rows{0};
+    std::uint32_t dim{0};
+    std::uint32_t rows_per_page{0};
+    std::uint32_t max_pages{0};
+    std::vector<std::uint32_t> lru;
+    std::vector<std::vector<float>> pages;
+    Qwen38NgramPageTelemetry telemetry;
+    safety::Reservation ram;
+};
+
+struct Qwen38NgramPageOptions {
+    std::filesystem::path table_path;
+    std::uint32_t rows{0};
+    std::uint32_t dim{0};
+    std::uint32_t rows_per_page{0};
+    std::uint32_t max_pages{0};
+};
+
+[[nodiscard]] Result<Qwen38NgramPageCache> qwen38_ngram_page_cache_open(
+    const Qwen38NgramPageOptions& options,
+    safety::ResourceGovernor& governor);
+
+[[nodiscard]] Result<std::vector<float>> qwen38_ngram_page_gather(
+    Qwen38NgramPageCache& cache,
+    std::span<const std::int64_t> row_ids);
 
 // Validates a full inspection result against Qwen38ExpectedCatalog.
 // Returns the result on success, error with context on mismatch.

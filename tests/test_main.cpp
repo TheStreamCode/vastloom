@@ -3034,6 +3034,180 @@ void test_qwen38_flash_next_reference_operators(const std::filesystem::path& roo
             }
         }
     }
+
+    using vastloom::inference::qwen38_delta_net_decode;
+    using vastloom::inference::qwen38_gated_residual;
+    using vastloom::inference::qwen38_gated_residual_combine;
+    using vastloom::inference::qwen38_ngram_hash_ids;
+    using vastloom::inference::qwen38_ngram_lookup;
+    using vastloom::inference::qwen38_ngram_multipliers;
+    using vastloom::inference::qwen38_nth_prime_after;
+    using vastloom::inference::qwen38_qsa_select;
+    using vastloom::inference::qwen38_rms_norm_affine;
+    using vastloom::inference::Qwen38DeltaNetState;
+    using vastloom::inference::Qwen38DeltaNetView;
+    using vastloom::inference::Qwen38GatedResidualView;
+    using vastloom::inference::Qwen38QsaSelectView;
+
+    {
+        const std::vector<float> input{1.0F, 0.0F, 0.0F, 1.0F};
+        const std::vector<float> weight(4, 0.0F);
+        auto grouped = qwen38_rms_norm_affine(input, weight, 1e-6F, 2);
+        CHECK(grouped);
+        if (grouped) {
+            CHECK(std::abs(grouped.value()[0] - 1.414212148F) < 1e-5F);
+            CHECK(std::abs(grouped.value()[1]) < 1e-6F);
+            CHECK(std::abs(grouped.value()[2]) < 1e-6F);
+            CHECK(std::abs(grouped.value()[3] - 1.414212148F) < 1e-5F);
+        }
+        auto bad = qwen38_rms_norm_affine(input, weight, 1e-6F, 3);
+        CHECK(!bad);
+    }
+
+    {
+        const std::vector<float> x{1.0F, 0.0F, 0.0F, 1.0F};
+        const std::vector<float> hc_norm(4, 0.0F);
+        const std::vector<float> mix_down{0.5F, -0.25F, 0.25F, 0.5F};
+        const std::vector<float> mix_up{0.5F, -0.5F, 0.25F, 0.75F};
+        const std::vector<float> inject{0.2F, -0.1F, 0.1F, 0.3F, -0.2F, 0.4F, 0.0F, 0.1F};
+        Qwen38GatedResidualView view{hc_norm, mix_down, mix_up, inject};
+        auto gr = qwen38_gated_residual(x, view, 2, 2, 1, 1e-6F);
+        CHECK(gr);
+        if (gr) {
+            CHECK(gr.value().mixed_input.size() == 2U);
+            CHECK(gr.value().injection_weights.size() == 2U);
+            CHECK(std::abs(gr.value().mixed_input[0] - 0.39521853F) < 1e-5F);
+            CHECK(std::abs(gr.value().mixed_input[1] - 0.41569112F) < 1e-5F);
+            CHECK(std::abs(gr.value().injection_weights[0] - 1.17495783F) < 1e-5F);
+            CHECK(std::abs(gr.value().injection_weights[1] - 0.96465942F) < 1e-5F);
+            const std::vector<float> sub{0.5F, -0.25F};
+            auto comb = qwen38_gated_residual_combine(
+                gr.value().residual, sub, gr.value().injection_weights, 2, 2);
+            CHECK(comb);
+            if (comb) {
+                CHECK(std::abs(comb.value()[0] - 1.58747892F) < 1e-5F);
+                CHECK(std::abs(comb.value()[1] + 0.29373946F) < 1e-5F);
+                CHECK(std::abs(comb.value()[2] - 0.48232971F) < 1e-5F);
+                CHECK(std::abs(comb.value()[3] - 0.75883514F) < 1e-5F);
+            }
+        }
+        Qwen38GatedResidualView mixer_only{hc_norm, mix_down, mix_up, {}};
+        auto mix = qwen38_gated_residual(x, mixer_only, 2, 2, 1, 1e-6F);
+        CHECK(mix && mix.value().injection_weights.empty());
+        CHECK(!qwen38_gated_residual(x, view, 1, 2, 1, 1e-6F));
+    }
+
+    {
+        const std::vector<float> x{0.2F, -0.1F, 0.3F, 0.05F};
+        const std::vector<float> w_qkv{
+            0.1F, 0.0F, -0.2F, 0.05F,
+            0.0F, 0.2F, 0.1F, -0.1F,
+            0.15F, -0.05F, 0.0F, 0.1F,
+            -0.1F, 0.1F, 0.2F, 0.0F,
+            0.05F, 0.15F, -0.1F, 0.05F,
+            0.1F, 0.0F, 0.1F, -0.15F,
+            -0.05F, 0.2F, 0.0F, 0.1F,
+            0.0F, -0.1F, 0.15F, 0.05F};
+        const std::vector<float> w_z{
+            0.2F, 0.0F, -0.1F, 0.05F,
+            -0.05F, 0.1F, 0.0F, 0.2F,
+            0.1F, -0.1F, 0.15F, 0.0F,
+            0.0F, 0.05F, -0.05F, 0.1F};
+        const std::vector<float> w_a{0.1F, -0.2F, 0.05F, 0.0F, -0.05F, 0.1F, 0.0F, 0.15F};
+        const std::vector<float> w_b{0.2F, 0.0F, -0.1F, 0.05F, 0.0F, 0.1F, 0.15F, -0.05F};
+        const std::vector<float> a_log{0.0F, std::log(2.0F)};
+        const std::vector<float> dt_bias{0.0F, 0.5F};
+        const std::vector<float> conv{
+            0.5F, 0.25F, 0.25F, 0.5F, 0.4F, 0.1F, 0.1F, 0.4F,
+            0.3F, 0.2F, 0.2F, 0.3F, 0.35F, 0.15F, 0.15F, 0.35F};
+        const std::vector<float> norm{1.0F, 1.0F};
+        const std::vector<float> w_out{
+            0.2F, -0.1F, 0.05F, 0.0F,
+            0.0F, 0.15F, -0.05F, 0.1F,
+            0.1F, 0.0F, 0.2F, -0.1F,
+            -0.05F, 0.05F, 0.0F, 0.15F};
+        Qwen38DeltaNetView view{
+            w_qkv, w_z, w_a, w_b, conv, a_log, dt_bias, norm, w_out,
+            4, 1, 2, 2, 2, 2, 1e-6F};
+        Qwen38DeltaNetState state;
+        state.conv.assign(8, 0.0F);
+        state.ssm.assign(8, 0.0F);
+        auto y = qwen38_delta_net_decode(x, view, state);
+        CHECK(y);
+        if (y) {
+            CHECK(y.value().size() == 4U);
+            CHECK(std::abs(y.value()[0] - 0.013882507F) < 1e-5F);
+            CHECK(std::abs(y.value()[1] + 0.020687077F) < 1e-5F);
+            CHECK(std::abs(y.value()[2] - 0.017294943F) < 1e-5F);
+            CHECK(std::abs(y.value()[3] + 0.020023171F) < 1e-5F);
+            CHECK(std::abs(state.ssm[0] + 0.000507323F) < 1e-6F);
+            CHECK(std::abs(state.ssm[5] - 0.001607545F) < 1e-6F);
+        }
+        auto y2 = qwen38_delta_net_decode(x, view, state);
+        CHECK(y2 && y2.value().size() == 4U);
+        CHECK(std::isfinite(y2.value()[0]));
+        Qwen38DeltaNetState bad_state;
+        CHECK(!qwen38_delta_net_decode(x, view, bad_state));
+    }
+
+    {
+        const std::vector<float> q{1.0F, 0.0F, 0.0F, 1.0F};
+        const std::vector<float> keys{
+            1.0F, 0.0F, 0.0F, 1.0F, 1.0F, 1.0F, -1.0F, 0.0F, 0.5F, -0.5F};
+        const std::vector<float> k_norm{0.0F, 0.0F};
+        Qwen38QsaSelectView view{q, keys, k_norm, 2, 2, 5, 2, 2, 1e-6F};
+        auto sel = qwen38_qsa_select(view);
+        CHECK(sel);
+        if (sel) {
+            CHECK(sel.value().block_scores.size() == 2U);
+            CHECK(sel.value().block_scores[0] > sel.value().block_scores[1]);
+            CHECK(sel.value().selected.size() == 3U);
+            CHECK(sel.value().selected[0] == 0);
+            CHECK(sel.value().selected[1] == 1);
+            CHECK(sel.value().selected[2] == 4);
+        }
+        view.budget = 3;
+        CHECK(!qwen38_qsa_select(view));
+    }
+
+    {
+        auto p23 = qwen38_nth_prime_after(19, 1);
+        auto p29 = qwen38_nth_prime_after(19, 2);
+        CHECK(p23 && p23.value() == 23U);
+        CHECK(p29 && p29.value() == 29U);
+        CHECK(!qwen38_nth_prime_after(19, 0));
+        auto mult = qwen38_ngram_multipliers(32, 3, 0, 1234);
+        CHECK(mult && mult.value().size() == 3U);
+        if (mult) {
+            CHECK(mult.value()[0] == 256496738022509279LL);
+            CHECK(mult.value()[1] == 251627398771002343LL);
+            CHECK(mult.value()[2] == 55314113489879221LL);
+        }
+        const std::vector<std::int32_t> tokens{3, 7};
+        const std::vector<std::int64_t> sizes{23, 29};
+        const std::vector<std::int64_t> offsets{0, 23};
+        auto ids = qwen38_ngram_hash_ids(tokens, {}, mult.value(), sizes, offsets, 3, 1, 0);
+        CHECK(ids && ids.value().size() == 4U);
+        if (ids) {
+            CHECK(ids.value()[2] == 21);
+            CHECK(ids.value()[3] == 50);
+        }
+        std::vector<float> table(52 * 2, 0.0F);
+        table[21 * 2] = 1.25F;
+        table[21 * 2 + 1] = -0.5F;
+        table[50 * 2] = 0.75F;
+        table[50 * 2 + 1] = 2.0F;
+        const std::vector<std::int64_t> last{ids.value()[2], ids.value()[3]};
+        auto looked = qwen38_ngram_lookup(last, table, 52, 2);
+        CHECK(looked && looked.value().size() == 4U);
+        if (looked) {
+            CHECK(looked.value()[0] == 1.25F);
+            CHECK(looked.value()[1] == -0.5F);
+            CHECK(looked.value()[2] == 0.75F);
+            CHECK(looked.value()[3] == 2.0F);
+        }
+        CHECK(!qwen38_ngram_lookup(last, table, 40, 2));
+    }
 }
 
 void test_qwen38_catalog_validation(const std::filesystem::path& root) {
@@ -3340,6 +3514,583 @@ void test_qwen38_import_transaction(const std::filesystem::path& root) {
             CHECK(refused.error().code == vastloom::ErrorCode::resource_exhausted);
         }
         CHECK(!std::filesystem::exists(dest / "governor_refused.bin"));
+    }
+}
+
+void test_qwen38_non_routed_graph_plan(const std::filesystem::path& root) {
+    using vastloom::inference::Qwen38ExpectedCatalog;
+    using vastloom::inference::Qwen38Consumer;
+    using vastloom::inference::Qwen38LayerKind;
+    using vastloom::inference::Qwen38ShardIndexEntry;
+    using vastloom::inference::qwen38_bind_non_routed_plan;
+    using vastloom::inference::qwen38_is_qsa_layer;
+    using vastloom::inference::qwen38_plan_non_routed_graph;
+    using vastloom::inference::qwen38_validate_non_routed_plan;
+
+    std::ignore = root;
+    CHECK(qwen38_is_qsa_layer(3, 4));
+    CHECK(!qwen38_is_qsa_layer(0, 4));
+    CHECK(!qwen38_is_qsa_layer(2, 4));
+    CHECK(qwen38_is_qsa_layer(47, 4));
+
+    const std::filesystem::path fixture_dir =
+        std::filesystem::path(VASTLOOM_SOURCE_DIR) / "tests" / "fixtures" / "qwen38_flash_next";
+    auto cfg = vastloom::inference::load_qwen38_flash_next_config(fixture_dir / "config.json");
+    CHECK(cfg);
+    if (!cfg) {
+        return;
+    }
+
+    auto planned = qwen38_plan_non_routed_graph(cfg.value());
+    CHECK(planned);
+    if (!planned) {
+        return;
+    }
+    auto validated = qwen38_validate_non_routed_plan(planned.value());
+    CHECK(validated);
+    if (!validated) {
+        std::cerr << "  non-routed plan validation failed: "
+                  << validated.error().message << " (" << validated.error().context << ")\n";
+        return;
+    }
+
+    const auto& plan = validated.value();
+    CHECK(plan.layers.size() == 49U);
+    CHECK(plan.linear_layers == 36U);
+    CHECK(plan.qsa_layers == 12U);
+    CHECK(plan.mtp_layers == 1U);
+    CHECK(plan.globals.size() == 5U);
+    CHECK(plan.non_routed_tensor_count == Qwen38ExpectedCatalog::text_non_routed);
+    CHECK(plan.layers[0].kind == Qwen38LayerKind::linear_attention);
+    CHECK(plan.layers[0].tensors.size() == 22U);
+    CHECK(plan.layers[0].tensors[0].name == "model.language_model.layers.0.linear_attn.A_log");
+    CHECK(plan.layers[0].tensors[0].consumer == Qwen38Consumer::delta_net);
+    CHECK(plan.layers[1].has_ple);
+    CHECK(plan.layers[1].tensors.size() == 160U);
+    CHECK(plan.layers[3].kind == Qwen38LayerKind::qwen_sparse_attention);
+    CHECK(plan.layers[3].tensors[0].name
+        == "model.language_model.layers.3.self_attn.indexer.index_qk_proj.weight");
+    CHECK(plan.layers[3].tensors[0].consumer == Qwen38Consumer::qsa_indexer);
+    CHECK(plan.layers.back().is_mtp);
+    CHECK(plan.layers.back().tensors.size() == 29U);
+    CHECK(plan.layers.back().kind == Qwen38LayerKind::qwen_sparse_attention);
+
+    std::vector<Qwen38ShardIndexEntry> catalog;
+    catalog.reserve(plan.non_routed_tensor_count);
+    for (const auto& layer : plan.layers) {
+        for (const auto& t : layer.tensors) {
+            catalog.push_back({t.name, "model-00001-of-00131.safetensors"});
+        }
+    }
+    for (const auto& t : plan.globals) {
+        catalog.push_back({t.name, "model-00001-of-00131.safetensors"});
+    }
+    auto bound = qwen38_bind_non_routed_plan(plan, catalog);
+    CHECK(bound);
+    if (bound) {
+        CHECK(bound.value().layers[0].tensors[0].bound);
+        CHECK(bound.value().globals[0].bound);
+    }
+
+    auto missing = catalog;
+    missing.erase(missing.begin());
+    CHECK(!qwen38_bind_non_routed_plan(plan, missing));
+
+    auto inspected = vastloom::inference::inspect_qwen38_flash_next_safetensors(
+        fixture_dir / "model.safetensors.index.json", cfg.value(), false);
+    CHECK(inspected);
+    if (inspected) {
+        CHECK(!qwen38_bind_non_routed_plan(plan, inspected.value().weight_map));
+    }
+
+    auto bad_cfg = cfg.value();
+    bad_cfg.mtp_num_hidden_layers = 2;
+    CHECK(!qwen38_plan_non_routed_graph(bad_cfg));
+}
+
+void test_qwen38_reduced_graph(const std::filesystem::path& root) {
+    using vastloom::inference::Qwen38OwnedDeltaNet;
+    using vastloom::inference::Qwen38OwnedExpert;
+    using vastloom::inference::Qwen38OwnedMoe;
+    using vastloom::inference::Qwen38OwnedQsa;
+    using vastloom::inference::Qwen38OwnedResidual;
+    using vastloom::inference::Qwen38OwnedSharedMlp;
+    using vastloom::inference::Qwen38ReducedModel;
+    using vastloom::inference::qwen38_expand_stream;
+    using vastloom::inference::qwen38_gated_residual;
+    using vastloom::inference::qwen38_gated_residual_combine;
+    using vastloom::inference::qwen38_linear;
+    using vastloom::inference::qwen38_reduced_decode;
+    using vastloom::inference::qwen38_reduced_prefill;
+    using vastloom::inference::qwen38_reduced_zero_state;
+    using vastloom::inference::qwen38_shared_mlp;
+
+    std::ignore = root;
+
+    auto fill = [](std::vector<float>& w, std::size_t n, float scale, float bias) {
+        w.resize(n);
+        for (std::size_t i = 0; i < n; ++i) {
+            w[i] = scale * (static_cast<float>(static_cast<int>(i % 7) - 3) / 7.0F) + bias;
+        }
+    };
+    auto fill_res = [&](Qwen38OwnedResidual& r, std::size_t stream, std::size_t rank, bool inject) {
+        fill(r.hc_norm, stream, 0.0F, 0.0F);
+        fill(r.mix_down, rank * stream, 0.08F, 0.02F);
+        fill(r.mix_up, stream * rank, 0.07F, -0.01F);
+        if (inject) {
+            fill(r.block_inject, 2 * stream, 0.05F, 0.0F);
+        }
+    };
+    auto fill_dn = [&](Qwen38OwnedDeltaNet& d) {
+        fill(d.in_proj_qkv, 32, 0.06F, 0.0F);
+        fill(d.in_proj_z, 16, 0.05F, 0.01F);
+        fill(d.in_proj_a, 8, 0.04F, 0.0F);
+        fill(d.in_proj_b, 8, 0.04F, 0.02F);
+        fill(d.conv1d, 16, 0.1F, 0.05F);
+        d.a_log = {0.0F, std::log(2.0F)};
+        d.dt_bias = {0.0F, 0.25F};
+        d.norm = {1.0F, 1.0F};
+        fill(d.out_proj, 16, 0.05F, 0.0F);
+    };
+    auto fill_qsa = [&](Qwen38OwnedQsa& q) {
+        fill(q.index_qk, 24, 0.05F, 0.0F);
+        q.q_layernorm.assign(2, 0.0F);
+        q.k_layernorm.assign(2, 0.0F);
+        fill(q.q_proj, 32, 0.06F, 0.0F);
+        fill(q.k_proj, 8, 0.05F, 0.0F);
+        fill(q.v_proj, 8, 0.05F, 0.01F);
+        fill(q.o_proj, 16, 0.04F, 0.0F);
+        q.q_norm.assign(2, 0.0F);
+        q.k_norm.assign(2, 0.0F);
+    };
+    auto fill_mlp = [&](Qwen38OwnedSharedMlp& m) {
+        fill(m.gate_proj, 16, 0.05F, 0.0F);
+        fill(m.up_proj, 16, 0.05F, 0.01F);
+        fill(m.down_proj, 16, 0.04F, 0.0F);
+        fill(m.shared_gate, 4, 0.03F, 0.0F);
+    };
+    auto fill_moe = [&](Qwen38OwnedMoe& moe, float scale) {
+        fill(moe.router, 16, scale, 0.0F);
+        moe.experts.resize(4);
+        for (std::size_t e = 0; e < 4; ++e) {
+            fill(moe.experts[e].gate_proj, 16, scale + 0.01F * static_cast<float>(e), 0.0F);
+            fill(moe.experts[e].up_proj, 16, scale + 0.02F * static_cast<float>(e), 0.01F);
+            fill(moe.experts[e].down_proj, 16, scale + 0.01F * static_cast<float>(e), 0.0F);
+        }
+    };
+
+    Qwen38ReducedModel model;
+    fill(model.embed, 16, 0.2F, 0.05F);
+    fill(model.lm_head, 16, 0.1F, 0.0F);
+    fill_res(model.mixer, 8, 2, false);
+    fill_res(model.layer0_attn_hc, 8, 2, true);
+    fill_dn(model.layer0_delta);
+    fill_res(model.layer0_mlp_hc, 8, 2, true);
+    fill_mlp(model.layer0_mlp);
+    fill_moe(model.layer0_moe, 0.04F);
+    fill_res(model.layer1_attn_hc, 8, 2, true);
+    fill_qsa(model.layer1_qsa);
+    fill_res(model.layer1_mlp_hc, 8, 2, true);
+    fill_mlp(model.layer1_mlp);
+    fill_moe(model.layer1_moe, 0.05F);
+    fill_res(model.mtp_attn_hc, 8, 2, true);
+    fill_qsa(model.mtp_qsa);
+    fill_res(model.mtp_mlp_hc, 8, 2, true);
+    fill_mlp(model.mtp_mlp);
+    fill_moe(model.mtp_moe, 0.06F);
+    fill_res(model.mtp_mixer, 8, 2, false);
+    fill(model.mtp_fc_hidden, 16, 0.05F, 0.0F);
+    fill(model.mtp_fc_embed, 16, 0.05F, 0.01F);
+    model.mtp_pre_hidden.assign(4, 0.0F);
+    model.mtp_pre_embed.assign(4, 0.0F);
+
+    auto state = qwen38_reduced_zero_state(model.dims);
+    CHECK(state);
+    if (!state) {
+        return;
+    }
+    const std::vector<std::int32_t> tokens{1, 2};
+    auto prefill = qwen38_reduced_prefill(model, tokens, state.value());
+    CHECK(prefill);
+    if (!prefill) {
+        return;
+    }
+    CHECK(prefill.value().hidden.size() == 8U);
+    CHECK(prefill.value().logits.size() == 8U);
+    CHECK(prefill.value().mtp_logits.size() == 4U);
+    for (float v : prefill.value().logits) {
+        CHECK(std::isfinite(v));
+    }
+    for (float v : prefill.value().mtp_logits) {
+        CHECK(std::isfinite(v));
+    }
+    CHECK(prefill.value().expert_cache.requests >= 12U);
+    CHECK(prefill.value().expert_cache.misses > 0U);
+    CHECK(prefill.value().expert_cache.logical_bytes > 0U);
+
+    auto stepped = qwen38_reduced_zero_state(model.dims);
+    CHECK(stepped);
+    if (!stepped) {
+        return;
+    }
+    auto d0 = qwen38_reduced_decode(model, 1, stepped.value());
+    auto d1 = qwen38_reduced_decode(model, 2, stepped.value());
+    CHECK(d0 && d1);
+    if (d0 && d1) {
+        CHECK(d1.value().hidden.size() == 4U);
+        for (std::size_t i = 0; i < 4; ++i) {
+            CHECK(std::abs(d1.value().hidden[i] - prefill.value().hidden[4 + i]) < 1e-5F);
+            CHECK(std::abs(d1.value().logits[i] - prefill.value().logits[4 + i]) < 1e-5F);
+            CHECK(std::abs(d1.value().mtp_logits[i] - prefill.value().mtp_logits[i]) < 1e-5F);
+        }
+    }
+
+    {
+        auto st = qwen38_reduced_zero_state(model.dims);
+        CHECK(st);
+        if (st) {
+            const std::vector<float> e0(model.embed.begin() + 4, model.embed.begin() + 8);
+            auto stream = qwen38_expand_stream(e0, 2);
+            CHECK(stream.size() == 8U);
+            vastloom::inference::Qwen38GatedResidualView attn_hc{
+                model.layer0_attn_hc.hc_norm, model.layer0_attn_hc.mix_down,
+                model.layer0_attn_hc.mix_up, model.layer0_attn_hc.block_inject};
+            auto gr = qwen38_gated_residual(stream, attn_hc, 2, 4, 2, 1e-6F);
+            CHECK(gr);
+            if (gr) {
+                vastloom::inference::Qwen38DeltaNetView dn{
+                    model.layer0_delta.in_proj_qkv, model.layer0_delta.in_proj_z,
+                    model.layer0_delta.in_proj_a, model.layer0_delta.in_proj_b,
+                    model.layer0_delta.conv1d, model.layer0_delta.a_log, model.layer0_delta.dt_bias,
+                    model.layer0_delta.norm, model.layer0_delta.out_proj,
+                    4, 1, 2, 2, 2, 2, 1e-6F};
+                auto y = vastloom::inference::qwen38_delta_net_decode(gr.value().mixed_input, dn, st.value().delta);
+                CHECK(y);
+                if (y) {
+                    auto comb = qwen38_gated_residual_combine(
+                        gr.value().residual, y.value(), gr.value().injection_weights, 2, 4);
+                    CHECK(comb);
+                    if (comb) {
+                        vastloom::inference::Qwen38GatedResidualView mlp_hc{
+                            model.layer0_mlp_hc.hc_norm, model.layer0_mlp_hc.mix_down,
+                            model.layer0_mlp_hc.mix_up, model.layer0_mlp_hc.block_inject};
+                        auto grm = qwen38_gated_residual(comb.value(), mlp_hc, 2, 4, 2, 1e-6F);
+                        CHECK(grm);
+                        if (grm) {
+                            auto mlp = qwen38_shared_mlp(grm.value().mixed_input, model.layer0_mlp.gate_proj,
+                                model.layer0_mlp.up_proj, model.layer0_mlp.down_proj, model.layer0_mlp.shared_gate, 4, 4);
+                            CHECK(mlp && mlp.value().size() == 4U);
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    CHECK(!qwen38_reduced_prefill(model, std::span<const std::int32_t>{}, state.value()));
+    auto empty_lin = qwen38_linear(std::vector<float>{1.0F}, std::vector<float>{1.0F}, 2, 2);
+    CHECK(!empty_lin);
+
+    using vastloom::inference::Qwen38ReducedFinishReason;
+    using vastloom::inference::Qwen38ReducedGenerationOptions;
+    using vastloom::inference::qwen38_reduced_generate;
+    using vastloom::inference::to_string;
+
+    const std::vector<std::int32_t> prompt{1, 2};
+    {
+        Qwen38ReducedGenerationOptions gen;
+        gen.max_new_tokens = 3U;
+        gen.top_k = 1U;
+        gen.temperature = 0.0F;
+        auto g = qwen38_reduced_generate(model, prompt, gen);
+        CHECK(g);
+        if (g) {
+            CHECK(g.value().generated_ids.size() == 3U);
+            CHECK(g.value().finish_reason == Qwen38ReducedFinishReason::max_tokens);
+            CHECK(to_string(g.value().finish_reason) == "max_tokens");
+            CHECK(g.value().stats.prompt_tokens == 2U);
+            CHECK(g.value().stats.generated_tokens == 3U);
+            CHECK(g.value().stats.forward_passes == 3U);
+            CHECK(g.value().stats.expert_requests >= 9U);
+            CHECK(g.value().stats.tokens_per_second >= 0.0);
+            for (std::int32_t t : g.value().generated_ids) {
+                CHECK(t >= 0 && static_cast<std::uint32_t>(t) < model.dims.vocab_size);
+            }
+        }
+        Qwen38ReducedGenerationOptions seed_a = gen;
+        Qwen38ReducedGenerationOptions seed_b = gen;
+        seed_a.seed = 42U;
+        seed_b.seed = 42U;
+        seed_a.temperature = 0.7F;
+        seed_a.top_k = 4U;
+        seed_b.temperature = 0.7F;
+        seed_b.top_k = 4U;
+        auto a = qwen38_reduced_generate(model, prompt, seed_a);
+        auto b = qwen38_reduced_generate(model, prompt, seed_b);
+        CHECK(a && b && a.value().generated_ids == b.value().generated_ids);
+        if (a) {
+            CHECK(a.value().generated_ids.size() == 3U);
+        }
+    }
+    {
+        Qwen38ReducedGenerationOptions probe;
+        probe.max_new_tokens = 1U;
+        probe.top_k = 1U;
+        auto p = qwen38_reduced_generate(model, prompt, probe);
+        CHECK(p && p.value().generated_ids.size() == 1U);
+        if (p) {
+            const std::int32_t first = p.value().generated_ids.front();
+            Qwen38ReducedGenerationOptions gen;
+            gen.max_new_tokens = 8U;
+            gen.top_k = 1U;
+            gen.stop_token_ids = {first};
+            auto g = qwen38_reduced_generate(model, prompt, gen);
+            CHECK(g);
+            if (g) {
+                CHECK(g.value().finish_reason == Qwen38ReducedFinishReason::stop_token);
+                CHECK(g.value().stop_token_id.has_value());
+                CHECK(g.value().stop_token_id.value() == first);
+                CHECK(g.value().generated_ids.size() == 1U);
+            }
+        }
+    }
+    {
+        Qwen38ReducedGenerationOptions gen;
+        gen.max_new_tokens = 4U;
+        gen.top_k = 1U;
+        gen.cancelled = [] { return true; };
+        auto g = qwen38_reduced_generate(model, prompt, gen);
+        CHECK(g && g.value().generated_ids.empty()
+              && g.value().finish_reason == Qwen38ReducedFinishReason::cancelled);
+    }
+    {
+        Qwen38ReducedGenerationOptions gen;
+        gen.max_new_tokens = 4U;
+        gen.top_k = 1U;
+        gen.timeout = std::chrono::milliseconds(1);
+        gen.cancelled = [] {
+            std::this_thread::sleep_for(std::chrono::milliseconds(2));
+            return false;
+        };
+        auto g = qwen38_reduced_generate(model, prompt, gen);
+        CHECK(g && g.value().generated_ids.empty()
+              && g.value().finish_reason == Qwen38ReducedFinishReason::timeout);
+    }
+    {
+        Qwen38ReducedGenerationOptions gen;
+        gen.max_new_tokens = 3U;
+        gen.context_limit_tokens = 3U;
+        auto g = qwen38_reduced_generate(model, prompt, gen);
+        CHECK(g && g.value().generated_ids.size() == 1U
+              && g.value().finish_reason == Qwen38ReducedFinishReason::context_limit);
+    }
+    CHECK(!qwen38_reduced_generate(model, std::span<const std::int32_t>{}, Qwen38ReducedGenerationOptions{}));
+}
+
+void test_qwen38_moe_router(const std::filesystem::path& root) {
+    using vastloom::inference::Qwen38ExpertLru;
+    using vastloom::inference::Qwen38OwnedExpert;
+    using vastloom::inference::qwen38_expert_cache_acquire;
+    using vastloom::inference::qwen38_moe_route;
+
+    std::ignore = root;
+    const std::vector<float> hidden{1.0F, 0.0F};
+    const std::vector<float> router{
+        1.0F, 0.0F,
+        0.0F, 1.0F,
+        1.0F, 1.0F};
+    auto route = qwen38_moe_route(hidden, router, 3, 2, true);
+    CHECK(route);
+    if (route) {
+        CHECK(route.value().indices.size() == 2U);
+        CHECK(route.value().indices[0] == 0U);
+        CHECK(route.value().indices[1] == 2U);
+        CHECK(std::abs(route.value().weights[0] - 0.5F) < 1e-5F);
+        CHECK(std::abs(route.value().weights[1] - 0.5F) < 1e-5F);
+        CHECK(std::abs(route.value().logits[0] - 1.0F) < 1e-6F);
+        CHECK(std::abs(route.value().logits[1] - 0.0F) < 1e-6F);
+        CHECK(std::abs(route.value().logits[2] - 1.0F) < 1e-6F);
+    }
+    CHECK(!qwen38_moe_route(hidden, router, 3, 4, true));
+
+    Qwen38ExpertLru cache;
+    cache.capacity = 1;
+    Qwen38OwnedExpert a;
+    a.gate_proj = {1.0F};
+    a.up_proj = {1.0F};
+    a.down_proj = {1.0F};
+    Qwen38OwnedExpert b = a;
+    b.gate_proj = {2.0F};
+    auto first = qwen38_expert_cache_acquire(cache, 1, a);
+    auto hit = qwen38_expert_cache_acquire(cache, 1, a);
+    auto evict = qwen38_expert_cache_acquire(cache, 2, b);
+    CHECK(first && hit && evict);
+    CHECK(cache.telemetry.hits == 1U);
+    CHECK(cache.telemetry.misses == 2U);
+    CHECK(cache.telemetry.evictions == 1U);
+    CHECK(cache.telemetry.requests == 3U);
+    CHECK(cache.telemetry.logical_bytes == 2U * 3U * sizeof(float));
+    CHECK(cache.keys.size() == 1U && cache.keys[0] == 2U);
+}
+
+void test_qwen38_persist_and_ngram_pages(const std::filesystem::path& root) {
+    using vastloom::inference::Qwen38NgramPageOptions;
+    using vastloom::inference::qwen38_deltanet_persist_create;
+    using vastloom::inference::qwen38_ngram_page_cache_open;
+    using vastloom::inference::qwen38_ngram_page_gather;
+    using vastloom::inference::qwen38_plan_persist_budget;
+    using vastloom::inference::qwen38_reference_live_ram_gate;
+    using vastloom::safety::ResourceGovernor;
+    using vastloom::safety::ResourceLimits;
+
+    const std::filesystem::path fixture_dir =
+        std::filesystem::path(VASTLOOM_SOURCE_DIR) / "tests" / "fixtures" / "qwen38_flash_next";
+    auto cfg = vastloom::inference::load_qwen38_flash_next_config(fixture_dir / "config.json");
+    CHECK(cfg);
+    if (!cfg) {
+        return;
+    }
+    auto budget = qwen38_plan_persist_budget(cfg.value());
+    CHECK(budget);
+    if (budget) {
+        CHECK(budget.value().linear_layers == 36U);
+        CHECK(budget.value().deltanet_bytes == 117669888ULL);
+        CHECK(budget.value().ngram_working_set == 4U * vastloom::GiB);
+        CHECK(budget.value().under_reference_ram_gate);
+        CHECK(budget.value().total_resident < qwen38_reference_live_ram_gate);
+    }
+
+    {
+        ResourceLimits limits;
+        limits.ram_hard_limit = 256U * vastloom::MiB;
+        ResourceGovernor governor(limits);
+        auto persist = qwen38_deltanet_persist_create(cfg.value(), governor);
+        CHECK(persist);
+        if (persist) {
+            CHECK(persist.value().linear_layers == 36U);
+            CHECK(persist.value().layers.size() == 36U);
+            CHECK(persist.value().layers[0].ssm.size() == 48U * 128U * 128U);
+            CHECK(persist.value().layers[0].conv.size() == 10240U * 3U);
+        }
+        ResourceLimits tiny;
+        tiny.ram_hard_limit = 1024U;
+        ResourceGovernor poor(tiny);
+        CHECK(!qwen38_deltanet_persist_create(cfg.value(), poor));
+    }
+
+    const auto table_path = root / "qwen38-ngram-pages.bin";
+    {
+        std::ofstream out(table_path, std::ios::binary);
+        for (int i = 0; i < 8; ++i) {
+            const float row[2] = {static_cast<float>(i) + 0.5F, static_cast<float>(i) + 1.5F};
+            out.write(reinterpret_cast<const char*>(row), sizeof(row));
+        }
+    }
+    ResourceLimits limits;
+    limits.ram_hard_limit = 64U * vastloom::KiB;
+    ResourceGovernor governor(limits);
+    Qwen38NgramPageOptions opt;
+    opt.table_path = table_path;
+    opt.rows = 8;
+    opt.dim = 2;
+    opt.rows_per_page = 2;
+    opt.max_pages = 2;
+    auto cache = qwen38_ngram_page_cache_open(opt, governor);
+    CHECK(cache);
+    if (!cache) {
+        return;
+    }
+    const std::int64_t first[] = {0};
+    auto g0 = qwen38_ngram_page_gather(cache.value(), first);
+    CHECK(g0 && g0.value().size() == 2U && std::abs(g0.value()[0] - 0.5F) < 1e-6F);
+    CHECK(cache.value().telemetry.misses == 1U);
+    CHECK(cache.value().telemetry.prefetches == 1U);
+    const std::int64_t second[] = {3};
+    auto g1 = qwen38_ngram_page_gather(cache.value(), second);
+    CHECK(g1 && std::abs(g1.value()[0] - 3.5F) < 1e-6F);
+    CHECK(cache.value().telemetry.hits >= 1U);
+    const std::int64_t third[] = {6};
+    auto g2 = qwen38_ngram_page_gather(cache.value(), third);
+    CHECK(g2 && std::abs(g2.value()[0] - 6.5F) < 1e-6F);
+    CHECK(cache.value().telemetry.evictions >= 1U);
+
+    ResourceLimits tiny;
+    tiny.ram_hard_limit = 8U;
+    ResourceGovernor poor(tiny);
+    CHECK(!qwen38_ngram_page_cache_open(opt, poor));
+}
+
+void test_qwen38_qsa_sparse(const std::filesystem::path& root) {
+    using vastloom::inference::qwen38_qsa_select;
+    using vastloom::inference::qwen38_qsa_sparse_attention;
+    using vastloom::inference::Qwen38QsaSelectView;
+
+    std::ignore = root;
+    const std::vector<float> query{
+        1.0F, 0.0F,  // head 0
+        0.0F, 1.0F   // head 1
+    };
+    const std::vector<float> k_cache{
+        1.0F, 0.0F,  // token 0 kv0
+        0.0F, 1.0F,  // token 1
+        1.0F, 1.0F,  // token 2
+        -1.0F, 0.0F, // token 3
+        0.5F, -0.5F, // token 4
+        0.2F, 0.8F,  // token 5
+        -0.5F, -0.5F,// token 6
+        0.0F, -1.0F  // token 7
+    };
+    const std::vector<float> v_cache{
+        1.0F, 2.0F,
+        3.0F, 4.0F,
+        5.0F, 6.0F,
+        7.0F, 8.0F,
+        9.0F, 10.0F,
+        11.0F, 12.0F,
+        13.0F, 14.0F,
+        15.0F, 16.0F
+    };
+    const std::vector<float> gate{
+        0.0F, 0.0F,
+        0.0F, 0.0F
+    };
+    const std::int32_t sel_raw[] = {0, 2};
+    auto sparse = qwen38_qsa_sparse_attention(query, k_cache, v_cache, sel_raw, gate, 2, 1, 2);
+    CHECK(sparse);
+    if (sparse) {
+        CHECK(sparse.value().size() == 4U);
+        for (float v : sparse.value()) {
+            CHECK(std::isfinite(v));
+        }
+        CHECK(sparse.value()[0] != sparse.value()[2]);
+    }
+    const std::int32_t sel_all[] = {0, 1, 2, 3, 4, 5, 6, 7};
+    auto dense = qwen38_qsa_sparse_attention(query, k_cache, v_cache, sel_all, gate, 2, 1, 2);
+    CHECK(dense);
+    CHECK(!qwen38_qsa_sparse_attention(query, k_cache, v_cache, sel_raw, gate, 3, 1, 2));
+
+    const std::vector<float> q_heads{
+        1.0F, 0.0F,
+        0.0F, 1.0F
+    };
+    const std::vector<float> raw_keys = k_cache;
+    const std::vector<float> k_norm{0.0F, 0.0F};
+    Qwen38QsaSelectView view{q_heads, raw_keys, k_norm, 2, 2, 8, 4, 2, 1e-6F};
+    auto idx = qwen38_qsa_select(view);
+    CHECK(idx);
+    if (idx) {
+        CHECK(idx.value().block_scores.size() == 4U);
+        std::size_t valid = 0;
+        for (std::int32_t v : idx.value().selected) {
+            if (v >= 0) {
+                ++valid;
+            }
+        }
+        CHECK(valid == 4U);
+        const std::int32_t expected_blocks = 8 / 2;
+        CHECK(idx.value().block_scores.size() == static_cast<std::size_t>(expected_blocks));
+        auto gated = qwen38_qsa_sparse_attention(query, k_cache, v_cache, idx.value().selected, gate, 2, 1, 2);
+        CHECK(gated);
     }
 }
 
@@ -8888,6 +9639,11 @@ int main() {
     test_qwen38_flash_next_reference_operators(root);
     test_qwen38_catalog_validation(root);
     test_qwen38_import_transaction(root);
+    test_qwen38_non_routed_graph_plan(root);
+    test_qwen38_reduced_graph(root);
+    test_qwen38_moe_router(root);
+    test_qwen38_persist_and_ngram_pages(root);
+    test_qwen38_qsa_sparse(root);
     test_deepseek_v4_reference_operators();
     test_deepseek_v4_reference_graph(root);
     test_model_store_and_runtime_policy(root);

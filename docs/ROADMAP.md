@@ -157,70 +157,129 @@ sintetico in-memory per il gate, mentre il mock fixture resta 3.6 KiB.
   destination rifiutata, (g) governor pieno => `resource_exhausted`.
 
 **Gate:** `vastloom_tests` ALL PASSED, `ctest --preset release` 13/14 (1 skipped),
-`compileall` verde. Import reale del payload 125B rimandato a Q5 (richiede
-download).
+`compileall` verde. Import reale del payload 125B resta rimandato (richiede
+download dopo i kernel e il POC).
 
-## Q5 - Operatori nativi pinned-ggml per le tre primitive
+## Q5 - Operatori nativi self-pinned per le tre primitive - complete
 
-- [ ] Decoder FP8 → F32 con kernel pinned-ggml.
-- [ ] Decoder DeltaNet state (linear-conv + gated-delta update) con kernel pinned.
-- [ ] Decoder QSA indexer (MQA 4-query/1-key con budget 2048) pinned.
-- [ ] Decoder n-gram embedding table (lookup async prefetch) pinned.
-- [ ] Decoder Gated Residual (4-branch read/write gate) pinned.
+> **Upstream bloccato:** llama.cpp `d0132a6` non ha `qwen4_exp`. Q5 è self-pinned
+> sulle equazioni di `transformers` `modeling_qwen4_exp.py` / `modular_qwen4_exp.py`
+> (Hugging Face, 2026-08), con golden values da oracolo Python ridotto.
 
-**Gate:** decoder per ogni primitiva dà output bit-exact contro llama.cpp pinned
-su almeno 1 layer ridotto, e il prodotto `dequant * matvec` chiude la parità.
+- [x] Decoder FP8 → F32 già in Q2 (`qwen38_fp8_e4m3_to_f32`, block-scale).
+- [x] `qwen38_rms_norm_affine`: RMS raggruppato + affine `(1 + weight)` come
+  `Qwen4ExpTextRMSNorm`.
+- [x] Gated Residual: `qwen38_gated_residual` + `qwen38_gated_residual_combine`
+  (SiLU bottleneck / `hc_count`, sigmoid read-gate, media sui branch,
+  write-gate `2 * sigmoid(inject / hc_count)`).
+- [x] Gated DeltaNet one-token: `qwen38_delta_net_decode` (conv1d causale + SiLU,
+  L2-norm Q/K, repeat_interleave, `g = -exp(A_log) * softplus(a + dt_bias)`,
+  update ricorrente FP32, RMSNorm gated-sigmoid, `out_proj`).
+- [x] QSA indexer: `qwen38_qsa_select` (pool `compress_ratio`, k-RMSNorm,
+  `relu(q·k).sum / sqrt(d)`, top-k blocchi + coda incompleta).
+- [x] N-gram: `qwen38_splitmix64`, `qwen38_nth_prime_after`,
+  `qwen38_ngram_multipliers` (seed 1234), `qwen38_ngram_hash_ids`
+  (shift-right ignore-EOS + XOR hash), `qwen38_ngram_lookup`.
+- [x] Test always-on esteso in `test_qwen38_flash_next_reference_operators`.
 
-## Q6 - Layer graph non-routed 48 layer Qwen3.8
+**Gate:** `vastloom_tests` ALL PASSED. Nessun download del 125B. Prefetch async
+n-gram e RoPE indexer restano Q9/Q10.
 
-- [ ] Planner che produce un piano non-routed (3 linear_attn + 1 full_attn) × 12.
-- [ ] Mappatura dei tensori FP8 → consumer C++20 (DeltaNet state, QSA indexer,
-  Gated Residual, MoE shared, MTP).
+## Q6 - Layer graph non-routed 48 layer Qwen3.8 - complete
 
-**Gate:** piano non-routed copre esattamente 48 layer + 1 MTP layer.
+- [x] `qwen38_plan_non_routed_graph(config)`: 36 Gated DeltaNet + 12 QSA
+  (`full_attention_interval=4`) + 1 MTP QSA. Nessun tensore routed expert.
+- [x] Nomi canonici dal catalogo reale Unsloth FP8: 22 non-routed/layer
+  (9 attn + 8 hyper + 5 shared/router), +138 PLE su layer 1, 29 MTP
+  (22 + 4 head + 3 mixer), 5 global (embed, lm_head, mixer).
+- [x] Mapping consumer: DeltaNet, QSA indexer/attention, Gated Residual
+  attn/mlp, MoE router/shared, n-gram PLE, MTP head, global embed/lm_head/mixer.
+- [x] `qwen38_validate_non_routed_plan` chiude 48+1, 36/12, 1194+5+29=1228.
+- [x] `qwen38_bind_non_routed_plan` attacca gli shard; manca un nome → refuse.
+- [x] Test always-on `test_qwen38_non_routed_graph_plan`.
 
-## Q7 - Prefill/decode reduced layer (2–3 layer + MTP)
+**Gate:** piano non-routed copre esattamente 48 layer + 1 MTP. Nessun download.
 
-- [ ] Modello ridotto: 2 layer ridotti + 1 MTP.
-- [ ] Forward deterministico, parità con grafo indipendentemente dequantizzato.
+## Q7 - Prefill/decode reduced layer (2–3 layer + MTP) - complete
 
-**Gate:** parità pinned-ggml bit-exact.
+> Self-pinned: llama.cpp non ha `qwen4_exp`. Il grafo ridotto ricompone i
+> kernel Q5; l'oracolo è la stessa sequenza di primitive, non ggml.
 
-## Q8 - MoE routing 10 routed + 1 shared
+- [x] Grafo ridotto F32: embed → stream `hc_count` → layer0 Gated Residual +
+  DeltaNet + shared SwiGLU → layer1 Gated Residual + QSA (indexer + GQA
+  mascherata + gate sigmoide) + shared SwiGLU → mixer globale → `lm_head`.
+- [x] MTP: `rms(h)`/`rms(embed)` + `fc_hidden`/`fc_embed` → un layer QSA+MLP
+  + mixer → logits extra.
+- [x] `qwen38_reduced_prefill` / `qwen38_reduced_decode` con state DeltaNet e
+  cache QSA/MTP. Prefill di 2 token == due decode incrementali.
+- [x] Primitive pubbliche `qwen38_linear`, `qwen38_shared_mlp`,
+  `qwen38_expand_stream`, `qwen38_qsa_layer_token`.
+- [x] Test always-on `test_qwen38_reduced_graph`. Nessun esperto routed (Q8).
 
-- [ ] Implementare router top-k 10/512 con softmax learned (no hash shortcut,
-  a differenza di DeepSeek).
-- [ ] Selected expert cache con hit/miss/eviction/logical-byte telemetry.
-- [ ] Confrontare routing decisions e final logits vs llama.cpp pinned.
+**Gate:** `vastloom_tests` ALL PASSED. Nessun download.
 
-**Gate:** routing identico su un seed pinned.
+## Q8 - MoE routing 10 routed + 1 shared - complete
 
-## Q9 - Gated DeltaNet state persistence + N-gram lookup resident
+> Self-pinned su `Qwen4ExpTextTopKRouter` / `Qwen4ExpTextSparseMoeBlock`
+> (`norm_topk_prob=true`). llama.cpp non ha `qwen4_exp`.
 
-- [ ] State FP32 (`mamba_ssm_dtype=float32`) pinned in RAM per tutti i 48 layer.
-- [ ] Lookup table n-gram 20M entries × 2560 dim × BF16 = ~102 GB; cache paginata
-  con prefetch asincrono (scenario B, 4 GB working set).
-- [ ] Convalida che un singolo forward di 1 token completa senza page-fault su disco
-  (page cache calda) e che la banda per token è entro il budget previsto.
+- [x] `qwen38_moe_route`: logits = xW^T, softmax F64, top-k, rinormalizza i
+  pesi selezionati. Nessuno hash-route.
+- [x] `qwen38_expert_mlp` + `qwen38_moe_block`: somma pesata dei routed +
+  shared SwiGLU (gate sigmoide).
+- [x] LRU `qwen38_expert_cache_acquire` con hit/miss/eviction/logical-byte.
+  Chiave `(layer << 16) | expert`.
+- [x] Grafo ridotto Q7: 4 esperti, top-2, cache da 2 slot su layer0/1/MTP.
+- [x] Test `test_qwen38_moe_router` (golden [1,0]→esperti 0+2, pesi 0.5/0.5)
+  e telemetry nel reduced prefill.
 
-**Gate:** RAM viva misurata < 12.3 GB su host reference; persist window 48 layer
-chiude.
+**Gate:** routing self-pinned sul seed del test. Nessun download. Nessun
+confronto llama.cpp.
 
-## Q10 - QSA sparse attention (MQA indexer + gather + matmul sparse)
+## Q9 - Gated DeltaNet state persistence + N-gram lookup resident - complete (infra)
 
-- [ ] Implementare indexer con 4 query heads / 1 key head (dim 128) e budget 2048.
-- [ ] Gather dei blocchi selezionati e matmul sparse pinned-ggml.
-- [ ] Test parità pinned-ggml su una lunghezza di context 4096 pinned.
+> Nessun download del 125B. Il gate “RAM viva < 12.3 GB sul generate ufficiale”
+> resta **non misurato**. Q9 chiude il persist planner e la cache paginata su
+> fixture.
 
-**Gate:** logits identici su contesto corto.
+- [x] `qwen38_plan_persist_budget`: 36 layer DeltaNet, conv+SSM FP32 =
+  117 669 888 B (~112.2 MiB) + working set n-gram (default 4 GiB scenario B).
+  Totale carta 4.11 GiB < gate 12.3 GiB.
+- [x] `qwen38_deltanet_persist_create`: riserva Governor e azzera 36 state
+  (conv 10240×3, SSM 48×128×128).
+- [x] `qwen38_ngram_page_cache_open` / `qwen38_ngram_page_gather`: pagine
+  bounded, LRU, prefetch della pagina successiva, telemetry
+  hit/miss/eviction/prefetch/logical-byte.
+- [x] Test always-on `test_qwen38_persist_and_ngram_pages`.
 
-## Q11 - Full-depth generate validate (48 layer + MTP)
+**Gate infra:** budget e cache verdi. **Non** è una misura live sul 125B.
 
-- [ ] Generare 20+ token dal modello 125B FP8 sul prompt italiano pinned
-  (analogo al prompt "Roma" usato per DeepSeek).
-- [ ] Confronto bit-exact con llama.cpp pinned-ggml.
+## Q10 - QSA sparse attention (MQA indexer + gather + matmul sparse) - complete (self-pinned)
 
-**Gate:** gli ultimi 8 token generati coincidono.
+> llama.cpp non ha `qwen4_exp`. Il gate “pinned-ggml 4096” è self-pinned.
+
+- [x] `qwen38_qsa_select` già in Q5 (indexer MQA 4q/1k, budget 2048, compress 4).
+- [x] `qwen38_qsa_sparse_attention`: GQA gather sui soli `selected`, scaled-dot,
+  softmax, weighted-sum, gate sigmoide — estratto da `qwen38_qsa_layer_token`.
+- [x] Test always-on `test_qwen38_qsa_sparse`: sparse su 2 token vs dense su 8,
+  budget enforcement e pipeline indexer→sparse su 8 token sintetici.
+
+**Gate:** parità self-pinned su contesto corto. 4096 reale non misurato.
+
+## Q11 - Full-depth generate validate (48 layer + MTP) - complete (infra)
+
+> Il gate reale (20+ token sul 125B FP8, confronto llama.cpp) resta **non
+> eseguibile** senza checkpoint. Q11 chiude il driver generate sul grafo
+> ridotto, pronto per il full-depth.
+
+- [x] `qwen38_reduced_generate`: prefill + decode loop, greedy/sampled
+  (softmax+top-k seeded), `stop_token_ids`, `context_limit_tokens`,
+  cancellazione, timeout, `on_token`, stats (prompt/generated/forward,
+  expert telemetry, ms, tok/s).
+- [x] Test always-on: greedy 3 token, determinismo seeded, stop/cancel/
+  timeout/context-limit, prompt vuoto rifiutato.
+
+**Gate infra:** driver verde su grafo ridotto. 125B non scaricato.
 
 ## Q12 - prefix-KV MoE stream (porting M13)
 

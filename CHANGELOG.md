@@ -2,6 +2,81 @@
 
 ## Unreleased
 
+- **Q11 - Qwen3.8-Flash-Next reduced autoregressive generate (infra).** New
+  `qwen38_reduced_generate` mirrors the DeepSeek reference driver on the
+  reduced graph: bounded prefill then a decode loop with greedy or seeded
+  softmax+top-k sampling, `stop_token_ids`, `context_limit_tokens`,
+  cancellation and timeout checkpoints, `on_token` streaming and
+  prompt/generation/expert telemetry (including tok/s). Always-on tests in
+  `test_qwen38_reduced_graph` cover greedy, seeded determinism, stop/cancel/
+  timeout/context-limit and empty-prompt refusal. The official 48-layer 125B
+  gate remains unmeasured (no checkpoint).
+
+- **Q10 - Qwen3.8-Flash-Next QSA sparse attention.** New
+  `qwen38_qsa_sparse_attention` (GQA gather on `selected` only, scaled-dot
+  softmax, sigmoid gate) factored from the Q7 layer. Indexer remains
+  `qwen38_qsa_select` (Q5). Always-on `test_qwen38_qsa_sparse` verifies
+  sparse vs dense divergence and indexer→sparse on 8 synthetic tokens.
+  Self-pinned; no ggml oracle, no 4096 live.
+
+- **Q9 - Qwen3.8-Flash-Next DeltaNet persist + paged n-gram cache.** New
+  `qwen38_plan_persist_budget` sizes the 36 Gated DeltaNet FP32 states
+  (117,669,888 bytes) plus the 4 GiB n-gram scenario-B working set and
+  compares the paper total against the 12.3 GiB live-RAM gate. 
+  `qwen38_deltanet_persist_create` reserves that state through the Governor.
+  `qwen38_ngram_page_cache_open` / `qwen38_ngram_page_gather` keep a bounded
+  LRU of table pages with next-page prefetch and hit/miss/eviction/prefetch
+  telemetry. Always-on `test_qwen38_persist_and_ngram_pages`. No 125B
+  download; official live RAM is still unmeasured.
+
+- **Q8 - Qwen3.8-Flash-Next learned MoE router + expert LRU.** New
+  `qwen38_moe_route` (softmax top-k, `norm_topk_prob` renormalization, no
+  hash shortcut), `qwen38_expert_mlp`, and `qwen38_moe_block` that adds the
+  weighted routed SwiGLU sum to the existing shared expert. Bounded LRU
+  `qwen38_expert_cache_acquire` records hits/misses/evictions and logical
+  bytes keyed by `(layer, expert)`. The reduced Q7 graph now routes 4
+  experts at top-2 on every layer including MTP. Always-on
+  `test_qwen38_moe_router` pins logits `[1,0,1]` -> experts `0,2` with
+  equal 0.5 weights and a one-slot eviction. No llama.cpp oracle.
+
+- **Q7 - Qwen3.8-Flash-Next reduced prefill/decode graph.** New self-pinned
+  two-layer + MTP reference: Gated Residual wraps a Gated DeltaNet block and
+  a QSA block (indexer select + masked GQA + sigmoid output gate), each
+  followed by the shared SwiGLU expert only. Global mixer collapses the
+  widened residual stream; MTP mixes last hidden and last embed through
+  `fc_hidden`/`fc_embed` and one QSA+MLP layer. `qwen38_reduced_prefill` and
+  `qwen38_reduced_decode` keep DeltaNet/QSA/MTP state; a two-token prefill
+  matches two incremental decodes. Also exported `qwen38_linear`,
+  `qwen38_shared_mlp`, `qwen38_expand_stream`, `qwen38_qsa_layer_token`.
+  Always-on `test_qwen38_reduced_graph`. No routed experts (Q8) and no 125B
+  download.
+
+- **Q6 - Qwen3.8-Flash-Next non-routed layer graph.** New
+  `qwen38_plan_non_routed_graph` emits the canonical 48-layer + 1 MTP plan
+  (36 Gated DeltaNet / 12 QSA from `full_attention_interval=4`) without
+  routed experts or vision. Each language layer maps 22 always-active
+  tensors (9 attention + 8 Gated Residual + 5 shared/router); layer 1 adds
+  the 138 PLE objects; MTP contributes 29 (QSA layer + `fc_*` + mixer).
+  Consumers are DeltaNet, QSA indexer/attention, Gated Residual, MoE
+  router/shared, n-gram PLE, MTP head and the three global mixer/embed/lm_head
+  tensors (1228 text-side non-routed names, pinned against the real Unsloth
+  FP8 index). `qwen38_validate_non_routed_plan` enforces those counts;
+  `qwen38_bind_non_routed_plan` attaches shard paths and refuses a missing
+  name. Always-on `test_qwen38_non_routed_graph_plan`.
+
+- **Q5 - Qwen3.8-Flash-Next self-pinned primitive operators.** Native C++20
+  kernels matching Hugging Face `modeling_qwen4_exp.py` (llama.cpp still has no
+  `qwen4_exp`). New `qwen38_rms_norm_affine` (grouped RMS, affine `1+w`),
+  `qwen38_gated_residual` / `qwen38_gated_residual_combine` (SiLU bottleneck
+  scaled by `hc_count`, sigmoid read-gate, mean over residual branches, write
+  gate `2*sigmoid(inject/hc_count)`), `qwen38_delta_net_decode` (causal conv1d +
+  SiLU, L2-norm Q/K, GQA repeat, gated-delta recurrent update in FP32, sigmoid
+  gated RMSNorm, output projection), `qwen38_qsa_select` (mean-pool
+  `compress_ratio` keys, ReLU-sum scores, top-k complete blocks plus incomplete
+  tail), and n-gram `splitmix64` / prime vocab / hash-XOR / table lookup.
+  Always-on `test_qwen38_flash_next_reference_operators` pins reduced golden
+  values for all four primitives. No 125B download.
+
 - **Q4 - Qwen3.8-Flash-Next range importer + safety governor.** New
   `qwen38_read_tensor_payload(shard, header, tensor_name)` reads exactly one
   tensor's payload (and its optional `weight_scale_inv` companion) from a

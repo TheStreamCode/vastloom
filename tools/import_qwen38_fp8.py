@@ -51,6 +51,8 @@ def build_spec() -> ModelSpec:
         size = int(entry["size"])
         if path.startswith("model-") and path.endswith(".safetensors"):
             files.append(FileSpec(path, size, None, True))
+        elif path == "model.safetensors.index.json":
+            files.append(FileSpec(path, size, None, False))
         elif any(path.endswith(suffix) for suffix in META_SUFFIXES) and "safetensors" not in path:
             files.append(FileSpec(path, size, None, False))
     if not files:

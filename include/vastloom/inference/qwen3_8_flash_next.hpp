@@ -209,7 +209,7 @@ struct Qwen38ExpectedCatalog {
     static constexpr std::size_t vision_tensors = 333;
     static constexpr std::size_t mtp_tensors = 3101;
     static constexpr std::size_t global_tensors = 5; // embed + lm_head + norm + 3 hyper global
-    static constexpr std::size_t ngram_tensors = 128; // shard_0..127 weights
+    static constexpr std::size_t ngram_tensors = 129; // 128 shard weights + weight_scale
     static constexpr std::size_t ngram_with_proj = 138; // + ple_input_proj etc
     static constexpr std::size_t fp8_expert_scale_inv = 75264; // counted as fp8_block_scaled_experts
     static constexpr std::size_t linear_layers = 36;

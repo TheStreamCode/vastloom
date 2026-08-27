@@ -2,6 +2,18 @@
 
 ## Unreleased
 
+- **Q11b - Qwen3.8-Flash-Next real checkpoint catalog.** The official
+  `unsloth/Qwen3.8-Flash-Next-FP8` 125B checkpoint (172.8 GiB, 131 shards,
+  152,089 tensors) is imported through the canonical immutable importer and
+  now validates end-to-end in native C++. New CLI `vastloom qwen38-inspect`
+  (metadata-only: config + index + optional first-shard header) and opt-in
+  serial test `vastloom_qwen38_checkpoint` (`-DVASTLOOM_QWEN38_MODEL=<root>`).
+  Fixed fixture-to-real drift: `ExpectedCatalog::ngram_tensors` 128 -> 129 (the
+  real checkpoint carries `ple_embedding.ngram_embedding.weight_scale`, which
+  the synthetic fixture lacked). New HF-token-aware download path for
+  `import_hf_model`/`import_qwen38_fp8` via the `HF_TOKEN` environment
+  variable (never logged). No tensor payload has been read for compute yet.
+
 - **Q11 - Qwen3.8-Flash-Next reduced autoregressive generate (infra).** New
   `qwen38_reduced_generate` mirrors the DeepSeek reference driver on the
   reduced graph: bounded prefill then a decode loop with greedy or seeded

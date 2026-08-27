@@ -59,6 +59,8 @@ set(VASTLOOM_DEEPSEEK_V4_IQ3XXS_SLICE "" CACHE FILEPATH
     "Optional pinned DeepSeek V4 Flash 0731 layer-0 expert-0 IQ3_XXS down slice")
 set(VASTLOOM_GGML_ROOT "" CACHE PATH
     "Optional pinned ggml source checkout; enables the opt-in ggml compute backend")
+set(VASTLOOM_QWEN38_MODEL "" CACHE PATH
+    "Path to the imported unsloth/Qwen3.8-Flash-Next-FP8 checkpoint root (opt-in real-model tests)")
 
 option(VASTLOOM_BUILD_TESTS "Build Vastloom tests" ON)
 option(VASTLOOM_ENABLE_SANITIZERS "Enable AddressSanitizer and UndefinedBehaviorSanitizer" OFF)
@@ -263,6 +265,21 @@ if(BUILD_TESTING AND VASTLOOM_BUILD_TESTS)
         )
         set_tests_properties(vastloom_deepseek_v4_real_expert PROPERTIES
             TIMEOUT 60
+            RUN_SERIAL TRUE
+        )
+    endif()
+    if(VASTLOOM_QWEN38_MODEL)
+        add_executable(vastloom_qwen38_checkpoint_test tests/test_qwen38_checkpoint.cpp)
+        target_link_libraries(vastloom_qwen38_checkpoint_test PRIVATE Vastloom::Core)
+        target_compile_features(vastloom_qwen38_checkpoint_test PRIVATE cxx_std_20)
+        vastloom_set_project_warnings(vastloom_qwen38_checkpoint_test)
+        vastloom_enable_sanitizers(vastloom_qwen38_checkpoint_test)
+        add_test(
+            NAME vastloom_qwen38_checkpoint
+            COMMAND vastloom_qwen38_checkpoint_test ${VASTLOOM_QWEN38_MODEL}
+        )
+        set_tests_properties(vastloom_qwen38_checkpoint PROPERTIES
+            TIMEOUT 300
             RUN_SERIAL TRUE
         )
     endif()

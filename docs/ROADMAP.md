@@ -281,6 +281,30 @@ confronto llama.cpp.
 
 **Gate infra:** driver verde su grafo ridotto. 125B non scaricato.
 
+## Q11b - Catalogo reale 125B FP8 - complete
+
+> Il checkpoint `unsloth/Qwen3.8-Flash-Next-FP8` (172.8 GiB, 131 shard, 140
+> file) è stato importato tramite il path canonico
+> (`tools/import_qwen38_fp8.py` su `import_hf_model.import_model`: store
+> `.vastloom-store`, lock, SHA-256 per file, manifest atomico, read-only) in
+> `C:\vastloom-store\models\original\unsloth-Qwen3.8-Flash-Next-FP8--main`.
+> Il download ha richiesto il token HF (throttle anonimo ~30 KB/s dopo burst;
+> autenticato ~78 MB/s, ~35 min totali).
+
+- [x] `vastloom qwen38-inspect <root> [--load-header] [--json]`: ispezione
+  metadata-only config + index (+ header primo shard) con validazione pin.
+- [x] Validazione completa del catalogo reale: 131 shard, 152 089 tensori,
+  75 264 esperti FP8 block-scale, 129 tensori n-gram (128 shard + weight_scale),
+  48 layer, vision 333, MTP 3101, globali 5.
+- [x] Drift fixture→reale corretto: `ExpectedCatalog::ngram_tensors` 128→129
+  (il tensore `ple_embedding.ngram_embedding.weight_scale` esiste nel
+  checkpoint reale e non nella fixture Q1; già previsto nel piano Q6).
+- [x] Test opt-in seriale `vastloom_qwen38_checkpoint`
+  (`-DVASTLOOM_QWEN38_MODEL=<root>`), metadata-only: PASS sul checkpoint reale.
+
+**Gate:** catalogo reale validato end-to-end in C++ nativo. Nessun payload
+tensore ancora letto per il compute (prossimo passo: bind e layer reale).
+
 ## Q12 - prefix-KV MoE stream (porting M13)
 
 - [ ] Estendere `LlamaSession` al percorso MoE stream.

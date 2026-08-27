@@ -36,6 +36,7 @@
 #include "vastloom/inference/deepseek_v4_reference.hpp"
 #include "vastloom/inference/ggml_compute.hpp"
 #include "vastloom/inference/deepseek_v4_preflight.hpp"
+#include "vastloom/inference/qwen3_8_flash_next.hpp"
 #include "vastloom/inference/llama_model.hpp"
 #include "vastloom/inference/olmoe_model.hpp"
 #include "vastloom/inference/olmoe_runtime.hpp"
@@ -1531,6 +1532,61 @@ int command_deepseek_inspect(const std::vector<std::string>& args) {
     if (!inspection) return print_error(inspection.error(), json);
     std::cout << (json ? vastloom::inference::to_json(inspection.value())
                       : vastloom::inference::to_text(inspection.value())) << '\n';
+    return 0;
+}
+
+// Qwen3.8-Flash-Next checkpoint inspection over the canonical Q1-Q4 reader
+// path: config.json -> model.safetensors.index.json -> optional first-shard
+// header. Metadata only; no tensor payload is read.
+int command_qwen38_inspect(const std::vector<std::string>& args) {
+    auto valid = validate_options(args, 1U, {}, {"--json", "--load-header"});
+    const bool json = has_flag(args, "--json");
+    if (!valid) return print_error(valid.error(), json);
+
+    const auto model_path = cli_path(args[0]);
+    const auto config_path = model_path / "config.json";
+    auto cfg = vastloom::inference::load_qwen38_flash_next_config(config_path);
+    if (!cfg) return print_error(cfg.error(), json);
+
+    const auto index_path = model_path / "model.safetensors.index.json";
+    auto inspected = vastloom::inference::inspect_qwen38_flash_next_safetensors(
+        index_path, cfg.value(), has_flag(args, "--load-header"));
+    if (!inspected) return print_error(inspected.error(), json);
+
+    auto validated = vastloom::inference::qwen38_validate_catalog(inspected.value());
+    if (!validated) return print_error(validated.error(), json);
+    const auto& r = validated.value();
+
+    if (json) {
+        std::cout << "{\n"
+                  << "  \"model_id\": \"" << r.model_id << "\",\n"
+                  << "  \"shards\": " << r.total_shards << ",\n"
+                  << "  \"tensors\": " << r.total_tensors << ",\n"
+                  << "  \"fp8_block_scaled_experts\": " << r.fp8_block_scaled_experts << ",\n"
+                  << "  \"ngram_tensors\": " << r.ngram_tensor_count << ",\n"
+                  << "  \"gated_residual_global\": " << (r.has_gated_residual_global ? "true" : "false") << ",\n"
+                  << "  \"gated_residual_per_layer\": " << (r.has_gated_residual_per_layer ? "true" : "false") << ",\n"
+                  << "  \"layers\": " << r.layers.size() << ",\n"
+                  << "  \"vision_tensors\": " << r.vision_tensors << ",\n"
+                  << "  \"mtp_tensors\": " << r.mtp_tensors << ",\n"
+                  << "  \"global_tensors\": " << r.global_tensors << ",\n"
+                  << "  \"shard_header_loaded\": " << (r.shard_loaded ? "true" : "false") << "\n"
+                  << "}\n";
+    } else {
+        std::cout << "Qwen3.8-Flash-Next checkpoint inspection\n"
+                  << "  model: " << r.model_id << '\n'
+                  << "  shards: " << r.total_shards << '\n'
+                  << "  tensors: " << r.total_tensors << '\n'
+                  << "  fp8 block-scaled experts: " << r.fp8_block_scaled_experts << '\n'
+                  << "  ngram tensors: " << r.ngram_tensor_count << '\n'
+                  << "  gated residual: "
+                  << (r.has_gated_residual_global && r.has_gated_residual_per_layer ? "yes" : "no") << '\n'
+                  << "  layers: " << r.layers.size() << '\n'
+                  << "  vision tensors: " << r.vision_tensors << '\n'
+                  << "  mtp tensors: " << r.mtp_tensors << '\n'
+                  << "  global tensors: " << r.global_tensors << '\n'
+                  << "  shard header loaded: " << (r.shard_loaded ? "yes" : "no") << '\n';
+    }
     return 0;
 }
 
@@ -4766,6 +4822,7 @@ int dispatch_cli(const std::vector<std::string>& arguments) {
         if (command == "real-logits") return command_real_logits(args);
         if (command == "moe-inspect") return command_moe_inspect(args);
         if (command == "deepseek-inspect") return command_deepseek_inspect(args);
+        if (command == "qwen38-inspect") return command_qwen38_inspect(args);
         if (command == "deepseek-gguf-inspect") return command_deepseek_gguf_inspect(args);
         if (command == "deepseek-gguf-checkpoint") return command_deepseek_gguf_checkpoint(args);
         if (command == "deepseek-gguf-probe-plan") return command_deepseek_gguf_probe_plan(args);

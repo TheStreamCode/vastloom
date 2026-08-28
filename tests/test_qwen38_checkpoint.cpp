@@ -43,56 +43,72 @@ int main(int argc, char** argv) {
     namespace inf = vastloom::inference;
 
     const auto config_path = root / "config.json";
-    check(std::filesystem::exists(config_path), "config.json exists");
-    auto cfg = inf::load_qwen38_flash_next_config(config_path);
-    check(static_cast<bool>(cfg), "config parses");
-    if (!cfg) {
-        std::cerr << "  error: " << cfg.error().message << " (" << cfg.error().context << ")\n";
-        return 1;
-    }
+    const bool safetensors = std::filesystem::exists(config_path);
+    check(safetensors
+              || std::filesystem::exists(root / "Q8_0")
+              || !std::filesystem::is_empty(root),
+          "checkpoint layout present");
+    if (safetensors) {
+        auto cfg = inf::load_qwen38_flash_next_config(config_path);
+        check(static_cast<bool>(cfg), "config parses");
+        if (!cfg) {
+            std::cerr << "  error: " << cfg.error().message << " (" << cfg.error().context << ")\n";
+            return 1;
+        }
 
-    const auto& c = cfg.value();
-    check(c.hidden_size == inf::Qwen38ExpectedInvariants::hidden_size, "hidden_size == 2560");
-    check(c.num_hidden_layers == inf::Qwen38ExpectedInvariants::num_hidden_layers, "layers == 48");
-    check(c.num_experts == inf::Qwen38ExpectedInvariants::num_experts, "experts == 512");
-    check(c.num_experts_per_tok == inf::Qwen38ExpectedInvariants::num_experts_per_tok, "top-k == 10");
-    check(c.vocab_size == inf::Qwen38ExpectedInvariants::vocab_size, "vocab == 248320");
-    check(c.full_attention_interval == inf::Qwen38ExpectedInvariants::full_attention_interval,
-          "full_attention_interval == 4");
+        const auto& c = cfg.value();
+        check(c.hidden_size == inf::Qwen38ExpectedInvariants::hidden_size, "hidden_size == 2560");
+        check(c.num_hidden_layers == inf::Qwen38ExpectedInvariants::num_hidden_layers, "layers == 48");
+        check(c.num_experts == inf::Qwen38ExpectedInvariants::num_experts, "experts == 512");
+        check(c.num_experts_per_tok == inf::Qwen38ExpectedInvariants::num_experts_per_tok, "top-k == 10");
+        check(c.vocab_size == inf::Qwen38ExpectedInvariants::vocab_size, "vocab == 248320");
+        check(c.full_attention_interval == inf::Qwen38ExpectedInvariants::full_attention_interval,
+              "full_attention_interval == 4");
 
-    const auto index_path = root / "model.safetensors.index.json";
-    check(std::filesystem::exists(index_path), "index.json exists");
-    auto inspected = inf::inspect_qwen38_flash_next_safetensors(index_path, c, /*load_header=*/true);
-    check(static_cast<bool>(inspected), "index inspects");
-    if (!inspected) {
-        std::cerr << "  error: " << inspected.error().message << " (" << inspected.error().context << ")\n";
-        return 1;
-    }
+        const auto index_path = root / "model.safetensors.index.json";
+        check(std::filesystem::exists(index_path), "index.json exists");
+        auto inspected = inf::inspect_qwen38_flash_next_safetensors(index_path, c, /*load_header=*/true);
+        check(static_cast<bool>(inspected), "index inspects");
+        if (!inspected) {
+            std::cerr << "  error: " << inspected.error().message << " (" << inspected.error().context << ")\n";
+            return 1;
+        }
 
-    check(inspected.value().total_tensors == inf::Qwen38ExpectedCatalog::total_tensors,
-          "total tensors == 152089");
-    check(inspected.value().total_shards == inf::Qwen38ExpectedCatalog::total_shards,
-          "total shards == 131");
-    check(inspected.value().fp8_block_scaled_experts == inf::Qwen38ExpectedCatalog::fp8_expert_scale_inv,
-          "fp8 scale_inv == 75264");
-    check(inspected.value().ngram_tensor_count == inf::Qwen38ExpectedCatalog::ngram_tensors,
-          "ngram tensors == 129");
-    check(inspected.value().has_gated_residual_global, "global gated residual present");
-    check(inspected.value().has_gated_residual_per_layer, "per-layer gated residual present");
-    check(inspected.value().shard_loaded, "first shard header loaded");
+        check(inspected.value().total_tensors == inf::Qwen38ExpectedCatalog::total_tensors,
+              "total tensors == 152089");
+        check(inspected.value().total_shards == inf::Qwen38ExpectedCatalog::total_shards,
+              "total shards == 131");
+        check(inspected.value().fp8_block_scaled_experts == inf::Qwen38ExpectedCatalog::fp8_expert_scale_inv,
+              "fp8 scale_inv == 75264");
+        check(inspected.value().ngram_tensor_count == inf::Qwen38ExpectedCatalog::ngram_tensors,
+              "ngram tensors == 129");
+        check(inspected.value().has_gated_residual_global, "global gated residual present");
+        check(inspected.value().has_gated_residual_per_layer, "per-layer gated residual present");
+        check(inspected.value().shard_loaded, "first shard header loaded");
 
-    // Full catalog validation (the same gate the CLI applies).
-    auto validated = inf::qwen38_validate_catalog(inspected.value());
-    check(static_cast<bool>(validated), "catalog validates against pinned invariants");
-    if (!validated) {
-        std::cerr << "  error: " << validated.error().message << " (" << validated.error().context << ")\n";
+        // Full catalog validation (the same gate the CLI applies).
+        auto validated = inf::qwen38_validate_catalog(inspected.value());
+        check(static_cast<bool>(validated), "catalog validates against pinned invariants");
+        if (!validated) {
+            std::cerr << "  error: " << validated.error().message << " (" << validated.error().context << ")\n";
+        } else {
+            const auto& r = validated.value();
+            check(r.layers.size() == inf::Qwen38ExpectedCatalog::language_layers, "48 language layers");
+            check(r.vision_tensors == inf::Qwen38ExpectedCatalog::vision_tensors, "vision == 333");
+            check(r.mtp_tensors == inf::Qwen38ExpectedCatalog::mtp_tensors, "mtp == 3101");
+            check(r.global_tensors == inf::Qwen38ExpectedCatalog::global_tensors, "globals == 5");
+            check(!r.shard_header.tensors.empty(), "shard header tensors non-empty");
+        }
     } else {
-        const auto& r = validated.value();
-        check(r.layers.size() == inf::Qwen38ExpectedCatalog::language_layers, "48 language layers");
-        check(r.vision_tensors == inf::Qwen38ExpectedCatalog::vision_tensors, "vision == 333");
-        check(r.mtp_tensors == inf::Qwen38ExpectedCatalog::mtp_tensors, "mtp == 3101");
-        check(r.global_tensors == inf::Qwen38ExpectedCatalog::global_tensors, "globals == 5");
-        check(!r.shard_header.tensors.empty(), "shard header tensors non-empty");
+        // GGUF layout (e.g. unsloth Q8_0): validate the split catalog instead.
+        auto gguf = inf::qwen38_open_gguf_checkpoint(root);
+        check(static_cast<bool>(gguf), "gguf split catalog opens");
+        if (!gguf) {
+            std::cerr << "  error: " << gguf.error().message << " (" << gguf.error().context << ")\n";
+            return 1;
+        }
+        check(gguf.value().catalog.architecture == "qwen4exp", "gguf architecture is qwen4exp");
+        check(gguf.value().catalog.tensors.size() >= 1224U, "gguf catalog covers the tensor set");
     }
 
     if (failures != 0) {
@@ -123,9 +139,22 @@ int main(int argc, char** argv) {
         }
         check(trunk.value().is_qsa == (layer_id == 3U),
               "layer attention kind matches full_attention_interval");
-        check(trunk.value().expert_shards.size()
-                  == ref::Qwen38ExpectedInvariants::num_experts,
-              "expert shard map covers 512 experts");
+        if (trunk.value().is_gguf) {
+            check(trunk.value().gguf_gate.expert_stride_bytes
+                      == 34U * (static_cast<std::uint64_t>(
+                                    ref::Qwen38ExpectedInvariants::hidden_size)
+                                * ref::Qwen38ExpectedInvariants::moe_intermediate_size / 32U),
+                  "fused gate expert stride matches Q8_0 blocks");
+            check(trunk.value().gguf_down.expert_stride_bytes
+                      == 34U * (static_cast<std::uint64_t>(
+                                    ref::Qwen38ExpectedInvariants::hidden_size)
+                                * ref::Qwen38ExpectedInvariants::moe_intermediate_size / 32U),
+                  "fused down expert stride matches Q8_0 blocks");
+        } else {
+            check(trunk.value().expert_shards.size()
+                      == ref::Qwen38ExpectedInvariants::num_experts,
+                  "expert shard map covers 512 experts");
+        }
         check(trunk.value().router.size()
                   == static_cast<std::size_t>(ref::Qwen38ExpectedInvariants::num_experts) * H,
               "router weight count");

@@ -101,6 +101,7 @@ add_library(vastloom_core STATIC
     src/inference/llama_model.cpp
     src/inference/qwen3_8_flash_next.cpp
     src/inference/qwen3_8_flash_next_reference.cpp
+    src/inference/qwen3_8_gguf.cpp
     src/inference/olmoe_model.cpp
     src/inference/olmoe_runtime.cpp
     src/inference/tiny_model.cpp

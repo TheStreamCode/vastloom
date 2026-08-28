@@ -1527,6 +1527,11 @@ Result<Qwen38LayerTrunk> qwen38_load_layer_trunk(
     const std::filesystem::path& checkpoint_root,
     std::uint32_t layer,
     Qwen38Layer0Telemetry* telemetry) {
+    auto kind = qwen38_detect_checkpoint_kind(checkpoint_root);
+    if (!kind) return kind.error();
+    if (kind.value() == Qwen38CheckpointKind::gguf) {
+        return qwen38_load_gguf_layer_trunk(checkpoint_root, layer, telemetry);
+    }
     const auto t0 = std::chrono::steady_clock::now();
 
     // Verify the checkpoint identity first: config + full catalog validation.
@@ -1891,6 +1896,11 @@ Result<std::vector<float>> qwen38_load_embed_row(
     const std::filesystem::path& checkpoint_root,
     std::uint32_t token_id,
     Qwen38Layer0Telemetry* telemetry) {
+    auto kind = qwen38_detect_checkpoint_kind(checkpoint_root);
+    if (!kind) return kind.error();
+    if (kind.value() == Qwen38CheckpointKind::gguf) {
+        return qwen38_load_gguf_embed_row(checkpoint_root, token_id, telemetry);
+    }
     const std::string s130 = "model-00130-of-00131.safetensors";
     const std::string embed_name = "model.language_model.embed_tokens.weight";
     const auto shard_path = checkpoint_root / s130;
@@ -2098,6 +2108,11 @@ Result<Qwen38OwnedExpert> qwen38_load_layer_expert(
     const std::filesystem::path& checkpoint_root,
     std::uint32_t expert_id,
     Qwen38Layer0Telemetry* telemetry) {
+    if (trunk.is_gguf) {
+        auto checkpoint = qwen38_open_gguf_checkpoint(checkpoint_root);
+        if (!checkpoint) return checkpoint.error();
+        return qwen38_load_gguf_expert(trunk, checkpoint.value(), expert_id, telemetry);
+    }
     if (expert_id >= Qwen38ExpectedInvariants::num_experts) {
         return make_error(ErrorCode::invalid_argument, "expert id out of range",
                           std::to_string(expert_id));

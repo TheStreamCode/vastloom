@@ -396,6 +396,39 @@ reali con prefill multi-token deterministico. Self-pinned.
 **Gate:** full-depth trunk+MoE eseguito su pesi reali, deterministico.
 Self-pinned; il confronto esterno arriva con il Q8_0 + llama.cpp.
 
+## Q11g - Checkpoint Q8_0 GGUF (qwen4exp) - complete
+
+- [x] Download del Q8_0 ufficiale (`unsloth/Qwen3.8-Flash-Next-GGUF`, 6 shard,
+  175,3 GiB, SHA-256 verificati, read-only, manifest atomico) tramite il
+  driver esteso `tools/import_qwen38_fp8.py --repo --gguf-dir`. Il checkpoint
+  FP8 safetensors è stato **eliminato** su richiesta: lo store contiene ora il
+  solo Q8_0.
+- [x] Metadati GGUF letti e verificati: `general.architecture = qwen4exp`,
+  1224 tensori (811 Q8_0, 389 F32, 24 BF16), tutti gli invarianti combaciano
+  e i metadati portano anche rope_sections, compress_ratios per layer,
+  ple.head_offsets/vocab_sizes, `embedding_length_per_layer_input = 160`.
+- [x] `src/inference/qwen3_8_gguf.cpp`: decode Q8_0 (scala F16 + 32 int8),
+  `qwen38_f16_to_f32`, apertura split-catalog validata, lettura tensore con
+  verifica shape + dequant + conversione dal layout ggml `[in, out]`;
+  `ssm_a` confermato F32 come A_log (range tutto negativo).
+- [x] Mappatura completa gguf→operatori: `attn_qkv`→in_proj_qkv,
+  `attn_gate`→in_proj_z, `ssm_alpha/beta`→in_proj_a/b, `ssm_out`→out_proj,
+  `hc_attn/ffn_*`→gated residual, indexer **split** in q/k_proj (il fused
+  index_qk è ricostruito per concat), esperti come **slice a stride fissa**
+  dei tensori fused `[in, out, 512]`, embedding a colonna da `token_embd`.
+- [x] Dispatcher automatico safetensors/GGUF in `qwen38_load_layer_trunk`,
+  `qwen38_load_embed_row` e `qwen38_load_layer_expert`: tutti i CLI
+  (`qwen38-layer`, `qwen38-prefill`, `qwen38-chain`) girano su entrambi.
+- [x] Full-depth reale su Q8_0: 48/48 layer, 6,58 GB payload, exit 0.
+  Sum (differiscono dal FP8 per la ricuantizzazione, atteso): layer-0 BOS
+  6.65287, layer-3 17.7864, chain 0–3 replay bit-pari (23.0238).
+- [x] Test opt-in biforcuto safetensors/GGUF; reconfigurato
+  `VASTLOOM_QWEN38_MODEL` sul root Q8_0.
+
+**Gate:** il runtime C++ nativo ora esegue il checkpoint **llama.cpp-compatible**
+end-to-end (layer singoli, prefill, catena, full-depth) — la base per
+l'oracolo llama.cpp e per la residenza esperti in VRAM.
+
 ## Q12 - prefix-KV MoE stream (porting M13)
 
 - [ ] Estendere `LlamaSession` al percorso MoE stream.

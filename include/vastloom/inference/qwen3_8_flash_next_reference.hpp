@@ -14,6 +14,7 @@
 #include <vector>
 
 #include "vastloom/core/status.hpp"
+#include "vastloom/model/gguf.hpp"
 
 namespace vastloom::inference {
 
@@ -469,7 +470,7 @@ struct Qwen38ReducedGenerationResult {
 // to load routed experts on demand. The layer is either a Gated DeltaNet layer
 // (is_qsa == false) or a QSA full-attention layer (is_qsa == true). The token
 // embedding row is NOT part of the trunk: it is loaded per token with a
-// bounded 5 KiB read.
+// bounded read.
 struct Qwen38LayerTrunk {
     std::uint32_t layer{0U};
     bool is_qsa{false};
@@ -479,8 +480,19 @@ struct Qwen38LayerTrunk {
     Qwen38OwnedResidual mlp_hyper;
     Qwen38OwnedSharedMlp shared_mlp;
     std::vector<float> router;
-    // expert id -> {gate shard, up shard, down shard} file names.
+    // expert id -> {gate shard, up shard, down shard} file names (safetensors path).
     std::unordered_map<std::uint32_t, std::array<std::string, 3U>> expert_shards;
+    // GGUF path: experts live in fused [in, out, 512] tensors, one expert slice
+    // at a fixed byte stride.
+    bool is_gguf{false};
+    struct Qwen38GgufExpertSource {
+        std::filesystem::path shard;         // shard file holding the fused tensor
+        std::uint64_t data_offset{0U};       // fused tensor start within the shard
+        std::uint64_t expert_stride_bytes{0U};
+    };
+    Qwen38GgufExpertSource gguf_gate;
+    Qwen38GgufExpertSource gguf_up;
+    Qwen38GgufExpertSource gguf_down;
 };
 
 // Caller-owned per-layer runtime state. The DeltaNet branch carries conv
@@ -553,6 +565,66 @@ struct Qwen38Layer0ForwardResult {
 [[nodiscard]] Result<std::vector<float>> qwen38_layer0_finish(
     const Qwen38Layer0ForwardResult& partial,
     std::span<const float> expert_sum);
+
+// --- Q11g: GGUF (qwen4exp) checkpoint source ---
+
+enum class Qwen38CheckpointKind {
+    safetensors,
+    gguf,
+};
+
+// Detects the checkpoint layout: model.safetensors.index.json (FP8 release)
+// or one or more *.gguf shards (llama.cpp Q8_0 and friends).
+[[nodiscard]] Result<Qwen38CheckpointKind> qwen38_detect_checkpoint_kind(
+    const std::filesystem::path& checkpoint_root);
+
+// IEEE half -> F32 (GGUF Q8_0 block scales are F16).
+[[nodiscard]] float qwen38_f16_to_f32(std::uint16_t bits) noexcept;
+
+// Decodes Q8_0 payload (F16 scale + 32 int8 per block) into F32.
+[[nodiscard]] Result<std::vector<float>> qwen38_decode_q8_0(
+    std::span<const std::byte> payload,
+    std::uint64_t element_count);
+
+struct Qwen38GgufCheckpoint {
+    std::filesystem::path root;
+    model::GgufSplitCatalog catalog;
+};
+
+// Opens every *.gguf shard under the checkpoint root (depth 2), finalizes the
+// split catalog and validates general.architecture == "qwen4exp".
+[[nodiscard]] Result<Qwen38GgufCheckpoint> qwen38_open_gguf_checkpoint(
+    const std::filesystem::path& checkpoint_root);
+
+// Reads one GGUF tensor by exact name, decodes it (Q8_0/BF16/F32) and, when
+// transpose is set, converts the ggml [in, out] layout to row-major [out, in].
+// expected_dims is checked against the GGUF shape verbatim.
+[[nodiscard]] Result<std::vector<float>> qwen38_read_gguf_tensor_f32(
+    const Qwen38GgufCheckpoint& checkpoint,
+    std::string_view tensor_name,
+    const std::vector<std::uint64_t>& expected_dims,
+    bool transpose,
+    Qwen38Layer0Telemetry* telemetry = nullptr);
+
+// GGUF variants of the canonical safetensors loaders. Same semantics, same
+// output structures; tensors arrive transposed (ggml [in, out]) and Q8_0
+// quantized, and routed experts are read as fixed-stride slices of the fused
+// [in, out, 512] tensors.
+[[nodiscard]] Result<Qwen38LayerTrunk> qwen38_load_gguf_layer_trunk(
+    const std::filesystem::path& checkpoint_root,
+    std::uint32_t layer,
+    Qwen38Layer0Telemetry* telemetry = nullptr);
+
+[[nodiscard]] Result<std::vector<float>> qwen38_load_gguf_embed_row(
+    const std::filesystem::path& checkpoint_root,
+    std::uint32_t token_id,
+    Qwen38Layer0Telemetry* telemetry = nullptr);
+
+[[nodiscard]] Result<Qwen38OwnedExpert> qwen38_load_gguf_expert(
+    const Qwen38LayerTrunk& trunk,
+    const Qwen38GgufCheckpoint& checkpoint,
+    std::uint32_t expert_id,
+    Qwen38Layer0Telemetry* telemetry = nullptr);
 
 [[nodiscard]] std::string_view to_string(Qwen38ReducedFinishReason reason) noexcept;
 

@@ -2,6 +2,21 @@
 
 ## Unreleased
 
+- **Q11g - Qwen3.8-Flash-Next GGUF (qwen4exp) checkpoint source.** The
+  official unsloth Q8_0 GGUF (6 shards, 175.3 GiB, SHA-256 verified through
+  the canonical importer, now generalized with `--repo/--gguf-dir`) replaced
+  the deleted FP8 safetensors checkpoint. New `src/inference/qwen3_8_gguf.cpp`
+  implements Q8_0/F16 decode on top of the generic `GgufSplitCatalog`,
+  validates `general.architecture=qwen4exp` (1224 tensors), converts the ggml
+  [in, out] layout, reconstructs the fused indexer projections, reads routed
+  experts as fixed-stride slices of the fused `[in, out, 512]` tensors and
+  embedding rows as contiguous Q8_0 column spans. A safetensors/GGUF
+  dispatcher keeps every CLI working on both layouts; the opt-in checkpoint
+  test now covers both. Full-depth 0..47 runs on the Q8_0 checkpoint
+  (6.58 GB payload, deterministic replay); sums differ from FP8 by design
+  (requantization). All fp8/E4M3 decode is now exercised only by historical
+  pins.
+
 - **Q11f - Qwen3.8-Flash-Next real layer chain and 48-layer full-depth run.**
   `qwen38_layer_forward` now takes the gated-residual input stream (a layer's
   output feeds the next; only layer 0 starts from the expanded embedding row),

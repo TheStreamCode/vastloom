@@ -101,33 +101,51 @@ int main(int argc, char** argv) {
     }
     std::cout << "Qwen3.8-Flash-Next real checkpoint catalog: PASS\n";
 
-    // --- Q11c/Q11d: real layer-0 forward + multi-token prefill ---
+    // --- Q11c/Q11d/Q11e: real layer forward + multi-token prefill ---
     // One token: trunk -> forward -> routed FP8 experts -> finish, asserting
     // finiteness and bit-identical determinism. Then a 5-token prefill carries
-    // the DeltaNet state across tokens through a bounded expert LRU; a full
-    // replay from scratch must reproduce the exact output sums.
-    {
+    // the layer state across tokens through a bounded expert LRU; a full
+    // replay from scratch must reproduce the exact output sums. Runs for both
+    // a Gated DeltaNet layer (0) and a QSA full-attention layer (3).
+    for (const std::uint32_t layer_id : {0U, 3U}) {
         namespace ref = vastloom::inference;
         const std::uint32_t bos = ref::Qwen38ExpectedInvariants::bos_token_id;
         const std::uint32_t H = ref::Qwen38ExpectedInvariants::hidden_size;
         const std::uint32_t I = ref::Qwen38ExpectedInvariants::moe_intermediate_size;
         ref::Qwen38Layer0Telemetry tel;
-        auto trunk = ref::qwen38_load_layer0_trunk(root, &tel);
-        check(static_cast<bool>(trunk), "layer0 trunk loads");
+        auto trunk = ref::qwen38_load_layer_trunk(root, layer_id, &tel);
+        check(static_cast<bool>(trunk), "layer trunk loads");
         if (!trunk) {
             std::cerr << "  error: " << trunk.error().message
                       << " (" << trunk.error().context << ")\n";
             return 1;
         }
+        check(trunk.value().is_qsa == (layer_id == 3U),
+              "layer attention kind matches full_attention_interval");
         check(trunk.value().expert_shards.size()
                   == ref::Qwen38ExpectedInvariants::num_experts,
               "expert shard map covers 512 experts");
         check(trunk.value().router.size()
                   == static_cast<std::size_t>(ref::Qwen38ExpectedInvariants::num_experts) * H,
               "router weight count");
+        if (layer_id == 3U) {
+            check(trunk.value().qsa.q_proj.size()
+                      == static_cast<std::size_t>(
+                             ref::Qwen38ExpectedInvariants::num_attention_heads)
+                         * ref::Qwen38ExpectedInvariants::head_dim * 2U * H,
+                  "QSA q_proj carries query+gate per head");
+        } else {
+            check(trunk.value().delta_net.in_proj_qkv.size()
+                      == static_cast<std::size_t>(
+                             2U * ref::Qwen38ExpectedInvariants::linear_num_key_heads
+                             * ref::Qwen38ExpectedInvariants::linear_key_head_dim
+                             + ref::Qwen38ExpectedInvariants::linear_num_value_heads
+                             * ref::Qwen38ExpectedInvariants::linear_value_head_dim) * H,
+                  "DeltaNet qkv projection width");
+        }
 
-        // Runs one token: caller-owned DeltaNet state and expert LRU.
-        auto run_token = [&](ref::Qwen38DeltaNetState& state,
+        // Runs one token: caller-owned layer state and expert LRU.
+        auto run_token = [&](ref::Qwen38LayerRuntimeState& state,
                              ref::Qwen38ExpertLru& lru,
                              std::uint32_t tid,
                              double* out_sum) -> bool {
@@ -137,7 +155,7 @@ int main(int argc, char** argv) {
                           << " (" << row.error().context << ")\n";
                 return false;
             }
-            auto fwd = ref::qwen38_layer0_forward(
+            auto fwd = ref::qwen38_layer_forward(
                 trunk.value(), row.value(), state,
                 ref::Qwen38ExpectedInvariants::num_experts,
                 ref::Qwen38ExpectedInvariants::num_experts_per_tok);
@@ -162,7 +180,7 @@ int main(int argc, char** argv) {
                     if (!acquired) return false;
                     ptr = acquired.value();
                 } else {
-                    auto real = ref::qwen38_load_layer0_expert(
+                    auto real = ref::qwen38_load_layer_expert(
                         trunk.value(), root, eid, &tel);
                     if (!real) {
                         std::cerr << "  error: " << real.error().message
@@ -197,7 +215,7 @@ int main(int argc, char** argv) {
 
         // Fresh state/cache pair per pass.
         auto fresh = []() {
-            std::pair<ref::Qwen38DeltaNetState, ref::Qwen38ExpertLru> p;
+            std::pair<ref::Qwen38LayerRuntimeState, ref::Qwen38ExpertLru> p;
             p.second.capacity = 16U;
             return p;
         };
@@ -205,16 +223,18 @@ int main(int argc, char** argv) {
         auto pass1 = fresh();
         double bos_sum = 0.0;
         check(run_token(pass1.first, pass1.second, bos, &bos_sum),
-              "layer0 single-token forward runs");
-        std::cout << "layer-0 output sum (BOS): " << bos_sum << "\n";
+              "single-token forward runs");
+        std::cout << "layer-" << layer_id
+                  << (trunk.value().is_qsa ? " (QSA)" : " (DeltaNet)")
+                  << " output sum (BOS): " << bos_sum << "\n";
 
         auto pass2 = fresh();
         double bos_sum2 = 0.0;
         check(run_token(pass2.first, pass2.second, bos, &bos_sum2),
-              "layer0 single-token rerun");
+              "single-token rerun");
         check(bos_sum == bos_sum2, "single-token forward deterministic");
 
-        // Multi-token prefill: the DeltaNet state carries across tokens.
+        // Multi-token prefill: the layer state carries across tokens.
         const std::array<std::uint32_t, 5U> seq{bos, 100U, 200U, 300U, 400U};
         auto prefill = [&](std::vector<double>* sums) -> bool {
             auto s = fresh();
@@ -236,7 +256,7 @@ int main(int argc, char** argv) {
                 if (sums[i] != sums[0]) { distinct = true; break; }
             }
             check(distinct, "state carry changes later-token outputs");
-            std::cout << "prefill sums:";
+            std::cout << "layer-" << layer_id << " prefill sums:";
             for (const double s : sums) std::cout << ' ' << s;
             std::cout << "\n";
             std::vector<double> replay;

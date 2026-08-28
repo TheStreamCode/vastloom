@@ -1591,15 +1591,18 @@ int command_qwen38_inspect(const std::vector<std::string>& args) {
     return 0;
 }
 
-// Qwen3.8-Flash-Next real layer-0 forward: loads the 22 canonical non-routed
-// tensors plus the embedding row and the top-k routed FP8 experts for one
-// token, then runs the full layer-0 reference forward over real weights.
+// Qwen3.8-Flash-Next real single-layer forward: loads the 22 canonical
+// non-routed tensors of one layer plus the embedding row and the top-k routed
+// FP8 experts for one token, then runs the full reference forward over real
+// weights. Works for Gated DeltaNet layers and QSA full-attention layers.
 int command_qwen38_layer0(const std::vector<std::string>& args) {
     const bool json = has_flag(args, "--json");
-    auto valid = validate_options(args, 1U, {"--token"}, {"--json", "--dump-hidden"});
+    auto valid = validate_options(args, 1U, {"--token", "--layer"}, {"--json", "--dump-hidden"});
     if (!valid) return print_error(valid.error(), json);
     auto token = optional_size(args, "--token", 0U);
+    auto layer = optional_size(args, "--layer", 0U);
     if (!token) return print_error(token.error(), json);
+    if (!layer) return print_error(layer.error(), json);
     if (token.value() >= vastloom::inference::Qwen38ExpectedInvariants::vocab_size) {
         return print_error(vastloom::make_error(
                                vastloom::ErrorCode::invalid_argument,
@@ -1616,15 +1619,16 @@ int command_qwen38_layer0(const std::vector<std::string>& args) {
     if (!guard) return print_error(guard.error(), json);
 
     vastloom::inference::Qwen38Layer0Telemetry load_tel;
-    auto trunk = vastloom::inference::qwen38_load_layer0_trunk(checkpoint_root, &load_tel);
+    auto trunk = vastloom::inference::qwen38_load_layer_trunk(
+        checkpoint_root, static_cast<std::uint32_t>(layer.value()), &load_tel);
     if (!trunk) return print_error(trunk.error(), json);
     auto embed_row = vastloom::inference::qwen38_load_embed_row(
         checkpoint_root, static_cast<std::uint32_t>(token.value()), &load_tel);
     if (!embed_row) return print_error(embed_row.error(), json);
 
-    vastloom::inference::Qwen38DeltaNetState dn_state;
-    auto forward = vastloom::inference::qwen38_layer0_forward(
-        trunk.value(), embed_row.value(), dn_state,
+    vastloom::inference::Qwen38LayerRuntimeState state;
+    auto forward = vastloom::inference::qwen38_layer_forward(
+        trunk.value(), embed_row.value(), state,
         vastloom::inference::Qwen38ExpectedInvariants::num_experts,
         vastloom::inference::Qwen38ExpectedInvariants::num_experts_per_tok);
     if (!forward) return print_error(forward.error(), json);
@@ -1635,7 +1639,7 @@ int command_qwen38_layer0(const std::vector<std::string>& args) {
     std::vector<float> expert_sum(H, 0.0F);
     for (std::size_t i = 0; i < forward.value().route.indices.size(); ++i) {
         const auto eid = forward.value().route.indices[i];
-        auto expert = vastloom::inference::qwen38_load_layer0_expert(
+        auto expert = vastloom::inference::qwen38_load_layer_expert(
             trunk.value(), checkpoint_root, eid, &load_tel);
         if (!expert) return print_error(expert.error(), json);
         auto y = vastloom::inference::qwen38_expert_mlp(
@@ -1666,6 +1670,8 @@ int command_qwen38_layer0(const std::vector<std::string>& args) {
     };
     if (json) {
         std::cout << "{\n"
+                  << "  \"layer\": " << layer.value() << ",\n"
+                  << "  \"is_qsa\": " << (trunk.value().is_qsa ? "true" : "false") << ",\n"
                   << "  \"token_id\": " << token.value() << ",\n"
                   << "  \"tensors_read\": " << load_tel.tensors_read << ",\n"
                   << "  \"payload_bytes_read\": " << load_tel.payload_bytes_read << ",\n"
@@ -1685,7 +1691,9 @@ int command_qwen38_layer0(const std::vector<std::string>& args) {
                      }() << "\n"
                   << "}\n";
     } else {
-        std::cout << "Qwen3.8-Flash-Next real layer-0 forward\n"
+        std::cout << "Qwen3.8-Flash-Next real layer forward\n"
+                  << "  layer: " << layer.value()
+                  << (trunk.value().is_qsa ? " (QSA)" : " (DeltaNet)") << '\n'
                   << "  token: " << token.value() << '\n'
                   << "  tensors read: " << load_tel.tensors_read << '\n'
                   << "  payload bytes read: " << load_tel.payload_bytes_read << '\n'
@@ -1718,7 +1726,7 @@ int command_qwen38_layer0(const std::vector<std::string>& args) {
 // validation for the real checkpoint.
 int command_qwen38_prefill(const std::vector<std::string>& args) {
     const bool json = has_flag(args, "--json");
-    auto valid = validate_options(args, 1U, {"--tokens", "--expert-cache"},
+    auto valid = validate_options(args, 1U, {"--tokens", "--expert-cache", "--layer"},
                                   {"--json"});
     if (!valid) return print_error(valid.error(), json);
     const auto tokens_csv = option_value(args, "--tokens");
@@ -1728,6 +1736,8 @@ int command_qwen38_prefill(const std::vector<std::string>& args) {
                                "qwen38-prefill requires --tokens with a comma-separated id list"),
                            json);
     }
+    auto layer = optional_size(args, "--layer", 0U);
+    if (!layer) return print_error(layer.error(), json);
     std::vector<std::uint32_t> token_ids;
     for (const auto& item : vastloom::util::split(*tokens_csv, ',', true)) {
         const auto trimmed = vastloom::util::trim(item);
@@ -1771,7 +1781,8 @@ int command_qwen38_prefill(const std::vector<std::string>& args) {
     const std::uint32_t I = vastloom::inference::Qwen38ExpectedInvariants::moe_intermediate_size;
 
     vastloom::inference::Qwen38Layer0Telemetry load_tel;
-    auto trunk = vastloom::inference::qwen38_load_layer0_trunk(checkpoint_root, &load_tel);
+    auto trunk = vastloom::inference::qwen38_load_layer_trunk(
+        checkpoint_root, static_cast<std::uint32_t>(layer.value()), &load_tel);
     if (!trunk) return print_error(trunk.error(), json);
 
     vastloom::inference::Qwen38ExpertLru lru;
@@ -1785,13 +1796,13 @@ int command_qwen38_prefill(const std::vector<std::string>& args) {
         std::vector<std::uint32_t> experts;
     };
     std::vector<TokenRow> rows;
-    vastloom::inference::Qwen38DeltaNetState dn_state;
+    vastloom::inference::Qwen38LayerRuntimeState layer_state;
 
     for (const std::uint32_t tid : token_ids) {
         auto row = vastloom::inference::qwen38_load_embed_row(checkpoint_root, tid, &load_tel);
         if (!row) return print_error(row.error(), json);
-        auto fwd = vastloom::inference::qwen38_layer0_forward(
-            trunk.value(), row.value(), dn_state,
+        auto fwd = vastloom::inference::qwen38_layer_forward(
+            trunk.value(), row.value(), layer_state,
             vastloom::inference::Qwen38ExpectedInvariants::num_experts,
             vastloom::inference::Qwen38ExpectedInvariants::num_experts_per_tok);
         if (!fwd) return print_error(fwd.error(), json);
@@ -1814,7 +1825,7 @@ int command_qwen38_prefill(const std::vector<std::string>& args) {
                 ++out_row.route_hits;
             } else {
                 // Miss: fetch the real expert from the shards, then insert it.
-                auto real = vastloom::inference::qwen38_load_layer0_expert(
+                auto real = vastloom::inference::qwen38_load_layer_expert(
                     trunk.value(), checkpoint_root, eid, &load_tel);
                 if (!real) return print_error(real.error(), json);
                 auto acquired = vastloom::inference::qwen38_expert_cache_acquire(
@@ -5133,7 +5144,7 @@ int dispatch_cli(const std::vector<std::string>& arguments) {
         if (command == "moe-inspect") return command_moe_inspect(args);
         if (command == "deepseek-inspect") return command_deepseek_inspect(args);
         if (command == "qwen38-inspect") return command_qwen38_inspect(args);
-        if (command == "qwen38-layer0") return command_qwen38_layer0(args);
+        if (command == "qwen38-layer" || command == "qwen38-layer0") return command_qwen38_layer0(args);
         if (command == "qwen38-prefill") return command_qwen38_prefill(args);
         if (command == "deepseek-gguf-inspect") return command_deepseek_gguf_inspect(args);
         if (command == "deepseek-gguf-checkpoint") return command_deepseek_gguf_checkpoint(args);

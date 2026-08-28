@@ -1523,34 +1523,41 @@ Result<std::vector<float>> load_tensor_f32(
 
 }  // namespace
 
-Result<Qwen38Layer0Trunk> qwen38_load_layer0_trunk(
+Result<Qwen38LayerTrunk> qwen38_load_layer_trunk(
     const std::filesystem::path& checkpoint_root,
+    std::uint32_t layer,
     Qwen38Layer0Telemetry* telemetry) {
     const auto t0 = std::chrono::steady_clock::now();
 
     // Verify the checkpoint identity first: config + full catalog validation.
     auto cfg = load_qwen38_flash_next_config(checkpoint_root / "config.json");
     if (!cfg) {
-        return make_error(cfg.error().code, cfg.error().message, "layer0 config");
+        return make_error(cfg.error().code, cfg.error().message, "layer config");
+    }
+    if (layer >= cfg.value().num_hidden_layers) {
+        return make_error(ErrorCode::invalid_argument, "layer id out of range",
+                          std::to_string(layer));
     }
     auto inspected = inspect_qwen38_flash_next_safetensors(
         checkpoint_root / "model.safetensors.index.json", cfg.value(), false);
     if (!inspected) {
-        return make_error(inspected.error().code, inspected.error().message, "layer0 index");
+        return make_error(inspected.error().code, inspected.error().message, "layer index");
     }
     auto validated = qwen38_validate_catalog(inspected.value());
     if (!validated) {
-        return make_error(validated.error().code, validated.error().message, "layer0 catalog");
+        return make_error(validated.error().code, validated.error().message, "layer catalog");
     }
 
-    const std::string s1 = "model-00001-of-00131.safetensors";
-    const std::string s3 = "model-00003-of-00131.safetensors";
-    const std::string p = "model.language_model.layers.0.";
+    const std::string p = "model.language_model.layers." + std::to_string(layer) + ".";
+    const bool is_qsa = qwen38_is_qsa_layer(layer, cfg.value().full_attention_interval);
 
-    Qwen38Layer0Trunk w;
+    Qwen38LayerTrunk w;
+    w.layer = layer;
+    w.is_qsa = is_qsa;
 
-    // Map every layer-0 routed expert to its three shard files once, so
-    // on-demand expert loads never re-parse the 17 MiB index.
+    // Resolve every non-routed tensor of this layer to its shard file in one
+    // pass, so the loads below never guess shard names.
+    std::unordered_map<std::string, std::string> shard_of;
     {
         const std::string expert_prefix = p + "mlp.experts.";
         const std::string gate_suffix = ".gate_proj.weight";
@@ -1558,51 +1565,67 @@ Result<Qwen38Layer0Trunk> qwen38_load_layer0_trunk(
         const std::string down_suffix = ".down_proj.weight";
         for (const auto& e : inspected.value().weight_map) {
             const std::string& n = e.tensor_name;
-            if (n.rfind(expert_prefix, 0U) != 0U) {
+            if (n.rfind(p, 0U) != 0U) {
                 continue;
             }
-            const std::size_t id_begin = expert_prefix.size();
-            const std::size_t dot = n.find('.', id_begin);
-            if (dot == std::string::npos) {
+            if (n.rfind(expert_prefix, 0U) == 0U) {
+                const std::size_t id_begin = expert_prefix.size();
+                const std::size_t dot = n.find('.', id_begin);
+                if (dot == std::string::npos) {
+                    continue;
+                }
+                const std::uint32_t eid = static_cast<std::uint32_t>(
+                    std::strtoul(n.c_str() + id_begin, nullptr, 10));
+                if (n.size() >= gate_suffix.size()
+                    && n.compare(n.size() - gate_suffix.size(), gate_suffix.size(), gate_suffix) == 0) {
+                    w.expert_shards[eid][0] = e.shard_path.string();
+                } else if (n.size() >= up_suffix.size()
+                    && n.compare(n.size() - up_suffix.size(), up_suffix.size(), up_suffix) == 0) {
+                    w.expert_shards[eid][1] = e.shard_path.string();
+                } else if (n.size() >= down_suffix.size()
+                    && n.compare(n.size() - down_suffix.size(), down_suffix.size(), down_suffix) == 0) {
+                    w.expert_shards[eid][2] = e.shard_path.string();
+                }
                 continue;
             }
-            const std::uint32_t eid = static_cast<std::uint32_t>(
-                std::strtoul(n.c_str() + id_begin, nullptr, 10));
-            if (n.size() >= gate_suffix.size()
-                && n.compare(n.size() - gate_suffix.size(), gate_suffix.size(), gate_suffix) == 0) {
-                w.expert_shards[eid][0] = e.shard_path.string();
-            } else if (n.size() >= up_suffix.size()
-                && n.compare(n.size() - up_suffix.size(), up_suffix.size(), up_suffix) == 0) {
-                w.expert_shards[eid][1] = e.shard_path.string();
-            } else if (n.size() >= down_suffix.size()
-                && n.compare(n.size() - down_suffix.size(), down_suffix.size(), down_suffix) == 0) {
-                w.expert_shards[eid][2] = e.shard_path.string();
-            }
+            shard_of[n] = e.shard_path.string();
         }
         if (w.expert_shards.size() != Qwen38ExpectedInvariants::num_experts) {
             return make_error(ErrorCode::invalid_format,
-                "layer0 expert shard map incomplete",
-                "experts=" + std::to_string(w.expert_shards.size()));
+                "layer expert shard map incomplete",
+                "layer=" + std::to_string(layer)
+                    + " experts=" + std::to_string(w.expert_shards.size()));
         }
     }
+    auto shard_for = [&](const std::string& full_name) -> Result<std::string> {
+        const auto it = shard_of.find(full_name);
+        if (it == shard_of.end()) {
+            return make_error(ErrorCode::not_found, "layer tensor missing from index",
+                              full_name);
+        }
+        return it->second;
+    };
 
-    auto load_residual = [&](const std::string& prefix, const std::string& shard,
+    auto load_residual = [&](const std::string& prefix,
                              Qwen38OwnedResidual& out) -> Result<void> {
-        auto hc_norm = load_tensor_f32(checkpoint_root, shard, prefix + ".hc_norm.weight",
+        const std::string base = p + prefix;
+        auto shard = shard_for(base + ".hc_norm.weight");
+        if (!shard) return shard.error();
+        auto hc_norm = load_tensor_f32(checkpoint_root, shard.value(), base + ".hc_norm.weight",
             {Qwen38ExpectedInvariants::hc_count * Qwen38ExpectedInvariants::hidden_size},
             telemetry, false);
         if (!hc_norm) return hc_norm.error();
-        auto mix_down = load_tensor_f32(checkpoint_root, shard, prefix + ".input_mix_weight_down.weight",
+        auto mix_down = load_tensor_f32(checkpoint_root, shard.value(), base + ".input_mix_weight_down.weight",
             {Qwen38ExpectedInvariants::hc_lowrank,
              Qwen38ExpectedInvariants::hc_count * Qwen38ExpectedInvariants::hidden_size},
             telemetry, false);
         if (!mix_down) return mix_down.error();
-        auto mix_up = load_tensor_f32(checkpoint_root, shard, prefix + ".input_mix_weight_up.weight",
+        auto mix_up = load_tensor_f32(checkpoint_root, shard.value(), base + ".input_mix_weight_up.weight",
             {Qwen38ExpectedInvariants::hc_count * Qwen38ExpectedInvariants::hidden_size,
              Qwen38ExpectedInvariants::hc_lowrank},
             telemetry, false);
         if (!mix_up) return mix_up.error();
-        auto inject = load_tensor_f32(checkpoint_root, shard, prefix + ".block_inject_weight.weight",
+        auto inject = load_tensor_f32(checkpoint_root, shard.value(), base + ".block_inject_weight.weight",
             {Qwen38ExpectedInvariants::hc_count,
              Qwen38ExpectedInvariants::hc_count * Qwen38ExpectedInvariants::hidden_size},
             telemetry, false);
@@ -1614,84 +1637,215 @@ Result<Qwen38Layer0Trunk> qwen38_load_layer0_trunk(
         return {};
     };
 
-    if (auto r = load_residual(p + "attn_hyper_connection", s1, w.attn_hyper); !r) {
+    if (auto r = load_residual("attn_hyper_connection", w.attn_hyper); !r) {
         return r.error();
     }
-    if (auto r = load_residual(p + "mlp_hyper_connection", s3, w.mlp_hyper); !r) {
+    if (auto r = load_residual("mlp_hyper_connection", w.mlp_hyper); !r) {
         return r.error();
     }
 
-    {
-        auto v = load_tensor_f32(checkpoint_root, s1, p + "linear_attn.in_proj_qkv.weight",
-            {4U * Qwen38ExpectedInvariants::hidden_size, Qwen38ExpectedInvariants::hidden_size},
-            telemetry, false);
-        if (!v) return v.error();
-        w.delta_net.in_proj_qkv = std::move(v.value());
+    if (!is_qsa) {
+        // Gated DeltaNet branch: 9 tensors.
+        const std::string b = p + "linear_attn.";
+        const std::size_t conv_dim =
+            static_cast<std::size_t>(Qwen38ExpectedInvariants::linear_num_key_heads)
+                * Qwen38ExpectedInvariants::linear_key_head_dim * 2U
+            + static_cast<std::size_t>(Qwen38ExpectedInvariants::linear_num_value_heads)
+                * Qwen38ExpectedInvariants::linear_value_head_dim;
+        {
+            auto shard = shard_for(b + "in_proj_qkv.weight");
+            if (!shard) return shard.error();
+            auto v = load_tensor_f32(checkpoint_root, shard.value(), b + "in_proj_qkv.weight",
+                {static_cast<std::int64_t>(conv_dim), Qwen38ExpectedInvariants::hidden_size},
+                telemetry, false);
+            if (!v) return v.error();
+            w.delta_net.in_proj_qkv = std::move(v.value());
+        }
+        {
+            auto shard = shard_for(b + "in_proj_z.weight");
+            if (!shard) return shard.error();
+            auto v = load_tensor_f32(checkpoint_root, shard.value(), b + "in_proj_z.weight",
+                {static_cast<std::int64_t>(
+                     Qwen38ExpectedInvariants::linear_num_value_heads
+                     * Qwen38ExpectedInvariants::linear_value_head_dim),
+                 Qwen38ExpectedInvariants::hidden_size},
+                telemetry, false);
+            if (!v) return v.error();
+            w.delta_net.in_proj_z = std::move(v.value());
+        }
+        {
+            auto shard = shard_for(b + "in_proj_a.weight");
+            if (!shard) return shard.error();
+            auto v = load_tensor_f32(checkpoint_root, shard.value(), b + "in_proj_a.weight",
+                {Qwen38ExpectedInvariants::linear_num_value_heads, Qwen38ExpectedInvariants::hidden_size},
+                telemetry, false);
+            if (!v) return v.error();
+            w.delta_net.in_proj_a = std::move(v.value());
+        }
+        {
+            auto shard = shard_for(b + "in_proj_b.weight");
+            if (!shard) return shard.error();
+            auto v = load_tensor_f32(checkpoint_root, shard.value(), b + "in_proj_b.weight",
+                {Qwen38ExpectedInvariants::linear_num_value_heads, Qwen38ExpectedInvariants::hidden_size},
+                telemetry, false);
+            if (!v) return v.error();
+            w.delta_net.in_proj_b = std::move(v.value());
+        }
+        {
+            auto shard = shard_for(b + "conv1d.weight");
+            if (!shard) return shard.error();
+            auto v = load_tensor_f32(checkpoint_root, shard.value(), b + "conv1d.weight",
+                {static_cast<std::int64_t>(conv_dim), 1,
+                 Qwen38ExpectedInvariants::linear_conv_kernel_dim},
+                telemetry, false);
+            if (!v) return v.error();
+            w.delta_net.conv1d = std::move(v.value());
+        }
+        {
+            auto shard = shard_for(b + "A_log");
+            if (!shard) return shard.error();
+            auto v = load_tensor_f32(checkpoint_root, shard.value(), b + "A_log",
+                {Qwen38ExpectedInvariants::linear_num_value_heads}, telemetry, false);
+            if (!v) return v.error();
+            w.delta_net.a_log = std::move(v.value());
+        }
+        {
+            auto shard = shard_for(b + "dt_bias");
+            if (!shard) return shard.error();
+            auto v = load_tensor_f32(checkpoint_root, shard.value(), b + "dt_bias",
+                {Qwen38ExpectedInvariants::linear_num_value_heads}, telemetry, false);
+            if (!v) return v.error();
+            w.delta_net.dt_bias = std::move(v.value());
+        }
+        {
+            auto shard = shard_for(b + "norm.weight");
+            if (!shard) return shard.error();
+            auto v = load_tensor_f32(checkpoint_root, shard.value(), b + "norm.weight",
+                {Qwen38ExpectedInvariants::linear_value_head_dim}, telemetry, false);
+            if (!v) return v.error();
+            w.delta_net.norm = std::move(v.value());
+        }
+        {
+            auto shard = shard_for(b + "out_proj.weight");
+            if (!shard) return shard.error();
+            auto v = load_tensor_f32(checkpoint_root, shard.value(), b + "out_proj.weight",
+                {Qwen38ExpectedInvariants::hidden_size,
+                 static_cast<std::int64_t>(
+                     Qwen38ExpectedInvariants::linear_num_value_heads
+                     * Qwen38ExpectedInvariants::linear_value_head_dim)},
+                telemetry, false);
+            if (!v) return v.error();
+            w.delta_net.out_proj = std::move(v.value());
+        }
+    } else {
+        // QSA full-attention branch: 9 tensors.
+        const std::string b = p + "self_attn.";
+        const std::size_t idx_qk_out =
+            (static_cast<std::size_t>(Qwen38ExpectedInvariants::indexer_n_heads) + 1U)
+            * Qwen38ExpectedInvariants::indexer_head_dim;
+        const std::size_t q_out =
+            static_cast<std::size_t>(Qwen38ExpectedInvariants::num_attention_heads)
+            * Qwen38ExpectedInvariants::head_dim * 2U;
+        const std::size_t kv_out =
+            static_cast<std::size_t>(Qwen38ExpectedInvariants::num_key_value_heads)
+            * Qwen38ExpectedInvariants::head_dim;
+        {
+            auto shard = shard_for(b + "indexer.index_qk_proj.weight");
+            if (!shard) return shard.error();
+            auto v = load_tensor_f32(checkpoint_root, shard.value(),
+                b + "indexer.index_qk_proj.weight",
+                {static_cast<std::int64_t>(idx_qk_out), Qwen38ExpectedInvariants::hidden_size},
+                telemetry, false);
+            if (!v) return v.error();
+            w.qsa.index_qk = std::move(v.value());
+        }
+        {
+            auto shard = shard_for(b + "indexer.q_layernorm.weight");
+            if (!shard) return shard.error();
+            auto v = load_tensor_f32(checkpoint_root, shard.value(),
+                b + "indexer.q_layernorm.weight",
+                {Qwen38ExpectedInvariants::indexer_head_dim}, telemetry, false);
+            if (!v) return v.error();
+            w.qsa.q_layernorm = std::move(v.value());
+        }
+        {
+            auto shard = shard_for(b + "indexer.k_layernorm.weight");
+            if (!shard) return shard.error();
+            auto v = load_tensor_f32(checkpoint_root, shard.value(),
+                b + "indexer.k_layernorm.weight",
+                {Qwen38ExpectedInvariants::indexer_head_dim}, telemetry, false);
+            if (!v) return v.error();
+            w.qsa.k_layernorm = std::move(v.value());
+        }
+        {
+            auto shard = shard_for(b + "q_proj.weight");
+            if (!shard) return shard.error();
+            auto v = load_tensor_f32(checkpoint_root, shard.value(), b + "q_proj.weight",
+                {static_cast<std::int64_t>(q_out), Qwen38ExpectedInvariants::hidden_size},
+                telemetry, false);
+            if (!v) return v.error();
+            w.qsa.q_proj = std::move(v.value());
+        }
+        {
+            auto shard = shard_for(b + "k_proj.weight");
+            if (!shard) return shard.error();
+            auto v = load_tensor_f32(checkpoint_root, shard.value(), b + "k_proj.weight",
+                {static_cast<std::int64_t>(kv_out), Qwen38ExpectedInvariants::hidden_size},
+                telemetry, false);
+            if (!v) return v.error();
+            w.qsa.k_proj = std::move(v.value());
+        }
+        {
+            auto shard = shard_for(b + "v_proj.weight");
+            if (!shard) return shard.error();
+            auto v = load_tensor_f32(checkpoint_root, shard.value(), b + "v_proj.weight",
+                {static_cast<std::int64_t>(kv_out), Qwen38ExpectedInvariants::hidden_size},
+                telemetry, false);
+            if (!v) return v.error();
+            w.qsa.v_proj = std::move(v.value());
+        }
+        {
+            auto shard = shard_for(b + "o_proj.weight");
+            if (!shard) return shard.error();
+            auto v = load_tensor_f32(checkpoint_root, shard.value(), b + "o_proj.weight",
+                {Qwen38ExpectedInvariants::hidden_size,
+                 static_cast<std::int64_t>(
+                     Qwen38ExpectedInvariants::num_attention_heads
+                     * Qwen38ExpectedInvariants::head_dim)},
+                telemetry, false);
+            if (!v) return v.error();
+            w.qsa.o_proj = std::move(v.value());
+        }
+        {
+            auto shard = shard_for(b + "q_norm.weight");
+            if (!shard) return shard.error();
+            auto v = load_tensor_f32(checkpoint_root, shard.value(), b + "q_norm.weight",
+                {Qwen38ExpectedInvariants::head_dim}, telemetry, false);
+            if (!v) return v.error();
+            w.qsa.q_norm = std::move(v.value());
+        }
+        {
+            auto shard = shard_for(b + "k_norm.weight");
+            if (!shard) return shard.error();
+            auto v = load_tensor_f32(checkpoint_root, shard.value(), b + "k_norm.weight",
+                {Qwen38ExpectedInvariants::head_dim}, telemetry, false);
+            if (!v) return v.error();
+            w.qsa.k_norm = std::move(v.value());
+        }
     }
     {
-        auto v = load_tensor_f32(checkpoint_root, s1, p + "linear_attn.in_proj_z.weight",
-            {2U * Qwen38ExpectedInvariants::hidden_size + 1024U, Qwen38ExpectedInvariants::hidden_size},
-            telemetry, false);
-        if (!v) return v.error();
-        w.delta_net.in_proj_z = std::move(v.value());
-    }
-    {
-        auto v = load_tensor_f32(checkpoint_root, s1, p + "linear_attn.in_proj_a.weight",
-            {Qwen38ExpectedInvariants::linear_num_value_heads, Qwen38ExpectedInvariants::hidden_size},
-            telemetry, false);
-        if (!v) return v.error();
-        w.delta_net.in_proj_a = std::move(v.value());
-    }
-    {
-        auto v = load_tensor_f32(checkpoint_root, s1, p + "linear_attn.in_proj_b.weight",
-            {Qwen38ExpectedInvariants::linear_num_value_heads, Qwen38ExpectedInvariants::hidden_size},
-            telemetry, false);
-        if (!v) return v.error();
-        w.delta_net.in_proj_b = std::move(v.value());
-    }
-    {
-        auto v = load_tensor_f32(checkpoint_root, s1, p + "linear_attn.conv1d.weight",
-            {Qwen38ExpectedInvariants::hc_count * Qwen38ExpectedInvariants::hidden_size, 1,
-             Qwen38ExpectedInvariants::linear_conv_kernel_dim},
-            telemetry, false);
-        if (!v) return v.error();
-        w.delta_net.conv1d = std::move(v.value());
-    }
-    {
-        auto v = load_tensor_f32(checkpoint_root, s1, p + "linear_attn.A_log",
-            {Qwen38ExpectedInvariants::linear_num_value_heads}, telemetry, false);
-        if (!v) return v.error();
-        w.delta_net.a_log = std::move(v.value());
-    }
-    {
-        auto v = load_tensor_f32(checkpoint_root, s1, p + "linear_attn.dt_bias",
-            {Qwen38ExpectedInvariants::linear_num_value_heads}, telemetry, false);
-        if (!v) return v.error();
-        w.delta_net.dt_bias = std::move(v.value());
-    }
-    {
-        auto v = load_tensor_f32(checkpoint_root, s1, p + "linear_attn.norm.weight",
-            {Qwen38ExpectedInvariants::linear_value_head_dim}, telemetry, false);
-        if (!v) return v.error();
-        w.delta_net.norm = std::move(v.value());
-    }
-    {
-        auto v = load_tensor_f32(checkpoint_root, s1, p + "linear_attn.out_proj.weight",
-            {Qwen38ExpectedInvariants::hidden_size,
-             2U * Qwen38ExpectedInvariants::hidden_size + 1024U},
-            telemetry, false);
-        if (!v) return v.error();
-        w.delta_net.out_proj = std::move(v.value());
-    }
-    {
-        auto v = load_tensor_f32(checkpoint_root, s3, p + "mlp.gate.weight",
+        auto shard = shard_for(p + "mlp.gate.weight");
+        if (!shard) return shard.error();
+        auto v = load_tensor_f32(checkpoint_root, shard.value(), p + "mlp.gate.weight",
             {Qwen38ExpectedInvariants::num_experts, Qwen38ExpectedInvariants::hidden_size},
             telemetry, false);
         if (!v) return v.error();
         w.router = std::move(v.value());
     }
     {
-        auto v = load_tensor_f32(checkpoint_root, s3, p + "mlp.shared_expert.gate_proj.weight",
+        auto shard = shard_for(p + "mlp.shared_expert.gate_proj.weight");
+        if (!shard) return shard.error();
+        auto v = load_tensor_f32(checkpoint_root, shard.value(), p + "mlp.shared_expert.gate_proj.weight",
             {Qwen38ExpectedInvariants::shared_expert_intermediate_size,
              Qwen38ExpectedInvariants::hidden_size},
             telemetry, false);
@@ -1699,7 +1853,9 @@ Result<Qwen38Layer0Trunk> qwen38_load_layer0_trunk(
         w.shared_mlp.gate_proj = std::move(v.value());
     }
     {
-        auto v = load_tensor_f32(checkpoint_root, s3, p + "mlp.shared_expert.up_proj.weight",
+        auto shard = shard_for(p + "mlp.shared_expert.up_proj.weight");
+        if (!shard) return shard.error();
+        auto v = load_tensor_f32(checkpoint_root, shard.value(), p + "mlp.shared_expert.up_proj.weight",
             {Qwen38ExpectedInvariants::shared_expert_intermediate_size,
              Qwen38ExpectedInvariants::hidden_size},
             telemetry, false);
@@ -1707,7 +1863,9 @@ Result<Qwen38Layer0Trunk> qwen38_load_layer0_trunk(
         w.shared_mlp.up_proj = std::move(v.value());
     }
     {
-        auto v = load_tensor_f32(checkpoint_root, s3, p + "mlp.shared_expert.down_proj.weight",
+        auto shard = shard_for(p + "mlp.shared_expert.down_proj.weight");
+        if (!shard) return shard.error();
+        auto v = load_tensor_f32(checkpoint_root, shard.value(), p + "mlp.shared_expert.down_proj.weight",
             {Qwen38ExpectedInvariants::hidden_size,
              Qwen38ExpectedInvariants::shared_expert_intermediate_size},
             telemetry, false);
@@ -1715,7 +1873,9 @@ Result<Qwen38Layer0Trunk> qwen38_load_layer0_trunk(
         w.shared_mlp.down_proj = std::move(v.value());
     }
     {
-        auto v = load_tensor_f32(checkpoint_root, s3, p + "mlp.shared_expert_gate.weight",
+        auto shard = shard_for(p + "mlp.shared_expert_gate.weight");
+        if (!shard) return shard.error();
+        auto v = load_tensor_f32(checkpoint_root, shard.value(), p + "mlp.shared_expert_gate.weight",
             {1, Qwen38ExpectedInvariants::hidden_size}, telemetry, false);
         if (!v) return v.error();
         w.shared_mlp.shared_gate = std::move(v.value());
@@ -1790,17 +1950,17 @@ Result<std::vector<float>> qwen38_load_embed_row(
     return row;
 }
 
-Result<Qwen38Layer0ForwardResult> qwen38_layer0_forward(
-    const Qwen38Layer0Trunk& trunk,
+Result<Qwen38Layer0ForwardResult> qwen38_layer_forward(
+    const Qwen38LayerTrunk& trunk,
     std::span<const float> embed_row,
-    Qwen38DeltaNetState& delta_net_state,
+    Qwen38LayerRuntimeState& runtime_state,
     std::uint32_t num_experts,
     std::uint32_t top_k) {
     const auto t0 = std::chrono::steady_clock::now();
     const std::uint32_t H = Qwen38ExpectedInvariants::hidden_size;
     const std::uint32_t C = Qwen38ExpectedInvariants::hc_count;
     const std::uint32_t R = Qwen38ExpectedInvariants::hc_lowrank;
-    const Qwen38Layer0Trunk& weights = trunk;
+    const Qwen38LayerTrunk& weights = trunk;
 
     // Embedding row -> expanded hyper stream input.
     if (embed_row.size() != H) {
@@ -1819,41 +1979,66 @@ Result<Qwen38Layer0ForwardResult> qwen38_layer0_forward(
     if (!attn_res) return attn_res.error();
     if (auto r = require_finite(attn_res.value().mixed_input, "attn_gr_mixed"); !r) return r.error();
 
-    // DeltaNet: the caller owns the state (zero it for the first token,
-    // reuse it for subsequent tokens so conv history and SSM carry).
-    Qwen38DeltaNetView dn_view{
-        weights.delta_net.in_proj_qkv, weights.delta_net.in_proj_z,
-        weights.delta_net.in_proj_a, weights.delta_net.in_proj_b,
-        weights.delta_net.conv1d, weights.delta_net.a_log,
-        weights.delta_net.dt_bias, weights.delta_net.norm,
-        weights.delta_net.out_proj};
-    dn_view.hidden_size = H;
-    dn_view.num_k_heads = Qwen38ExpectedInvariants::linear_num_key_heads;
-    dn_view.num_v_heads = Qwen38ExpectedInvariants::linear_num_value_heads;
-    dn_view.key_head_dim = Qwen38ExpectedInvariants::linear_key_head_dim;
-    dn_view.value_head_dim = Qwen38ExpectedInvariants::linear_value_head_dim;
-    dn_view.conv_kernel = Qwen38ExpectedInvariants::linear_conv_kernel_dim;
-    dn_view.rms_eps = 1.0e-6F;
-    if (delta_net_state.conv.empty() && delta_net_state.ssm.empty()) {
-        delta_net_state.conv.assign(
-            (static_cast<std::size_t>(Qwen38ExpectedInvariants::linear_num_key_heads)
-                 * Qwen38ExpectedInvariants::linear_key_head_dim * 2U
-             + static_cast<std::size_t>(Qwen38ExpectedInvariants::linear_num_value_heads)
-                 * Qwen38ExpectedInvariants::linear_value_head_dim)
-                * (Qwen38ExpectedInvariants::linear_conv_kernel_dim - 1U),
-            0.0F);
-        delta_net_state.ssm.assign(
-            static_cast<std::size_t>(Qwen38ExpectedInvariants::linear_num_value_heads)
-                * Qwen38ExpectedInvariants::linear_key_head_dim
-                * Qwen38ExpectedInvariants::linear_value_head_dim,
-            0.0F);
+    std::vector<float> attn_out_vec;
+    if (!weights.is_qsa) {
+        // Gated DeltaNet: the caller owns the state (zero it for the first
+        // token, reuse it for subsequent tokens so conv history and SSM carry).
+        Qwen38DeltaNetView dn_view{
+            weights.delta_net.in_proj_qkv, weights.delta_net.in_proj_z,
+            weights.delta_net.in_proj_a, weights.delta_net.in_proj_b,
+            weights.delta_net.conv1d, weights.delta_net.a_log,
+            weights.delta_net.dt_bias, weights.delta_net.norm,
+            weights.delta_net.out_proj};
+        dn_view.hidden_size = H;
+        dn_view.num_k_heads = Qwen38ExpectedInvariants::linear_num_key_heads;
+        dn_view.num_v_heads = Qwen38ExpectedInvariants::linear_num_value_heads;
+        dn_view.key_head_dim = Qwen38ExpectedInvariants::linear_key_head_dim;
+        dn_view.value_head_dim = Qwen38ExpectedInvariants::linear_value_head_dim;
+        dn_view.conv_kernel = Qwen38ExpectedInvariants::linear_conv_kernel_dim;
+        dn_view.rms_eps = 1.0e-6F;
+        Qwen38DeltaNetState& delta_net_state = runtime_state.delta_net;
+        if (delta_net_state.conv.empty() && delta_net_state.ssm.empty()) {
+            delta_net_state.conv.assign(
+                (static_cast<std::size_t>(Qwen38ExpectedInvariants::linear_num_key_heads)
+                     * Qwen38ExpectedInvariants::linear_key_head_dim * 2U
+                 + static_cast<std::size_t>(Qwen38ExpectedInvariants::linear_num_value_heads)
+                     * Qwen38ExpectedInvariants::linear_value_head_dim)
+                    * (Qwen38ExpectedInvariants::linear_conv_kernel_dim - 1U),
+                0.0F);
+            delta_net_state.ssm.assign(
+                static_cast<std::size_t>(Qwen38ExpectedInvariants::linear_num_value_heads)
+                    * Qwen38ExpectedInvariants::linear_key_head_dim
+                    * Qwen38ExpectedInvariants::linear_value_head_dim,
+                0.0F);
+        }
+        auto dn_out = qwen38_delta_net_decode(attn_res.value().mixed_input, dn_view, delta_net_state);
+        if (!dn_out) return dn_out.error();
+        if (auto r = require_finite(dn_out.value(), "deltanet_out"); !r) return r.error();
+        attn_out_vec = std::move(dn_out.value());
+    } else {
+        // QSA full attention: the caller owns the indexer-key and KV caches.
+        Qwen38QsaLayerView qsa_view{
+            weights.qsa.index_qk, weights.qsa.q_layernorm, weights.qsa.k_layernorm,
+            weights.qsa.q_proj, weights.qsa.k_proj, weights.qsa.v_proj,
+            weights.qsa.o_proj, weights.qsa.q_norm, weights.qsa.k_norm};
+        qsa_view.hidden_size = H;
+        qsa_view.indexer_heads = Qwen38ExpectedInvariants::indexer_n_heads;
+        qsa_view.indexer_dim = Qwen38ExpectedInvariants::indexer_head_dim;
+        qsa_view.budget = Qwen38ExpectedInvariants::indexer_budget;
+        qsa_view.compress_ratio = 4U;
+        qsa_view.attn_heads = Qwen38ExpectedInvariants::num_attention_heads;
+        qsa_view.attn_kv_heads = Qwen38ExpectedInvariants::num_key_value_heads;
+        qsa_view.attn_head_dim = Qwen38ExpectedInvariants::head_dim;
+        qsa_view.rms_eps = 1.0e-6F;
+        auto qsa_out = qwen38_qsa_layer_token(attn_res.value().mixed_input, qsa_view,
+                                              runtime_state.qsa);
+        if (!qsa_out) return qsa_out.error();
+        if (auto r = require_finite(qsa_out.value(), "qsa_out"); !r) return r.error();
+        attn_out_vec = std::move(qsa_out.value());
     }
-    auto dn_out = qwen38_delta_net_decode(attn_res.value().mixed_input, dn_view, delta_net_state);
-    if (!dn_out) return dn_out.error();
-    if (auto r = require_finite(dn_out.value(), "deltanet_out"); !r) return r.error();
 
     auto attn_out = qwen38_gated_residual_combine(
-        attn_res.value().residual, dn_out.value(), attn_res.value().injection_weights, C, H);
+        attn_res.value().residual, attn_out_vec, attn_res.value().injection_weights, C, H);
     if (!attn_out) return attn_out.error();
 
     // mlp gated residual
@@ -1909,8 +2094,8 @@ Result<std::vector<float>> qwen38_layer0_finish(
                                          partial.injection_weights, C, H);
 }
 
-Result<Qwen38OwnedExpert> qwen38_load_layer0_expert(
-    const Qwen38Layer0Trunk& trunk,
+Result<Qwen38OwnedExpert> qwen38_load_layer_expert(
+    const Qwen38LayerTrunk& trunk,
     const std::filesystem::path& checkpoint_root,
     std::uint32_t expert_id,
     Qwen38Layer0Telemetry* telemetry) {
@@ -1923,8 +2108,8 @@ Result<Qwen38OwnedExpert> qwen38_load_layer0_expert(
         return make_error(ErrorCode::not_found, "expert not in shard map",
                           std::to_string(expert_id));
     }
-    const std::string p = "model.language_model.layers.0.mlp.experts."
-        + std::to_string(expert_id) + ".";
+    const std::string p = "model.language_model.layers." + std::to_string(trunk.layer)
+        + ".mlp.experts." + std::to_string(expert_id) + ".";
     const std::string& gate_shard = it->second[0];
     const std::string& up_shard = it->second[1];
     const std::string& down_shard = it->second[2];

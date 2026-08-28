@@ -2,6 +2,18 @@
 
 ## Unreleased
 
+- **Q11e - Qwen3.8-Flash-Next real QSA full-attention layer.** The layer
+  loader is generalized to any layer: `qwen38_load_layer_trunk` resolves the
+  22 non-routed tensors from the weight map (no hardcoded shard names) and
+  loads the Gated DeltaNet or QSA branch according to
+  `full_attention_interval`; `qwen38_layer_forward` takes a caller-owned
+  `Qwen38LayerRuntimeState` (DeltaNet conv/SSM or QSA indexer-key + KV
+  caches). The real layer-3 QSA weights match the pinned operator layout
+  exactly (q_proj carries query+gate per head: 24x256x2). On the official
+  checkpoint the QSA layer runs a deterministic 5-token prefill (BOS sum
+  28.0353, bit-identical replay), and the CLI (`qwen38-layer --layer 3`,
+  `qwen38-prefill --layer 3`) agrees with the opt-in test.
+
 - **Q11d - Qwen3.8-Flash-Next real multi-token layer-0 prefill.** Trunk/row
   split (`qwen38_load_layer0_trunk` builds the expert->shard map once; embed
   rows stay bounded 5 KiB reads), caller-owned DeltaNet state so conv history

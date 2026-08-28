@@ -353,6 +353,26 @@ self-pinned: nessun oracolo esterno esiste per `qwen4_exp`.
 stato che attraversa i token. Self-pinned; QSA/MTP e full-depth restano
 aperti (Q11e).
 
+## Q11e - Layer QSA reale (layer 3) - complete
+
+- [x] Loader generalizzato a layer arbitrario: `qwen38_load_layer_trunk`
+  risolve i 22 tensori non-routed dal weight_map (niente shard hardcoddati),
+  carica il ramo DeltaNet (9 tensori) o QSA (9 tensori) secondo
+  `full_attention_interval`, e mappa gli esperti del layer richiesto.
+- [x] Forward generico `qwen38_layer_forward` con `Qwen38LayerRuntimeState`
+  caller-owned: conv/SSM per DeltaNet, cache indexer-keys + KV per QSA.
+- [x] **Layout QSA reale confermato dall'operatore pinnato**: `q_proj`
+  [12288, 2560] = query+gate per head (24×256×2), `index_qk_proj` [640, 2560]
+  = (4+1)×128, `k/v_proj` [512, 2560] = 2×256, `o_proj` [2560, 6144].
+- [x] CLI: `qwen38-layer --layer N` e `qwen38-prefill --layer N` (alias
+  `qwen38-layer0` compatibile).
+- [x] Layer 3 QSA reale: BOS sum 28.0353, prefill 5 token deterministico
+  (replay bit-pari), route dipendente dallo stato, esperti FP8 selezionati
+  {169,418,141,...}; CLI e test concordano.
+
+**Gate:** entrambi i tipi di layer (36 DeltaNet + 12 QSA) eseguono su pesi
+reali con prefill multi-token deterministico. Self-pinned.
+
 ## Q12 - prefix-KV MoE stream (porting M13)
 
 - [ ] Estendere `LlamaSession` al percorso MoE stream.

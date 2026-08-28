@@ -305,6 +305,31 @@ confronto llama.cpp.
 **Gate:** catalogo reale validato end-to-end in C++ nativo. Nessun payload
 tensore ancora letto per il compute (prossimo passo: bind e layer reale).
 
+## Q11c - Layer-0 reale in esecuzione - complete
+
+- [x] `vastloom qwen38-layer0 <root> --token N [--json] [--dump-hidden]`:
+  forward completo del layer-0 reale — riga embedding (lettura bounded di una
+  sola riga, 5 KB), attn gated residual, Gated DeltaNet (state azzerato),
+  combine, mlp gated residual, router top-10 su 512, shared expert, carico
+  on-demand dei 10 esperti FP8 selezionati, combine finale.
+- [x] **Bug FP8 trovato sul payload reale e corretto**: `qwen38_fp8_e4m3_to_f32`
+  trattava tutto `exp==15` come NaN; in E4M3FN (formato HF) NaN è solo
+  `exp==15 && mant==7`, mentre `0x78–0x7E` sono finiti fino a 448. Il
+  checkpoint ufficiale contiene tali encoding (3 370 su un solo gate_proj);
+  il vecchio decoder corrompeva qualunque inference reale. Test Q2 esteso con
+  i nuovi pin (0x78→256, 0x7E→448, 0xFE→−448).
+- [x] Guardie di finitezza per stadio (embed/stream/gated/DeltaNet/shared/
+  esperti) con errori che nominano lo stadio.
+- [x] Test opt-in esteso: forward reale su token BOS, finitezza, route
+  top-k esatta, determinismo bit-pari su doppia esecuzione.
+- [x] Router verificato sensibile all'input: token 100 → esperti
+  {215,226,122,448,483,363,459,40,239,500}; token BOS → {411,334,286,152,291,
+  106,421,304,226,331}.
+
+**Gate:** layer-0 completo eseguito su pesi reali (204 MB payload letti,
+~1.2 s load, ~46 ms forward). Output deterministico e finito. È un run
+self-pinned: nessun oracolo esterno esiste per `qwen4_exp`.
+
 ## Q12 - prefix-KV MoE stream (porting M13)
 
 - [ ] Estendere `LlamaSession` al percorso MoE stream.

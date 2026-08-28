@@ -14,10 +14,12 @@
 
 #include "vastloom/core/status.hpp"
 #include "vastloom/inference/qwen3_8_flash_next.hpp"
+#include "vastloom/inference/qwen3_8_flash_next_reference.hpp"
 
 namespace {
 
 int failures = 0;
+double pinned_sum = 0.0;
 
 void check(bool condition, const std::string& label) {
     if (!condition) {
@@ -96,5 +98,139 @@ int main(int argc, char** argv) {
         return 1;
     }
     std::cout << "Qwen3.8-Flash-Next real checkpoint catalog: PASS\n";
+
+    // --- Q11c: real layer-0 forward over the imported weights ---
+    // BOS token: load trunk + embedding row, run the full layer-0 forward,
+    // load the top-k routed FP8 experts, and finish. Asserts finiteness,
+    // determinism across two runs, and a consistent router decision.
+    {
+        namespace ref = vastloom::inference;
+        const std::uint32_t bos = ref::Qwen38ExpectedInvariants::bos_token_id;
+        ref::Qwen38Layer0Telemetry tel;
+        auto weights = ref::qwen38_load_layer0_weights(root, bos, &tel);
+        check(static_cast<bool>(weights), "layer0 trunk loads");
+        if (!weights) {
+            std::cerr << "  error: " << weights.error().message
+                      << " (" << weights.error().context << ")\n";
+            return 1;
+        }
+        check(weights.value().token_embed.size()
+                  == ref::Qwen38ExpectedInvariants::hidden_size,
+              "embedding row width");
+        check(weights.value().router.size()
+                  == static_cast<std::size_t>(ref::Qwen38ExpectedInvariants::num_experts)
+                     * ref::Qwen38ExpectedInvariants::hidden_size,
+              "router weight count");
+
+        ref::Qwen38Layer0ForwardResult fwd_storage;
+        auto run_forward = [&]() -> ref::Qwen38Layer0ForwardResult* {
+            auto fwd = ref::qwen38_layer0_forward(
+                weights.value(), bos, ref::Qwen38ExpectedInvariants::num_experts,
+                ref::Qwen38ExpectedInvariants::num_experts_per_tok);
+            if (!fwd) {
+                std::cerr << "  error: " << fwd.error().message
+                          << " (" << fwd.error().context << ")\n";
+                return nullptr;
+            }
+            fwd_storage = fwd.take_value();
+            return &fwd_storage;
+        };
+
+        auto* first = run_forward();
+        check(first != nullptr, "layer0 forward runs");
+        if (first != nullptr) {
+            check(first->route.indices.size()
+                      == ref::Qwen38ExpectedInvariants::num_experts_per_tok,
+                  "router selects exactly top-k experts");
+            check(first->mixed_input.size() == ref::Qwen38ExpectedInvariants::hidden_size,
+                  "mixed input width");
+            check(first->residual.size()
+                      == static_cast<std::size_t>(ref::Qwen38ExpectedInvariants::hc_count)
+                         * ref::Qwen38ExpectedInvariants::hidden_size,
+                  "mlp residual stream width");
+
+            // Load each selected FP8 expert and accumulate the routed sum.
+            const std::uint32_t H = ref::Qwen38ExpectedInvariants::hidden_size;
+            const std::uint32_t I = ref::Qwen38ExpectedInvariants::moe_intermediate_size;
+            std::vector<float> expert_sum(H, 0.0F);
+            bool experts_ok = true;
+            for (std::size_t i = 0; i < first->route.indices.size(); ++i) {
+                auto expert = ref::qwen38_load_layer0_expert(root, first->route.indices[i], &tel);
+                if (!expert) {
+                    experts_ok = false;
+                    std::cerr << "  error: " << expert.error().message
+                              << " (" << expert.error().context << ")\n";
+                    break;
+                }
+                auto y = ref::qwen38_expert_mlp(first->mixed_input,
+                                                expert.value().gate_proj,
+                                                expert.value().up_proj,
+                                                expert.value().down_proj, H, I);
+                if (!y) {
+                    experts_ok = false;
+                    std::cerr << "  error: " << y.error().message
+                              << " (" << y.error().context << ")\n";
+                    break;
+                }
+                for (std::uint32_t d = 0; d < H; ++d) {
+                    expert_sum[d] += y.value()[d] * first->route.weights[i];
+                }
+            }
+            check(experts_ok, "selected experts load and run");
+            if (experts_ok) {
+                auto finished = ref::qwen38_layer0_finish(*first, expert_sum);
+                check(static_cast<bool>(finished), "layer0 finish combines");
+                if (finished) {
+                    bool finite = true;
+                    for (const float v : finished.value()) {
+                        if (!std::isfinite(v)) { finite = false; break; }
+                    }
+                    check(finite, "layer0 output finite");
+                    double sum = 0.0;
+                    for (const float v : finished.value()) sum += static_cast<double>(v);
+                    std::cout << "layer-0 output sum: " << sum << "\n";
+                    pinned_sum = sum;
+
+                    // Determinism: a second full run must reproduce the exact sum.
+                    auto* second = run_forward();
+                    check(second != nullptr, "layer0 forward reruns");
+                    if (second != nullptr) {
+                        std::vector<float> expert_sum2(H, 0.0F);
+                        for (std::size_t i = 0; i < second->route.indices.size(); ++i) {
+                            auto expert = ref::qwen38_load_layer0_expert(
+                                root, second->route.indices[i], &tel);
+                            if (!expert) { experts_ok = false; break; }
+                            auto y = ref::qwen38_expert_mlp(second->mixed_input,
+                                                            expert.value().gate_proj,
+                                                            expert.value().up_proj,
+                                                            expert.value().down_proj, H, I);
+                            if (!y) { experts_ok = false; break; }
+                            for (std::uint32_t d = 0; d < H; ++d) {
+                                expert_sum2[d] += y.value()[d] * second->route.weights[i];
+                            }
+                        }
+                        auto finished2 = ref::qwen38_layer0_finish(*second, expert_sum2);
+                        check(static_cast<bool>(finished2) && experts_ok,
+                              "second forward completes");
+                        if (finished2 && experts_ok) {
+                            double sum2 = 0.0;
+                            for (const float v : finished2.value()) {
+                                sum2 += static_cast<double>(v);
+                            }
+                            check(sum2 == pinned_sum, "layer0 forward deterministic");
+                        }
+                    }
+                }
+            }
+        }
+        check(tel.tensors_read >= 22U, "at least the 22 trunk tensors read");
+        check(tel.expert_payload_bytes > 0U, "expert payload was read");
+    }
+
+    if (failures != 0) {
+        std::cerr << failures << " check(s) failed\n";
+        return 1;
+    }
+    std::cout << "Qwen3.8-Flash-Next real checkpoint layer-0 forward: PASS\n";
     return 0;
 }

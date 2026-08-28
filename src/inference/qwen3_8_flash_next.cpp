@@ -1,7 +1,9 @@
 #include "vastloom/inference/qwen3_8_flash_next.hpp"
+#include "vastloom/inference/qwen3_8_flash_next_reference.hpp"
 
 #include <algorithm>
 #include <chrono>
+#include <cmath>
 #include <cstdint>
 #include <filesystem>
 #include <fstream>
@@ -1414,6 +1416,513 @@ Result<std::vector<float>> qwen38_ngram_page_gather(
         }
     }
     return out;
+}
+
+// --- Q11c: real layer-0 loader + forward ---
+
+namespace {
+
+bool all_finite(std::span<const float> v) {
+    for (const float x : v) {
+        if (!std::isfinite(x)) {
+            return false;
+        }
+    }
+    return true;
+}
+
+Result<void> require_finite(std::span<const float> v, std::string_view stage) {
+    if (!all_finite(v)) {
+        return make_error(ErrorCode::invalid_format, "layer0 stage produced non-finite values",
+                          std::string(stage));
+    }
+    return {};
+}
+
+// Reads one tensor from a checkpoint shard as F32 using the canonical
+// safetensors reader. Records payload bytes and SHA-256 of the weight bytes.
+Result<std::vector<float>> load_tensor_f32(
+    const std::filesystem::path& root,
+    const std::string& shard_name,
+    const std::string& tensor_name,
+    const std::vector<std::int64_t>& expected_shape,
+    Qwen38Layer0Telemetry* telemetry,
+    bool is_expert) {
+    const auto shard_path = root / shard_name;
+    std::error_code ec;
+    const auto file_size = std::filesystem::file_size(shard_path, ec);
+    if (ec) {
+        return make_error(ErrorCode::io_error, "cannot stat shard", shard_path.string());
+    }
+    // Header reads are bounded; expert-dense shards carry larger JSON headers
+    // (hundreds of tensor entries), so allow 4 MiB. The reader still validates
+    // the declared length against the real header length.
+    auto header = read_qwen38_safetensors_header(shard_path, file_size, 4U * 1024U * 1024U);
+    if (!header) {
+        return make_error(header.error().code, header.error().message,
+                          "layer0 header: " + shard_name);
+    }
+    auto payload = qwen38_read_tensor_payload(shard_path, header.value(), tensor_name);
+    if (!payload) {
+        return make_error(payload.error().code, payload.error().message,
+                          "layer0 tensor: " + tensor_name);
+    }
+
+    const Qwen38TensorDescriptor* desc = nullptr;
+    for (const auto& t : header.value().tensors) {
+        if (t.name == tensor_name) { desc = &t; break; }
+    }
+    if (desc == nullptr) {
+        return make_error(ErrorCode::not_found, "tensor descriptor vanished", tensor_name);
+    }
+    if (desc->shape != expected_shape) {
+        return make_error(ErrorCode::invalid_format,
+            "layer0 tensor shape drift",
+            tensor_name + ": expected " + std::to_string(expected_shape.size()) + " dims");
+    }
+
+    util::Sha256 digest;
+    digest.update(std::span<const std::byte>{payload.value().bytes.data(), payload.value().bytes.size()});
+    const std::string hash = digest.finalize_hex();
+
+    // FP8 block-scale companions carry their own shape; locate it so the
+    // decoder can validate the 128x128 block tiling.
+    std::vector<std::int64_t> scale_shape;
+    if (!desc->scale_inv_name.empty()) {
+        const Qwen38TensorDescriptor* scale_desc = nullptr;
+        for (const auto& t : header.value().tensors) {
+            if (t.name == desc->scale_inv_name) { scale_desc = &t; break; }
+        }
+        if (scale_desc == nullptr) {
+            return make_error(ErrorCode::not_found, "scale_inv descriptor missing",
+                              desc->scale_inv_name);
+        }
+        scale_shape = scale_desc->shape;
+    }
+
+    auto decoded = qwen38_decode_tensor_payload(
+        std::span<const std::byte>{payload.value().bytes.data(), payload.value().bytes.size()},
+        std::span<const std::byte>{payload.value().scale_bytes.data(), payload.value().scale_bytes.size()},
+        desc->dtype, desc->shape, scale_shape);
+    if (!decoded) {
+        return make_error(decoded.error().code, decoded.error().message,
+                          "layer0 decode: " + tensor_name);
+    }
+
+    if (telemetry) {
+        telemetry->payload_bytes_read += payload.value().payload_bytes;
+        telemetry->tensors_read += 1U;
+        if (is_expert) {
+            telemetry->expert_payload_bytes += payload.value().payload_bytes;
+        }
+    }
+    std::ignore = hash;
+    return decoded;
+}
+
+}  // namespace
+
+Result<Qwen38Layer0Weights> qwen38_load_layer0_weights(
+    const std::filesystem::path& checkpoint_root,
+    std::uint32_t token_id,
+    Qwen38Layer0Telemetry* telemetry) {
+    const auto t0 = std::chrono::steady_clock::now();
+
+    // Verify the checkpoint identity first: config + full catalog validation.
+    auto cfg = load_qwen38_flash_next_config(checkpoint_root / "config.json");
+    if (!cfg) {
+        return make_error(cfg.error().code, cfg.error().message, "layer0 config");
+    }
+    auto inspected = inspect_qwen38_flash_next_safetensors(
+        checkpoint_root / "model.safetensors.index.json", cfg.value(), false);
+    if (!inspected) {
+        return make_error(inspected.error().code, inspected.error().message, "layer0 index");
+    }
+    auto validated = qwen38_validate_catalog(inspected.value());
+    if (!validated) {
+        return make_error(validated.error().code, validated.error().message, "layer0 catalog");
+    }
+
+    const std::string s1 = "model-00001-of-00131.safetensors";
+    const std::string s2 = "model-00002-of-00131.safetensors";
+    const std::string s3 = "model-00003-of-00131.safetensors";
+    const std::string s130 = "model-00130-of-00131.safetensors";
+    const std::string p = "model.language_model.layers.0.";
+
+    Qwen38Layer0Weights w;
+
+    // Embedding row for token_id: embed_tokens.weight [248320, 2560] BF16.
+    {
+        const auto shard_path = checkpoint_root / s130;
+        std::error_code ec;
+        const auto file_size = std::filesystem::file_size(shard_path, ec);
+        if (ec) {
+            return make_error(ErrorCode::io_error, "cannot stat embed shard", s130);
+        }
+        auto header = read_qwen38_safetensors_header(shard_path, file_size, 4U * 1024U * 1024U);
+        if (!header) {
+            return make_error(header.error().code, header.error().message, "layer0 embed header");
+        }
+        const std::string embed_name = "model.language_model.embed_tokens.weight";
+        const Qwen38TensorDescriptor* desc = nullptr;
+        for (const auto& t : header.value().tensors) {
+            if (t.name == embed_name) { desc = &t; break; }
+        }
+        if (desc == nullptr) {
+            return make_error(ErrorCode::not_found, "embed tensor not found", embed_name);
+        }
+        if (desc->dtype != "BF16" || desc->shape.size() != 2U
+            || desc->shape[1] != Qwen38ExpectedInvariants::hidden_size) {
+            return make_error(ErrorCode::invalid_format, "embed tensor drift", embed_name);
+        }
+        if (token_id >= static_cast<std::uint32_t>(desc->shape[0])) {
+            return make_error(ErrorCode::invalid_argument, "token id out of vocab",
+                              std::to_string(token_id));
+        }
+        // Bounded read: fetch exactly one embedding row instead of the whole
+        // 1.27 GiB embedding tensor.
+        const std::size_t row_bytes = static_cast<std::size_t>(desc->shape[1]) * 2U;
+        const std::uint64_t row_begin_abs =
+            8U + header.value().json_header_bytes + desc->data_offset_begin
+            + static_cast<std::uint64_t>(token_id) * row_bytes;
+        if (row_begin_abs + row_bytes > header.value().total_bytes) {
+            return make_error(ErrorCode::invalid_format, "embed row out of payload", embed_name);
+        }
+        std::ifstream in(shard_path, std::ios::binary);
+        if (!in) {
+            return make_error(ErrorCode::io_error, "cannot open embed shard", s130);
+        }
+        in.seekg(static_cast<std::streamoff>(row_begin_abs));
+        std::vector<std::byte> row_bytes_buf(row_bytes);
+        in.read(reinterpret_cast<char*>(row_bytes_buf.data()),
+                static_cast<std::streamsize>(row_bytes));
+        if (static_cast<std::uint64_t>(in.gcount()) != row_bytes) {
+            return make_error(ErrorCode::io_error, "short read of embed row", embed_name);
+        }
+        std::vector<std::int64_t> row_shape{1, desc->shape[1]};
+        auto row = qwen38_decode_bf16(row_bytes_buf, row_shape);
+        if (!row) {
+            return make_error(row.error().code, row.error().message, "layer0 embed row decode");
+        }
+        w.token_embed = std::move(row.value());
+        if (telemetry) {
+            telemetry->payload_bytes_read += row_bytes;
+            telemetry->tensors_read += 1U;
+        }
+    }
+
+    auto load_residual = [&](const std::string& prefix, const std::string& shard,
+                             Qwen38OwnedResidual& out) -> Result<void> {
+        auto hc_norm = load_tensor_f32(checkpoint_root, shard, prefix + ".hc_norm.weight",
+            {Qwen38ExpectedInvariants::hc_count * Qwen38ExpectedInvariants::hidden_size},
+            telemetry, false);
+        if (!hc_norm) return hc_norm.error();
+        auto mix_down = load_tensor_f32(checkpoint_root, shard, prefix + ".input_mix_weight_down.weight",
+            {Qwen38ExpectedInvariants::hc_lowrank,
+             Qwen38ExpectedInvariants::hc_count * Qwen38ExpectedInvariants::hidden_size},
+            telemetry, false);
+        if (!mix_down) return mix_down.error();
+        auto mix_up = load_tensor_f32(checkpoint_root, shard, prefix + ".input_mix_weight_up.weight",
+            {Qwen38ExpectedInvariants::hc_count * Qwen38ExpectedInvariants::hidden_size,
+             Qwen38ExpectedInvariants::hc_lowrank},
+            telemetry, false);
+        if (!mix_up) return mix_up.error();
+        auto inject = load_tensor_f32(checkpoint_root, shard, prefix + ".block_inject_weight.weight",
+            {Qwen38ExpectedInvariants::hc_count,
+             Qwen38ExpectedInvariants::hc_count * Qwen38ExpectedInvariants::hidden_size},
+            telemetry, false);
+        if (!inject) return inject.error();
+        out.hc_norm = std::move(hc_norm.value());
+        out.mix_down = std::move(mix_down.value());
+        out.mix_up = std::move(mix_up.value());
+        out.block_inject = std::move(inject.value());
+        return {};
+    };
+
+    if (auto r = load_residual(p + "attn_hyper_connection", s1, w.attn_hyper); !r) {
+        return r.error();
+    }
+    if (auto r = load_residual(p + "mlp_hyper_connection", s3, w.mlp_hyper); !r) {
+        return r.error();
+    }
+
+    {
+        auto v = load_tensor_f32(checkpoint_root, s1, p + "linear_attn.in_proj_qkv.weight",
+            {4U * Qwen38ExpectedInvariants::hidden_size, Qwen38ExpectedInvariants::hidden_size},
+            telemetry, false);
+        if (!v) return v.error();
+        w.delta_net.in_proj_qkv = std::move(v.value());
+    }
+    {
+        auto v = load_tensor_f32(checkpoint_root, s1, p + "linear_attn.in_proj_z.weight",
+            {2U * Qwen38ExpectedInvariants::hidden_size + 1024U, Qwen38ExpectedInvariants::hidden_size},
+            telemetry, false);
+        if (!v) return v.error();
+        w.delta_net.in_proj_z = std::move(v.value());
+    }
+    {
+        auto v = load_tensor_f32(checkpoint_root, s1, p + "linear_attn.in_proj_a.weight",
+            {Qwen38ExpectedInvariants::linear_num_value_heads, Qwen38ExpectedInvariants::hidden_size},
+            telemetry, false);
+        if (!v) return v.error();
+        w.delta_net.in_proj_a = std::move(v.value());
+    }
+    {
+        auto v = load_tensor_f32(checkpoint_root, s1, p + "linear_attn.in_proj_b.weight",
+            {Qwen38ExpectedInvariants::linear_num_value_heads, Qwen38ExpectedInvariants::hidden_size},
+            telemetry, false);
+        if (!v) return v.error();
+        w.delta_net.in_proj_b = std::move(v.value());
+    }
+    {
+        auto v = load_tensor_f32(checkpoint_root, s1, p + "linear_attn.conv1d.weight",
+            {Qwen38ExpectedInvariants::hc_count * Qwen38ExpectedInvariants::hidden_size, 1,
+             Qwen38ExpectedInvariants::linear_conv_kernel_dim},
+            telemetry, false);
+        if (!v) return v.error();
+        w.delta_net.conv1d = std::move(v.value());
+    }
+    {
+        auto v = load_tensor_f32(checkpoint_root, s1, p + "linear_attn.A_log",
+            {Qwen38ExpectedInvariants::linear_num_value_heads}, telemetry, false);
+        if (!v) return v.error();
+        w.delta_net.a_log = std::move(v.value());
+    }
+    {
+        auto v = load_tensor_f32(checkpoint_root, s1, p + "linear_attn.dt_bias",
+            {Qwen38ExpectedInvariants::linear_num_value_heads}, telemetry, false);
+        if (!v) return v.error();
+        w.delta_net.dt_bias = std::move(v.value());
+    }
+    {
+        auto v = load_tensor_f32(checkpoint_root, s1, p + "linear_attn.norm.weight",
+            {Qwen38ExpectedInvariants::linear_value_head_dim}, telemetry, false);
+        if (!v) return v.error();
+        w.delta_net.norm = std::move(v.value());
+    }
+    {
+        auto v = load_tensor_f32(checkpoint_root, s1, p + "linear_attn.out_proj.weight",
+            {Qwen38ExpectedInvariants::hidden_size,
+             2U * Qwen38ExpectedInvariants::hidden_size + 1024U},
+            telemetry, false);
+        if (!v) return v.error();
+        w.delta_net.out_proj = std::move(v.value());
+    }
+    {
+        auto v = load_tensor_f32(checkpoint_root, s3, p + "mlp.gate.weight",
+            {Qwen38ExpectedInvariants::num_experts, Qwen38ExpectedInvariants::hidden_size},
+            telemetry, false);
+        if (!v) return v.error();
+        w.router = std::move(v.value());
+    }
+    {
+        auto v = load_tensor_f32(checkpoint_root, s3, p + "mlp.shared_expert.gate_proj.weight",
+            {Qwen38ExpectedInvariants::shared_expert_intermediate_size,
+             Qwen38ExpectedInvariants::hidden_size},
+            telemetry, false);
+        if (!v) return v.error();
+        w.shared_mlp.gate_proj = std::move(v.value());
+    }
+    {
+        auto v = load_tensor_f32(checkpoint_root, s3, p + "mlp.shared_expert.up_proj.weight",
+            {Qwen38ExpectedInvariants::shared_expert_intermediate_size,
+             Qwen38ExpectedInvariants::hidden_size},
+            telemetry, false);
+        if (!v) return v.error();
+        w.shared_mlp.up_proj = std::move(v.value());
+    }
+    {
+        auto v = load_tensor_f32(checkpoint_root, s3, p + "mlp.shared_expert.down_proj.weight",
+            {Qwen38ExpectedInvariants::hidden_size,
+             Qwen38ExpectedInvariants::shared_expert_intermediate_size},
+            telemetry, false);
+        if (!v) return v.error();
+        w.shared_mlp.down_proj = std::move(v.value());
+    }
+    {
+        auto v = load_tensor_f32(checkpoint_root, s3, p + "mlp.shared_expert_gate.weight",
+            {1, Qwen38ExpectedInvariants::hidden_size}, telemetry, false);
+        if (!v) return v.error();
+        w.shared_mlp.shared_gate = std::move(v.value());
+    }
+
+    if (telemetry) {
+        telemetry->load_ms = std::chrono::steady_clock::now() - t0;
+    }
+    return w;
+}
+
+Result<Qwen38Layer0ForwardResult> qwen38_layer0_forward(
+    const Qwen38Layer0Weights& weights,
+    std::uint32_t token_id,
+    std::uint32_t num_experts,
+    std::uint32_t top_k) {
+    const auto t0 = std::chrono::steady_clock::now();
+    const std::uint32_t H = Qwen38ExpectedInvariants::hidden_size;
+    const std::uint32_t C = Qwen38ExpectedInvariants::hc_count;
+    const std::uint32_t R = Qwen38ExpectedInvariants::hc_lowrank;
+    std::ignore = token_id;
+
+    // Embedding row -> expanded hyper stream input.
+    const std::span<const float> hidden{weights.token_embed.data(), weights.token_embed.size()};
+    if (hidden.size() != H) {
+        return make_error(ErrorCode::invalid_format, "embed row width drift",
+                          std::to_string(hidden.size()));
+    }
+
+    // attn gated residual on the expanded stream
+    auto stream0 = qwen38_expand_stream(hidden, C);
+    if (auto r = require_finite(stream0, "embed_stream"); !r) return r.error();
+    Qwen38GatedResidualView attn_view{
+        weights.attn_hyper.hc_norm, weights.attn_hyper.mix_down,
+        weights.attn_hyper.mix_up, weights.attn_hyper.block_inject};
+    auto attn_res = qwen38_gated_residual(stream0, attn_view, C, H, R, 1.0e-6F);
+    if (!attn_res) return attn_res.error();
+    if (auto r = require_finite(attn_res.value().mixed_input, "attn_gr_mixed"); !r) return r.error();
+
+    // DeltaNet (state starts zeroed)
+    Qwen38DeltaNetView dn_view{
+        weights.delta_net.in_proj_qkv, weights.delta_net.in_proj_z,
+        weights.delta_net.in_proj_a, weights.delta_net.in_proj_b,
+        weights.delta_net.conv1d, weights.delta_net.a_log,
+        weights.delta_net.dt_bias, weights.delta_net.norm,
+        weights.delta_net.out_proj};
+    dn_view.hidden_size = H;
+    dn_view.num_k_heads = Qwen38ExpectedInvariants::linear_num_key_heads;
+    dn_view.num_v_heads = Qwen38ExpectedInvariants::linear_num_value_heads;
+    dn_view.key_head_dim = Qwen38ExpectedInvariants::linear_key_head_dim;
+    dn_view.value_head_dim = Qwen38ExpectedInvariants::linear_value_head_dim;
+    dn_view.conv_kernel = Qwen38ExpectedInvariants::linear_conv_kernel_dim;
+    dn_view.rms_eps = 1.0e-6F;
+    Qwen38DeltaNetState dn_state;
+    dn_state.conv.assign(
+        (static_cast<std::size_t>(Qwen38ExpectedInvariants::linear_num_key_heads)
+             * Qwen38ExpectedInvariants::linear_key_head_dim * 2U
+         + static_cast<std::size_t>(Qwen38ExpectedInvariants::linear_num_value_heads)
+             * Qwen38ExpectedInvariants::linear_value_head_dim)
+            * (Qwen38ExpectedInvariants::linear_conv_kernel_dim - 1U),
+        0.0F);
+    dn_state.ssm.assign(
+        static_cast<std::size_t>(Qwen38ExpectedInvariants::linear_num_value_heads)
+            * Qwen38ExpectedInvariants::linear_key_head_dim
+            * Qwen38ExpectedInvariants::linear_value_head_dim,
+        0.0F);
+    auto dn_out = qwen38_delta_net_decode(attn_res.value().mixed_input, dn_view, dn_state);
+    if (!dn_out) return dn_out.error();
+    if (auto r = require_finite(dn_out.value(), "deltanet_out"); !r) return r.error();
+
+    auto attn_out = qwen38_gated_residual_combine(
+        attn_res.value().residual, dn_out.value(), attn_res.value().injection_weights, C, H);
+    if (!attn_out) return attn_out.error();
+
+    // mlp gated residual
+    Qwen38GatedResidualView mlp_view{
+        weights.mlp_hyper.hc_norm, weights.mlp_hyper.mix_down,
+        weights.mlp_hyper.mix_up, weights.mlp_hyper.block_inject};
+    auto mlp_res = qwen38_gated_residual(attn_out.value(), mlp_view, C, H, R, 1.0e-6F);
+    if (!mlp_res) return mlp_res.error();
+    if (auto r = require_finite(mlp_res.value().mixed_input, "mlp_gr_mixed"); !r) return r.error();
+
+    // router
+    auto route = qwen38_moe_route(mlp_res.value().mixed_input, weights.router,
+                                  num_experts, top_k, true);
+    if (!route) return route.error();
+
+    // shared expert
+    auto shared = qwen38_shared_mlp(mlp_res.value().mixed_input,
+                                    weights.shared_mlp.gate_proj,
+                                    weights.shared_mlp.up_proj,
+                                    weights.shared_mlp.down_proj,
+                                    weights.shared_mlp.shared_gate,
+                                    H, Qwen38ExpectedInvariants::shared_expert_intermediate_size);
+    if (!shared) return shared.error();
+    if (auto r = require_finite(shared.value(), "shared_expert"); !r) return r.error();
+
+    Qwen38Layer0ForwardResult out;
+    out.route = route.value();
+    out.mixed_input = std::move(mlp_res.value().mixed_input);
+    out.residual = std::move(mlp_res.value().residual);
+    out.injection_weights = std::move(mlp_res.value().injection_weights);
+    out.shared_out = std::move(shared.value());
+    out.telemetry.selected_experts = route.value().indices.size();
+    out.telemetry.forward_ms = std::chrono::steady_clock::now() - t0;
+    return out;
+}
+
+Result<std::vector<float>> qwen38_layer0_finish(
+    const Qwen38Layer0ForwardResult& partial,
+    std::span<const float> expert_sum) {
+    const std::uint32_t H = Qwen38ExpectedInvariants::hidden_size;
+    const std::uint32_t C = Qwen38ExpectedInvariants::hc_count;
+    if (expert_sum.size() != H || partial.shared_out.size() != H
+        || partial.residual.size() != static_cast<std::size_t>(C) * H
+        || partial.injection_weights.size() != C) {
+        return make_error(ErrorCode::invalid_argument, "layer0 finish size mismatch",
+                          "layer0_finish");
+    }
+    std::vector<float> moe_total(H, 0.0F);
+    for (std::uint32_t d = 0; d < H; ++d) {
+        moe_total[d] = partial.shared_out[d] + expert_sum[d];
+    }
+    return qwen38_gated_residual_combine(partial.residual, moe_total,
+                                         partial.injection_weights, C, H);
+}
+
+Result<Qwen38OwnedExpert> qwen38_load_layer0_expert(
+    const std::filesystem::path& checkpoint_root,
+    std::uint32_t expert_id,
+    Qwen38Layer0Telemetry* telemetry) {
+    if (expert_id >= Qwen38ExpectedInvariants::num_experts) {
+        return make_error(ErrorCode::invalid_argument, "expert id out of range",
+                          std::to_string(expert_id));
+    }
+    const std::string p = "model.language_model.layers.0.mlp.experts."
+        + std::to_string(expert_id) + ".";
+    // Expert tensors are distributed across shards; consult the index.
+    auto cfg = load_qwen38_flash_next_config(checkpoint_root / "config.json");
+    if (!cfg) {
+        return make_error(cfg.error().code, cfg.error().message, "expert config");
+    }
+    auto inspected = inspect_qwen38_flash_next_safetensors(
+        checkpoint_root / "model.safetensors.index.json", cfg.value(), false);
+    if (!inspected) {
+        return make_error(inspected.error().code, inspected.error().message, "expert index");
+    }
+    std::string gate_shard;
+    std::string up_shard;
+    std::string down_shard;
+    for (const auto& e : inspected.value().weight_map) {
+        if (e.tensor_name == p + "gate_proj.weight") gate_shard = e.shard_path.string();
+        else if (e.tensor_name == p + "up_proj.weight") up_shard = e.shard_path.string();
+        else if (e.tensor_name == p + "down_proj.weight") down_shard = e.shard_path.string();
+    }
+    if (gate_shard.empty() || up_shard.empty() || down_shard.empty()) {
+        return make_error(ErrorCode::not_found, "expert tensors missing from index", p);
+    }
+
+    Qwen38OwnedExpert expert;
+    const std::vector<std::int64_t> gate_shape{
+        static_cast<std::int64_t>(Qwen38ExpectedInvariants::moe_intermediate_size),
+        static_cast<std::int64_t>(Qwen38ExpectedInvariants::hidden_size)};
+    const std::vector<std::int64_t> down_shape{
+        static_cast<std::int64_t>(Qwen38ExpectedInvariants::hidden_size),
+        static_cast<std::int64_t>(Qwen38ExpectedInvariants::moe_intermediate_size)};
+    auto gate = load_tensor_f32(checkpoint_root, gate_shard, p + "gate_proj.weight",
+                                gate_shape, telemetry, true);
+    if (!gate) return gate.error();
+    if (auto r = require_finite(gate.value(), p + "gate_proj"); !r) return r.error();
+    auto up = load_tensor_f32(checkpoint_root, up_shard, p + "up_proj.weight",
+                              gate_shape, telemetry, true);
+    if (!up) return up.error();
+    if (auto r = require_finite(up.value(), p + "up_proj"); !r) return r.error();
+    auto down = load_tensor_f32(checkpoint_root, down_shard, p + "down_proj.weight",
+                                down_shape, telemetry, true);
+    if (!down) return down.error();
+    if (auto r = require_finite(down.value(), p + "down_proj"); !r) return r.error();
+    expert.gate_proj = std::move(gate.value());
+    expert.up_proj = std::move(up.value());
+    expert.down_proj = std::move(down.value());
+    return expert;
 }
 
 }  // namespace vastloom::inference

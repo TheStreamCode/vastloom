@@ -2870,10 +2870,15 @@ void test_qwen38_flash_next_reference_operators(const std::filesystem::path& roo
         CHECK(std::abs(qwen38_fp8_e4m3_to_f32(0xB8) - (-1.0F)) < 1e-6F);
         // 0x3C => 1.5 (exp=7, mant=4 => 1+4/8=1.5)
         CHECK(std::abs(qwen38_fp8_e4m3_to_f32(0x3C) - 1.5F) < 1e-6F);
-        // 0x7F => NaN (exp=15)
+        // 0x7F => NaN (exp=15, mant=7 — the only E4M3FN NaN pattern)
         CHECK(std::isnan(qwen38_fp8_e4m3_to_f32(0x7F)));
         // 0xFF => NaN (negative NaN)
         CHECK(std::isnan(qwen38_fp8_e4m3_to_f32(0xFF)));
+        // exp==15 with mant<7 is finite in E4M3FN: max 448.
+        // These encodings occur in the official FP8 checkpoint weights.
+        CHECK(std::abs(qwen38_fp8_e4m3_to_f32(0x78) - 256.0F) < 1e-3F);
+        CHECK(std::abs(qwen38_fp8_e4m3_to_f32(0x7E) - 448.0F) < 1e-3F);
+        CHECK(std::abs(qwen38_fp8_e4m3_to_f32(0xFE) - (-448.0F)) < 1e-3F);
         // 0x01 => subnormal: 1/8 * 2^-6 = 1/512 ≈ 0.001953
         CHECK(std::abs(qwen38_fp8_e4m3_to_f32(0x01) - (1.0F / 512.0F)) < 1e-7F);
     }

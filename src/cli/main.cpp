@@ -37,6 +37,7 @@
 #include "vastloom/inference/ggml_compute.hpp"
 #include "vastloom/inference/deepseek_v4_preflight.hpp"
 #include "vastloom/inference/qwen3_8_flash_next.hpp"
+#include "vastloom/inference/qwen3_8_flash_next_reference.hpp"
 #include "vastloom/inference/llama_model.hpp"
 #include "vastloom/inference/olmoe_model.hpp"
 #include "vastloom/inference/olmoe_runtime.hpp"
@@ -1586,6 +1587,124 @@ int command_qwen38_inspect(const std::vector<std::string>& args) {
                   << "  mtp tensors: " << r.mtp_tensors << '\n'
                   << "  global tensors: " << r.global_tensors << '\n'
                   << "  shard header loaded: " << (r.shard_loaded ? "yes" : "no") << '\n';
+    }
+    return 0;
+}
+
+// Qwen3.8-Flash-Next real layer-0 forward: loads the 22 canonical non-routed
+// tensors plus the embedding row and the top-k routed FP8 experts for one
+// token, then runs the full layer-0 reference forward over real weights.
+int command_qwen38_layer0(const std::vector<std::string>& args) {
+    const bool json = has_flag(args, "--json");
+    auto valid = validate_options(args, 1U, {"--token"}, {"--json", "--dump-hidden"});
+    if (!valid) return print_error(valid.error(), json);
+    auto token = optional_size(args, "--token", 0U);
+    if (!token) return print_error(token.error(), json);
+    if (token.value() >= vastloom::inference::Qwen38ExpectedInvariants::vocab_size) {
+        return print_error(vastloom::make_error(
+                               vastloom::ErrorCode::invalid_argument,
+                               "token id outside the Qwen3.8-Flash-Next vocabulary"),
+                           json);
+    }
+
+    const auto checkpoint_root = cli_path(args.front());
+    auto hardware = vastloom::hardware::HardwareProbe::collect(checkpoint_root);
+    if (!hardware) return print_error(hardware.error(), json);
+    auto policy = vastloom::safety::make_safe_runtime_policy(hardware.value());
+    if (!policy) return print_error(policy.error(), json);
+    auto guard = vastloom::safety::ProcessSafetyGuard::apply(policy.value());
+    if (!guard) return print_error(guard.error(), json);
+
+    vastloom::inference::Qwen38Layer0Telemetry load_tel;
+    auto weights = vastloom::inference::qwen38_load_layer0_weights(
+        checkpoint_root, static_cast<std::uint32_t>(token.value()), &load_tel);
+    if (!weights) return print_error(weights.error(), json);
+
+    auto forward = vastloom::inference::qwen38_layer0_forward(
+        weights.value(), static_cast<std::uint32_t>(token.value()),
+        vastloom::inference::Qwen38ExpectedInvariants::num_experts,
+        vastloom::inference::Qwen38ExpectedInvariants::num_experts_per_tok);
+    if (!forward) return print_error(forward.error(), json);
+
+    // Routed experts: load each selected FP8 expert, run its MLP, accumulate.
+    const std::uint32_t H = vastloom::inference::Qwen38ExpectedInvariants::hidden_size;
+    const std::uint32_t I = vastloom::inference::Qwen38ExpectedInvariants::moe_intermediate_size;
+    std::vector<float> expert_sum(H, 0.0F);
+    for (std::size_t i = 0; i < forward.value().route.indices.size(); ++i) {
+        const auto eid = forward.value().route.indices[i];
+        auto expert = vastloom::inference::qwen38_load_layer0_expert(
+            checkpoint_root, eid, &load_tel);
+        if (!expert) return print_error(expert.error(), json);
+        auto y = vastloom::inference::qwen38_expert_mlp(
+            forward.value().mixed_input,
+            expert.value().gate_proj, expert.value().up_proj, expert.value().down_proj,
+            H, I);
+        if (!y) return print_error(y.error(), json);
+        for (const float v : y.value()) {
+            if (!std::isfinite(v)) {
+                return print_error(vastloom::make_error(
+                                       vastloom::ErrorCode::invalid_format,
+                                       "expert mlp produced non-finite output",
+                                       "expert=" + std::to_string(eid)),
+                                   json);
+            }
+        }
+        const float w = forward.value().route.weights[i];
+        for (std::uint32_t d = 0; d < H; ++d) {
+            expert_sum[d] += y.value()[d] * w;
+        }
+    }
+    auto finished = vastloom::inference::qwen38_layer0_finish(forward.value(), expert_sum);
+    if (!finished) return print_error(finished.error(), json);
+    const std::vector<float>& hidden = finished.value();
+
+    const auto ms = [](std::chrono::steady_clock::duration d) {
+        return std::chrono::duration<double, std::milli>(d).count();
+    };
+    if (json) {
+        std::cout << "{\n"
+                  << "  \"token_id\": " << token.value() << ",\n"
+                  << "  \"tensors_read\": " << load_tel.tensors_read << ",\n"
+                  << "  \"payload_bytes_read\": " << load_tel.payload_bytes_read << ",\n"
+                  << "  \"expert_payload_bytes\": " << load_tel.expert_payload_bytes << ",\n"
+                  << "  \"selected_experts\": [";
+        for (std::size_t i = 0; i < forward.value().route.indices.size(); ++i) {
+            if (i != 0) std::cout << ",";
+            std::cout << forward.value().route.indices[i];
+        }
+        std::cout << "],\n"
+                  << "  \"load_ms\": " << ms(load_tel.load_ms) << ",\n"
+                  << "  \"forward_ms\": " << ms(forward.value().telemetry.forward_ms) << ",\n"
+                  << "  \"hidden_sum\": " << [&] {
+                         double s = 0.0;
+                         for (float v : hidden) s += static_cast<double>(v);
+                         return s;
+                     }() << "\n"
+                  << "}\n";
+    } else {
+        std::cout << "Qwen3.8-Flash-Next real layer-0 forward\n"
+                  << "  token: " << token.value() << '\n'
+                  << "  tensors read: " << load_tel.tensors_read << '\n'
+                  << "  payload bytes read: " << load_tel.payload_bytes_read << '\n'
+                  << "  expert payload bytes: " << load_tel.expert_payload_bytes << '\n'
+                  << "  selected experts:";
+        for (const auto eid : forward.value().route.indices) {
+            std::cout << ' ' << eid;
+        }
+        std::cout << "\n  load ms: " << ms(load_tel.load_ms) << '\n'
+                  << "  forward ms: " << ms(forward.value().telemetry.forward_ms) << '\n'
+                  << "  hidden sum: " << [&] {
+                         double s = 0.0;
+                         for (float v : hidden) s += static_cast<double>(v);
+                         return s;
+                     }() << '\n';
+    }
+    if (has_flag(args, "--dump-hidden")) {
+        std::cout << "hidden[0..7]:";
+        for (std::size_t i = 0; i < 8 && i < hidden.size(); ++i) {
+            std::cout << ' ' << hidden[i];
+        }
+        std::cout << '\n';
     }
     return 0;
 }
@@ -4823,6 +4942,7 @@ int dispatch_cli(const std::vector<std::string>& arguments) {
         if (command == "moe-inspect") return command_moe_inspect(args);
         if (command == "deepseek-inspect") return command_deepseek_inspect(args);
         if (command == "qwen38-inspect") return command_qwen38_inspect(args);
+        if (command == "qwen38-layer0") return command_qwen38_layer0(args);
         if (command == "deepseek-gguf-inspect") return command_deepseek_gguf_inspect(args);
         if (command == "deepseek-gguf-checkpoint") return command_deepseek_gguf_checkpoint(args);
         if (command == "deepseek-gguf-probe-plan") return command_deepseek_gguf_probe_plan(args);

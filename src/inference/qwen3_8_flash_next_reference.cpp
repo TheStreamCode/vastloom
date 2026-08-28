@@ -21,10 +21,11 @@ float qwen38_fp8_e4m3_to_f32(std::uint8_t bits) noexcept {
     const std::uint32_t exp = (bits >> 3) & 0xFU;
     const std::uint32_t mant = bits & 0x7U;
 
-    // E4M3 special: exp==15 => NaN (no Inf).
-    if (exp == 15U) {
-        // OCP: 0x7F and 0xFF are NaN, but we treat any exp==15 as NaN for safety.
-        // Preserve sign in NaN payload if needed, but return quiet NaN.
+    // E4M3FN special: exp==15 && mant==7 => NaN (no Inf in E4M3FN).
+    // exp==15 with mant<7 is finite: (1 + mant/8) * 2^8, up to the 448 max.
+    // The real FP8 checkpoints contain these encodings, so treating all of
+    // exp==15 as NaN corrupts real weights (found on the official 125B).
+    if (exp == 15U && mant == 7U) {
         return std::numeric_limits<float>::quiet_NaN();
     }
 

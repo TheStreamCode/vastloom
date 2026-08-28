@@ -2,6 +2,20 @@
 
 ## Unreleased
 
+- **Q11c - Qwen3.8-Flash-Next real layer-0 forward.** New CLI
+  `vastloom qwen38-layer0 <root> --token N` runs the complete official
+  layer-0 on real weights: bounded single-row embedding read (5 KB instead of
+  the 1.27 GiB tensor), attn gated residual, zeroed-state Gated DeltaNet,
+  combine, mlp gated residual, router (top-10 of 512), shared expert,
+  on-demand load of the 10 selected FP8 experts and the final combine.
+  Found and fixed a real-weight decoder defect: `qwen38_fp8_e4m3_to_f32`
+  treated every `exp==15` byte as NaN, but E4M3FN (the HF format) defines NaN
+  only for `exp==15 && mant==7`; `0x78..0x7E` are finite values up to 448 and
+  occur in the official checkpoint (3,370 in one gate_proj alone). Stage-named
+  finiteness guards were added along the forward. The opt-in checkpoint test
+  now also asserts a finite, deterministic layer-0 output with an exact top-k
+  route. Self-pinned run: no external oracle exists for `qwen4_exp`.
+
 - **Q11b - Qwen3.8-Flash-Next real checkpoint catalog.** The official
   `unsloth/Qwen3.8-Flash-Next-FP8` 125B checkpoint (172.8 GiB, 131 shards,
   152,089 tensors) is imported through the canonical immutable importer and

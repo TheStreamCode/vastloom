@@ -532,15 +532,17 @@ struct Qwen38Layer0ForwardResult {
     std::uint32_t expert_id,
     Qwen38Layer0Telemetry* telemetry = nullptr);
 
-// One-token forward through real layer weights: embed row -> attn gated
-// residual -> Gated DeltaNet or QSA -> combine -> mlp gated residual ->
-// router + shared expert. The runtime state is caller-owned: pass a fresh
-// state for the first token and reuse it for subsequent tokens (multi-token
-// prefill). Routed experts are resolved by the caller (qwen38_load_layer_expert
-// + qwen38_expert_mlp) and folded back with qwen38_layer0_finish.
+// One-token forward through real layer weights: input stream (hc_count *
+// hidden_size; the expanded embedding row for the first layer of a chain, the
+// previous layer's output otherwise) -> attn gated residual -> Gated DeltaNet
+// or QSA -> combine -> mlp gated residual -> router + shared expert. The
+// runtime state is caller-owned: pass a fresh state for the first token and
+// reuse it for subsequent tokens (multi-token prefill). Routed experts are
+// resolved by the caller (qwen38_load_layer_expert + qwen38_expert_mlp) and
+// folded back with qwen38_layer0_finish.
 [[nodiscard]] Result<Qwen38Layer0ForwardResult> qwen38_layer_forward(
     const Qwen38LayerTrunk& trunk,
-    std::span<const float> embed_row,
+    std::span<const float> input_stream,
     Qwen38LayerRuntimeState& state,
     std::uint32_t num_experts,
     std::uint32_t top_k);

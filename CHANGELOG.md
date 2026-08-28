@@ -2,6 +2,19 @@
 
 ## Unreleased
 
+- **Q11f - Qwen3.8-Flash-Next real layer chain and 48-layer full-depth run.**
+  `qwen38_layer_forward` now takes the gated-residual input stream (a layer's
+  output feeds the next; only layer 0 starts from the expanded embedding row),
+  and the new CLI `vastloom qwen38-chain --layers --tokens` runs consecutive
+  real layers with per-layer state and a shared bounded expert LRU. Found and
+  fixed the access violation that blocked the full-depth run: the streaming
+  mode's final report indexed loaded trunks out of bounds (one trunk resident
+  at a time); the attention kind is now derived from the layer id. Streaming
+  mode is verified bit-identical to resident mode, and the official
+  checkpoint runs all 48 layers (36 DeltaNet + 12 QSA, 480 real FP8 experts,
+  9.63 GB payload read) with a bit-identical replay (output sum −28.9797).
+  The n-gram PLE block on layer 1 is documented as not yet integrated.
+
 - **Q11e - Qwen3.8-Flash-Next real QSA full-attention layer.** The layer
   loader is generalized to any layer: `qwen38_load_layer_trunk` resolves the
   22 non-routed tensors from the weight map (no hardcoded shard names) and

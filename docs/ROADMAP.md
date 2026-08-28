@@ -373,6 +373,29 @@ aperti (Q11e).
 **Gate:** entrambi i tipi di layer (36 DeltaNet + 12 QSA) eseguono su pesi
 reali con prefill multi-token deterministico. Self-pinned.
 
+## Q11f - Catena e full-depth reale (48 layer) - complete
+
+- [x] `qwen38_layer_forward` accetta lo **stream di input** (hc_count ×
+  hidden) invece della riga embedding: l'output gated-residual di un layer
+  alimenta il successivo; solo il layer 0 parte dall'embedding espanso.
+- [x] `vastloom qwen38-chain --layers <csv> --tokens <csv> --expert-cache N
+  [--no-trunk-resident] [--trace-layers]`: catena di layer reali con stato
+  per layer e LRU esperti condivisa (chiave layer<<16|expert).
+- [x] **Bug di memoria trovato e corretto**: in modalità streaming (trunk
+  non residente) il print finale indicizzava `trunks[i]` oltre l'unico
+  elemento caricato — lettura OOB che causava l'access violation
+  (0xC0000005) del full-depth; le catene corte passavano solo per layout
+  heap fortunato. Il tipo di attenzione ora deriva dall'id del layer.
+- [x] Modalità streaming verificata identica alla residente (stessi sum,
+  catena 0–3): trunk caricato ed eseguito un layer alla volta.
+- [x] **Run full-depth reale 0→47**: 48/48 layer (36 DeltaNet + 12 QSA),
+  480 esperti FP8 reali, 9 633 094 400 byte di payload letti, replay
+  bit-pari (sum −28.9797). Nota documentata: il blocco PLE n-gram del
+  layer 1 non è ancora integrato nel forward.
+
+**Gate:** full-depth trunk+MoE eseguito su pesi reali, deterministico.
+Self-pinned; il confronto esterno arriva con il Q8_0 + llama.cpp.
+
 ## Q12 - prefix-KV MoE stream (porting M13)
 
 - [ ] Estendere `LlamaSession` al percorso MoE stream.

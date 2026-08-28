@@ -112,6 +112,7 @@ int main(int argc, char** argv) {
         const std::uint32_t bos = ref::Qwen38ExpectedInvariants::bos_token_id;
         const std::uint32_t H = ref::Qwen38ExpectedInvariants::hidden_size;
         const std::uint32_t I = ref::Qwen38ExpectedInvariants::moe_intermediate_size;
+        const std::uint32_t Cn = ref::Qwen38ExpectedInvariants::hc_count;
         ref::Qwen38Layer0Telemetry tel;
         auto trunk = ref::qwen38_load_layer_trunk(root, layer_id, &tel);
         check(static_cast<bool>(trunk), "layer trunk loads");
@@ -155,8 +156,9 @@ int main(int argc, char** argv) {
                           << " (" << row.error().context << ")\n";
                 return false;
             }
+            auto input_stream = ref::qwen38_expand_stream(row.value(), Cn);
             auto fwd = ref::qwen38_layer_forward(
-                trunk.value(), row.value(), state,
+                trunk.value(), input_stream, state,
                 ref::Qwen38ExpectedInvariants::num_experts,
                 ref::Qwen38ExpectedInvariants::num_experts_per_tok);
             if (!fwd) {
@@ -265,6 +267,116 @@ int main(int argc, char** argv) {
         }
         check(tel.tensors_read >= 22U, "at least the 22 trunk tensors read");
         check(tel.expert_payload_bytes > 0U, "expert payload was read");
+    }
+
+    // --- Q11f: real layer chain 0->1->2->3 ---
+    // Each token flows through the four consecutive layers; the layer output
+    // stream feeds the next layer and every layer keeps its own runtime
+    // state. Two passes over the same tokens must reproduce identical sums.
+    {
+        namespace ref = vastloom::inference;
+        const std::uint32_t H = ref::Qwen38ExpectedInvariants::hidden_size;
+        const std::uint32_t I = ref::Qwen38ExpectedInvariants::moe_intermediate_size;
+        const std::uint32_t C = ref::Qwen38ExpectedInvariants::hc_count;
+        const std::array<std::uint32_t, 4U> chain_layers{0U, 1U, 2U, 3U};
+        const std::array<std::uint32_t, 3U> chain_tokens{
+            ref::Qwen38ExpectedInvariants::bos_token_id, 100U, 200U};
+
+        ref::Qwen38Layer0Telemetry tel;
+        std::vector<ref::Qwen38LayerTrunk> trunks;
+        for (const std::uint32_t l : chain_layers) {
+            auto trunk = ref::qwen38_load_layer_trunk(root, l, &tel);
+            check(static_cast<bool>(trunk), "chain trunk loads");
+            if (!trunk) {
+                std::cerr << "  error: " << trunk.error().message
+                          << " (" << trunk.error().context << ")\n";
+                return 1;
+            }
+            trunks.push_back(std::move(trunk.value()));
+        }
+        check(trunks[3U].is_qsa, "chain layer 3 is QSA");
+
+        auto run_chain = [&](std::vector<double>* sums) -> bool {
+            std::vector<ref::Qwen38LayerRuntimeState> states(chain_layers.size());
+            ref::Qwen38ExpertLru lru;
+            lru.capacity = 32U;
+            static const ref::Qwen38OwnedExpert kEmpty;
+            for (const std::uint32_t tid : chain_tokens) {
+                auto row = ref::qwen38_load_embed_row(root, tid, &tel);
+                if (!row) {
+                    std::cerr << "  error: " << row.error().message
+                              << " (" << row.error().context << ")\n";
+                    return false;
+                }
+                std::vector<float> stream = ref::qwen38_expand_stream(row.value(), C);
+                for (std::size_t li = 0; li < chain_layers.size(); ++li) {
+                    auto fwd = ref::qwen38_layer_forward(
+                        trunks[li], stream, states[li],
+                        ref::Qwen38ExpectedInvariants::num_experts,
+                        ref::Qwen38ExpectedInvariants::num_experts_per_tok);
+                    if (!fwd) {
+                        std::cerr << "  error: " << fwd.error().message
+                                  << " (" << fwd.error().context << ")\n";
+                        return false;
+                    }
+                    std::vector<float> expert_sum(H, 0.0F);
+                    for (std::size_t i = 0; i < fwd.value().route.indices.size(); ++i) {
+                        const auto eid = fwd.value().route.indices[i];
+                        const std::uint32_t key = (chain_layers[li] << 16U) | eid;
+                        const bool cached = std::find(lru.keys.begin(), lru.keys.end(), key)
+                                            != lru.keys.end();
+                        const ref::Qwen38OwnedExpert* ptr = nullptr;
+                        if (cached) {
+                            auto acquired = ref::qwen38_expert_cache_acquire(lru, key, kEmpty);
+                            if (!acquired) return false;
+                            ptr = acquired.value();
+                        } else {
+                            auto real = ref::qwen38_load_layer_expert(
+                                trunks[li], root, eid, &tel);
+                            if (!real) {
+                                std::cerr << "  error: " << real.error().message
+                                          << " (" << real.error().context << ")\n";
+                                return false;
+                            }
+                            auto acquired = ref::qwen38_expert_cache_acquire(lru, key, real.value());
+                            if (!acquired) return false;
+                            ptr = acquired.value();
+                        }
+                        auto y = ref::qwen38_expert_mlp(fwd.value().mixed_input,
+                                                        ptr->gate_proj, ptr->up_proj,
+                                                        ptr->down_proj, H, I);
+                        if (!y) return false;
+                        for (const float v : y.value()) {
+                            if (!std::isfinite(v)) return false;
+                        }
+                        for (std::uint32_t d = 0; d < H; ++d) {
+                            expert_sum[d] += y.value()[d] * fwd.value().route.weights[i];
+                        }
+                    }
+                    auto finished = ref::qwen38_layer0_finish(fwd.value(), expert_sum);
+                    if (!finished) return false;
+                    for (const float v : finished.value()) {
+                        if (!std::isfinite(v)) return false;
+                    }
+                    stream = std::move(finished.value());
+                }
+                double sum = 0.0;
+                for (const float v : stream) sum += static_cast<double>(v);
+                sums->push_back(sum);
+            }
+            return true;
+        };
+
+        std::vector<double> sums;
+        check(run_chain(&sums), "layer chain runs");
+        if (!sums.empty()) {
+            std::cout << "chain output sums:";
+            for (const double s : sums) std::cout << ' ' << s;
+            std::cout << "\n";
+            std::vector<double> replay;
+            check(run_chain(&replay), "layer chain replay runs");
+            check(replay == sums, "layer chain deterministic");
+        }
     }
 
     if (failures != 0) {

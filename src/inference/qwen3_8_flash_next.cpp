@@ -1952,7 +1952,7 @@ Result<std::vector<float>> qwen38_load_embed_row(
 
 Result<Qwen38Layer0ForwardResult> qwen38_layer_forward(
     const Qwen38LayerTrunk& trunk,
-    std::span<const float> embed_row,
+    std::span<const float> input_stream,
     Qwen38LayerRuntimeState& runtime_state,
     std::uint32_t num_experts,
     std::uint32_t top_k) {
@@ -1962,20 +1962,19 @@ Result<Qwen38Layer0ForwardResult> qwen38_layer_forward(
     const std::uint32_t R = Qwen38ExpectedInvariants::hc_lowrank;
     const Qwen38LayerTrunk& weights = trunk;
 
-    // Embedding row -> expanded hyper stream input.
-    if (embed_row.size() != H) {
-        return make_error(ErrorCode::invalid_format, "embed row width drift",
-                          std::to_string(embed_row.size()));
+    // Input stream (already hc_count * hidden_size).
+    if (input_stream.size() != static_cast<std::size_t>(C) * H) {
+        return make_error(ErrorCode::invalid_format, "input stream width drift",
+                          std::to_string(input_stream.size()));
     }
+    if (auto r = require_finite(input_stream, "input_stream"); !r) return r.error();
+    const std::span<const float> stream_in = input_stream;
 
-    // attn gated residual on the expanded stream
-    const std::span<const float> hidden = embed_row;
-    auto stream0 = qwen38_expand_stream(hidden, C);
-    if (auto r = require_finite(stream0, "embed_stream"); !r) return r.error();
     Qwen38GatedResidualView attn_view{
         weights.attn_hyper.hc_norm, weights.attn_hyper.mix_down,
         weights.attn_hyper.mix_up, weights.attn_hyper.block_inject};
-    auto attn_res = qwen38_gated_residual(stream0, attn_view, C, H, R, 1.0e-6F);
+    // attn gated residual on the input stream
+    auto attn_res = qwen38_gated_residual(stream_in, attn_view, C, H, R, 1.0e-6F);
     if (!attn_res) return attn_res.error();
     if (auto r = require_finite(attn_res.value().mixed_input, "attn_gr_mixed"); !r) return r.error();
 

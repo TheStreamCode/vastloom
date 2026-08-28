@@ -1616,12 +1616,15 @@ int command_qwen38_layer0(const std::vector<std::string>& args) {
     if (!guard) return print_error(guard.error(), json);
 
     vastloom::inference::Qwen38Layer0Telemetry load_tel;
-    auto weights = vastloom::inference::qwen38_load_layer0_weights(
+    auto trunk = vastloom::inference::qwen38_load_layer0_trunk(checkpoint_root, &load_tel);
+    if (!trunk) return print_error(trunk.error(), json);
+    auto embed_row = vastloom::inference::qwen38_load_embed_row(
         checkpoint_root, static_cast<std::uint32_t>(token.value()), &load_tel);
-    if (!weights) return print_error(weights.error(), json);
+    if (!embed_row) return print_error(embed_row.error(), json);
 
+    vastloom::inference::Qwen38DeltaNetState dn_state;
     auto forward = vastloom::inference::qwen38_layer0_forward(
-        weights.value(), static_cast<std::uint32_t>(token.value()),
+        trunk.value(), embed_row.value(), dn_state,
         vastloom::inference::Qwen38ExpectedInvariants::num_experts,
         vastloom::inference::Qwen38ExpectedInvariants::num_experts_per_tok);
     if (!forward) return print_error(forward.error(), json);
@@ -1633,7 +1636,7 @@ int command_qwen38_layer0(const std::vector<std::string>& args) {
     for (std::size_t i = 0; i < forward.value().route.indices.size(); ++i) {
         const auto eid = forward.value().route.indices[i];
         auto expert = vastloom::inference::qwen38_load_layer0_expert(
-            checkpoint_root, eid, &load_tel);
+            trunk.value(), checkpoint_root, eid, &load_tel);
         if (!expert) return print_error(expert.error(), json);
         auto y = vastloom::inference::qwen38_expert_mlp(
             forward.value().mixed_input,
@@ -1705,6 +1708,194 @@ int command_qwen38_layer0(const std::vector<std::string>& args) {
             std::cout << ' ' << hidden[i];
         }
         std::cout << '\n';
+    }
+    return 0;
+}
+
+// Qwen3.8-Flash-Next real multi-token layer-0 prefill: the trunk loads once,
+// the DeltaNet state (conv history + SSM) carries across tokens, and the
+// routed FP8 experts resolve through a bounded LRU. This is the streaming
+// validation for the real checkpoint.
+int command_qwen38_prefill(const std::vector<std::string>& args) {
+    const bool json = has_flag(args, "--json");
+    auto valid = validate_options(args, 1U, {"--tokens", "--expert-cache"},
+                                  {"--json"});
+    if (!valid) return print_error(valid.error(), json);
+    const auto tokens_csv = option_value(args, "--tokens");
+    if (!tokens_csv || tokens_csv->empty()) {
+        return print_error(vastloom::make_error(
+                               vastloom::ErrorCode::invalid_argument,
+                               "qwen38-prefill requires --tokens with a comma-separated id list"),
+                           json);
+    }
+    std::vector<std::uint32_t> token_ids;
+    for (const auto& item : vastloom::util::split(*tokens_csv, ',', true)) {
+        const auto trimmed = vastloom::util::trim(item);
+        std::uint32_t id = 0U;
+        const auto converted = std::from_chars(
+            trimmed.data(), trimmed.data() + trimmed.size(), id);
+        if (trimmed.empty() || converted.ec != std::errc{}
+            || converted.ptr != trimmed.data() + trimmed.size()
+            || id >= vastloom::inference::Qwen38ExpectedInvariants::vocab_size) {
+            return print_error(vastloom::make_error(
+                                   vastloom::ErrorCode::invalid_argument,
+                                   "prefill token ids must be valid vocabulary ids", item),
+                               json);
+        }
+        token_ids.push_back(id);
+    }
+    if (token_ids.empty() || token_ids.size() > 64U) {
+        return print_error(vastloom::make_error(
+                               vastloom::ErrorCode::invalid_argument,
+                               "prefill requires between 1 and 64 tokens"),
+                           json);
+    }
+    auto expert_cache = optional_size(args, "--expert-cache", 16U);
+    if (!expert_cache) return print_error(expert_cache.error(), json);
+    if (expert_cache.value() == 0U || expert_cache.value() > 64U) {
+        return print_error(vastloom::make_error(
+                               vastloom::ErrorCode::invalid_argument,
+                               "expert cache size outside safe bounds"),
+                           json);
+    }
+
+    const auto checkpoint_root = cli_path(args.front());
+    auto hardware = vastloom::hardware::HardwareProbe::collect(checkpoint_root);
+    if (!hardware) return print_error(hardware.error(), json);
+    auto policy = vastloom::safety::make_safe_runtime_policy(hardware.value());
+    if (!policy) return print_error(policy.error(), json);
+    auto guard = vastloom::safety::ProcessSafetyGuard::apply(policy.value());
+    if (!guard) return print_error(guard.error(), json);
+
+    const std::uint32_t H = vastloom::inference::Qwen38ExpectedInvariants::hidden_size;
+    const std::uint32_t I = vastloom::inference::Qwen38ExpectedInvariants::moe_intermediate_size;
+
+    vastloom::inference::Qwen38Layer0Telemetry load_tel;
+    auto trunk = vastloom::inference::qwen38_load_layer0_trunk(checkpoint_root, &load_tel);
+    if (!trunk) return print_error(trunk.error(), json);
+
+    vastloom::inference::Qwen38ExpertLru lru;
+    lru.capacity = expert_cache.value();
+
+    struct TokenRow {
+        std::uint32_t token{0U};
+        std::size_t route_hits{0U};
+        std::size_t route_misses{0U};
+        double output_sum{0.0};
+        std::vector<std::uint32_t> experts;
+    };
+    std::vector<TokenRow> rows;
+    vastloom::inference::Qwen38DeltaNetState dn_state;
+
+    for (const std::uint32_t tid : token_ids) {
+        auto row = vastloom::inference::qwen38_load_embed_row(checkpoint_root, tid, &load_tel);
+        if (!row) return print_error(row.error(), json);
+        auto fwd = vastloom::inference::qwen38_layer0_forward(
+            trunk.value(), row.value(), dn_state,
+            vastloom::inference::Qwen38ExpectedInvariants::num_experts,
+            vastloom::inference::Qwen38ExpectedInvariants::num_experts_per_tok);
+        if (!fwd) return print_error(fwd.error(), json);
+
+        std::vector<float> expert_sum(H, 0.0F);
+        TokenRow out_row;
+        out_row.token = tid;
+        for (std::size_t i = 0; i < fwd.value().route.indices.size(); ++i) {
+            const auto eid = fwd.value().route.indices[i];
+            const std::uint32_t key = eid;  // single-layer cache: key is the expert id
+            static const vastloom::inference::Qwen38OwnedExpert kEmptyExpert;
+            const bool cached = std::find(lru.keys.begin(), lru.keys.end(), key)
+                                != lru.keys.end();
+            const vastloom::inference::Qwen38OwnedExpert* acquired_ptr = nullptr;
+            if (cached) {
+                auto acquired = vastloom::inference::qwen38_expert_cache_acquire(
+                    lru, key, kEmptyExpert);
+                if (!acquired) return print_error(acquired.error(), json);
+                acquired_ptr = acquired.value();
+                ++out_row.route_hits;
+            } else {
+                // Miss: fetch the real expert from the shards, then insert it.
+                auto real = vastloom::inference::qwen38_load_layer0_expert(
+                    trunk.value(), checkpoint_root, eid, &load_tel);
+                if (!real) return print_error(real.error(), json);
+                auto acquired = vastloom::inference::qwen38_expert_cache_acquire(
+                    lru, key, real.value());
+                if (!acquired) return print_error(acquired.error(), json);
+                acquired_ptr = acquired.value();
+                ++out_row.route_misses;
+            }
+            auto y = vastloom::inference::qwen38_expert_mlp(
+                fwd.value().mixed_input,
+                acquired_ptr->gate_proj, acquired_ptr->up_proj,
+                acquired_ptr->down_proj, H, I);
+            if (!y) return print_error(y.error(), json);
+            for (const float v : y.value()) {
+                if (!std::isfinite(v)) {
+                    return print_error(vastloom::make_error(
+                                           vastloom::ErrorCode::invalid_format,
+                                           "expert mlp produced non-finite output",
+                                           "expert=" + std::to_string(eid)),
+                                       json);
+                }
+            }
+            const float w = fwd.value().route.weights[i];
+            for (std::uint32_t d = 0; d < H; ++d) {
+                expert_sum[d] += y.value()[d] * w;
+            }
+            out_row.experts.push_back(eid);
+        }
+        auto finished = vastloom::inference::qwen38_layer0_finish(fwd.value(), expert_sum);
+        if (!finished) return print_error(finished.error(), json);
+        for (const float v : finished.value()) {
+            if (!std::isfinite(v)) {
+                return print_error(vastloom::make_error(
+                                       vastloom::ErrorCode::invalid_format,
+                                       "layer-0 prefill produced non-finite output",
+                                       "token=" + std::to_string(tid)),
+                                   json);
+            }
+            out_row.output_sum += static_cast<double>(v);
+        }
+        rows.push_back(std::move(out_row));
+    }
+
+    if (json) {
+        std::cout << "{\n"
+                  << "  \"tokens\": [";
+        for (std::size_t i = 0; i < rows.size(); ++i) {
+            if (i != 0) std::cout << ",";
+            std::cout << rows[i].token;
+        }
+        std::cout << "],\n"
+                  << "  \"output_sums\": [";
+        for (std::size_t i = 0; i < rows.size(); ++i) {
+            if (i != 0) std::cout << ",";
+            std::cout << rows[i].output_sum;
+        }
+        std::cout << "],\n"
+                  << "  \"expert_cache_hits\": " << lru.telemetry.hits << ",\n"
+                  << "  \"expert_cache_misses\": " << lru.telemetry.misses << ",\n"
+                  << "  \"expert_cache_evictions\": " << lru.telemetry.evictions << ",\n"
+                  << "  \"expert_cache_logical_bytes\": " << lru.telemetry.logical_bytes << ",\n"
+                  << "  \"payload_bytes_read\": " << load_tel.payload_bytes_read << ",\n"
+                  << "  \"tensors_read\": " << load_tel.tensors_read << "\n"
+                  << "}\n";
+    } else {
+        std::cout << "Qwen3.8-Flash-Next real layer-0 prefill\n"
+                  << "  tokens: " << rows.size() << '\n'
+                  << "  expert cache: cap=" << lru.capacity
+                  << " hits=" << lru.telemetry.hits
+                  << " misses=" << lru.telemetry.misses
+                  << " evictions=" << lru.telemetry.evictions << '\n'
+                  << "  payload bytes: " << load_tel.payload_bytes_read << '\n';
+        for (std::size_t i = 0; i < rows.size(); ++i) {
+            std::cout << "  [" << i << "] token " << rows[i].token
+                      << " sum " << rows[i].output_sum
+                      << " experts:";
+            for (const auto eid : rows[i].experts) {
+                std::cout << ' ' << eid;
+            }
+            std::cout << '\n';
+        }
     }
     return 0;
 }
@@ -4943,6 +5134,7 @@ int dispatch_cli(const std::vector<std::string>& arguments) {
         if (command == "deepseek-inspect") return command_deepseek_inspect(args);
         if (command == "qwen38-inspect") return command_qwen38_inspect(args);
         if (command == "qwen38-layer0") return command_qwen38_layer0(args);
+        if (command == "qwen38-prefill") return command_qwen38_prefill(args);
         if (command == "deepseek-gguf-inspect") return command_deepseek_gguf_inspect(args);
         if (command == "deepseek-gguf-checkpoint") return command_deepseek_gguf_checkpoint(args);
         if (command == "deepseek-gguf-probe-plan") return command_deepseek_gguf_probe_plan(args);

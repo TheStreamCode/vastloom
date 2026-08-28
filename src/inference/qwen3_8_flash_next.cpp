@@ -5,6 +5,7 @@
 #include <chrono>
 #include <cmath>
 #include <cstdint>
+#include <cstdlib>
 #include <filesystem>
 #include <fstream>
 #include <set>
@@ -1522,9 +1523,8 @@ Result<std::vector<float>> load_tensor_f32(
 
 }  // namespace
 
-Result<Qwen38Layer0Weights> qwen38_load_layer0_weights(
+Result<Qwen38Layer0Trunk> qwen38_load_layer0_trunk(
     const std::filesystem::path& checkpoint_root,
-    std::uint32_t token_id,
     Qwen38Layer0Telemetry* telemetry) {
     const auto t0 = std::chrono::steady_clock::now();
 
@@ -1544,70 +1544,45 @@ Result<Qwen38Layer0Weights> qwen38_load_layer0_weights(
     }
 
     const std::string s1 = "model-00001-of-00131.safetensors";
-    const std::string s2 = "model-00002-of-00131.safetensors";
     const std::string s3 = "model-00003-of-00131.safetensors";
-    const std::string s130 = "model-00130-of-00131.safetensors";
     const std::string p = "model.language_model.layers.0.";
 
-    Qwen38Layer0Weights w;
+    Qwen38Layer0Trunk w;
 
-    // Embedding row for token_id: embed_tokens.weight [248320, 2560] BF16.
+    // Map every layer-0 routed expert to its three shard files once, so
+    // on-demand expert loads never re-parse the 17 MiB index.
     {
-        const auto shard_path = checkpoint_root / s130;
-        std::error_code ec;
-        const auto file_size = std::filesystem::file_size(shard_path, ec);
-        if (ec) {
-            return make_error(ErrorCode::io_error, "cannot stat embed shard", s130);
+        const std::string expert_prefix = p + "mlp.experts.";
+        const std::string gate_suffix = ".gate_proj.weight";
+        const std::string up_suffix = ".up_proj.weight";
+        const std::string down_suffix = ".down_proj.weight";
+        for (const auto& e : inspected.value().weight_map) {
+            const std::string& n = e.tensor_name;
+            if (n.rfind(expert_prefix, 0U) != 0U) {
+                continue;
+            }
+            const std::size_t id_begin = expert_prefix.size();
+            const std::size_t dot = n.find('.', id_begin);
+            if (dot == std::string::npos) {
+                continue;
+            }
+            const std::uint32_t eid = static_cast<std::uint32_t>(
+                std::strtoul(n.c_str() + id_begin, nullptr, 10));
+            if (n.size() >= gate_suffix.size()
+                && n.compare(n.size() - gate_suffix.size(), gate_suffix.size(), gate_suffix) == 0) {
+                w.expert_shards[eid][0] = e.shard_path.string();
+            } else if (n.size() >= up_suffix.size()
+                && n.compare(n.size() - up_suffix.size(), up_suffix.size(), up_suffix) == 0) {
+                w.expert_shards[eid][1] = e.shard_path.string();
+            } else if (n.size() >= down_suffix.size()
+                && n.compare(n.size() - down_suffix.size(), down_suffix.size(), down_suffix) == 0) {
+                w.expert_shards[eid][2] = e.shard_path.string();
+            }
         }
-        auto header = read_qwen38_safetensors_header(shard_path, file_size, 4U * 1024U * 1024U);
-        if (!header) {
-            return make_error(header.error().code, header.error().message, "layer0 embed header");
-        }
-        const std::string embed_name = "model.language_model.embed_tokens.weight";
-        const Qwen38TensorDescriptor* desc = nullptr;
-        for (const auto& t : header.value().tensors) {
-            if (t.name == embed_name) { desc = &t; break; }
-        }
-        if (desc == nullptr) {
-            return make_error(ErrorCode::not_found, "embed tensor not found", embed_name);
-        }
-        if (desc->dtype != "BF16" || desc->shape.size() != 2U
-            || desc->shape[1] != Qwen38ExpectedInvariants::hidden_size) {
-            return make_error(ErrorCode::invalid_format, "embed tensor drift", embed_name);
-        }
-        if (token_id >= static_cast<std::uint32_t>(desc->shape[0])) {
-            return make_error(ErrorCode::invalid_argument, "token id out of vocab",
-                              std::to_string(token_id));
-        }
-        // Bounded read: fetch exactly one embedding row instead of the whole
-        // 1.27 GiB embedding tensor.
-        const std::size_t row_bytes = static_cast<std::size_t>(desc->shape[1]) * 2U;
-        const std::uint64_t row_begin_abs =
-            8U + header.value().json_header_bytes + desc->data_offset_begin
-            + static_cast<std::uint64_t>(token_id) * row_bytes;
-        if (row_begin_abs + row_bytes > header.value().total_bytes) {
-            return make_error(ErrorCode::invalid_format, "embed row out of payload", embed_name);
-        }
-        std::ifstream in(shard_path, std::ios::binary);
-        if (!in) {
-            return make_error(ErrorCode::io_error, "cannot open embed shard", s130);
-        }
-        in.seekg(static_cast<std::streamoff>(row_begin_abs));
-        std::vector<std::byte> row_bytes_buf(row_bytes);
-        in.read(reinterpret_cast<char*>(row_bytes_buf.data()),
-                static_cast<std::streamsize>(row_bytes));
-        if (static_cast<std::uint64_t>(in.gcount()) != row_bytes) {
-            return make_error(ErrorCode::io_error, "short read of embed row", embed_name);
-        }
-        std::vector<std::int64_t> row_shape{1, desc->shape[1]};
-        auto row = qwen38_decode_bf16(row_bytes_buf, row_shape);
-        if (!row) {
-            return make_error(row.error().code, row.error().message, "layer0 embed row decode");
-        }
-        w.token_embed = std::move(row.value());
-        if (telemetry) {
-            telemetry->payload_bytes_read += row_bytes;
-            telemetry->tensors_read += 1U;
+        if (w.expert_shards.size() != Qwen38ExpectedInvariants::num_experts) {
+            return make_error(ErrorCode::invalid_format,
+                "layer0 expert shard map incomplete",
+                "experts=" + std::to_string(w.expert_shards.size()));
         }
     }
 
@@ -1752,25 +1727,89 @@ Result<Qwen38Layer0Weights> qwen38_load_layer0_weights(
     return w;
 }
 
-Result<Qwen38Layer0ForwardResult> qwen38_layer0_forward(
-    const Qwen38Layer0Weights& weights,
+Result<std::vector<float>> qwen38_load_embed_row(
+    const std::filesystem::path& checkpoint_root,
     std::uint32_t token_id,
+    Qwen38Layer0Telemetry* telemetry) {
+    const std::string s130 = "model-00130-of-00131.safetensors";
+    const std::string embed_name = "model.language_model.embed_tokens.weight";
+    const auto shard_path = checkpoint_root / s130;
+    std::error_code ec;
+    const auto file_size = std::filesystem::file_size(shard_path, ec);
+    if (ec) {
+        return make_error(ErrorCode::io_error, "cannot stat embed shard", s130);
+    }
+    auto header = read_qwen38_safetensors_header(shard_path, file_size, 4U * 1024U * 1024U);
+    if (!header) {
+        return make_error(header.error().code, header.error().message, "layer0 embed header");
+    }
+    const Qwen38TensorDescriptor* desc = nullptr;
+    for (const auto& t : header.value().tensors) {
+        if (t.name == embed_name) { desc = &t; break; }
+    }
+    if (desc == nullptr) {
+        return make_error(ErrorCode::not_found, "embed tensor not found", embed_name);
+    }
+    if (desc->dtype != "BF16" || desc->shape.size() != 2U
+        || desc->shape[1] != Qwen38ExpectedInvariants::hidden_size) {
+        return make_error(ErrorCode::invalid_format, "embed tensor drift", embed_name);
+    }
+    if (token_id >= static_cast<std::uint32_t>(desc->shape[0])) {
+        return make_error(ErrorCode::invalid_argument, "token id out of vocab",
+                          std::to_string(token_id));
+    }
+    // Bounded read: fetch exactly one embedding row instead of the whole
+    // 1.27 GiB embedding tensor.
+    const std::size_t row_bytes = static_cast<std::size_t>(desc->shape[1]) * 2U;
+    const std::uint64_t row_begin_abs =
+        8U + header.value().json_header_bytes + desc->data_offset_begin
+        + static_cast<std::uint64_t>(token_id) * row_bytes;
+    if (row_begin_abs + row_bytes > header.value().total_bytes) {
+        return make_error(ErrorCode::invalid_format, "embed row out of payload", embed_name);
+    }
+    std::ifstream in(shard_path, std::ios::binary);
+    if (!in) {
+        return make_error(ErrorCode::io_error, "cannot open embed shard", s130);
+    }
+    in.seekg(static_cast<std::streamoff>(row_begin_abs));
+    std::vector<std::byte> row_bytes_buf(row_bytes);
+    in.read(reinterpret_cast<char*>(row_bytes_buf.data()),
+            static_cast<std::streamsize>(row_bytes));
+    if (static_cast<std::uint64_t>(in.gcount()) != row_bytes) {
+        return make_error(ErrorCode::io_error, "short read of embed row", embed_name);
+    }
+    std::vector<std::int64_t> row_shape{1, desc->shape[1]};
+    auto row = qwen38_decode_bf16(row_bytes_buf, row_shape);
+    if (!row) {
+        return make_error(row.error().code, row.error().message, "layer0 embed row decode");
+    }
+    if (telemetry) {
+        telemetry->payload_bytes_read += row_bytes;
+        telemetry->tensors_read += 1U;
+    }
+    return row;
+}
+
+Result<Qwen38Layer0ForwardResult> qwen38_layer0_forward(
+    const Qwen38Layer0Trunk& trunk,
+    std::span<const float> embed_row,
+    Qwen38DeltaNetState& delta_net_state,
     std::uint32_t num_experts,
     std::uint32_t top_k) {
     const auto t0 = std::chrono::steady_clock::now();
     const std::uint32_t H = Qwen38ExpectedInvariants::hidden_size;
     const std::uint32_t C = Qwen38ExpectedInvariants::hc_count;
     const std::uint32_t R = Qwen38ExpectedInvariants::hc_lowrank;
-    std::ignore = token_id;
+    const Qwen38Layer0Trunk& weights = trunk;
 
     // Embedding row -> expanded hyper stream input.
-    const std::span<const float> hidden{weights.token_embed.data(), weights.token_embed.size()};
-    if (hidden.size() != H) {
+    if (embed_row.size() != H) {
         return make_error(ErrorCode::invalid_format, "embed row width drift",
-                          std::to_string(hidden.size()));
+                          std::to_string(embed_row.size()));
     }
 
     // attn gated residual on the expanded stream
+    const std::span<const float> hidden = embed_row;
     auto stream0 = qwen38_expand_stream(hidden, C);
     if (auto r = require_finite(stream0, "embed_stream"); !r) return r.error();
     Qwen38GatedResidualView attn_view{
@@ -1780,7 +1819,8 @@ Result<Qwen38Layer0ForwardResult> qwen38_layer0_forward(
     if (!attn_res) return attn_res.error();
     if (auto r = require_finite(attn_res.value().mixed_input, "attn_gr_mixed"); !r) return r.error();
 
-    // DeltaNet (state starts zeroed)
+    // DeltaNet: the caller owns the state (zero it for the first token,
+    // reuse it for subsequent tokens so conv history and SSM carry).
     Qwen38DeltaNetView dn_view{
         weights.delta_net.in_proj_qkv, weights.delta_net.in_proj_z,
         weights.delta_net.in_proj_a, weights.delta_net.in_proj_b,
@@ -1794,20 +1834,21 @@ Result<Qwen38Layer0ForwardResult> qwen38_layer0_forward(
     dn_view.value_head_dim = Qwen38ExpectedInvariants::linear_value_head_dim;
     dn_view.conv_kernel = Qwen38ExpectedInvariants::linear_conv_kernel_dim;
     dn_view.rms_eps = 1.0e-6F;
-    Qwen38DeltaNetState dn_state;
-    dn_state.conv.assign(
-        (static_cast<std::size_t>(Qwen38ExpectedInvariants::linear_num_key_heads)
-             * Qwen38ExpectedInvariants::linear_key_head_dim * 2U
-         + static_cast<std::size_t>(Qwen38ExpectedInvariants::linear_num_value_heads)
-             * Qwen38ExpectedInvariants::linear_value_head_dim)
-            * (Qwen38ExpectedInvariants::linear_conv_kernel_dim - 1U),
-        0.0F);
-    dn_state.ssm.assign(
-        static_cast<std::size_t>(Qwen38ExpectedInvariants::linear_num_value_heads)
-            * Qwen38ExpectedInvariants::linear_key_head_dim
-            * Qwen38ExpectedInvariants::linear_value_head_dim,
-        0.0F);
-    auto dn_out = qwen38_delta_net_decode(attn_res.value().mixed_input, dn_view, dn_state);
+    if (delta_net_state.conv.empty() && delta_net_state.ssm.empty()) {
+        delta_net_state.conv.assign(
+            (static_cast<std::size_t>(Qwen38ExpectedInvariants::linear_num_key_heads)
+                 * Qwen38ExpectedInvariants::linear_key_head_dim * 2U
+             + static_cast<std::size_t>(Qwen38ExpectedInvariants::linear_num_value_heads)
+                 * Qwen38ExpectedInvariants::linear_value_head_dim)
+                * (Qwen38ExpectedInvariants::linear_conv_kernel_dim - 1U),
+            0.0F);
+        delta_net_state.ssm.assign(
+            static_cast<std::size_t>(Qwen38ExpectedInvariants::linear_num_value_heads)
+                * Qwen38ExpectedInvariants::linear_key_head_dim
+                * Qwen38ExpectedInvariants::linear_value_head_dim,
+            0.0F);
+    }
+    auto dn_out = qwen38_delta_net_decode(attn_res.value().mixed_input, dn_view, delta_net_state);
     if (!dn_out) return dn_out.error();
     if (auto r = require_finite(dn_out.value(), "deltanet_out"); !r) return r.error();
 
@@ -1869,6 +1910,7 @@ Result<std::vector<float>> qwen38_layer0_finish(
 }
 
 Result<Qwen38OwnedExpert> qwen38_load_layer0_expert(
+    const Qwen38Layer0Trunk& trunk,
     const std::filesystem::path& checkpoint_root,
     std::uint32_t expert_id,
     Qwen38Layer0Telemetry* telemetry) {
@@ -1876,28 +1918,18 @@ Result<Qwen38OwnedExpert> qwen38_load_layer0_expert(
         return make_error(ErrorCode::invalid_argument, "expert id out of range",
                           std::to_string(expert_id));
     }
+    const auto it = trunk.expert_shards.find(expert_id);
+    if (it == trunk.expert_shards.end()) {
+        return make_error(ErrorCode::not_found, "expert not in shard map",
+                          std::to_string(expert_id));
+    }
     const std::string p = "model.language_model.layers.0.mlp.experts."
         + std::to_string(expert_id) + ".";
-    // Expert tensors are distributed across shards; consult the index.
-    auto cfg = load_qwen38_flash_next_config(checkpoint_root / "config.json");
-    if (!cfg) {
-        return make_error(cfg.error().code, cfg.error().message, "expert config");
-    }
-    auto inspected = inspect_qwen38_flash_next_safetensors(
-        checkpoint_root / "model.safetensors.index.json", cfg.value(), false);
-    if (!inspected) {
-        return make_error(inspected.error().code, inspected.error().message, "expert index");
-    }
-    std::string gate_shard;
-    std::string up_shard;
-    std::string down_shard;
-    for (const auto& e : inspected.value().weight_map) {
-        if (e.tensor_name == p + "gate_proj.weight") gate_shard = e.shard_path.string();
-        else if (e.tensor_name == p + "up_proj.weight") up_shard = e.shard_path.string();
-        else if (e.tensor_name == p + "down_proj.weight") down_shard = e.shard_path.string();
-    }
+    const std::string& gate_shard = it->second[0];
+    const std::string& up_shard = it->second[1];
+    const std::string& down_shard = it->second[2];
     if (gate_shard.empty() || up_shard.empty() || down_shard.empty()) {
-        return make_error(ErrorCode::not_found, "expert tensors missing from index", p);
+        return make_error(ErrorCode::not_found, "expert shards missing from map", p);
     }
 
     Qwen38OwnedExpert expert;

@@ -1,5 +1,6 @@
 #pragma once
 
+#include <array>
 #include <chrono>
 #include <cstddef>
 #include <cstdint>
@@ -9,6 +10,7 @@
 #include <span>
 #include <string>
 #include <string_view>
+#include <unordered_map>
 #include <vector>
 
 #include "vastloom/core/status.hpp"
@@ -461,16 +463,19 @@ struct Qwen38ReducedGenerationResult {
     std::span<const std::int32_t> prompt_ids,
     const Qwen38ReducedGenerationOptions& options);
 
-// --- Q11c: real layer-0 forward over the imported FP8 checkpoint ---
+// --- Q11c/Q11d: real layer-0 forward over the imported FP8 checkpoint ---
 
-struct Qwen38Layer0Weights {
+// Layer-0 always-active weights plus the shard map needed to load routed
+// experts on demand. The token embedding row is NOT part of the trunk: it is
+// loaded per token with a bounded 5 KiB read.
+struct Qwen38Layer0Trunk {
     Qwen38OwnedResidual attn_hyper;
     Qwen38OwnedDeltaNet delta_net;
     Qwen38OwnedResidual mlp_hyper;
     Qwen38OwnedSharedMlp shared_mlp;
     std::vector<float> router;
-    std::vector<float> embed_row;        // embedding row for the input token
-    std::vector<float> token_embed;      // embed_tokens.weight rows read (row-major, 1 row)
+    // expert id -> {gate shard, up shard, down shard} file names.
+    std::unordered_map<std::uint32_t, std::array<std::string, 3U>> expert_shards;
 };
 
 struct Qwen38Layer0Telemetry {
@@ -483,9 +488,6 @@ struct Qwen38Layer0Telemetry {
 };
 
 struct Qwen38Layer0ForwardResult {
-    // Post-MLP-block layer output stream (hc_count * hidden_size), available
-    // only after routed experts are added by the caller via combine_layer0.
-    std::vector<float> output;
     // Intermediate pieces of the layer-0 forward:
     std::vector<float> mixed_input;      // MoE input (hidden_size)
     std::vector<float> residual;         // mlp hyper residual (hc_count * hidden_size)
@@ -495,37 +497,45 @@ struct Qwen38Layer0ForwardResult {
     Qwen38Layer0Telemetry telemetry;
 };
 
-// Folds the routed-expert contributions into the layer-0 result and applies
-// the final gated-residual combine. expert_sum must already contain
-// sum_k route_weight_k * expert_k(mixed_input).
-[[nodiscard]] Result<std::vector<float>> qwen38_layer0_finish(
-    const Qwen38Layer0ForwardResult& partial,
-    std::span<const float> expert_sum);
+// Loads the 22 canonical non-routed layer-0 tensors from the imported
+// checkpoint and maps every routed expert to its three shard files.
+[[nodiscard]] Result<Qwen38Layer0Trunk> qwen38_load_layer0_trunk(
+    const std::filesystem::path& checkpoint_root,
+    Qwen38Layer0Telemetry* telemetry = nullptr);
 
-// Loads the 22 canonical non-routed layer-0 tensors plus the embedding row for
-// `token_id` from the imported checkpoint (safetensors shards). Every tensor
-// payload is SHA-256 hashed at read time; hashes are recorded in telemetry.
-[[nodiscard]] Result<Qwen38Layer0Weights> qwen38_load_layer0_weights(
+// Bounded read of exactly one embedding row (5 KiB) for `token_id`.
+[[nodiscard]] Result<std::vector<float>> qwen38_load_embed_row(
     const std::filesystem::path& checkpoint_root,
     std::uint32_t token_id,
     Qwen38Layer0Telemetry* telemetry = nullptr);
 
 // Loads one routed expert (gate/up/down FP8 block-scale) for layer 0 from the
-// imported checkpoint. Returns the decoded F32 weights.
+// imported checkpoint using the trunk's shard map. Returns decoded F32.
 [[nodiscard]] Result<Qwen38OwnedExpert> qwen38_load_layer0_expert(
+    const Qwen38Layer0Trunk& trunk,
     const std::filesystem::path& checkpoint_root,
     std::uint32_t expert_id,
     Qwen38Layer0Telemetry* telemetry = nullptr);
 
 // One-token forward through real layer-0 weights: embed row -> attn gated
 // residual -> Gated DeltaNet -> combine -> mlp gated residual -> router +
-// shared expert + top-k routed experts (FP8 block-scale decoded) -> combine.
-// DeltaNet state starts zeroed; the layer output is the post-MLP hidden state.
+// shared expert. The DeltaNet state is caller-owned: pass a zeroed state for
+// the first token and reuse it for subsequent tokens (multi-token prefill).
+// Routed experts are resolved by the caller (qwen38_load_layer0_expert +
+// qwen38_expert_mlp) and folded back with qwen38_layer0_finish.
 [[nodiscard]] Result<Qwen38Layer0ForwardResult> qwen38_layer0_forward(
-    const Qwen38Layer0Weights& weights,
-    std::uint32_t token_id,
+    const Qwen38Layer0Trunk& trunk,
+    std::span<const float> embed_row,
+    Qwen38DeltaNetState& delta_net_state,
     std::uint32_t num_experts,
     std::uint32_t top_k);
+
+// Folds the routed-expert contributions into the layer-0 result and applies
+// the final gated-residual combine. expert_sum must already contain
+// sum_k route_weight_k * expert_k(mixed_input).
+[[nodiscard]] Result<std::vector<float>> qwen38_layer0_finish(
+    const Qwen38Layer0ForwardResult& partial,
+    std::span<const float> expert_sum);
 
 [[nodiscard]] std::string_view to_string(Qwen38ReducedFinishReason reason) noexcept;
 

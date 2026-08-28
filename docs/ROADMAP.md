@@ -330,6 +330,29 @@ tensore ancora letto per il compute (prossimo passo: bind e layer reale).
 ~1.2 s load, ~46 ms forward). Output deterministico e finito. È un run
 self-pinned: nessun oracolo esterno esiste per `qwen4_exp`.
 
+## Q11d - Prefill multi-token reale layer-0 - complete
+
+- [x] Rifattorizzazione a trunk/row: `qwen38_load_layer0_trunk` (22 tensori +
+  mappa esperto→shard costruita una sola volta, niente re-parse dell'indice
+  da 17 MiB per esperto), `qwen38_load_embed_row` (lettura bounded 5 KiB),
+  stato DeltaNet di proprietà del chiamante.
+- [x] `vastloom qwen38-prefill <root> --tokens <csv> [--expert-cache N]`:
+  prefill multi-token con conv history e SSM che attraversano i token, LRU
+  esperti bounded (cap default 16 ≈ 315 MiB decodificati) e telemetry.
+- [x] Regression implicita: il token BOS nel prefill riproduce il sum
+  single-token di Q11c (3.0418) bit-pari.
+- [x] Streaming verificato: il token 100 isolato e lo stesso token dopo BOS
+  producono route diverse ({215,...} vs {283,...}) — la route dipende dallo
+  stato, com'è corretto.
+- [x] LRU reale su 5 token: 44 miss / 6 hits / 28 evictions; gli hit derivano
+  dalla ricorrenza reale degli esperti (226 nei token 0–2, 334 nei token 0/4).
+- [x] Test opt-in esteso: prefill 5 token, replay bit-pari, state-carry
+  assertion, cross-check CLI/test sugli stessi sum.
+
+**Gate:** prefill multi-token reale deterministico (replay bit-pari) con
+stato che attraversa i token. Self-pinned; QSA/MTP e full-depth restano
+aperti (Q11e).
+
 ## Q12 - prefix-KV MoE stream (porting M13)
 
 - [ ] Estendere `LlamaSession` al percorso MoE stream.

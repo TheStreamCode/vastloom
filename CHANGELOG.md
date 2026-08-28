@@ -2,6 +2,17 @@
 
 ## Unreleased
 
+- **Q11d - Qwen3.8-Flash-Next real multi-token layer-0 prefill.** Trunk/row
+  split (`qwen38_load_layer0_trunk` builds the expert->shard map once; embed
+  rows stay bounded 5 KiB reads), caller-owned DeltaNet state so conv history
+  and SSM carry across tokens, and new CLI `vastloom qwen38-prefill --tokens`
+  with a bounded expert LRU (default cap 16). On the official checkpoint a
+  5-token prefill is deterministic end-to-end (bit-identical replay), the BOS
+  sum reproduces the Q11c single-token result exactly, the router provably
+  depends on the carried state (same token, different route after BOS), and
+  the LRU records real recurrence hits (44 misses / 6 hits / 28 evictions).
+  Opt-in checkpoint test extended with prefill + replay determinism.
+
 - **Q11c - Qwen3.8-Flash-Next real layer-0 forward.** New CLI
   `vastloom qwen38-layer0 <root> --token N` runs the complete official
   layer-0 on real weights: bounded single-row embedding read (5 KB instead of

@@ -7,6 +7,7 @@
 #include <chrono>
 #include <cmath>
 #include <cstdint>
+#include <cstdio>
 #include <cstring>
 #include <limits>
 #include <random>
@@ -510,6 +511,54 @@ Result<Qwen38GatedResidualResult> qwen38_gated_residual(
             out.injection_weights[b] = 2.0F * sigmoid_f(logits.value()[b] * inv_hc);
         }
     }
+    if (weights.debug_tag >= 0) {
+        char* path = nullptr;
+        std::size_t path_length = 0U;
+#if defined(_WIN32)
+        const bool has_path = _dupenv_s(&path, &path_length, "VASTLOOM_QWEN38_DUMP_CORE") == 0
+            && path != nullptr;
+#else
+        path = std::getenv("VASTLOOM_QWEN38_DUMP_CORE");
+        (void)path_length;
+        const bool has_path = path != nullptr;
+#endif
+        if (has_path) {
+            std::FILE* f = nullptr;
+            bool opened = false;
+#if defined(_WIN32)
+            const std::wstring wide(path, path + std::strlen(path));
+            opened = _wfopen_s(&f, wide.c_str(), L"ab") == 0 && f != nullptr;
+#else
+            f = std::fopen(path, "ab");
+            opened = f != nullptr;
+#endif
+            if (opened) {
+                std::fprintf(f, "grnm-%d", weights.debug_tag);
+                for (std::size_t j = 0; j < hc_hidden; ++j) {
+                    std::fprintf(f, " %.6f", normed.value()[j]);
+                }
+                std::fprintf(f, "\ngrrt-%d", weights.debug_tag);
+                for (std::size_t j = 0; j < static_cast<std::size_t>(rank); ++j) {
+                    std::fprintf(f, " %.6f", bottleneck.value()[j]);
+                }
+                std::fprintf(f, "\ngrgt-%d", weights.debug_tag);
+                for (std::size_t j = 0; j < hc_hidden; ++j) {
+                    std::fprintf(f, " %.6f", mix.value()[j]);
+                }
+                std::fprintf(f, "\ngrmo-%d", weights.debug_tag);
+                for (std::size_t j = 0; j < hidden_size; ++j) {
+                    std::fprintf(f, " %.6f", out.mixed_input[j]);
+                }
+                std::fprintf(f, "\n");
+                std::fclose(f);
+            }
+        }
+        if (path != nullptr) {
+#if defined(_WIN32)
+            std::free(path);
+#endif
+        }
+    }
     return out;
 }
 
@@ -533,6 +582,24 @@ Result<std::vector<float>> qwen38_gated_residual_combine(
     return out;
 }
 
+// True when VASTLOOM_QWEN38_DUMP_CORE names a core-dump target (defect D1
+// diagnostic). Safe against the CRT deprecation gate on both platforms.
+bool qwen38_core_dump_requested() {
+    char* path = nullptr;
+    std::size_t length = 0U;
+#if defined(_WIN32)
+    const bool present =
+        _dupenv_s(&path, &length, "VASTLOOM_QWEN38_DUMP_CORE") == 0 && path != nullptr;
+    if (path != nullptr) {
+        std::free(path);
+    }
+#else
+    path = std::getenv("VASTLOOM_QWEN38_DUMP_CORE");
+    (void)length;
+    const bool present = path != nullptr;
+#endif
+    return present;
+}
 Result<std::vector<float>> qwen38_delta_net_decode(
     std::span<const float> hidden,
     const Qwen38DeltaNetView& weights,
@@ -676,6 +743,52 @@ Result<std::vector<float>> qwen38_delta_net_decode(
         }
     }
     });  // end v-head parallel loop
+    if (weights.debug_layer >= 0) {
+        char* path = nullptr;
+        std::size_t path_length = 0U;
+#if defined(_WIN32)
+        const bool has_path = _dupenv_s(&path, &path_length, "VASTLOOM_QWEN38_DUMP_CORE") == 0
+            && path != nullptr;
+#else
+        path = std::getenv("VASTLOOM_QWEN38_DUMP_CORE");
+        (void)path_length;
+        const bool has_path = path != nullptr;
+#endif
+        if (has_path) {
+            std::FILE* f = nullptr;
+            bool opened = false;
+#if defined(_WIN32)
+            const std::wstring wide(path, path + std::strlen(path));
+            opened = _wfopen_s(&f, wide.c_str(), L"ab") == 0 && f != nullptr;
+#else
+            f = std::fopen(path, "ab");
+            opened = f != nullptr;
+#endif
+            if (opened) {
+                std::fprintf(f, "core-%d", weights.debug_layer);
+                for (std::size_t j = 0; j < value_dim; ++j) {
+                    std::fprintf(f, " %.6f", core[j]);
+                }
+                std::fprintf(f, "\n");
+                std::fprintf(f, "cvs-%d", weights.debug_layer);
+                for (std::size_t j = 0; j < conv_dim; ++j) {
+                    std::fprintf(f, " %.6f", conv_out[j]);
+                }
+                std::fprintf(f, "\n");
+                std::fprintf(f, "xin-%d", weights.debug_layer);
+                for (std::size_t j = 0; j < hidden_size; ++j) {
+                    std::fprintf(f, " %.6f", hidden[j]);
+                }
+                std::fprintf(f, "\n");
+                std::fclose(f);
+            }
+        }
+        if (path != nullptr) {
+#if defined(_WIN32)
+            std::free(path);
+#endif
+        }
+    }
     return linear_w(core, weights.out_proj, hidden_size, value_dim);
 }
 

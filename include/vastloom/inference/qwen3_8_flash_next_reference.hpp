@@ -116,6 +116,9 @@ struct Qwen38GatedResidualView {
     Qwen38WeightRef mix_down;
     Qwen38WeightRef mix_up;
     Qwen38WeightRef block_inject;
+    // Diagnostic only (defect D1): >=0 dumps this GR stage to the
+    // VASTLOOM_QWEN38_DUMP_CORE file. Never affects arithmetic.
+    int debug_tag{-1};
 };
 
 struct Qwen38GatedResidualResult {
@@ -156,6 +159,9 @@ struct Qwen38DeltaNetView {
     std::uint32_t value_head_dim{0};
     std::uint32_t conv_kernel{0};
     float rms_eps{1.0e-6F};
+    // Diagnostic only: >=0 asks the kernel to append its pre-out_proj core to
+    // the file named by VASTLOOM_QWEN38_DUMP_CORE. Never affects arithmetic.
+    int debug_layer{-1};
     // false (default): HF repeat_interleave, v-head vh reads k-head vh/group.
     // true: ggml-repeat tile semantics, v-head vh reads k-head vh % k_heads —
     // the mapping the converted GGUF checkpoint is validated against.
@@ -166,6 +172,9 @@ struct Qwen38DeltaNetState {
     std::vector<float> conv;
     std::vector<float> ssm;
 };
+
+// True when VASTLOOM_QWEN38_DUMP_CORE names a core-dump target (defect D1 diagnostic).
+[[nodiscard]] bool qwen38_core_dump_requested();
 
 [[nodiscard]] Result<std::vector<float>> qwen38_delta_net_decode(
     std::span<const float> hidden,

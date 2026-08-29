@@ -1999,6 +1999,7 @@ Result<Qwen38Layer0ForwardResult> qwen38_layer_forward(
     Qwen38GatedResidualView attn_view{
         weights.attn_hyper.hc_norm, weights.attn_hyper.mix_down.ref(),
         weights.attn_hyper.mix_up.ref(), weights.attn_hyper.block_inject.ref()};
+    attn_view.debug_tag = qwen38_core_dump_requested() ? static_cast<int>(weights.layer) : -1;
     // attn gated residual on the input stream
     auto attn_res = qwen38_gated_residual(stream_in, attn_view, C, H, R, 1.0e-6F);
     if (!attn_res) return attn_res.error();
@@ -2021,6 +2022,8 @@ Result<Qwen38Layer0ForwardResult> qwen38_layer_forward(
         dn_view.value_head_dim = Qwen38ExpectedInvariants::linear_value_head_dim;
         dn_view.conv_kernel = Qwen38ExpectedInvariants::linear_conv_kernel_dim;
         dn_view.rms_eps = 1.0e-6F;
+        dn_view.debug_layer = qwen38_core_dump_requested()
+            ? static_cast<int>(weights.layer) : -1;
     dn_view.tile_k_heads = weights.is_gguf;
         Qwen38DeltaNetState& delta_net_state = runtime_state.delta_net;
         if (delta_net_state.conv.empty() && delta_net_state.ssm.empty()) {
@@ -2075,6 +2078,7 @@ Result<Qwen38Layer0ForwardResult> qwen38_layer_forward(
     Qwen38GatedResidualView mlp_view{
         weights.mlp_hyper.hc_norm, weights.mlp_hyper.mix_down.ref(),
         weights.mlp_hyper.mix_up.ref(), weights.mlp_hyper.block_inject.ref()};
+    mlp_view.debug_tag = qwen38_core_dump_requested() ? 1000 + static_cast<int>(weights.layer) : -1;
     auto mlp_res = qwen38_gated_residual(attn_out.value(), mlp_view, C, H, R, 1.0e-6F);
     if (!mlp_res) return mlp_res.error();
     if (auto r = require_finite(mlp_res.value().mixed_input, "mlp_gr_mixed"); !r) return r.error();

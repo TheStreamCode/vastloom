@@ -1,5 +1,7 @@
 #include "vastloom/inference/qwen3_8_flash_next_reference.hpp"
 
+#include "vastloom/inference/deepseek_v4_reference.hpp"
+
 #include <algorithm>
 #include <chrono>
 #include <cmath>
@@ -1138,6 +1140,53 @@ Result<std::vector<float>> qwen38_expert_mlp_q8(
         gate.value()[i] = silu_f(gate.value()[i]) * up.value()[i];
     }
     return linear_from_q8(gate.value(), expert.down, h, mid);
+}
+
+namespace {
+// One device-first Q8_0 matvec: the accelerator's VRAM kernel and the CPU
+// kernel accumulate identically, so the choice changes speed only.
+Result<std::vector<float>> matvec_q8_preferring_device(
+    std::span<const float> input,
+    const DeepseekV4PackedMatrix& matrix,
+    std::size_t out_dim,
+    std::size_t in_dim,
+    DeepseekV4MatvecAccelerator* device) {
+    if (device != nullptr) {
+        std::vector<float> out(out_dim, 0.0F);
+        auto served = device->matvec(matrix, input, out);
+        if (served && served.value()) {
+            return out;
+        }
+    }
+    return linear_from_q8(input, matrix.encoded, out_dim, in_dim);
+}
+}  // namespace
+
+Result<std::vector<float>> qwen38_expert_mlp_q8(
+    std::span<const float> hidden,
+    const DeepseekV4PackedMatrix& gate,
+    const DeepseekV4PackedMatrix& up,
+    const DeepseekV4PackedMatrix& down,
+    std::uint32_t hidden_size,
+    std::uint32_t intermediate,
+    DeepseekV4MatvecAccelerator* device) {
+    const std::size_t h = hidden_size;
+    const std::size_t mid = intermediate;
+    if (h == 0 || mid == 0 || hidden.size() != h) {
+        return make_error(ErrorCode::invalid_argument, "expert mlp dims invalid", "expert_mlp_q8");
+    }
+    auto gate_out = matvec_q8_preferring_device(hidden, gate, mid, h, device);
+    if (!gate_out) {
+        return gate_out.error();
+    }
+    auto up_out = matvec_q8_preferring_device(hidden, up, mid, h, device);
+    if (!up_out) {
+        return up_out.error();
+    }
+    for (std::size_t i = 0; i < mid; ++i) {
+        gate_out.value()[i] = silu_f(gate_out.value()[i]) * up_out.value()[i];
+    }
+    return matvec_q8_preferring_device(gate_out.value(), down, h, mid, device);
 }
 
 Result<const Qwen38OwnedExpert*> qwen38_expert_cache_acquire(

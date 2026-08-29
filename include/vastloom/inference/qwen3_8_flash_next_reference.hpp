@@ -407,6 +407,23 @@ struct Qwen38ExpertLru {
     std::uint32_t hidden_size,
     std::uint32_t intermediate);
 
+// Device-accelerated variant: gate/up/down are Q8_0 descriptors (type 8,
+// defined in deepseek_v4_reference.hpp) with stable identities, resident in
+// VRAM after the first use. The accelerator declines anything it cannot
+// serve - no device, full VRAM, unsupported shape - and the declined matvec
+// runs through the same CPU kernel as the overload above, so both paths are
+// bit-identical.
+struct DeepseekV4PackedMatrix;
+class DeepseekV4MatvecAccelerator;
+[[nodiscard]] Result<std::vector<float>> qwen38_expert_mlp_q8(
+    std::span<const float> hidden,
+    const DeepseekV4PackedMatrix& gate,
+    const DeepseekV4PackedMatrix& up,
+    const DeepseekV4PackedMatrix& down,
+    std::uint32_t hidden_size,
+    std::uint32_t intermediate,
+    DeepseekV4MatvecAccelerator* device);
+
 [[nodiscard]] Result<const Qwen38OwnedExpert*> qwen38_expert_cache_acquire(
     Qwen38ExpertLru& cache,
     std::uint32_t key,

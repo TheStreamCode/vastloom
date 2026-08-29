@@ -2172,8 +2172,7 @@ int command_qwen38_chain(const std::vector<std::string>& args) {
 // byte-level gpt2 detokenize. The external-parity path against llama.cpp.
 int command_qwen38_greedy(const std::vector<std::string>& args) {
     const bool json = has_flag(args, "--json");
-    auto valid = validate_options(args, 1U, {"--prompt-ids", "--steps", "--expert-cache", "--ram-headroom-gb"},
-                                  {"--json", "--show-ids"});
+    auto valid = validate_options(args, 1U, {"--prompt-ids", "--steps", "--expert-cache", "--ram-headroom-gb", "--gpu-limit"}, {"--json", "--show-ids", "--cuda-experts"});
     if (!valid) return print_error(valid.error(), json);
     const auto ids_csv = option_value(args, "--prompt-ids");
     if (!ids_csv || ids_csv->empty()) {
@@ -2251,6 +2250,40 @@ int command_qwen38_greedy(const std::vector<std::string>& args) {
     auto guard = vastloom::safety::ProcessSafetyGuard::apply(policy.value());
     if (!guard) return print_error(guard.error(), json);
 
+    // Optional device path for the routed experts: the accelerator holds Q8_0
+    // matrices resident in VRAM and its kernel accumulates each row in double
+    // in the CPU reference order, so device and CPU results are identical.
+    // A declined matvec (no VRAM, unsupported shape) runs the CPU kernel.
+    std::unique_ptr<vastloom::cuda::CudaMatvecAccelerator> accelerator;
+    vastloom::safety::ResourceGovernor governor(policy.value().resources);
+    if (has_flag(args, "--cuda-experts")) {
+        auto cuda_driver = vastloom::cuda::CudaDriver::load();
+        if (!cuda_driver) {
+            std::cerr << "cuda: driver unavailable, running CPU experts\n";
+        } else {
+            vastloom::cuda::CudaMatvecAcceleratorOptions accelerator_options;
+            accelerator_options.minimum_free_vram_after = 1U * vastloom::GiB;
+            accelerator_options.maximum_resident_bytes =
+                policy.value().resources.vram_hard_limit;
+            if (option_value(args, "--gpu-limit").has_value()) {
+                auto mebibytes = optional_size(args, "--gpu-limit", 4096U);
+                if (!mebibytes) return print_error(mebibytes.error(), json);
+                accelerator_options.maximum_resident_bytes = std::min(
+                    accelerator_options.maximum_resident_bytes,
+                    static_cast<vastloom::ByteCount>(mebibytes.value()) * vastloom::MiB);
+            }
+            accelerator_options.maximum_matrices = 8192U;
+            auto created = vastloom::cuda::CudaMatvecAccelerator::create(
+                cuda_driver.take_value(), governor, accelerator_options);
+            if (!created) {
+                std::cerr << "cuda: " << created.error().message
+                          << ", running CPU experts\n";
+            } else {
+                accelerator = created.take_value();
+            }
+        }
+    }
+
     using namespace vastloom::inference;
     const std::uint32_t H = Qwen38ExpectedInvariants::hidden_size;
     const std::uint32_t I = Qwen38ExpectedInvariants::moe_intermediate_size;
@@ -2312,7 +2345,15 @@ int command_qwen38_greedy(const std::vector<std::string>& args) {
     struct GreedyExpertCache {
         struct Entry {
             std::uint32_t key;
-            Qwen38OwnedExpertQ8 expert;
+            // Q8_0 descriptors: the loaded bytes move here once. The device
+            // accelerator keys residency on cache_identity; the weights are
+            // immutable, so an expert re-read after host eviction reuses the
+            // same device copy safely.
+            DeepseekV4PackedMatrix gate;
+            DeepseekV4PackedMatrix up;
+            DeepseekV4PackedMatrix down;
+            // True when the host holds no bytes because the device does.
+            bool device_only{false};
         };
         std::size_t capacity = 64U;
         std::size_t hits = 0U;
@@ -2321,25 +2362,33 @@ int command_qwen38_greedy(const std::vector<std::string>& args) {
         std::list<Entry> hot;  // front = most recently used
         std::unordered_map<std::uint32_t, std::list<Entry>::iterator> index;
 
-        Qwen38OwnedExpertQ8* find(std::uint32_t key) {
+        Entry* find(std::uint32_t key) {
             const auto it = index.find(key);
             if (it == index.end()) {
                 return nullptr;
             }
             ++hits;
             hot.splice(hot.begin(), hot, it->second);
-            return &it->second->expert;
+            return &*it->second;
         }
-        Qwen38OwnedExpertQ8& insert(std::uint32_t key, Qwen38OwnedExpertQ8&& source) {
+        Entry& insert(Entry&& source) {
             ++misses;
-            auto& fresh = hot.emplace_front(Entry{key, std::move(source)});
-            index.emplace(key, hot.begin());
+            auto& fresh = hot.emplace_front(std::move(source));
+            index.emplace(fresh.key, hot.begin());
             if (hot.size() > capacity) {
                 index.erase(hot.back().key);
                 hot.pop_back();
                 ++evictions;
             }
-            return fresh.expert;
+            return fresh;
+        }
+        void erase(std::uint32_t key) {
+            const auto it = index.find(key);
+            if (it == index.end()) {
+                return;
+            }
+            hot.erase(it->second);
+            index.erase(it);
         }
     };
     GreedyExpertCache lru;
@@ -2385,14 +2434,55 @@ int command_qwen38_greedy(const std::vector<std::string>& args) {
             // Phase 1: cache lookup; misses dispatch as concurrent reads (each
             // slice is ~5 MB and latency-bound, so batching the top-k experts
             // hides NVMe round trips the sequential loop paid one by one).
-            std::vector<Qwen38OwnedExpertQ8*> slots(route.indices.size(), nullptr);
+            std::vector<GreedyExpertCache::Entry*> slots(route.indices.size(), nullptr);
+            auto expert_identity = [](std::uint32_t layer_id, std::uint32_t eid,
+                                      std::uint32_t role) {
+                return 1U + (static_cast<std::uint64_t>(layer_id) * 512U + eid) * 3U + role;
+            };
+            auto packed_expert = [expert_identity](std::uint32_t layer_id, std::uint32_t eid,
+                                                   std::uint32_t role, std::size_t rows,
+                                                   std::size_t cols, std::vector<std::byte> bytes) {
+                DeepseekV4PackedMatrix matrix;
+                matrix.ggml_type = 8U;  // Q8_0
+                matrix.rows = rows;
+                matrix.logical_columns = cols;
+                matrix.storage_columns = cols;
+                matrix.encoded = std::move(bytes);
+                matrix.cache_identity = expert_identity(layer_id, eid, role);
+                matrix.recurring = false;  // routed: the device cache favours recurring weights
+                return matrix;
+            };
+            auto device_holds_expert = [expert_identity, &accelerator](
+                std::uint32_t layer_id, std::uint32_t eid) {
+                return accelerator
+                    && accelerator->holds(expert_identity(layer_id, eid, 0U))
+                    && accelerator->holds(expert_identity(layer_id, eid, 1U))
+                    && accelerator->holds(expert_identity(layer_id, eid, 2U));
+            };
             std::vector<std::future<std::tuple<std::uint32_t, std::size_t,
                 Result<Qwen38OwnedExpertQ8>, Qwen38Layer0Telemetry>>> loads;
             for (std::size_t i = 0; i < route.indices.size(); ++i) {
                 const auto eid = route.indices[i];
                 const std::uint32_t key = (layer << 16U) | eid;
                 slots[i] = lru.find(key);
+                if (slots[i] != nullptr && slots[i]->device_only &&
+                    !device_holds_expert(layer, eid)) {
+                    // The device dropped this expert's bytes since the host cached
+                    // them: the host entry holds no payload, so drop and re-read it.
+                    lru.erase(key);
+                    slots[i] = nullptr;
+                }
                 if (slots[i] != nullptr) {
+                    continue;
+                }
+                if (device_holds_expert(layer, eid)) {
+                    GreedyExpertCache::Entry cached_entry{
+                        key,
+                        packed_expert(layer, eid, 0U, I, H, {}),
+                        packed_expert(layer, eid, 1U, I, H, {}),
+                        packed_expert(layer, eid, 2U, H, I, {})};
+                    cached_entry.device_only = true;
+                    slots[i] = &lru.insert(std::move(cached_entry));
                     continue;
                 }
                 loads.emplace_back(std::async(std::launch::async,
@@ -2411,10 +2501,36 @@ int command_qwen38_greedy(const std::vector<std::string>& args) {
                 load_tel.expert_payload_bytes += local.expert_payload_bytes;
                 load_tel.tensors_read += local.tensors_read;
                 if (!result) return print_error(result.error(), json);
-                slots[idx] = &lru.insert(key, std::move(result.value()));
+                const std::uint32_t eid = route.indices[idx];
+                Qwen38OwnedExpertQ8 source = std::move(result.value());
+                GreedyExpertCache::Entry entry{
+                    key,
+                    packed_expert(layer, eid, 0U, I, H, std::move(source.gate)),
+                    packed_expert(layer, eid, 1U, I, H, std::move(source.up)),
+                    packed_expert(layer, eid, 2U, H, I, std::move(source.down))};
+                slots[idx] = &lru.insert(std::move(entry));
             }
             for (std::size_t i = 0; i < slots.size(); ++i) {
-                auto y = qwen38_expert_mlp_q8(fwd.value().mixed_input, *slots[i], H, I);
+                if (slots[i]->device_only && !device_holds_expert(layer, route.indices[i])) {
+                    // The device evicted these bytes while the compute pass was
+                    // being assembled: re-read them here (rare; synchronous is
+                    // simpler than threading a reload through the async batch).
+                    const std::uint32_t stale_key = slots[i]->key;
+                    lru.erase(stale_key);
+                    auto fresh = qwen38_load_layer_expert_q8(
+                        trunk_ref, checkpoint_root, route.indices[i], &load_tel);
+                    if (!fresh) return print_error(fresh.error(), json);
+                    Qwen38OwnedExpertQ8 src = std::move(fresh.value());
+                    GreedyExpertCache::Entry entry{
+                        stale_key,
+                        packed_expert(layer, route.indices[i], 0U, I, H, std::move(src.gate)),
+                        packed_expert(layer, route.indices[i], 1U, I, H, std::move(src.up)),
+                        packed_expert(layer, route.indices[i], 2U, H, I, std::move(src.down))};
+                    slots[i] = &lru.insert(std::move(entry));
+                }
+                auto y = qwen38_expert_mlp_q8(fwd.value().mixed_input,
+                                              slots[i]->gate, slots[i]->up, slots[i]->down,
+                                              H, I, accelerator.get());
                 if (!y) return print_error(y.error(), json);
                 const float w = route.weights[i];
                 for (std::uint32_t d = 0; d < H; ++d) {
@@ -2451,6 +2567,14 @@ int command_qwen38_greedy(const std::vector<std::string>& args) {
                   << " forward=" << (int)t_fwd << " head=" << (int)t_head << "\n";
         std::cerr << "expert cache: cap=" << lru.capacity << " hits=" << lru.hits
                   << " misses=" << lru.misses << " evictions=" << lru.evictions << "\n";
+        if (accelerator) {
+            const auto& acc = accelerator->stats();
+            std::cerr << "cuda experts: accelerated=" << acc.accelerated
+                      << " declined=" << acc.declined << " resident=" << acc.resident_matrices
+                      << " bytes=" << (acc.resident_bytes / (1024U * 1024U)) << " MiB"
+                      << " kernel_ms=" << static_cast<int>(acc.kernel_ms)
+                      << " upload_ms=" << static_cast<int>(acc.upload_ms) << "\n";
+        }
     }
     std::string text;
     for (const auto id : generated) {

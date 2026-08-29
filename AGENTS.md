@@ -190,7 +190,13 @@ Trunk residency was cut from 13 GB of F32 to Q8_0 bytes in P2d (bit-identical, s
 parity accumulation cannot use parallel reductions on consumer parts, so the 12-thread CPU
 kernel stays ahead). What could still close the gap is a smaller expert quant (Q4_K/IQ4
 re-import: halves the ~2.5 GB/token expert traffic) and float-precision device kernels
-where the parity bar admits them. Do not describe any throughput here as competitive.
+where the parity bar admits them. The checkpoint declares a 262,144-token context and
+the state architecture scales well (36 of 48 layers are O(1) DeltaNet; the 12 QSA layers
+add ~72 KB/token of F32 caches, ~9.4 GB at 128k — halving to ~4.7 GB if the caches go
+F16), but the serial one-token prefill (~3.5-4 s/token) makes
+long contexts impractical today: chunked prefill (roadmap Q11k) is the first lever,
+ahead of prefix-KV sessions (Q12) and the Qwen3.8 serve path (Q13). Do not describe any
+throughput here as competitive.
 Do not compare an IQ2_XXS second-per-token to an older IQ1_S figure as if they were the
 same experiment.
 

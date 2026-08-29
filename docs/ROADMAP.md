@@ -465,6 +465,42 @@ l'oracolo llama.cpp e per la residenza esperti in VRAM.
 **Gate:** il runtime nativo Vastloom produce gli stessi token di llama.cpp
 sul checkpoint ufficiale Q8_0. L'oracolo esterno è stabilito per Q12+.
 
+## Q11j - Throughput P2b-P3a - complete
+
+- [x] Q8_0-native expert matvec + LRU O(1) + decode DeltaNet parallelo
+  (`c5b62db`): bit-identico, 33.75 → ~7 s/token.
+- [x] Prefetch concorrente dei top-k esperti (`843430b`): ~4 s/token.
+- [x] Trunk Q8_0-native in residenza, P2d (`4ed0fad`): startup residenza
+  16,8 → 3,1 s; streaming senza override 194 → 32 s; parità invariata.
+- [x] P3a `--cuda-experts` (`ee927b5`): bit-identico ma MISURATO più lento
+  del kernel CPU a 12 thread (FP64 1/64-rate + griglie vincolate dalla
+  parità) → resta opt-in, il CPU kernel è la product path.
+
+**Gate:** parità greedy 16/16 token mantenuta a ogni passo; numeri onesti in
+AGENTS.md/CHANGELOG. ~3,3-4 s/token generato, contro 0,32 s/token di
+llama.cpp (gap ~10x, strutturale: page cache vs cache nostre).
+
+## Q11k - Prefill a chunk (PRIORITÀ sopra Q12/Q13)
+
+Motivazione: il contesto dichiarato dal checkpoint è 262.144 token; gli
+stati DeltaNet sono O(1) e i cache QSA crescono ~72 KB/token in F32 (128k ≈
+9,4 GB, dimezzabili con cache F16 — fattibile in RAM), ma il prefill seriale
+a 1 token (~3,5-4 s/token) rende
+il contesto lungo irraggiungibile in pratica. Senza prefill veloce, Q12
+(prefix-KV) e Q13 (serve) restano demo corte.
+
+- [ ] Forma chunked della regola delta GDN (scan a blocchi, stato carry tra
+      chunk) con accepts condition: output bit-pari vs il percorso seriale
+      token-per-token fixture e reale (stato dopo N token identico).
+- [ ] Prefill QSA batchato: punteggio indexer e selezione blocchi per più
+      query per passata, append KV/index senza cambiare i risultati.
+- [ ] Conv/PLE/Router/mixing sul percorso prefill allineati al chunking.
+- [ ] Misura: throughput prefill token/s su prompt lunghi vs il baseline
+      seriale, bytes/token letti, in report dedicato.
+
+**Gate:** replay bit-paro del prefill multi-token reale (estensione del test
+di regression Q11d a ≥ 64 token) + throughput misurato e documentato.
+
 ## Q12 - prefix-KV MoE stream (porting M13)
 
 - [ ] Estendere `LlamaSession` al percorso MoE stream.
@@ -475,11 +511,21 @@ sul checkpoint ufficiale Q8_0. L'oracolo esterno è stabilito per Q12+.
 
 ## Q13 - vastloom serve per Qwen3.8
 
-- [ ] Dispatch `serve <directory>` che carica Qwen3.8-Flash-Next FP8.
+- [ ] Tokenizer nativo text→id per qwen4exp (gpt2-BPE: `tokenizer.ggml.tokens`
+      + `merges` + pre-tokenizer dal metadata GGUF), validato contro
+      `llama-tokenize.exe` (oracolo) su fixture EN/IT.
+- [ ] Framing ChatML dei messaggi (im_start/im_end dal vocab GGUF; il
+      template jena nel file è decorativo, la forma è nota e pinnata).
+- [ ] Dispatch `serve <directory>`: rilevamento Q8_0 GGUF qwen4exp →
+      chat engine Qwen3.8 (residenza trunk, LRU esperti, opzione
+      `--cuda-experts`); la generazione è il loop qwen38-greedy estratto
+      dall CLI, con cancel/timeout dal pattern reduce_generate.
 - [ ] Endpoint `/v1/models`, `/v1/chat/completions` (streaming + non-stream).
 - [ ] Test Python opt-in via `tests/test_qwen38_cli.py`.
 
-**Gate:** smoke test verde end-to-end.
+**Gate:** smoke test verde end-to-end. Nota di onestà: prima di Q11k la
+sessione serve riprefilla ogni turno a ~3,5-4 s/token → demo con contesti
+brevi; il contesto lungo realistico dipende da Q11k+Q12, non da Q13.
 
 ---
 

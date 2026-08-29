@@ -2,6 +2,22 @@
 
 ## Unreleased
 
+- **Q11i - Q8_0-native experts and concurrent prefetch (4x greedy speedup).**
+  Routed experts are no longer dequantized to a 19.7 MB F32 copy per use:
+  `qwen38_expert_mlp_q8` reads contiguous Q8_0 blocks directly with the same
+  per-row sequential double accumulation as `linear_f`, so results are
+  bit-identical to the F32 path and the full oracle parity check was not
+  needed to accept it. The greedy CLI caches raw Q8_0 slices in an O(1) LRU,
+  dispatches all top-k misses as concurrent per-thread reads, and clamps
+  cache capacity so no pointer is used across an eviction. The delta-net
+  decode conv is channel-parallel, its recurrence loop value-head parallel,
+  and the `linear_f` parallel threshold now covers expert-sized matvecs.
+  End to end the greedy CLI went from ~33 s/token (Q11h) to ~4 s/token on the
+  reference PC with trunk F32 residency on; llama.cpp on the same machine is
+  ~3.2 tok/s, so the CPU gap is now roughly twelve times and it is a
+  residency-architecture gap (Q8_0 under the page cache vs 13 GB of F32),
+  which is the next milestone alongside CUDA expert execution.
+
 - **Q11h - Greedy parity with llama.cpp achieved.** The native Vastloom
   runtime now generates token-identical output to llama.cpp on the official
   Qwen3.8-Flash-Next Q8_0 checkpoint ("The capital of France is" → " Paris.

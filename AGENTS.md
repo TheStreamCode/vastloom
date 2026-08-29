@@ -23,8 +23,10 @@ below or any present-tense validation claim.
 unsloth **Q8_0 GGUF** checkpoint (175.3 GiB, canonical immutable import at
 `C:\vastloom-store`, FP8 safetensors deleted after the GGUF replaced it)
 end-to-end and achieves **greedy token parity with llama.cpp** (`6fe7498`,
-CPU, same checkpoint). Do not claim throughput: trunks stream from NVMe per
-token and experts resolve through a bounded LRU; VRAM-resident expert tiers
+CPU, same checkpoint). Do not claim competitive throughput: the reference-PC greedy CLI runs
+~4 s/token against llama.cpp's ~3.2 tok/s on the same machine; trunks stream from NVMe per
+token unless an explicit RAM-headroom override permits F32 residency, and experts resolve
+through a bounded Q8_0 cache; VRAM-resident expert tiers
 and cross-layer prefetch are designed but not implemented. The DeepSeek V4
 Flash 0731 track is historical: `UD-IQ2_XXS` was its only execution quant,
 IQ1 / `UD-IQ1_S` was deleted; its pinned decoders and reduced-graph fixtures
@@ -173,9 +175,14 @@ order: this reference sums in `double` where ggml sums in `float`, and their log
 0.01 to 0.06 by construction.
 
 Measured position: a token still moves 8.76 GB of weights (6.99 GB always-active trunk plus
-globals, 1.77 GB selected experts). After the opt-in ggml backend the remaining gap to
-llama.cpp is streaming structure and expert I/O, not missing AVX-512 kernels. Do not describe
-any throughput here as competitive. Do not compare an IQ2_XXS second-per-token to an older
+globals, 1.77 GB selected experts). The Qwen3.8 greedy CLI on the reference PC (CPU, trunk
+F32 residency, Q8_0-native expert matvec, concurrent expert reads, 512-entry expert cache)
+runs ~4 s/token end to end; llama.cpp `6fe7498` on the same machine and checkpoint reaches
+~3.2 tok/s, so the honest ratio is roughly twelve times, not competitive. The remaining gap
+is architectural, not kernel-level: llama.cpp keeps everything in Q8_0 under the OS page
+cache while we hold ~13 GB of F32 trunks that evict it. Closing this needs Q8_0-native trunk
+residency and then CUDA expert/tile execution; neither exists yet. Do not describe any
+throughput here as competitive. Do not compare an IQ2_XXS second-per-token to an older
 IQ1_S figure as if they were the same experiment.
 
 Before trusting a number, ask under what conditions it was taken. Five checks in this milestone

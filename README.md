@@ -28,22 +28,23 @@ brain** on NVMe through bounded bridges — is documented separately in
 It is a compass for future work, not a claim about what runs today.
 
 > [!NOTE]
-> **Current measured position (August 2026, reference PC: 31 GiB RAM, RTX 4070 Super).**
-> Official generate is **UD-IQ2_XXS only**. The UD-IQ1_S store was deleted; do not run or
-> cite IQ1 as product quality. `deepseek-forward --cpu-only --ggml-compute --trunk-window 43`
-> produces the llama.cpp-correct greedy answer (`**Roma**` on the pinned Italian prompt) at
-> about **3.2–3.5 s/token** (~0.3 tok/s), page-cache dependent. llama.cpp on CPU was
-> 0.30–0.33 s/token on the earlier IQ1 profile when idle. Expert I/O dominates. 26% of
-> selected experts recur on the next token; keeping them across decode saves expert traffic
-> but must not steal the 43-layer trunk window (that trade made the run slower). The
-> Governor refuses with exit 75 when the live budget is short. This is correct generation,
-> not a usable interactive rate. The long note below is a chronological lab log; where it
-> disagrees with this box, this box wins.
+> **Current measured position (August 2026, reference PC: 31 GiB RAM, RTX 4070 Super 12 GiB).**
+> The primary track is now **Qwen3.8-Flash-Next** (`qwen4exp`, 125B MoE, 6B active,
+> 48 layers = 36 Gated DeltaNet + 12 QSA, 512 routed experts top-10 + shared). The
+> native runtime executes the official unsloth **Q8_0 GGUF** checkpoint (175.3 GiB,
+> canonical immutable import) end-to-end — per-layer forwards, multi-token prefill,
+> the full 48-layer chain, PLE n-gram block and RoPE included — and achieves
+> **greedy token parity with llama.cpp** (`6fe7498`, CPU, same checkpoint): pinned
+> prompt "The capital of France is" produces the identical 16-token continuation
+> on both engines. The former DeepSeek V4 Flash track (UD-IQ2_XXS, ~0.3 tok/s,
+> self-pinned only) is historical; its pinned tests remain as contracts. The Qwen
+> path is externally validated — that is the difference that matters. The long note
+> below is a chronological lab log; where it disagrees with this box, this box wins.
 
 > [!IMPORTANT]
-> **Lab log — `0.4.0-alpha.4` plus unreleased DeepSeek and multitier-control slices.**
-> Historical figures in this note (60 s/token, 6.9 s GPU, “kernels are the gap”,
-> “generation unvalidated”) are superseded by the box above. They stay as the path that
+> **Lab log - `0.4.0-alpha.4` plus unreleased DeepSeek and multitier-control slices.**
+> Historical figures in this note (60 s/token, 6.9 s GPU, "kernels are the gap",
+> "generation unvalidated") are superseded by the box above. They stay as the path that
 > got here.
 > Vastloom now runs the routed token path of the pinned 13.84 GB
 > `allenai/OLMoE-1B-7B-0924-Instruct` checkpoint on CPU while keeping only the
@@ -339,6 +340,35 @@ Vastloom must therefore be described as working on Windows and Linux today. macO
 portability target, not a validated platform claim.
 
 ## What works in the current source
+
+### Qwen3.8-Flash-Next (primary track, llama.cpp-parity validated)
+
+- **Pinned checkpoint:** `unsloth/Qwen3.8-Flash-Next-Q8_0` GGUF (6 shards,
+  175.3 GiB, SHA-256 verified) imported through the canonical immutable
+  importer into the external model store; the FP8 safetensors release was
+  imported first, validated against the pinned 152,089-tensor catalog, then
+  removed once the GGUF replaced it.
+- **Native `qwen4exp` execution:** full 48-layer forward (36 Gated DeltaNet +
+  12 QSA sparse attention), multi-token prefill with carried conv/SSM/KV
+  state, MoE routing (top-10 of 512, shared expert), the PLE n-gram block
+  (hash → fused 160-per-head table lookup → gate → dilated depthwise conv),
+  partial RoPE (64/256, theta 1e7) and the global mixer + LM head.
+- **Greedy token parity with llama.cpp** (rev `6fe7498`, CPU, same
+  checkpoint): "The capital of France is" → " Paris. The capital of Germany
+  is Berlin. The capital of Italy is Rome. The" for 16 greedy tokens,
+  identical on both engines. Stage-by-stage tensor comparison against
+  llama.cpp surfaced and fixed five real defects that self-pinned tests
+  could not see (sigmoid DeltaNet output gate, pre-applied `-exp(A_log)` in
+  `ssm_a`, GGUF norm weights already `(1+w)`, ggml-repeat tile k-head
+  mapping, and a stale-trunk bug in the greedy CLI).
+- **CLI:** `vastloom qwen38-inspect` (metadata catalog validation),
+  `qwen38-layer` (single real layer forward), `qwen38-prefill` (multi-token
+  prefill with a bounded expert LRU), `qwen38-chain` (consecutive real
+  layers, streaming trunks), `qwen38-greedy` (full-depth greedy generation
+  with detokenize). The safetensors/GGUF dispatcher keeps the FP8 path
+  working for historical pins.
+- **Opt-in real-checkpoint test** (`-DVASTLOOM_QWEN38_MODEL=<root>`): catalog
+  validation, per-layer forwards and prefill determinism on both layouts.
 
 ### Real pretrained model path
 
@@ -670,11 +700,10 @@ the selected install prefix.
 
 The default build registers the tests whose inputs live in the repository. The real-model and real
 GPU checks are opt-in: they only run where their checkpoints, slices or NVIDIA driver are present,
-and none of them runs in CI. [`docs/VALIDATION_MATRIX.md`](docs/VALIDATION_MATRIX.md) lists every
-test, the CMake variable that enables it and the artifact it needs, including
-`tools/fetch_deepseek_test_slices.py` for the 6,488,064 bytes of pinned expert slices. Governed
-commands report `SKIPPED` with the reason when the host is too short on memory or disk to run them
-safely, so read the run output rather than the exit code alone.
+and none of them runs in CI. The CMake variables that enable them (`VASTLOOM_QWEN38_MODEL`,
+`VASTLOOM_DEEPSEEK_V4_*`, `VASTLOOM_GGML_ROOT`) are listed in [`AGENTS.md`](AGENTS.md) under
+Standard gates. Governed commands report `SKIPPED` with the reason when the host is too short on
+memory or disk to run them safely, so read the run output rather than the exit code alone.
 
 ## Chat with the bundled model
 
@@ -1103,17 +1132,23 @@ and complete scopes remain fail-closed while routing authority is unverified.
 
 ## Current limitations
 
-Alpha.4 proves one real dense path and one real CPU MoE streaming path with an
-opt-in bounded asynchronous reader, not the final Vastloom research thesis.
-It currently has:
+Alpha.4 proves one real dense path, one real CPU MoE streaming path and the
+Qwen3.8-Flash-Next externally-parity-validated path — not the final Vastloom
+research thesis. It currently has:
 
+- **Qwen3.8-Flash-Next**: greedy parity validated, but no throughput claim yet —
+  trunks stream from NVMe per token (one resident at a time) and experts resolve
+  through a bounded LRU; the VRAM-resident expert tiers and cross-layer prefetch
+  that would make streaming fast are designed but not implemented; the MTP draft
+  head and vision tower are not executed; sampling is greedy-only in the parity
+  CLI;
 - two executable pinned Hugging Face adapters plus a DeepSeek metadata/tokenizer, reduced
   FP32 prefill oracle, file-backed governed Q8_0 layer, official 0731 GGUF metadata catalog and
   verified source-binding boundary; no full-checkpoint DeepSeek, MiniMax or Kimi execution adapter;
 - native CUDA driver discovery, governed allocation, synchronous copies, one scalar FP32 RMSNorm
   parity kernel and quantized Q8_0/IQ1_S/IQ3_XXS matvec kernels wired into the DeepSeek graph with
   weights resident in VRAM, but no attention/dense CUDA path, no streams and no complete GPU
-  inference — activations still return to the host between operations; no ROCm, Vulkan or Metal
+  inference - activations still return to the host between operations; no ROCm, Vulkan or Metal
   inference backend;
 - scalar IQ1_S/IQ2_XXS/IQ3_XXS/MXFP4 expert, Q4_K global and Q8_0/Q5_K/Q6_K/BF16/F32 trunk
   reference kernels, plus bounded Q4_K/IQ2_XXS/MXFP4 row lookup and I32 router-table decoding, one

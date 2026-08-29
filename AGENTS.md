@@ -18,19 +18,30 @@ architectures is listed as excluded, and "x100 intelligence" is replaced by a ta
 falsification ladder. Treat it as a compass; do not let it rewrite the execution checkpoint
 below or any present-tense validation claim.
 
-**Execution checkpoint.** Official DeepSeek V4 Flash 0731 generate on the reference PC uses
-only `UD-IQ2_XXS` (`deepseek-v4-flash-0731-iq2xxs`). Do not run, measure, or claim product
-quality on IQ1 / `UD-IQ1_S`; that store was deleted. The IQ1_S decoder and reduced-graph
-fixtures remain as historical tests, not as the execution path.
+**Execution checkpoint.** The primary track is now **Qwen3.8-Flash-Next**
+(`qwen4exp`, 125B MoE, 6B active): the native runtime executes the official
+unsloth **Q8_0 GGUF** checkpoint (175.3 GiB, canonical immutable import at
+`C:\vastloom-store`, FP8 safetensors deleted after the GGUF replaced it)
+end-to-end and achieves **greedy token parity with llama.cpp** (`6fe7498`,
+CPU, same checkpoint). Do not claim throughput: trunks stream from NVMe per
+token and experts resolve through a bounded LRU; VRAM-resident expert tiers
+and cross-layer prefetch are designed but not implemented. The DeepSeek V4
+Flash 0731 track is historical: `UD-IQ2_XXS` was its only execution quant,
+IQ1 / `UD-IQ1_S` was deleted; its pinned decoders and reduced-graph fixtures
+remain as historical tests, not as the execution path.
 
-**Current measured position (reference PC, `--cpu-only --ggml-compute --trunk-window 43`).**
-Full 43-layer greedy generate is correct against the llama.cpp oracle (`**Roma**` on the
-pinned Italian prompt). IQ2_XXS: about **3.2–3.5 s/token** (~0.3 tok/s), page-cache
-dependent. llama.cpp CPU on the earlier IQ1 profile was 0.30–0.33 s/token idle. Expert I/O
-is most of the generate. 26% of selected expert identities recur on the next token; keeping
-those six-per-layer across decode cuts expert traffic (31.2 → 24.6 GB) but stealing the
-trunk window to afford that persist made the run slower (6.48 s/token). Persist is on only
-when window 43 already fits the live budget. Exit 75 is a correct Governor refusal.
+**Current measured position (reference PC).** Qwen3.8-Flash-Next greedy
+generate matches llama.cpp token-for-token ("The capital of France is" →
+" Paris. The capital of Germany is Berlin. The capital of Italy is Rome.
+The" for 16 tokens) after fixing five real defects surfaced only by the
+external oracle: sigmoid DeltaNet output gate (not silu), pre-applied
+`-exp(A_log)` in GGUF `ssm_a`, GGUF norm weights stored as `(1+w)` except
+RMSNormGated `ssm_norm`, ggml-repeat tile k-head mapping (`vh % k_heads`),
+and a stale-trunk bug in the greedy CLI. Partial RoPE (64/256, theta 1e7)
+and the PLE n-gram block are integrated. The llama.cpp oracle (clone
+`6fe7498` + optional intermediate-tensor dump, local only) is the authority
+for every future change; prefer it over this project's own reference
+whenever the two disagree.
 
 The longer boundary below is a lab log. Where it says official generate is unvalidated or
 that the remaining gap is missing kernels, this paragraph wins.
@@ -152,10 +163,11 @@ documentation, tests and git state before changing code. Preserve working compon
 replace real paths with placeholders.
 
 An external reference now exists and is the authority: llama.cpp built from source reads the same
-checkpoint and supports both `deepseek4` and `dflash`. It found a defect no internal test could —
-the Hyper-Connection mixing matrix was read transposed — because the M6 Python operator reference
-carried the same transposition, and two implementations written from one reading of the equations
-confirmed each other for a milestone. Prefer it over this project's own reference whenever the two
+checkpoint. For the Qwen3.8-Flash-Next track it validated greedy parity and found defects no
+internal test could — the DeltaNet output gate is sigmoid (not silu as the HF modeling main
+carries), GGUF `ssm_a` is pre-transformed, GGUF norm weights are stored as `(1+w)`, and the
+k-head mapping is ggml-repeat tile. For the DeepSeek track it found the Hyper-Connection mixing
+matrix transposition the same way. Prefer it over this project's own reference whenever the two
 disagree, and treat bit-exactness as a property of the storage decoders rather than of accumulation
 order: this reference sums in `double` where ggml sums in `float`, and their logits differ by
 0.01 to 0.06 by construction.
@@ -222,17 +234,18 @@ python -m unittest tests/test_distill_evaluate.py -v
 python tests/test_import_hf_model.py
 ```
 
-External model tests are opt-in through the `VASTLOOM_*_MODEL` CMake paths. Run large tests
-serially. Distinguish simulated traces, warm-cache measurements, process-visible I/O and physical
-device traffic in every report.
+External model tests are opt-in through the `VASTLOOM_*_MODEL` CMake paths. For the Qwen3.8
+track: `-DVASTLOOM_QWEN38_MODEL=<imported checkpoint root>` enables
+`vastloom_qwen38_checkpoint` (serial, metadata catalog + real layer-0/3 forwards + prefill
+determinism on the GGUF layout). Run large tests serially. Distinguish simulated traces,
+warm-cache measurements, process-visible I/O and physical device traffic in every report.
 
-[`docs/VALIDATION_MATRIX.md`](docs/VALIDATION_MATRIX.md) maps every claim to the test that defends
-it, the CMake variable that enables that test and the artifact it needs. Consult it before writing
-a present-tense claim: a green `ctest` only covers what the current machine has configured, and
-neither the real-model tests nor the live CUDA kernel run in CI. Contracts the Safety Governor
-refuses because the host is short on memory or disk exit with code 75 and are reported by CTest as
-skipped, not passed; report the skip count alongside the pass count and never convert a skip into a
-passing claim.
+The Qwen3.8 CLI surface: `qwen38-inspect` (catalog validation), `qwen38-layer --layer N`,
+`qwen38-prefill --tokens` (multi-token prefill, bounded expert LRU), `qwen38-chain --layers`
+(consecutive real layers), `qwen38-greedy --prompt-ids` (full-depth greedy generation with
+detokenize). The safetensors/GGUF dispatcher selects the checkpoint layout automatically.
+llama.cpp comparison tooling (clone `6fe7498` + optional intermediate dump) stays outside the
+repository.
 
 ## Claims and commits
 

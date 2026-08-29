@@ -5,9 +5,12 @@
 Vastloom is a native inference runtime, not a model and not a generic swap wrapper. Its
 purpose is to execute a validated model graph while controlling where each weight/state
 object lives and how it moves. A small CLI is included as a reference client and
-validation surface. Official DeepSeek V4 Flash generate on the reference PC is the
-`UD-IQ2_XXS` GGUF through `deepseek-forward`; IQ1 is not an execution path. See
-`README.md` and `AGENTS.md` for the current measured milliseconds-per-token.
+validation surface. The primary track is **Qwen3.8-Flash-Next** (`qwen4exp`): the
+official unsloth Q8_0 GGUF executes end-to-end through the `qwen38-*` CLI family and
+achieves greedy token parity with llama.cpp. The DeepSeek V4 Flash `UD-IQ2_XXS`
+path (`deepseek-forward`) is historical; IQ1 is not an execution path. See
+`README.md` and `AGENTS.md` for the current measured position and the
+`docs/reports/Q11C_QWEN38_LLAMA_PARITY_VALIDATION.md` report for the parity evidence.
 
 ```text
                      Model adapter

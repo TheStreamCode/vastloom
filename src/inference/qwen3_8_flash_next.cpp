@@ -2177,4 +2177,19 @@ Result<Qwen38OwnedExpert> qwen38_load_layer_expert(
     return expert;
 }
 
+Result<Qwen38OwnedExpertQ8> qwen38_load_layer_expert_q8(
+    const Qwen38LayerTrunk& trunk,
+    const std::filesystem::path& checkpoint_root,
+    std::uint32_t expert_id,
+    Qwen38Layer0Telemetry* telemetry) {
+    if (!trunk.is_gguf) {
+        return make_error(ErrorCode::unsupported,
+                          "q8 expert path requires a GGUF Q8_0 checkpoint",
+                          std::to_string(expert_id));
+    }
+    auto checkpoint = qwen38_open_gguf_checkpoint(checkpoint_root);
+    if (!checkpoint) return checkpoint.error();
+    return qwen38_load_gguf_expert_q8(trunk, checkpoint.value(), expert_id, telemetry);
+}
+
 }  // namespace vastloom::inference

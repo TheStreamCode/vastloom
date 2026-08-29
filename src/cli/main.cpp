@@ -11,6 +11,7 @@
 #include <iostream>
 #include <initializer_list>
 #include <limits>
+#include <list>
 #include <memory>
 #include <numeric>
 #include <stdexcept>
@@ -18,6 +19,7 @@
 #include <set>
 #include <string>
 #include <string_view>
+#include <unordered_map>
 #include <vector>
 
 #include "vastloom/cli/tiny_commands.hpp"
@@ -2289,10 +2291,53 @@ int command_qwen38_greedy(const std::vector<std::string>& args) {
                   << (int)std::chrono::duration_cast<std::chrono::milliseconds>(
                          std::chrono::steady_clock::now() - residency_start).count() << " ms\n";
     }
+    // The greedy expert path is Q8_0-native: only the GGUF layout carries the
+    // raw expert blocks it consumes.
+    auto greedy_kind = qwen38_detect_checkpoint_kind(checkpoint_root);
+    if (!greedy_kind) return print_error(greedy_kind.error(), json);
+    if (greedy_kind.value() != Qwen38CheckpointKind::gguf) {
+        std::cerr << "qwen38-greedy: the Q8_0-native expert path requires a GGUF checkpoint\n";
+        return 2;
+    }
     std::vector<Qwen38LayerRuntimeState> states(Qwen38ExpectedInvariants::num_hidden_layers);
-    Qwen38ExpertLru lru;
+    // O(1) LRU for routed experts. The reference Qwen38ExpertLru shifts a
+    // vector on eviction, which memmoves the whole cached expert heap on
+    // every miss once the capacity is below the per-token working set.
+    struct GreedyExpertCache {
+        struct Entry {
+            std::uint32_t key;
+            Qwen38OwnedExpertQ8 expert;
+        };
+        std::size_t capacity = 64U;
+        std::size_t hits = 0U;
+        std::size_t misses = 0U;
+        std::size_t evictions = 0U;
+        std::list<Entry> hot;  // front = most recently used
+        std::unordered_map<std::uint32_t, std::list<Entry>::iterator> index;
+
+        Qwen38OwnedExpertQ8* find(std::uint32_t key) {
+            const auto it = index.find(key);
+            if (it == index.end()) {
+                return nullptr;
+            }
+            ++hits;
+            hot.splice(hot.begin(), hot, it->second);
+            return &it->second->expert;
+        }
+        Qwen38OwnedExpertQ8& insert(std::uint32_t key, Qwen38OwnedExpertQ8&& source) {
+            ++misses;
+            auto& fresh = hot.emplace_front(Entry{key, std::move(source)});
+            index.emplace(key, hot.begin());
+            if (hot.size() > capacity) {
+                index.erase(hot.back().key);
+                hot.pop_back();
+                ++evictions;
+            }
+            return fresh.expert;
+        }
+    };
+    GreedyExpertCache lru;
     lru.capacity = expert_cache.value();
-    static const Qwen38OwnedExpert kEmptyExpert;
 
     std::vector<std::uint32_t> generated;
     std::vector<std::uint32_t> sequence = token_ids;
@@ -2326,32 +2371,25 @@ int command_qwen38_greedy(const std::vector<std::string>& args) {
             if (!fwd) return print_error(fwd.error(), json);
             t_trunk += t1 - t0; t_fwd += t2 - t1;
             std::vector<float> expert_sum(H, 0.0F);
+            const double tex0 = now_ms();
             for (std::size_t i = 0; i < fwd.value().route.indices.size(); ++i) {
                 const auto eid = fwd.value().route.indices[i];
                 const std::uint32_t key = (layer << 16U) | eid;
-                const bool cached = std::find(lru.keys.begin(), lru.keys.end(), key)
-                                    != lru.keys.end();
-                const Qwen38OwnedExpert* ptr = nullptr;
-                if (cached) {
-                    auto acquired = qwen38_expert_cache_acquire(lru, key, kEmptyExpert);
-                    if (!acquired) return print_error(acquired.error(), json);
-                    ptr = acquired.value();
-                } else {
-                    auto real = qwen38_load_layer_expert(
+                Qwen38OwnedExpertQ8* ptr = lru.find(key);
+                if (ptr == nullptr) {
+                    auto real = qwen38_load_layer_expert_q8(
                         trunk_ref, checkpoint_root, eid, &load_tel);
                     if (!real) return print_error(real.error(), json);
-                    auto acquired = qwen38_expert_cache_acquire(lru, key, real.value());
-                    if (!acquired) return print_error(acquired.error(), json);
-                    ptr = acquired.value();
+                    ptr = &lru.insert(key, std::move(real.value()));
                 }
-                auto y = qwen38_expert_mlp(fwd.value().mixed_input,
-                                           ptr->gate_proj, ptr->up_proj, ptr->down_proj, H, I);
+                auto y = qwen38_expert_mlp_q8(fwd.value().mixed_input, *ptr, H, I);
                 if (!y) return print_error(y.error(), json);
                 const float w = fwd.value().route.weights[i];
                 for (std::uint32_t d = 0; d < H; ++d) {
                     expert_sum[d] += y.value()[d] * w;
                 }
             }
+            t_expert += now_ms() - tex0;
             auto finished = qwen38_layer0_finish(fwd.value(), expert_sum);
             if (!finished) return print_error(finished.error(), json);
             stream = std::move(finished.value());
@@ -2379,6 +2417,8 @@ int command_qwen38_greedy(const std::vector<std::string>& args) {
         std::cerr << "cache fetch=" << cache_stats.first << " hit=" << cache_stats.second << "\n";
         std::cerr << "phase ms: trunk=" << (int)t_trunk << " expert=" << (int)t_expert
                   << " forward=" << (int)t_fwd << " head=" << (int)t_head << "\n";
+        std::cerr << "expert cache: cap=" << lru.capacity << " hits=" << lru.hits
+                  << " misses=" << lru.misses << " evictions=" << lru.evictions << "\n";
     }
     std::string text;
     for (const auto id : generated) {

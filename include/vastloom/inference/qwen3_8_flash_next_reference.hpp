@@ -303,6 +303,14 @@ struct Qwen38OwnedExpert {
     std::vector<float> down_proj;
 };
 
+// Routed expert held as raw contiguous Q8_0 blocks ([out, in] row major).
+// Consumed by qwen38_expert_mlp_q8; ~4x smaller than the F32 form.
+struct Qwen38OwnedExpertQ8 {
+    std::vector<std::byte> gate;
+    std::vector<std::byte> up;
+    std::vector<std::byte> down;
+};
+
 struct Qwen38OwnedMoe {
     std::vector<float> router;
     std::vector<Qwen38OwnedExpert> experts;
@@ -341,6 +349,14 @@ struct Qwen38ExpertLru {
     std::span<const float> gate_proj,
     std::span<const float> up_proj,
     std::span<const float> down_proj,
+    std::uint32_t hidden_size,
+    std::uint32_t intermediate);
+
+// Bit-identical to qwen38_expert_mlp for the same logical weights, but the
+// matvec reads Q8_0 bytes directly (no F32 materialization).
+[[nodiscard]] Result<std::vector<float>> qwen38_expert_mlp_q8(
+    std::span<const float> hidden,
+    const Qwen38OwnedExpertQ8& expert,
     std::uint32_t hidden_size,
     std::uint32_t intermediate);
 
@@ -598,6 +614,14 @@ struct Qwen38Layer0ForwardResult {
     std::uint32_t expert_id,
     Qwen38Layer0Telemetry* telemetry = nullptr);
 
+// Q8_0-native variant: only the GGUF layout provides Q8_0 routed experts; the
+// safetensors/FP8 path has no equivalent raw block and errors out.
+[[nodiscard]] Result<Qwen38OwnedExpertQ8> qwen38_load_layer_expert_q8(
+    const Qwen38LayerTrunk& trunk,
+    const std::filesystem::path& checkpoint_root,
+    std::uint32_t expert_id,
+    Qwen38Layer0Telemetry* telemetry = nullptr);
+
 // One-token forward through real layer weights: input stream (hc_count *
 // hidden_size; the expanded embedding row for the first layer of a chain, the
 // previous layer's output otherwise) -> attn gated residual -> Gated DeltaNet
@@ -692,6 +716,13 @@ std::pair<std::uint64_t, std::uint64_t> qwen38_raw_cache_stats();
     Qwen38Layer0Telemetry* telemetry = nullptr);
 
 [[nodiscard]] Result<Qwen38OwnedExpert> qwen38_load_gguf_expert(
+    const Qwen38LayerTrunk& trunk,
+    const Qwen38GgufCheckpoint& checkpoint,
+    std::uint32_t expert_id,
+    Qwen38Layer0Telemetry* telemetry = nullptr);
+
+// Same slice as qwen38_load_gguf_expert but returns the raw Q8_0 blocks.
+[[nodiscard]] Result<Qwen38OwnedExpertQ8> qwen38_load_gguf_expert_q8(
     const Qwen38LayerTrunk& trunk,
     const Qwen38GgufCheckpoint& checkpoint,
     std::uint32_t expert_id,

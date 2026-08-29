@@ -1047,6 +1047,58 @@ Result<Qwen38OwnedExpert> qwen38_load_gguf_expert(
     return expert;
 }
 
+Result<Qwen38OwnedExpertQ8> qwen38_load_gguf_expert_q8(
+    const Qwen38LayerTrunk& trunk,
+    const Qwen38GgufCheckpoint& /*checkpoint*/,
+    std::uint32_t expert_id,
+    Qwen38Layer0Telemetry* telemetry) {
+    if (expert_id >= Qwen38ExpectedInvariants::num_experts) {
+        return make_error(ErrorCode::invalid_argument, "expert id out of range",
+                          std::to_string(expert_id));
+    }
+    const std::uint64_t kRow = Qwen38ExpectedInvariants::hidden_size;
+    const std::uint64_t inter = Qwen38ExpectedInvariants::moe_intermediate_size;
+    auto slice = [&](const Qwen38LayerTrunk::Qwen38GgufExpertSource& src,
+                     std::uint64_t in_dim,
+                     std::uint64_t out_dim,
+                     std::vector<std::byte>& dest) -> Result<bool> {
+        const std::uint64_t elements = in_dim * out_dim;
+        const std::uint64_t blocks = (elements + 31U) / 32U;
+        const std::uint64_t span = blocks * 34U;
+        if (src.expert_stride_bytes != span) {
+            return make_error(ErrorCode::invalid_format, "expert slice stride drift",
+                              src.shard.string());
+        }
+        const std::uint64_t begin = src.data_offset
+            + static_cast<std::uint64_t>(expert_id) * src.expert_stride_bytes;
+        if (begin + span > std::filesystem::file_size(src.shard)) {
+            return make_error(ErrorCode::invalid_format, "expert slice out of bounds",
+                              src.shard.string());
+        }
+        std::ifstream& in = persistent_shard_stream(src.shard);
+        if (!in) {
+            return make_error(ErrorCode::io_error, "cannot open expert shard", src.shard.string());
+        }
+        in.seekg(static_cast<std::streamoff>(begin));
+        dest.resize(static_cast<std::size_t>(span));
+        in.read(reinterpret_cast<char*>(dest.data()), static_cast<std::streamsize>(span));
+        if (static_cast<std::uint64_t>(in.gcount()) != span) {
+            return make_error(ErrorCode::io_error, "short read of expert slice",
+                              src.shard.string());
+        }
+        if (telemetry) {
+            telemetry->payload_bytes_read += span;
+            telemetry->expert_payload_bytes += span;
+        }
+        return true;
+    };
+    Qwen38OwnedExpertQ8 expert;
+    if (auto r = slice(trunk.gguf_gate, kRow, inter, expert.gate); !r) return r.error();
+    if (auto r = slice(trunk.gguf_up, kRow, inter, expert.up); !r) return r.error();
+    if (auto r = slice(trunk.gguf_down, inter, kRow, expert.down); !r) return r.error();
+    return expert;
+}
+
 Result<Qwen38GgufHead> qwen38_load_gguf_head(
     const std::filesystem::path& checkpoint_root,
     Qwen38Layer0Telemetry* telemetry) {

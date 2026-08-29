@@ -309,7 +309,7 @@ Result<std::vector<float>> linear_f(
     // Row-parallel above a work threshold; every output row keeps its own
     // sequential double accumulation, so results are bit-identical to the
     // single-threaded path.
-    if (out_dim * in_dim >= 4U * 1024U * 1024U) {
+    if (out_dim * in_dim >= 256U * 1024U) {
         qwen38_parallel_for(0U, out_dim, 64U, [&](std::uint64_t lo, std::uint64_t hi) {
             for (std::uint64_t o = lo; o < hi; ++o) {
                 double acc = 0.0;
@@ -330,6 +330,47 @@ Result<std::vector<float>> linear_f(
         }
         out[o] = static_cast<float>(acc);
     }
+    return out;
+}
+
+// Row-parallel matvec straight from contiguous Q8_0 bytes ([out, in] row
+// major). Each weight value is float(int8) * f16 scale, which the F32
+// dequantization path materializes identically, and every row keeps the same
+// sequential double accumulation as linear_f, so results are bit-identical
+// while the whole [out x in] F32 buffer is never allocated.
+Result<std::vector<float>> linear_from_q8(
+    std::span<const float> input,
+    std::span<const std::byte> weight,
+    std::size_t out_dim,
+    std::size_t in_dim) {
+    const std::uint64_t elements = out_dim * in_dim;
+    const std::uint64_t blocks = (elements + 31U) / 32U;
+    if (in_dim == 0 || in_dim % 32U != 0U || input.size() != in_dim
+        || weight.size() < blocks * 34U) {
+        return make_error(ErrorCode::invalid_argument, "linear q8 size mismatch", "qwen38_linear_q8");
+    }
+    std::vector<float> out(out_dim, 0.0F);
+    const auto* bytes = reinterpret_cast<const std::uint8_t*>(weight.data());
+    const std::uint64_t row_blocks = in_dim / 32U;
+    qwen38_parallel_for(0U, out_dim, 32U, [&](std::uint64_t lo, std::uint64_t hi) {
+        for (std::uint64_t o = lo; o < hi; ++o) {
+            double acc = 0.0;
+            const std::uint64_t row_first_block = (o * in_dim) / 32U;
+            for (std::uint64_t rb = 0; rb < row_blocks; ++rb) {
+                const std::uint8_t* block = bytes + (row_first_block + rb) * 34U;
+                std::uint16_t bits = 0U;
+                std::memcpy(&bits, block, 2U);
+                const float scale = qwen38_f16_to_f32(bits);
+                const std::size_t i0 = static_cast<std::size_t>(rb * 32U);
+                for (std::size_t k = 0; k < 32U; ++k) {
+                    const auto q = static_cast<std::int8_t>(block[2U + k]);
+                    acc += static_cast<double>(static_cast<float>(q) * scale)
+                         * static_cast<double>(input[i0 + k]);
+                }
+            }
+            out[o] = static_cast<float>(acc);
+        }
+    });
     return out;
 }
 
@@ -514,21 +555,24 @@ Result<std::vector<float>> qwen38_delta_net_decode(
 
     std::vector<float> conv_out(conv_dim, 0.0F);
     std::vector<float> next_conv(conv_dim * conv_hist, 0.0F);
-    for (std::size_t c = 0; c < conv_dim; ++c) {
-        std::vector<float> hist(kernel, 0.0F);
-        for (std::size_t k = 0; k < conv_hist; ++k) {
-            hist[k] = state.conv[c * conv_hist + k];
+    // Channel-parallel causal depthwise conv; per-channel writes are disjoint.
+    qwen38_parallel_for(0U, conv_dim, 64U, [&](std::uint64_t cl, std::uint64_t ch) {
+        for (std::uint64_t c = cl; c < ch; ++c) {
+            float hist[8];
+            for (std::size_t k = 0; k < conv_hist; ++k) {
+                hist[k] = state.conv[c * conv_hist + k];
+            }
+            hist[conv_hist] = qkv.value()[c];
+            double acc = 0.0;
+            for (std::size_t k = 0; k < kernel; ++k) {
+                acc += static_cast<double>(weights.conv1d[c * kernel + k]) * static_cast<double>(hist[k]);
+            }
+            conv_out[c] = silu_f(static_cast<float>(acc));
+            for (std::size_t k = 0; k < conv_hist; ++k) {
+                next_conv[c * conv_hist + k] = hist[k + 1U];
+            }
         }
-        hist[conv_hist] = qkv.value()[c];
-        double acc = 0.0;
-        for (std::size_t k = 0; k < kernel; ++k) {
-            acc += static_cast<double>(weights.conv1d[c * kernel + k]) * static_cast<double>(hist[k]);
-        }
-        conv_out[c] = silu_f(static_cast<float>(acc));
-        for (std::size_t k = 0; k < conv_hist; ++k) {
-            next_conv[c * conv_hist + k] = hist[k + 1U];
-        }
-    }
+    });
     state.conv = std::move(next_conv);
 
     const float* q_ptr = conv_out.data();
@@ -538,7 +582,10 @@ Result<std::vector<float>> qwen38_delta_net_decode(
     const double scale = 1.0 / std::sqrt(static_cast<double>(dk));
     std::vector<float> core(value_dim, 0.0F);
 
-    for (std::size_t vh = 0; vh < v_heads; ++vh) {
+    // Value-head parallel delta rule; per-vh writes to core and state.ssm are
+    // disjoint, so each head keeps its own sequential accumulation order.
+    qwen38_parallel_for(0U, v_heads, 2U, [&](std::uint64_t vl, std::uint64_t vh_end) {
+    for (std::size_t vh = vl; vh < vh_end; ++vh) {
         const std::size_t kh = weights.tile_k_heads ? (vh % k_heads) : (vh / repeat);
         std::vector<float> qh(dk, 0.0F);
         std::vector<float> kk(dk, 0.0F);
@@ -600,6 +647,7 @@ Result<std::vector<float>> qwen38_delta_net_decode(
                 static_cast<double>(weights.norm[j]) * static_cast<double>(o[j]) * o_inv * static_cast<double>(gated));
         }
     }
+    });  // end v-head parallel loop
     return linear_f(core, weights.out_proj, hidden_size, value_dim);
 }
 
@@ -1018,6 +1066,30 @@ Result<std::vector<float>> qwen38_expert_mlp(
         gate.value()[i] = silu_f(gate.value()[i]) * up.value()[i];
     }
     return linear_f(gate.value(), down_proj, h, mid);
+}
+
+Result<std::vector<float>> qwen38_expert_mlp_q8(
+    std::span<const float> hidden,
+    const Qwen38OwnedExpertQ8& expert,
+    std::uint32_t hidden_size,
+    std::uint32_t intermediate) {
+    const std::size_t h = hidden_size;
+    const std::size_t mid = intermediate;
+    if (h == 0 || mid == 0 || hidden.size() != h) {
+        return make_error(ErrorCode::invalid_argument, "expert mlp dims invalid", "expert_mlp_q8");
+    }
+    auto gate = linear_from_q8(hidden, expert.gate, mid, h);
+    if (!gate) {
+        return gate.error();
+    }
+    auto up = linear_from_q8(hidden, expert.up, mid, h);
+    if (!up) {
+        return up.error();
+    }
+    for (std::size_t i = 0; i < mid; ++i) {
+        gate.value()[i] = silu_f(gate.value()[i]) * up.value()[i];
+    }
+    return linear_from_q8(gate.value(), expert.down, h, mid);
 }
 
 Result<const Qwen38OwnedExpert*> qwen38_expert_cache_acquire(

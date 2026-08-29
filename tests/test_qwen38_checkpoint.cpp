@@ -187,7 +187,7 @@ int main(int argc, char** argv) {
             }
             auto input_stream = ref::qwen38_expand_stream(row.value(), Cn);
             auto fwd = ref::qwen38_layer_forward(
-                trunk.value(), input_stream, state,
+                trunk.value(), input_stream, state, tid,
                 ref::Qwen38ExpectedInvariants::num_experts,
                 ref::Qwen38ExpectedInvariants::num_experts_per_tok);
             if (!fwd) {
@@ -340,7 +340,7 @@ int main(int argc, char** argv) {
                 std::vector<float> stream = ref::qwen38_expand_stream(row.value(), C);
                 for (std::size_t li = 0; li < chain_layers.size(); ++li) {
                     auto fwd = ref::qwen38_layer_forward(
-                        trunks[li], stream, states[li],
+                        trunks[li], stream, states[li], tid,
                         ref::Qwen38ExpectedInvariants::num_experts,
                         ref::Qwen38ExpectedInvariants::num_experts_per_tok);
                     if (!fwd) {

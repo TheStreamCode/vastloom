@@ -489,7 +489,7 @@ Result<std::vector<float>> qwen38_delta_net_decode(
     std::vector<float> core(value_dim, 0.0F);
 
     for (std::size_t vh = 0; vh < v_heads; ++vh) {
-        const std::size_t kh = vh / repeat;
+        const std::size_t kh = weights.tile_k_heads ? (vh % k_heads) : (vh / repeat);
         std::vector<float> qh(dk, 0.0F);
         std::vector<float> kk(dk, 0.0F);
         double q_sum = 0.0;
@@ -541,12 +541,41 @@ Result<std::vector<float>> qwen38_delta_net_decode(
         }
         const double o_inv = 1.0 / std::sqrt(o_sum / static_cast<double>(dv) + static_cast<double>(weights.rms_eps));
         for (std::size_t j = 0; j < dv; ++j) {
+            // Qwen4ExpTextRMSNormGated output gate: the converted checkpoint
+            // uses a sigmoid (llama.cpp: "the one numerical difference from
+            // Qwen3.5's GDN: sigmoid output gate, not silu"), which the HF
+            // modeling main does not carry. Validated against llama.cpp.
             const float gated = sigmoid_f(z.value()[vh * dv + j]);
             core[vh * dv + j] = static_cast<float>(
                 static_cast<double>(weights.norm[j]) * static_cast<double>(o[j]) * o_inv * static_cast<double>(gated));
         }
     }
     return linear_f(core, weights.out_proj, hidden_size, value_dim);
+}
+
+void qwen38_apply_partial_rope(
+    std::span<float> head,
+    std::uint64_t position,
+    std::uint64_t rope_dim,
+    float theta) {
+    if (rope_dim == 0U || rope_dim > head.size() || rope_dim % 2U != 0U || theta <= 0.0F) {
+        return;
+    }
+    const std::size_t half = static_cast<std::size_t>(rope_dim / 2U);
+    // emb = cat(freqs, freqs) with rotate_half pairing (i, i + half).
+    for (std::size_t i = 0; i < half; ++i) {
+        const double freq = std::pow(static_cast<double>(theta),
+            -2.0 * static_cast<double>(i) / static_cast<double>(rope_dim));
+        const double angle = freq * static_cast<double>(position);
+        const double c = std::cos(angle);
+        const double s = std::sin(angle);
+        const float x1 = head[i];
+        const float x2 = head[half + i];
+        head[i] = static_cast<float>(static_cast<double>(x1) * c
+            - static_cast<double>(x2) * s);
+        head[half + i] = static_cast<float>(static_cast<double>(x2) * c
+            + static_cast<double>(x1) * s);
+    }
 }
 
 Result<Qwen38QsaSelectResult> qwen38_qsa_select(const Qwen38QsaSelectView& view) {
@@ -568,6 +597,17 @@ Result<Qwen38QsaSelectResult> qwen38_qsa_select(const Qwen38QsaSelectView& view)
 
     std::vector<std::pair<float, std::size_t>> ranked;
     ranked.reserve(n_blocks);
+    std::vector<float> q_rope_storage;
+    std::span<const float> q_heads = view.query_heads;
+    if (view.rope_theta > 0.0F && view.rope_dim > 0U && view.rope_dim <= d) {
+        q_rope_storage.assign(q_heads.begin(), q_heads.end());
+        for (std::size_t h = 0; h < n_q; ++h) {
+            qwen38_apply_partial_rope(
+                std::span<float>(q_rope_storage.data() + h * d, d),
+                view.query_position, view.rope_dim, view.rope_theta);
+        }
+        q_heads = q_rope_storage;
+    }
     const double inv_sqrt = 1.0 / std::sqrt(static_cast<double>(d));
     for (std::size_t b = 0; b < n_blocks; ++b) {
         std::vector<float> pooled(d, 0.0F);
@@ -584,11 +624,33 @@ Result<Qwen38QsaSelectResult> qwen38_qsa_select(const Qwen38QsaSelectView& view)
         if (!kn) {
             return kn.error();
         }
+        // Official indexer applies partial RoPE to the pooled block keys at
+        // the block's starting position, and to the query at the current
+        // position (done once below for the query heads).
+        if (view.rope_theta > 0.0F && view.rope_dim > 0U) {
+            auto pooled_head = kn.value();
+            qwen38_apply_partial_rope(pooled_head,
+                static_cast<std::uint64_t>(b) * view.compress_ratio,
+                view.rope_dim, view.rope_theta);
+            double score = 0.0;
+            for (std::size_t h = 0; h < n_q; ++h) {
+                double dot = 0.0;
+                for (std::size_t i = 0; i < d; ++i) {
+                    dot += static_cast<double>(q_heads[h * d + i])
+                        * static_cast<double>(pooled_head[i]);
+                }
+                score += (dot > 0.0) ? dot : 0.0;
+            }
+            const float s = static_cast<float>(score * inv_sqrt);
+            out.block_scores[b] = s;
+            ranked.push_back({s, b});
+            continue;
+        }
         double score = 0.0;
         for (std::size_t h = 0; h < n_q; ++h) {
             double dot = 0.0;
             for (std::size_t i = 0; i < d; ++i) {
-                dot += static_cast<double>(view.query_heads[h * d + i]) * static_cast<double>(kn.value()[i]);
+                dot += static_cast<double>(q_heads[h * d + i]) * static_cast<double>(kn.value()[i]);
             }
             score += (dot > 0.0) ? dot : 0.0;
         }
@@ -1024,12 +1086,21 @@ Result<std::vector<float>> qwen38_qsa_layer_token(
     if (!qk) {
         return qk.error();
     }
+    // Absolute position of the current token within this layer's cache.
+    const std::uint32_t current_position =
+        static_cast<std::uint32_t>(cache.index_keys.size() / idx_dim);
     std::vector<float> q_idx(idx_heads * idx_dim, 0.0F);
     for (std::size_t head = 0; head < idx_heads; ++head) {
         auto head_span = std::span<const float>(qk.value().data() + head * idx_dim, idx_dim);
         auto normed = qwen38_rms_norm_affine(head_span, weights.q_layernorm, weights.rms_eps, 0);
         if (!normed) {
             return normed.error();
+        }
+        // Indexer query receives partial RoPE at the current position.
+        if (weights.rope_theta > 0.0F && weights.rope_dim > 0U
+            && weights.rope_dim <= idx_dim) {
+            qwen38_apply_partial_rope(normed.value(), current_position,
+                weights.rope_dim, weights.rope_theta);
         }
         std::copy(normed.value().begin(), normed.value().end(), q_idx.begin() + static_cast<std::ptrdiff_t>(head * idx_dim));
     }
@@ -1039,7 +1110,8 @@ Result<std::vector<float>> qwen38_qsa_layer_token(
     Qwen38QsaSelectView select_view{
         q_idx, cache.index_keys, weights.k_layernorm,
         static_cast<std::uint32_t>(idx_heads), static_cast<std::uint32_t>(idx_dim),
-        static_cast<std::uint32_t>(tokens), weights.budget, weights.compress_ratio, weights.rms_eps};
+        static_cast<std::uint32_t>(tokens), weights.budget, weights.compress_ratio, weights.rms_eps,
+        weights.rope_theta, weights.rope_dim, current_position};
     auto selected = qwen38_qsa_select(select_view);
     if (!selected) {
         return selected.error();
@@ -1058,6 +1130,13 @@ Result<std::vector<float>> qwen38_qsa_layer_token(
         if (!qn) {
             return qn.error();
         }
+        // Attention query receives partial RoPE at the current position
+        // (after q_norm, matching the official attention).
+        if (weights.rope_theta > 0.0F && weights.rope_dim > 0U
+            && weights.rope_dim <= attn_dim) {
+            qwen38_apply_partial_rope(qn.value(), current_position,
+                weights.rope_dim, weights.rope_theta);
+        }
         std::copy(qn.value().begin(), qn.value().end(), query.begin() + static_cast<std::ptrdiff_t>(head * attn_dim));
         std::copy(g_head.begin(), g_head.end(), gate.begin() + static_cast<std::ptrdiff_t>(head * attn_dim));
     }
@@ -1070,6 +1149,13 @@ Result<std::vector<float>> qwen38_qsa_layer_token(
         auto kn = qwen38_rms_norm_affine(k_head, weights.k_norm, weights.rms_eps, 0);
         if (!kn) {
             return kn.error();
+        }
+        // Attention key receives partial RoPE at the current position before
+        // being cached (the official cache stores rotated keys).
+        if (weights.rope_theta > 0.0F && weights.rope_dim > 0U
+            && weights.rope_dim <= attn_dim) {
+            qwen38_apply_partial_rope(kn.value(), current_position,
+                weights.rope_dim, weights.rope_theta);
         }
         std::copy(kn.value().begin(), kn.value().end(), k.value().begin() + static_cast<std::ptrdiff_t>(head * attn_dim));
     }

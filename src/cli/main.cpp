@@ -1630,7 +1630,7 @@ int command_qwen38_layer0(const std::vector<std::string>& args) {
     auto input_stream = vastloom::inference::qwen38_expand_stream(
         embed_row.value(), vastloom::inference::Qwen38ExpectedInvariants::hc_count);
     auto forward = vastloom::inference::qwen38_layer_forward(
-        trunk.value(), input_stream, state,
+        trunk.value(), input_stream, state, static_cast<std::uint32_t>(token.value()),
         vastloom::inference::Qwen38ExpectedInvariants::num_experts,
         vastloom::inference::Qwen38ExpectedInvariants::num_experts_per_tok);
     if (!forward) return print_error(forward.error(), json);
@@ -1806,7 +1806,7 @@ int command_qwen38_prefill(const std::vector<std::string>& args) {
         auto token_stream = vastloom::inference::qwen38_expand_stream(
             row.value(), vastloom::inference::Qwen38ExpectedInvariants::hc_count);
         auto fwd = vastloom::inference::qwen38_layer_forward(
-            trunk.value(), token_stream, layer_state,
+            trunk.value(), token_stream, layer_state, tid,
             vastloom::inference::Qwen38ExpectedInvariants::num_experts,
             vastloom::inference::Qwen38ExpectedInvariants::num_experts_per_tok);
         if (!fwd) return print_error(fwd.error(), json);
@@ -2046,7 +2046,7 @@ int command_qwen38_chain(const std::vector<std::string>& args) {
             const vastloom::inference::Qwen38LayerTrunk& trunk_ref =
                 trunk_resident ? trunks[li] : trunks.front();
             auto fwd = vastloom::inference::qwen38_layer_forward(
-                trunk_ref, stream, states[li],
+                trunk_ref, stream, states[li], tid,
                 vastloom::inference::Qwen38ExpectedInvariants::num_experts,
                 vastloom::inference::Qwen38ExpectedInvariants::num_experts_per_tok);
             if (!fwd) return print_error(fwd.error(), json);
@@ -2159,6 +2159,185 @@ int command_qwen38_chain(const std::vector<std::string>& args) {
             std::cout << ' ' << r.output_sum;
         }
         std::cout << '\n';
+    }
+    return 0;
+}
+
+// Qwen3.8-Flash-Next greedy generation over the GGUF checkpoint: full-depth
+// chain (48 layers, streaming trunks), global mixer collapse, lm_head argmax,
+// byte-level gpt2 detokenize. The external-parity path against llama.cpp.
+int command_qwen38_greedy(const std::vector<std::string>& args) {
+    const bool json = has_flag(args, "--json");
+    auto valid = validate_options(args, 1U, {"--prompt-ids", "--steps", "--expert-cache"},
+                                  {"--json", "--show-ids"});
+    if (!valid) return print_error(valid.error(), json);
+    const auto ids_csv = option_value(args, "--prompt-ids");
+    if (!ids_csv || ids_csv->empty()) {
+        return print_error(vastloom::make_error(
+                               vastloom::ErrorCode::invalid_argument,
+                               "qwen38-greedy requires --prompt-ids with a comma-separated id list"),
+                           json);
+    }
+    std::vector<std::uint32_t> token_ids;
+    for (const auto& item : vastloom::util::split(*ids_csv, ',', true)) {
+        const auto trimmed = vastloom::util::trim(item);
+        std::uint32_t id = 0U;
+        const auto converted = std::from_chars(
+            trimmed.data(), trimmed.data() + trimmed.size(), id);
+        if (trimmed.empty() || converted.ec != std::errc{}
+            || converted.ptr != trimmed.data() + trimmed.size()
+            || id >= vastloom::inference::Qwen38ExpectedInvariants::vocab_size) {
+            return print_error(vastloom::make_error(
+                                   vastloom::ErrorCode::invalid_argument,
+                                   "greedy prompt ids must be valid vocabulary ids", item),
+                               json);
+        }
+        token_ids.push_back(id);
+    }
+    if (token_ids.empty() || token_ids.size() > 256U) {
+        return print_error(vastloom::make_error(
+                               vastloom::ErrorCode::invalid_argument,
+                               "greedy requires between 1 and 256 prompt ids"),
+                           json);
+    }
+    auto steps = optional_size(args, "--steps", 8U);
+    if (!steps) return print_error(steps.error(), json);
+    if (steps.value() == 0U || steps.value() > 64U) {
+        return print_error(vastloom::make_error(
+                               vastloom::ErrorCode::invalid_argument,
+                               "greedy steps outside safe bounds"),
+                           json);
+    }
+    auto expert_cache = optional_size(args, "--expert-cache", 64U);
+    if (!expert_cache) return print_error(expert_cache.error(), json);
+    if (expert_cache.value() == 0U || expert_cache.value() > 512U) {
+        return print_error(vastloom::make_error(
+                               vastloom::ErrorCode::invalid_argument,
+                               "expert cache size outside safe bounds"),
+                           json);
+    }
+
+    const auto checkpoint_root = cli_path(args.front());
+    auto hardware = vastloom::hardware::HardwareProbe::collect(checkpoint_root);
+    if (!hardware) return print_error(hardware.error(), json);
+    auto policy = vastloom::safety::make_safe_runtime_policy(hardware.value());
+    if (!policy) return print_error(policy.error(), json);
+    auto guard = vastloom::safety::ProcessSafetyGuard::apply(policy.value());
+    if (!guard) return print_error(guard.error(), json);
+
+    using namespace vastloom::inference;
+    const std::uint32_t H = Qwen38ExpectedInvariants::hidden_size;
+    const std::uint32_t I = Qwen38ExpectedInvariants::moe_intermediate_size;
+    const std::uint32_t C = Qwen38ExpectedInvariants::hc_count;
+
+    Qwen38Layer0Telemetry load_tel;
+    auto head = qwen38_load_gguf_head(checkpoint_root, &load_tel);
+    if (!head) return print_error(head.error(), json);
+    auto vocab = qwen38_load_gguf_vocab(checkpoint_root);
+    if (!vocab) return print_error(vocab.error(), json);
+
+    std::vector<Qwen38LayerTrunk> trunks;
+    trunks.reserve(1U);
+    std::vector<Qwen38LayerRuntimeState> states(Qwen38ExpectedInvariants::num_hidden_layers);
+    Qwen38ExpertLru lru;
+    lru.capacity = expert_cache.value();
+    static const Qwen38OwnedExpert kEmptyExpert;
+
+    std::vector<std::uint32_t> generated;
+    std::vector<std::uint32_t> sequence = token_ids;
+    const std::size_t prompt_len = token_ids.size();
+    // Prefill processes every prompt token (carrying the layer states); the
+    // last prompt token and every generated token produce logits.
+    for (std::size_t pos = 0; pos < prompt_len + steps.value(); ++pos) {
+        const std::uint32_t tid = sequence[pos];
+        auto row = qwen38_load_embed_row(checkpoint_root, tid, &load_tel);
+        if (!row) return print_error(row.error(), json);
+        std::vector<float> stream = qwen38_expand_stream(row.value(), C);
+        for (std::uint32_t layer = 0; layer < Qwen38ExpectedInvariants::num_hidden_layers; ++layer) {
+            // Streaming: one trunk resident at a time (~270 MiB decoded), so
+            // the full-depth run fits the process memory guard. The trunk is
+            // reloaded for every layer of every token.
+            auto trunk = qwen38_load_layer_trunk(checkpoint_root, layer, &load_tel);
+            if (!trunk) return print_error(trunk.error(), json);
+            trunks.assign(1U, std::move(trunk.value()));
+            const auto& trunk_ref = trunks.front();
+            auto fwd = qwen38_layer_forward(
+                trunk_ref, stream, states[layer], tid,
+                Qwen38ExpectedInvariants::num_experts,
+                Qwen38ExpectedInvariants::num_experts_per_tok);
+            if (!fwd) return print_error(fwd.error(), json);
+            std::vector<float> expert_sum(H, 0.0F);
+            for (std::size_t i = 0; i < fwd.value().route.indices.size(); ++i) {
+                const auto eid = fwd.value().route.indices[i];
+                const std::uint32_t key = (layer << 16U) | eid;
+                const bool cached = std::find(lru.keys.begin(), lru.keys.end(), key)
+                                    != lru.keys.end();
+                const Qwen38OwnedExpert* ptr = nullptr;
+                if (cached) {
+                    auto acquired = qwen38_expert_cache_acquire(lru, key, kEmptyExpert);
+                    if (!acquired) return print_error(acquired.error(), json);
+                    ptr = acquired.value();
+                } else {
+                    auto real = qwen38_load_layer_expert(
+                        trunk_ref, checkpoint_root, eid, &load_tel);
+                    if (!real) return print_error(real.error(), json);
+                    auto acquired = qwen38_expert_cache_acquire(lru, key, real.value());
+                    if (!acquired) return print_error(acquired.error(), json);
+                    ptr = acquired.value();
+                }
+                auto y = qwen38_expert_mlp(fwd.value().mixed_input,
+                                           ptr->gate_proj, ptr->up_proj, ptr->down_proj, H, I);
+                if (!y) return print_error(y.error(), json);
+                const float w = fwd.value().route.weights[i];
+                for (std::uint32_t d = 0; d < H; ++d) {
+                    expert_sum[d] += y.value()[d] * w;
+                }
+            }
+            auto finished = qwen38_layer0_finish(fwd.value(), expert_sum);
+            if (!finished) return print_error(finished.error(), json);
+            stream = std::move(finished.value());
+        }
+        if (pos + 1 < prompt_len) {
+            continue;  // middle prompt tokens do not need the head
+        }
+        auto logits = qwen38_gguf_logits(head.value(), stream);
+        if (!logits) return print_error(logits.error(), json);
+        std::uint32_t best = 0U;
+        for (std::uint32_t v = 1U; v < logits.value().size(); ++v) {
+            if (logits.value()[v] > logits.value()[best]) best = v;
+        }
+        sequence.push_back(best);
+        generated.push_back(best);
+        if (has_flag(args, "--show-ids")) {
+            std::cout << best << (generated.size() < steps.value() ? ',' : '\n');
+        }
+    }
+
+    std::string text;
+    for (const auto id : generated) {
+        text += qwen38_gpt2_piece_to_bytes(vocab.value()[id]);
+    }
+    if (json) {
+        std::cout << "{\n"
+                  << "  \"prompt_tokens\": " << token_ids.size() << ",\n"
+                  << "  \"generated_ids\": [";
+        for (std::size_t i = 0; i < generated.size(); ++i) {
+            if (i != 0) std::cout << ",";
+            std::cout << generated[i];
+        }
+        std::cout << "],\n"
+                  << "  \"text\": \"";
+        for (const char ch : text) {
+            if (ch == '"' || ch == '\\') std::cout << '\\';
+            if (static_cast<unsigned char>(ch) >= 0x20U || ch == '\n' || ch == '\t') {
+                std::cout << ch;
+            }
+        }
+        std::cout << "\",\n"
+                  << "  \"payload_bytes_read\": " << load_tel.payload_bytes_read << "\n"
+                  << "}\n";
+    } else {
+        std::cout << "generated: " << text << '\n';
     }
     return 0;
 }
@@ -5399,6 +5578,7 @@ int dispatch_cli(const std::vector<std::string>& arguments) {
         if (command == "qwen38-layer" || command == "qwen38-layer0") return command_qwen38_layer0(args);
         if (command == "qwen38-prefill") return command_qwen38_prefill(args);
         if (command == "qwen38-chain") return command_qwen38_chain(args);
+        if (command == "qwen38-greedy") return command_qwen38_greedy(args);
         if (command == "deepseek-gguf-inspect") return command_deepseek_gguf_inspect(args);
         if (command == "deepseek-gguf-checkpoint") return command_deepseek_gguf_checkpoint(args);
         if (command == "deepseek-gguf-probe-plan") return command_deepseek_gguf_probe_plan(args);

@@ -8,6 +8,7 @@
 #include <cstdlib>
 #include <filesystem>
 #include <fstream>
+#include <iomanip>
 #include <set>
 #include <sstream>
 #include <string>
@@ -1964,6 +1965,7 @@ Result<Qwen38Layer0ForwardResult> qwen38_layer_forward(
     const Qwen38LayerTrunk& trunk,
     std::span<const float> input_stream,
     Qwen38LayerRuntimeState& runtime_state,
+    std::uint32_t token_id,
     std::uint32_t num_experts,
     std::uint32_t top_k) {
     const auto t0 = std::chrono::steady_clock::now();
@@ -1978,7 +1980,21 @@ Result<Qwen38Layer0ForwardResult> qwen38_layer_forward(
                           std::to_string(input_stream.size()));
     }
     if (auto r = require_finite(input_stream, "input_stream"); !r) return r.error();
-    const std::span<const float> stream_in = input_stream;
+    std::vector<float> stream_vec(input_stream.begin(), input_stream.end());
+    if (trunk.has_ple) {
+        // Official Qwen4ExpTextDecoderLayer: the PLE block is added to the
+        // stream before the layer's attention gated residual.
+        auto checkpoint = qwen38_open_gguf_checkpoint(trunk.gguf_root);
+        if (!checkpoint) return checkpoint.error();
+        auto ple = qwen38_ple_forward(trunk, checkpoint.value(), runtime_state.ple,
+                                      stream_vec, token_id);
+        if (!ple) return ple.error();
+        for (std::uint64_t i = 0; i < stream_vec.size(); ++i) {
+            stream_vec[i] += ple.value()[i];
+        }
+        if (auto r = require_finite(stream_vec, "ple_stream"); !r) return r.error();
+    }
+    const std::span<const float> stream_in = stream_vec;
 
     Qwen38GatedResidualView attn_view{
         weights.attn_hyper.hc_norm, weights.attn_hyper.mix_down,
@@ -2005,6 +2021,7 @@ Result<Qwen38Layer0ForwardResult> qwen38_layer_forward(
         dn_view.value_head_dim = Qwen38ExpectedInvariants::linear_value_head_dim;
         dn_view.conv_kernel = Qwen38ExpectedInvariants::linear_conv_kernel_dim;
         dn_view.rms_eps = 1.0e-6F;
+    dn_view.tile_k_heads = weights.is_gguf;
         Qwen38DeltaNetState& delta_net_state = runtime_state.delta_net;
         if (delta_net_state.conv.empty() && delta_net_state.ssm.empty()) {
             delta_net_state.conv.assign(
@@ -2039,6 +2056,10 @@ Result<Qwen38Layer0ForwardResult> qwen38_layer_forward(
         qsa_view.attn_kv_heads = Qwen38ExpectedInvariants::num_key_value_heads;
         qsa_view.attn_head_dim = Qwen38ExpectedInvariants::head_dim;
         qsa_view.rms_eps = 1.0e-6F;
+        // Official qwen4exp RoPE: theta 1e7, partial rotary over the first 64
+        // of the 256 head dims (rope.dimension_sections in the GGUF metadata).
+        qsa_view.rope_theta = 10000000.0F;
+        qsa_view.rope_dim = 64U;
         auto qsa_out = qwen38_qsa_layer_token(attn_res.value().mixed_input, qsa_view,
                                               runtime_state.qsa);
         if (!qsa_out) return qsa_out.error();

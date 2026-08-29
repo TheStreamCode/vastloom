@@ -2,6 +2,22 @@
 
 ## Unreleased
 
+- **Q11h - Greedy parity with llama.cpp achieved.** The native Vastloom
+  runtime now generates token-identical output to llama.cpp on the official
+  Qwen3.8-Flash-Next Q8_0 checkpoint ("The capital of France is" → " Paris.
+  The capital of Germany is Berlin. The capital of Italy is Rome. The" for 16
+  greedy tokens). Systematic stage-by-stage comparison against llama.cpp
+  (built locally, rev 6fe7498, with an optional intermediate-tensor dump)
+  surfaced five real defects: the DeltaNet output gate is sigmoid, not silu
+  (llama.cpp: "the one numerical difference from Qwen3.5's GDN"); the GGUF
+  ssm_a carries pre-applied -exp(A_log); GGUF norm weights are stored as
+  (1+w) except the RMSNormGated ssm_norm; k-head mapping is ggml-repeat tile
+  semantics (vh % k_heads); and the greedy CLI replayed a stale trunk across
+  tokens. Partial RoPE (64/256, theta 1e7) over attention and indexer, the
+  PLE n-gram block (hash → fused 160-per-head table lookup → gate → dilated
+  depthwise conv) and a correct multi-token prefill were also required. The
+  external oracle is now established for all future milestones.
+
 - **Q11g - Qwen3.8-Flash-Next GGUF (qwen4exp) checkpoint source.** The
   official unsloth Q8_0 GGUF (6 shards, 175.3 GiB, SHA-256 verified through
   the canonical importer, now generalized with `--repo/--gguf-dir`) replaced

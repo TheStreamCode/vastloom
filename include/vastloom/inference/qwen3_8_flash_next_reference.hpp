@@ -118,6 +118,10 @@ struct Qwen38DeltaNetView {
     std::uint32_t value_head_dim{0};
     std::uint32_t conv_kernel{0};
     float rms_eps{1.0e-6F};
+    // false (default): HF repeat_interleave, v-head vh reads k-head vh/group.
+    // true: ggml-repeat tile semantics, v-head vh reads k-head vh % k_heads —
+    // the mapping the converted GGUF checkpoint is validated against.
+    bool tile_k_heads{false};
 };
 
 struct Qwen38DeltaNetState {
@@ -140,7 +144,23 @@ struct Qwen38QsaSelectView {
     std::uint32_t budget{0};
     std::uint32_t compress_ratio{0};
     float rms_eps{1.0e-6F};
+    // Partial RoPE (used by the official qwen4exp indexer): rotated dim is the
+    // first `rope_dim` elements of each head with rotate_half pairing;
+    // query_position is the absolute position of the current token, block b
+    // starts at token b * compress_ratio. rope_theta 0 disables RoPE.
+    float rope_theta{0.0F};
+    std::uint32_t rope_dim{0U};
+    std::uint32_t query_position{0U};
 };
+
+// Partial rotate-half RoPE over the first `rope_dim` elements of a head
+// vector: freqs = base^(-2i/rope_dim), pairs (i, i + rope_dim/2), the
+// tail beyond rope_dim is left untouched.
+void qwen38_apply_partial_rope(
+    std::span<float> head,
+    std::uint64_t position,
+    std::uint64_t rope_dim,
+    float theta);
 
 struct Qwen38QsaSelectResult {
     std::vector<std::int32_t> selected;
@@ -212,6 +232,10 @@ struct Qwen38QsaLayerView {
     std::uint32_t attn_kv_heads{0};
     std::uint32_t attn_head_dim{0};
     float rms_eps{1.0e-6F};
+    // Partial RoPE over attention q/k and the indexer (theta 0 disables).
+    float rope_theta{0.0F};
+    std::uint32_t rope_dim{0U};
+    std::uint32_t position{0U};
 };
 
 struct Qwen38QsaCache {
@@ -464,6 +488,11 @@ struct Qwen38ReducedGenerationResult {
     std::span<const std::int32_t> prompt_ids,
     const Qwen38ReducedGenerationOptions& options);
 
+struct Qwen38GgufCheckpoint {
+    std::filesystem::path root;
+    model::GgufSplitCatalog catalog;
+};
+
 // --- Q11c/Q11d/Q11e: real layer forward over the imported FP8 checkpoint ---
 
 // Always-active weights of one language-model layer plus the shard map needed
@@ -485,6 +514,7 @@ struct Qwen38LayerTrunk {
     // GGUF path: experts live in fused [in, out, 512] tensors, one expert slice
     // at a fixed byte stride.
     bool is_gguf{false};
+    std::filesystem::path gguf_root;
     struct Qwen38GgufExpertSource {
         std::filesystem::path shard;         // shard file holding the fused tensor
         std::uint64_t data_offset{0U};       // fused tensor start within the shard
@@ -493,14 +523,38 @@ struct Qwen38LayerTrunk {
     Qwen38GgufExpertSource gguf_gate;
     Qwen38GgufExpertSource gguf_up;
     Qwen38GgufExpertSource gguf_down;
+    // PLE n-gram block (layer 1 only). Weights come from the GGUF tensors;
+    // multipliers/offsets/vocab-sizes from the GGUF metadata.
+    bool has_ple{false};
+    struct Qwen38PleWeights {
+        std::vector<float> key_proj;      // [10240, 160] row-major
+        std::vector<float> value_proj;    // [2560, 160] row-major
+        std::vector<float> norm_key;      // [10240]
+        std::vector<float> norm_query;    // [10240]
+        std::vector<float> norm_conv;     // [10240]
+        std::vector<float> conv1d;        // [10240 * 4] (k contiguous per channel)
+        std::uint64_t multipliers[3]{};
+        std::uint64_t head_offsets[16]{};
+        std::uint64_t head_vocab_sizes[16]{};
+    };
+    Qwen38PleWeights ple;
+};
+
+// PLE runtime state: 2-token n-gram context (init EOS) and the dilated
+// depthwise short-conv state (10240 channels x 9 history values).
+struct Qwen38PleRuntime {
+    std::uint32_t previous_context[2]{0U, 0U};
+    bool context_initialized{false};
+    std::vector<float> conv_state;  // 10240 * 9
 };
 
 // Caller-owned per-layer runtime state. The DeltaNet branch carries conv
 // history and SSM across tokens; the QSA branch carries the indexer-key and
-// KV caches.
+// KV caches; the PLE branch carries the n-gram context and short-conv state.
 struct Qwen38LayerRuntimeState {
     Qwen38DeltaNetState delta_net;
     Qwen38QsaCache qsa;
+    Qwen38PleRuntime ple;
 };
 
 struct Qwen38Layer0Telemetry {
@@ -549,15 +603,29 @@ struct Qwen38Layer0ForwardResult {
 // previous layer's output otherwise) -> attn gated residual -> Gated DeltaNet
 // or QSA -> combine -> mlp gated residual -> router + shared expert. The
 // runtime state is caller-owned: pass a fresh state for the first token and
-// reuse it for subsequent tokens (multi-token prefill). Routed experts are
+// reuse it for subsequent tokens (multi-token prefill). token_id drives the
+// PLE n-gram lookup when the layer carries one (layer 1). Routed experts are
 // resolved by the caller (qwen38_load_layer_expert + qwen38_expert_mlp) and
 // folded back with qwen38_layer0_finish.
 [[nodiscard]] Result<Qwen38Layer0ForwardResult> qwen38_layer_forward(
     const Qwen38LayerTrunk& trunk,
     std::span<const float> input_stream,
     Qwen38LayerRuntimeState& state,
+    std::uint32_t token_id,
     std::uint32_t num_experts,
     std::uint32_t top_k);
+
+// PLE n-gram forward (layer 1): hashed n-gram lookup over the per-layer
+// embedding table, key/value projections, sigmoid gate against the current
+// stream, norm-conv and dilated short-conv. Returns the [10240] delta to add
+// to the input stream.
+[[nodiscard]] Result<std::vector<float>> qwen38_ple_forward(
+    const Qwen38LayerTrunk& trunk,
+    const Qwen38GgufCheckpoint& checkpoint,
+    Qwen38PleRuntime& state,
+    std::span<const float> input_stream,
+    std::uint32_t token_id,
+    Qwen38Layer0Telemetry* telemetry = nullptr);
 
 // Folds the routed-expert contributions into the layer result and applies
 // the final gated-residual combine. expert_sum must already contain
@@ -585,11 +653,6 @@ enum class Qwen38CheckpointKind {
 [[nodiscard]] Result<std::vector<float>> qwen38_decode_q8_0(
     std::span<const std::byte> payload,
     std::uint64_t element_count);
-
-struct Qwen38GgufCheckpoint {
-    std::filesystem::path root;
-    model::GgufSplitCatalog catalog;
-};
 
 // Opens every *.gguf shard under the checkpoint root (depth 2), finalizes the
 // split catalog and validates general.architecture == "qwen4exp".
@@ -625,6 +688,32 @@ struct Qwen38GgufCheckpoint {
     const Qwen38GgufCheckpoint& checkpoint,
     std::uint32_t expert_id,
     Qwen38Layer0Telemetry* telemetry = nullptr);
+
+// Final collapse + LM head over the GGUF checkpoint. The official text model
+// ends with the global hyper-connection mixer (Qwen4ExpTextGatedResidual with
+// use_combine=false) followed directly by lm_head: there is NO final RMSNorm.
+struct Qwen38GgufHead {
+    Qwen38OwnedResidual mixer;   // output_hc_norm/down/up (block_inject empty)
+    std::vector<float> lm_head;  // [248320, 2560] row-major
+};
+
+[[nodiscard]] Result<Qwen38GgufHead> qwen38_load_gguf_head(
+    const std::filesystem::path& checkpoint_root,
+    Qwen38Layer0Telemetry* telemetry = nullptr);
+
+// Collapses the final 4-branch stream through the global mixer and projects
+// the 2560 hidden state onto the vocabulary (248320 logits).
+[[nodiscard]] Result<std::vector<float>> qwen38_gguf_logits(
+    const Qwen38GgufHead& head,
+    std::span<const float> final_stream);
+
+// Detokenizer: loads tokenizer.ggml.tokens from the GGUF header (gpt2-style
+// byte-level pieces) and maps them back to raw bytes.
+[[nodiscard]] Result<std::vector<std::string>> qwen38_load_gguf_vocab(
+    const std::filesystem::path& checkpoint_root);
+
+// Byte-level gpt2 piece -> raw bytes (Ġ -> ' ', Ċ -> '\n', ...).
+[[nodiscard]] std::string qwen38_gpt2_piece_to_bytes(std::string_view piece);
 
 [[nodiscard]] std::string_view to_string(Qwen38ReducedFinishReason reason) noexcept;
 

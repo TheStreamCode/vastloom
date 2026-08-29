@@ -429,6 +429,42 @@ Self-pinned; il confronto esterno arriva con il Q8_0 + llama.cpp.
 end-to-end (layer singoli, prefill, catena, full-depth) — la base per
 l'oracolo llama.cpp e per la residenza esperti in VRAM.
 
+## Q11h - Parità greedy con llama.cpp - complete
+
+> **Oracolo esterno raggiunto**: il runtime nativo genera gli stessi token di
+> llama.cpp sullo stesso checkpoint Q8_0. Fine dell'era self-pinned.
+
+- [x] llama.cpp `6fe7498` clonato e compilato (CPU Release, MSVC);
+  `llama-completion`, `llama-tokenize`, `llama-debug` (+ patch di dump
+  opzionale via env, solo nel clone locale, non committata).
+- [x] Debug sistematico per stadio con dump intermedi (`hc_norm`, `hc_mixed`,
+  `attn_output`, `final_output`) e replica numpy — cinque difetti trovati e
+  corretti:
+  1. **z-gate del DeltaNet: sigmoid, non silu** — llama: "the one numerical
+     difference from Qwen3.5's GDN: sigmoid output gate, not silu"; il
+     modeling HF main non lo porta (era il mio errore nel fix Q11c).
+  2. **ssm_a pre-trasformato**: il GGUF porta già −exp(A_log) (range tutto
+     negativo, verificato); il loader lo converte in log-space per l'operatore.
+  3. **Norm weights già (1+w)** nel GGUF (mean ≈ 1 verificato): shift −1 al
+     load, tranne `ssm_norm` (RMSNormGated, weight diretto).
+  4. **Mapping k-heads a tile** (vh % k_heads, semantica ggml repeat),
+     confermato dal kernel ggml `ik1 = iv1 % nek1`.
+  5. **RoPE parziale** (64 su 256 dim, theta 1e7) su attention q/k e indexer
+     q/pooled-keys + **PLE integrato** (hash n-gram → lookup tabella →
+     key/value → gate → conv dilatata), mancanti nel Q7/Q10.
+  6. **Sfasamento trunk nel greedy CLI**: il layer 0 girava col trunk 47 del
+     token precedente (trunks.size()==1 sempre).
+- [x] Verifica numerica stadio-per-stadio con input identico (hc_mixed di
+  llama): qkv/conv ~0.01%, delta rule raw sum 0.8686 vs 0.8687 (0.01%),
+  core post-norm con sigmoid ~0.2%.
+- [x] **Parità greedy**: "The capital of France is" → " Paris. The capital of
+  Germany is Berlin. The capital of Italy is Rome. The" (16 token) =
+  identico a llama.cpp greedy. Secondo prompt ("Hello world") plausibile e
+  deterministico.
+
+**Gate:** il runtime nativo Vastloom produce gli stessi token di llama.cpp
+sul checkpoint ufficiale Q8_0. L'oracolo esterno è stabilito per Q12+.
+
 ## Q12 - prefix-KV MoE stream (porting M13)
 
 - [ ] Estendere `LlamaSession` al percorso MoE stream.

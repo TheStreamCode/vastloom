@@ -89,6 +89,15 @@ std::map<std::string, Qwen38GgufCheckpoint>& gguf_cache() {
 
 }  // namespace
 
+
+// llama.cpp GGUF norm weights are stored already as (1 + w) because the
+// reference kernels multiply them plainly; our rms_norm_affine adds 1 back.
+// Shifting by -1 at load time keeps the operator untouched.
+void shift_norm_weight(std::vector<float>& w) {
+    for (float& v : w) {
+        v -= 1.0F;
+    }
+}
 float qwen38_f16_to_f32(std::uint16_t bits) noexcept {
     const std::uint32_t sign = (bits >> 15) & 0x1U;
     const std::uint32_t exp = (bits >> 10) & 0x1FU;
@@ -188,7 +197,14 @@ Result<Qwen38GgufCheckpoint> qwen38_open_gguf_checkpoint(
     std::vector<model::GgufFile> shards;
     shards.reserve(shard_paths.size());
     for (const auto& p : shard_paths) {
-        auto file = model::GgufFile::open(p);
+        // Retain the PLE metadata arrays (multipliers/offsets/vocab sizes).
+        model::GgufReaderLimits limits;
+        limits.retained_integral_array_keys = {
+            "qwen4exp.ple.layer_multipliers",
+            "qwen4exp.ple.head_offsets",
+            "qwen4exp.ple.head_vocab_sizes",
+        };
+        auto file = model::GgufFile::open(p, limits);
         if (!file) {
             return make_error(file.error().code, file.error().message,
                               "gguf shard open: " + p.string());
@@ -378,6 +394,7 @@ Result<Qwen38LayerTrunk> qwen38_load_gguf_layer_trunk(
     w.layer = layer;
     w.is_qsa = is_qsa;
     w.is_gguf = true;
+    w.gguf_root = checkpoint_root;
 
     auto load = [&](const std::string& name,
                     const std::vector<std::uint64_t>& dims,
@@ -396,6 +413,7 @@ Result<Qwen38LayerTrunk> qwen38_load_gguf_layer_trunk(
         if (!mix_up) return mix_up.error();
         auto inject_w = load(inject, {kStream, Qwen38ExpectedInvariants::hc_count}, true);
         if (!inject_w) return inject_w.error();
+        shift_norm_weight(hc_norm.value());
         out.hc_norm = std::move(hc_norm.value());
         out.mix_down = std::move(mix_down.value());
         out.mix_up = std::move(mix_up.value());
@@ -438,6 +456,19 @@ Result<Qwen38LayerTrunk> qwen38_load_gguf_layer_trunk(
         w.delta_net.conv1d = std::move(conv.value());
         auto a_log = load(b + "a", {Qwen38ExpectedInvariants::linear_num_value_heads}, false);
         if (!a_log) return a_log.error();
+        // The GGUF conversion pre-applies -exp(A_log): ssm_a IS the log-space
+        // decay gate (always <= 0), used directly by llama.cpp as
+        // gate = softplus(a + dt) * ssm_a. Our operator reconstructs
+        // g = -exp(a_log) * softplus(...), so we store log(-ssm_a), which
+        // reproduces g = ssm_a * softplus(...) exactly.
+        for (std::size_t i = 0; i < a_log.value().size(); ++i) {
+            const float v = a_log.value()[i];
+            if (v >= 0.0F) {
+                return make_error(ErrorCode::invalid_format, "ssm_a must be negative",
+                                  "layer " + std::to_string(layer));
+            }
+            a_log.value()[i] = std::log(-v);
+        }
         w.delta_net.a_log = std::move(a_log.value());
         auto dt = load(b + "dt.bias", {Qwen38ExpectedInvariants::linear_num_value_heads}, false);
         if (!dt) return dt.error();
@@ -474,9 +505,11 @@ Result<Qwen38LayerTrunk> qwen38_load_gguf_layer_trunk(
         w.qsa.o_proj = std::move(o.value());
         auto qn = load(p + "attn_q_norm.weight", {Qwen38ExpectedInvariants::head_dim}, false);
         if (!qn) return qn.error();
+        shift_norm_weight(qn.value());
         w.qsa.q_norm = std::move(qn.value());
         auto kn = load(p + "attn_k_norm.weight", {Qwen38ExpectedInvariants::head_dim}, false);
         if (!kn) return kn.error();
+        shift_norm_weight(kn.value());
         w.qsa.k_norm = std::move(kn.value());
         auto iq = load(p + "indexer.q_proj.weight", {kHidden, idxQ}, true);
         if (!iq) return iq.error();
@@ -487,9 +520,11 @@ Result<Qwen38LayerTrunk> qwen38_load_gguf_layer_trunk(
         w.qsa.index_qk.insert(w.qsa.index_qk.end(), ik.value().begin(), ik.value().end());
         auto iqn = load(p + "indexer.q_norm.weight", {Qwen38ExpectedInvariants::indexer_head_dim}, false);
         if (!iqn) return iqn.error();
+        shift_norm_weight(iqn.value());
         w.qsa.q_layernorm = std::move(iqn.value());
         auto ikn = load(p + "indexer.k_norm.weight", {Qwen38ExpectedInvariants::indexer_head_dim}, false);
         if (!ikn) return ikn.error();
+        shift_norm_weight(ikn.value());
         w.qsa.k_layernorm = std::move(ikn.value());
     }
 
@@ -549,14 +584,210 @@ Result<Qwen38LayerTrunk> qwen38_load_gguf_layer_trunk(
         w.gguf_down = std::move(d.value());
     }
 
+    // PLE weights (layer 1 only) + metadata arrays.
+    if (layer == 1U) {
+        auto key = load(p + "ple_key.weight", {kHidden, kStream}, true);
+        if (!key) return key.error();
+        w.ple.key_proj = std::move(key.value());
+        auto value = load(p + "ple_value.weight", {kHidden, kHidden}, true);
+        if (!value) return value.error();
+        w.ple.value_proj = std::move(value.value());
+        auto nk = load(p + "ple_norm_key.weight", {kStream}, false);
+        if (!nk) return nk.error();
+        shift_norm_weight(nk.value());
+        w.ple.norm_key = std::move(nk.value());
+        auto nq = load(p + "ple_norm_query.weight", {kStream}, false);
+        if (!nq) return nq.error();
+        shift_norm_weight(nq.value());
+        w.ple.norm_query = std::move(nq.value());
+        auto nc = load(p + "ple_norm_conv.weight", {kStream}, false);
+        if (!nc) return nc.error();
+        shift_norm_weight(nc.value());
+        w.ple.norm_conv = std::move(nc.value());
+        auto conv = load(p + "ple_conv1d.weight",
+                         {4U, kStream}, false);
+        if (!conv) return conv.error();
+        w.ple.conv1d = std::move(conv.value());
+        auto read_meta = [&](const char* key_name, std::uint64_t* out,
+                             std::size_t count) -> Result<void> {
+            const auto* entry = checkpoint.value().catalog.shards.front().find_metadata(key_name);
+            if (entry == nullptr || entry->unsigned_array_values.size() < count) {
+                return make_error(ErrorCode::not_found, "PLE metadata array missing", key_name);
+            }
+            for (std::size_t i = 0; i < count; ++i) {
+                out[i] = entry->unsigned_array_values[i];
+            }
+            return {};
+        };
+        if (auto r = read_meta("qwen4exp.ple.layer_multipliers", w.ple.multipliers, 3U); !r) {
+            return r.error();
+        }
+        if (auto r = read_meta("qwen4exp.ple.head_offsets", w.ple.head_offsets, 16U); !r) {
+            return r.error();
+        }
+        if (auto r = read_meta("qwen4exp.ple.head_vocab_sizes", w.ple.head_vocab_sizes, 16U); !r) {
+            return r.error();
+        }
+        w.has_ple = true;
+    }
+
     if (telemetry) {
         telemetry->load_ms = std::chrono::steady_clock::now() - t0;
     }
     return w;
 }
 
-Result<std::vector<float>> qwen38_load_gguf_embed_row(
-    const std::filesystem::path& checkpoint_root,
+Result<std::vector<float>> qwen38_ple_forward(
+    const Qwen38LayerTrunk& trunk,
+    const Qwen38GgufCheckpoint& checkpoint,
+    Qwen38PleRuntime& state,
+    std::span<const float> input_stream,
+    std::uint32_t token_id,
+    Qwen38Layer0Telemetry* telemetry) {
+    if (!trunk.has_ple) {
+        return make_error(ErrorCode::invalid_argument, "PLE forward on layer without PLE",
+                          std::to_string(trunk.layer));
+    }
+    constexpr std::uint32_t kEos = Qwen38ExpectedInvariants::eos_token_id;
+    constexpr std::uint64_t kPleHeadDim = 160U;
+    constexpr std::uint32_t kHeads = 16U;
+    constexpr std::uint32_t kEmbDim = kHeads * kPleHeadDim;  // 2560
+    const std::uint32_t H = Qwen38ExpectedInvariants::hidden_size;
+    const std::uint32_t C = Qwen38ExpectedInvariants::hc_count;
+
+    if (!state.context_initialized) {
+        state.previous_context[0] = kEos;
+        state.previous_context[1] = kEos;
+        state.conv_state.assign(static_cast<std::size_t>(kStream) * 9U, 0.0F);
+        state.context_initialized = true;
+    }
+    // Token history: [prev(2), current]; shifted[s] pads with EOS.
+    std::uint32_t history[3] = {state.previous_context[0], state.previous_context[1], token_id};
+    std::uint32_t shifted[3][3];
+    for (std::uint32_t s = 0; s < 3U; ++s) {
+        for (std::uint32_t i = 0; i < 3U; ++i) {
+            shifted[s][i] = (i >= s) ? history[i - s] : kEos;
+        }
+    }
+    // n-gram hash per head (ngram 2 -> heads 0..7, ngram 3 -> heads 8..15).
+    std::uint64_t ids[kHeads];
+    for (std::uint32_t g = 0; g < 2U; ++g) {
+        const std::uint32_t ngram = g + 2U;
+        std::uint64_t mixed = static_cast<std::uint64_t>(shifted[0][2]) * trunk.ple.multipliers[0];
+        for (std::uint32_t position = 1U; position < ngram; ++position) {
+            mixed ^= static_cast<std::uint64_t>(shifted[position][2]) * trunk.ple.multipliers[position];
+        }
+        for (std::uint32_t h = 0; h < 8U; ++h) {
+            const std::uint32_t head = g * 8U + h;
+            ids[head] = mixed % trunk.ple.head_vocab_sizes[head] + trunk.ple.head_offsets[head];
+        }
+    }
+
+    // Embedding lookup: one 160-element column per id (contiguous Q8_0 spans).
+    const auto& catalog = checkpoint.catalog;
+    const auto loc = catalog.tensors.find("per_layer_token_embd.weight");
+    if (loc == catalog.tensors.end()) {
+        return make_error(ErrorCode::not_found, "per_layer_token_embd missing", "ple");
+    }
+    const model::GgufFile& shard = catalog.shards[loc->second.shard_index];
+    const model::GgufTensorDescriptor& desc = shard.tensors()[loc->second.tensor_index];
+    if (desc.ggml_type != 8U || desc.shape.size() != 2U || desc.shape[0] != kPleHeadDim) {
+        return make_error(ErrorCode::invalid_format, "per_layer_token_embd layout drift", "ple");
+    }
+    constexpr std::uint64_t kBlocksPerColumn = kPleHeadDim / 32U;
+    constexpr std::uint64_t kColumnBytes = kBlocksPerColumn * 34U;
+    std::vector<float> embeddings(kEmbDim, 0.0F);
+    for (std::uint32_t h = 0; h < kHeads; ++h) {
+        if (ids[h] >= desc.shape[1]) {
+            return make_error(ErrorCode::invalid_format, "ple id out of table",
+                              std::to_string(ids[h]));
+        }
+        const std::uint64_t begin = desc.absolute_offset + ids[h] * kColumnBytes;
+        std::ifstream in(shard.path(), std::ios::binary);
+        if (!in) {
+            return make_error(ErrorCode::io_error, "cannot open ple shard", shard.path().string());
+        }
+        in.seekg(static_cast<std::streamoff>(begin));
+        std::vector<std::byte> payload(static_cast<std::size_t>(kColumnBytes));
+        in.read(reinterpret_cast<char*>(payload.data()), static_cast<std::streamsize>(kColumnBytes));
+        if (static_cast<std::uint64_t>(in.gcount()) != kColumnBytes) {
+            return make_error(ErrorCode::io_error, "short read of ple column", "ple");
+        }
+        auto column = qwen38_decode_q8_0(payload, kPleHeadDim);
+        if (!column) return column.error();
+        for (std::uint32_t i = 0; i < kPleHeadDim; ++i) {
+            embeddings[static_cast<std::size_t>(h) * kPleHeadDim + i] = column.value()[i];
+        }
+        if (telemetry) {
+            telemetry->payload_bytes_read += kColumnBytes;
+            telemetry->tensors_read += 1U;
+        }
+    }
+
+    // key/value projections + norm/gate (Qwen4ExpTextPLELayer.forward).
+    auto key = qwen38_linear(embeddings, trunk.ple.key_proj, kStream, kEmbDim);
+    // silu local to this TU (the reference one lives in an anonymous namespace).
+    auto ple_silu = [](float v) { return v / (1.0F + std::exp(-v)); };
+    if (!key) return key.error();
+    auto key_normed = qwen38_rms_norm_affine(key.value(), trunk.ple.norm_key, 1.0e-6F, H);
+    if (!key_normed) return key_normed.error();
+    auto value = qwen38_linear(embeddings, trunk.ple.value_proj, H, kEmbDim);
+    if (!value) return value.error();
+    auto query_normed = qwen38_rms_norm_affine(input_stream, trunk.ple.norm_query, 1.0e-6F, H);
+    if (!query_normed) return query_normed.error();
+
+    std::vector<float> gated_value(kStream, 0.0F);
+    const double gate_scale = 1.0 / std::sqrt(static_cast<double>(H));
+    for (std::uint32_t b = 0; b < C; ++b) {
+        double gate = 0.0;
+        for (std::uint32_t i = 0; i < H; ++i) {
+            gate += static_cast<double>(key_normed.value()[b * H + i])
+                * static_cast<double>(query_normed.value()[b * H + i]);
+        }
+        gate *= gate_scale;
+        const double mag = std::max(std::fabs(gate), 1.0e-6);
+        const double shaped = std::sqrt(mag) * (gate < 0.0 ? -1.0 : (gate > 0.0 ? 1.0 : 0.0));
+        const double sig = 1.0 / (1.0 + std::exp(-shaped));
+        for (std::uint32_t i = 0; i < H; ++i) {
+            gated_value[b * H + i] = static_cast<float>(sig * static_cast<double>(value.value()[i]));
+        }
+    }
+    auto gated_normed = qwen38_rms_norm_affine(gated_value, trunk.ple.norm_conv, 1.0e-6F, H);
+    if (!gated_normed) return gated_normed.error();
+
+    // Dilated depthwise short conv (dilation 3, kernel 4, state 9) + silu.
+    if (state.conv_state.size() != static_cast<std::size_t>(kStream) * 9U) {
+        return make_error(ErrorCode::invalid_format, "ple conv state size drift", "ple");
+    }
+    std::vector<float> conv_out(kStream, 0.0F);
+    std::vector<float> next_state(static_cast<std::size_t>(kStream) * 9U, 0.0F);
+    for (std::uint32_t c = 0; c < kStream; ++c) {
+        const float* hist = state.conv_state.data() + static_cast<std::size_t>(c) * 9U;
+        double acc = 0.0;
+        for (std::uint32_t k = 0; k < 3U; ++k) {
+            acc += static_cast<double>(trunk.ple.conv1d[c * 4U + k]) * static_cast<double>(hist[k * 3U]);
+        }
+        acc += static_cast<double>(trunk.ple.conv1d[c * 4U + 3U])
+            * static_cast<double>(gated_normed.value()[c]);
+        conv_out[c] = ple_silu(static_cast<float>(acc));
+        // New state: [old[1..8], current].
+        for (std::uint32_t j = 0; j < 8U; ++j) {
+            next_state[static_cast<std::size_t>(c) * 9U + j] = hist[j + 1U];
+        }
+        next_state[static_cast<std::size_t>(c) * 9U + 8U] = gated_normed.value()[c];
+    }
+    state.conv_state = std::move(next_state);
+
+    // output = gated_value + conv_out, added to the input stream by the caller
+    // (kept here as the sum for clarity).
+    std::vector<float> out(kStream, 0.0F);
+    for (std::uint64_t i = 0; i < kStream; ++i) {
+        out[i] = gated_value[i] + conv_out[i];
+    }
+    return out;
+}
+
+Result<std::vector<float>> qwen38_load_gguf_embed_row(    const std::filesystem::path& checkpoint_root,
     std::uint32_t token_id,
     Qwen38Layer0Telemetry* telemetry) {
     auto checkpoint = qwen38_open_gguf_checkpoint(checkpoint_root);
@@ -651,8 +882,6 @@ Result<Qwen38OwnedExpert> qwen38_load_gguf_expert(
         // ggml per-expert [in, out] flat == row-major [out, in].
         std::vector<float> out(flat.value().size());
         std::memcpy(out.data(), flat.value().data(), flat.value().size() * sizeof(float));
-        std::ignore = in_dim;
-        std::ignore = out_dim;
         return out;
     };
     Qwen38OwnedExpert expert;
@@ -669,6 +898,326 @@ Result<Qwen38OwnedExpert> qwen38_load_gguf_expert(
     expert.up_proj = std::move(up.value());
     expert.down_proj = std::move(down.value());
     return expert;
+}
+
+Result<Qwen38GgufHead> qwen38_load_gguf_head(
+    const std::filesystem::path& checkpoint_root,
+    Qwen38Layer0Telemetry* telemetry) {
+    const auto t0 = std::chrono::steady_clock::now();
+    auto checkpoint = qwen38_open_gguf_checkpoint(checkpoint_root);
+    if (!checkpoint) return checkpoint.error();
+    Qwen38GgufHead head;
+    auto norm = qwen38_read_gguf_tensor_f32(checkpoint.value(), "output_hc_norm.weight",
+                                            {kStream}, false, telemetry);
+    if (!norm) return norm.error();
+    auto down = qwen38_read_gguf_tensor_f32(checkpoint.value(), "output_hc_down.weight",
+                                            {kStream, kRank}, true, telemetry);
+    if (!down) return down.error();
+    auto up = qwen38_read_gguf_tensor_f32(checkpoint.value(), "output_hc_up.weight",
+                                          {kRank, kStream}, true, telemetry);
+    if (!up) return up.error();
+    shift_norm_weight(norm.value());
+    head.mixer.hc_norm = std::move(norm.value());
+    head.mixer.mix_down = std::move(down.value());
+    head.mixer.mix_up = std::move(up.value());
+    auto lm = qwen38_read_gguf_tensor_f32(checkpoint.value(), "output.weight",
+                                          {kHidden, Qwen38ExpectedInvariants::vocab_size},
+                                          true, telemetry);
+    if (!lm) return lm.error();
+    head.lm_head = std::move(lm.value());
+    if (telemetry) {
+        telemetry->load_ms = std::chrono::steady_clock::now() - t0;
+    }
+    return head;
+}
+
+Result<std::vector<float>> qwen38_gguf_logits(
+    const Qwen38GgufHead& head,
+    std::span<const float> final_stream) {
+    const std::uint32_t H = Qwen38ExpectedInvariants::hidden_size;
+    const std::uint32_t C = Qwen38ExpectedInvariants::hc_count;
+    const std::uint32_t R = Qwen38ExpectedInvariants::hc_lowrank;
+    if (final_stream.size() != static_cast<std::size_t>(C) * H) {
+        return make_error(ErrorCode::invalid_format, "final stream width drift",
+                          std::to_string(final_stream.size()));
+    }
+    // Global gated-residual mixer with use_combine=false: no block_inject.
+    const Qwen38GatedResidualView mixer_view{
+        head.mixer.hc_norm, head.mixer.mix_down, head.mixer.mix_up, {}};
+    auto collapsed = qwen38_gated_residual(final_stream, mixer_view, C, H, R, 1.0e-6F);
+    if (!collapsed) return collapsed.error();
+    const std::vector<float>& mixed = collapsed.value().mixed_input;
+    if (auto r = require_finite_local(mixed, "gguf_head_mixed"); !r) return r.error();
+
+    const std::size_t vocab = Qwen38ExpectedInvariants::vocab_size;
+    if (head.lm_head.size() != vocab * H) {
+        return make_error(ErrorCode::invalid_format, "lm_head size drift",
+                          std::to_string(head.lm_head.size()));
+    }
+    std::vector<float> logits(vocab, 0.0F);
+    for (std::size_t v = 0; v < vocab; ++v) {
+        const float* row = head.lm_head.data() + v * H;
+        double acc = 0.0;
+        for (std::size_t i = 0; i < H; ++i) {
+            acc += static_cast<double>(mixed[i]) * static_cast<double>(row[i]);
+        }
+        logits[v] = static_cast<float>(acc);
+    }
+    return logits;
+}
+
+// --- GGUF vocabulary (tokenizer.ggml.tokens) ---
+
+namespace {
+
+// Minimal GGUF header KV walker: returns the file offset and length of the
+// raw value bytes for one metadata key. Works on the metadata-only first
+// shard whose header fits in a bounded read.
+Result<std::pair<std::uint64_t, std::uint64_t>> locate_gguf_kv(
+    const std::filesystem::path& shard_path,
+    std::string_view key,
+    std::vector<std::byte>& header_buffer) {
+    std::ifstream in(shard_path, std::ios::binary);
+    if (!in) {
+        return make_error(ErrorCode::io_error, "cannot open gguf shard for vocab",
+                          shard_path.string());
+    }
+    in.read(reinterpret_cast<char*>(header_buffer.data()),
+            static_cast<std::streamsize>(header_buffer.size()));
+    const std::uint64_t loaded = static_cast<std::uint64_t>(in.gcount());
+    if (loaded < 24U || header_buffer[0] != std::byte{0x47U}) {
+        return make_error(ErrorCode::invalid_format, "not a GGUF header", shard_path.string());
+    }
+    const auto u32_at = [&](std::uint64_t p) {
+        std::uint32_t v = 0U;
+        std::memcpy(&v, header_buffer.data() + p, 4U);
+        return v;
+    };
+    const auto u64_at = [&](std::uint64_t p) {
+        std::uint64_t v = 0U;
+        std::memcpy(&v, header_buffer.data() + p, 8U);
+        return v;
+    };
+    const auto str_at = [&](std::uint64_t p, std::string* out) -> Result<std::uint64_t> {
+        const std::uint64_t len = u64_at(p);
+        if (p + 8U + len > loaded) {
+            return make_error(ErrorCode::invalid_format, "gguf string out of header",
+                              shard_path.string());
+        }
+        out->assign(reinterpret_cast<const char*>(header_buffer.data()) + p + 8U,
+                    static_cast<std::size_t>(len));
+        return p + 8U + len;
+    };
+    std::uint64_t pos = 24U;  // magic + version + tensor_count + kv_count
+    const std::uint64_t kv_count = u64_at(16U);
+    const std::uint64_t header_end = loaded;
+    for (std::uint64_t i = 0; i < kv_count && pos < header_end; ++i) {
+        std::string k;
+        auto after_key = str_at(pos, &k);
+        if (!after_key) return after_key.error();
+        pos = after_key.value();
+        const std::uint32_t type = u32_at(pos);
+        pos += 4U;
+        if (k == key) {
+            // Value spans until the next KV key start; compute by walking it.
+            // Caller only needs scalar/array-of-string values, so walk here.
+            std::uint64_t value_begin = pos;
+            if (type == 9U) {
+                const std::uint32_t et = u32_at(pos);
+                pos += 4U;
+                const std::uint64_t n = u64_at(pos);
+                pos += 8U;
+                if (et == 8U) {
+                    for (std::uint64_t j = 0; j < n; ++j) {
+                        auto next = str_at(pos, &k);
+                        if (!next) return next.error();
+                        pos = next.value();
+                    }
+                } else {
+                    std::uint64_t sz = 0U;
+                    switch (et) {
+                        case 0U: case 1U: case 7U: sz = 1U; break;
+                        case 2U: case 3U: sz = 2U; break;
+                        case 4U: case 5U: case 6U: sz = 4U; break;
+                        case 10U: case 11U: case 12U: sz = 8U; break;
+                        default:
+                            return make_error(ErrorCode::invalid_format,
+                                              "gguf array element type unsupported",
+                                              std::to_string(et));
+                    }
+                    pos += n * sz;
+                }
+            } else if (type == 8U) {
+                auto next = str_at(pos, &k);
+                if (!next) return next.error();
+                pos = next.value();
+            } else {
+                std::uint64_t sz = 0U;
+                switch (type) {
+                    case 0U: case 1U: case 7U: sz = 1U; break;
+                    case 2U: case 3U: sz = 2U; break;
+                    case 4U: case 5U: case 6U: sz = 4U; break;
+                    case 10U: case 11U: case 12U: sz = 8U; break;
+                    default:
+                        return make_error(ErrorCode::invalid_format,
+                                          "gguf value type unsupported", std::to_string(type));
+                }
+                pos += sz;
+            }
+            return std::pair<std::uint64_t, std::uint64_t>{value_begin, pos - value_begin};
+        }
+        // Skip this KV's value entirely.
+        if (type == 9U) {
+            const std::uint32_t et = u32_at(pos);
+            pos += 4U;
+            const std::uint64_t n = u64_at(pos);
+            pos += 8U;
+            if (et == 8U) {
+                for (std::uint64_t j = 0; j < n; ++j) {
+                    auto next = str_at(pos, &k);
+                    if (!next) return next.error();
+                    pos = next.value();
+                }
+            } else {
+                std::uint64_t sz = 0U;
+                switch (et) {
+                    case 0U: case 1U: case 7U: sz = 1U; break;
+                    case 2U: case 3U: sz = 2U; break;
+                    case 4U: case 5U: case 6U: sz = 4U; break;
+                    case 10U: case 11U: case 12U: sz = 8U; break;
+                    default:
+                        return make_error(ErrorCode::invalid_format,
+                                          "gguf array element type unsupported",
+                                          std::to_string(et));
+                }
+                pos += n * sz;
+            }
+        } else if (type == 8U) {
+            auto next = str_at(pos, &k);
+            if (!next) return next.error();
+            pos = next.value();
+        } else {
+            std::uint64_t sz = 0U;
+            switch (type) {
+                case 0U: case 1U: case 7U: sz = 1U; break;
+                case 2U: case 3U: sz = 2U; break;
+                case 4U: case 5U: case 6U: sz = 4U; break;
+                case 10U: case 11U: case 12U: sz = 8U; break;
+                default:
+                    return make_error(ErrorCode::invalid_format,
+                                      "gguf value type unsupported", std::to_string(type));
+            }
+            pos += sz;
+        }
+    }
+    return make_error(ErrorCode::not_found, "gguf key not found", std::string{key});
+}
+
+}  // namespace
+
+Result<std::vector<std::string>> qwen38_load_gguf_vocab(
+    const std::filesystem::path& checkpoint_root) {
+    auto checkpoint = qwen38_open_gguf_checkpoint(checkpoint_root);
+    if (!checkpoint) return checkpoint.error();
+    // tokenizer.ggml.tokens lives in the metadata shard; locate it by walking
+    // every shard's header until found (bounded read per shard).
+    for (const auto& shard : checkpoint.value().catalog.shards) {
+        std::vector<std::byte> header(
+            static_cast<std::size_t>((std::min<std::uint64_t>)(shard.file_bytes(), 64U * 1024U * 1024U)));
+        auto located = locate_gguf_kv(shard.path(), "tokenizer.ggml.tokens", header);
+        if (!located) continue;
+        const auto [offset, length] = located.value();
+        // Re-walk the value region and collect the strings.
+        std::vector<std::byte> value(length);
+        std::ifstream in(shard.path(), std::ios::binary);
+        if (!in) {
+            return make_error(ErrorCode::io_error, "cannot reopen vocab shard", shard.path().string());
+        }
+        in.seekg(static_cast<std::streamoff>(offset));
+        in.read(reinterpret_cast<char*>(value.data()), static_cast<std::streamsize>(length));
+        if (static_cast<std::uint64_t>(in.gcount()) != length) {
+            return make_error(ErrorCode::io_error, "short read of vocab", shard.path().string());
+        }
+        std::vector<std::string> vocab;
+        vocab.reserve(Qwen38ExpectedInvariants::vocab_size);
+        // The value region is [array_type u32][count u64][count strings].
+        std::uint64_t pos = 12U;
+        while (pos + 8U <= length) {
+            std::uint64_t len = 0U;
+            std::memcpy(&len, value.data() + pos, 8U);
+            pos += 8U;
+            if (pos + len > length) {
+                return make_error(ErrorCode::invalid_format, "vocab string out of range",
+                                  shard.path().string());
+            }
+            vocab.emplace_back(reinterpret_cast<const char*>(value.data()) + pos,
+                               static_cast<std::size_t>(len));
+            pos += len;
+        }
+        if (vocab.size() != Qwen38ExpectedInvariants::vocab_size) {
+            return make_error(ErrorCode::invalid_format, "vocab size drift",
+                              std::to_string(vocab.size()));
+        }
+        return vocab;
+    }
+    return make_error(ErrorCode::not_found, "tokenizer.ggml.tokens not in any shard",
+                      checkpoint_root.string());
+}
+
+std::string qwen38_gpt2_piece_to_bytes(std::string_view piece) {
+    // Inverse of the gpt2 bytes_to_unicode byte-level encoding: printable
+    // bytes map to themselves; the remaining 68 bytes map to codepoints 256+n
+    // in ascending byte order.
+    static const std::map<std::uint32_t, unsigned char> inverse = [] {
+        std::map<std::uint32_t, unsigned char> m;
+        std::uint32_t n = 0U;
+        for (unsigned int b = 0U; b < 256U; ++b) {
+            const bool printable = (b >= '!' && b <= '~') || (b >= 0xA1U && b <= 0xACU)
+                || (b >= 0xAEU && b <= 0xFFU);
+            if (printable) {
+                m[b] = static_cast<unsigned char>(b);
+            } else {
+                m[256U + n] = static_cast<unsigned char>(b);
+                ++n;
+            }
+        }
+        return m;
+    }();
+    std::string out;
+    out.reserve(piece.size());
+    // The piece is the UTF-8 encoding of mapped codepoints; decode UTF-8 and
+    // map each codepoint back to its raw byte.
+    std::size_t i = 0U;
+    while (i < piece.size()) {
+        const auto lead = static_cast<unsigned char>(piece[i]);
+        std::uint32_t cp = 0U;
+        std::size_t len = 1U;
+        if (lead < 0x80U) {
+            cp = lead;
+        } else if ((lead & 0xE0U) == 0xC0U) {
+            cp = lead & 0x1FU;
+            len = 2U;
+        } else if ((lead & 0xF0U) == 0xE0U) {
+            cp = lead & 0x0FU;
+            len = 3U;
+        } else {
+            cp = lead & 0x07U;
+            len = 4U;
+        }
+        bool complete = true;
+        for (std::size_t j = 1U; j < len; ++j) {
+            if (i + j >= piece.size()) { complete = false; break; }
+            cp = (cp << 6U) | (static_cast<unsigned char>(piece[i + j]) & 0x3FU);
+        }
+        if (complete) {
+            auto it = inverse.find(cp);
+            if (it != inverse.end()) {
+                out.push_back(static_cast<char>(it->second));
+            }
+        }
+        i += len;
+    }
+    return out;
 }
 
 }  // namespace vastloom::inference

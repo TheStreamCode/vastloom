@@ -2168,7 +2168,7 @@ int command_qwen38_chain(const std::vector<std::string>& args) {
 // byte-level gpt2 detokenize. The external-parity path against llama.cpp.
 int command_qwen38_greedy(const std::vector<std::string>& args) {
     const bool json = has_flag(args, "--json");
-    auto valid = validate_options(args, 1U, {"--prompt-ids", "--steps", "--expert-cache"},
+    auto valid = validate_options(args, 1U, {"--prompt-ids", "--steps", "--expert-cache", "--ram-headroom-gb"},
                                   {"--json", "--show-ids"});
     if (!valid) return print_error(valid.error(), json);
     const auto ids_csv = option_value(args, "--prompt-ids");
@@ -2222,6 +2222,28 @@ int command_qwen38_greedy(const std::vector<std::string>& args) {
     if (!hardware) return print_error(hardware.error(), json);
     auto policy = vastloom::safety::make_safe_runtime_policy(hardware.value());
     if (!policy) return print_error(policy.error(), json);
+    // Explicit user override: trade Safety-Guard headroom for resident-trunk
+    // capacity. The override only raises the process memory ceiling; the
+    // trunk residency check below still refuses when the budget is short.
+    if (const auto headroom = option_value(args, "--ram-headroom-gb")) {
+        std::uint32_t gb = 0U;
+        const auto converted = std::from_chars(headroom->data(), headroom->data() + headroom->size(), gb);
+        if (converted.ec != std::errc{} || gb > 24U) {
+            return print_error(vastloom::make_error(
+                                   vastloom::ErrorCode::invalid_argument,
+                                   "ram headroom override must be 0..24 GiB"),
+                               json);
+        }
+        MEMORYSTATUSEX mem{};
+        mem.dwLength = sizeof(mem);
+        GlobalMemoryStatusEx(&mem);
+        const std::uint64_t ceiling =
+            mem.ullTotalPhys - static_cast<std::uint64_t>(gb) * (1ULL << 30);
+        const auto raised = std::max(policy.value().resources.host_memory_hard_limit, ceiling);
+        policy.value().resources.host_memory_hard_limit = raised;
+        // The Windows Job Object enforces ram_hard_limit, not host_memory_hard_limit.
+        policy.value().resources.ram_hard_limit = raised;
+    }
     auto guard = vastloom::safety::ProcessSafetyGuard::apply(policy.value());
     if (!guard) return print_error(guard.error(), json);
 
@@ -2236,8 +2258,37 @@ int command_qwen38_greedy(const std::vector<std::string>& args) {
     auto vocab = qwen38_load_gguf_vocab(checkpoint_root);
     if (!vocab) return print_error(vocab.error(), json);
 
+    // Trunk residency: with all 48 decoded trunks resident (~13 GiB) the
+    // per-token trunk I/O disappears entirely. Gated on the live RAM headroom
+    // reported by the hardware probe; falls back to per-token streaming when
+    // the budget refuses.
     std::vector<Qwen38LayerTrunk> trunks;
-    trunks.reserve(1U);
+    MEMORYSTATUSEX memx{};
+    memx.dwLength = sizeof(memx);
+    GlobalMemoryStatusEx(&memx);
+    const std::uint64_t free_ram = memx.ullAvailPhys;
+    const bool trunks_resident =
+        (13ULL << 30) + (512ULL << 20) < policy.value().resources.host_memory_hard_limit
+        && free_ram > (14ULL << 30);
+    if (trunks_resident) {
+        // The decoded-trunk residency replaces the raw Q8_0 payload cache;
+        // both together would double-count the same bytes in RAM.
+        qwen38_set_raw_cache_enabled(false);
+        trunks.reserve(Qwen38ExpectedInvariants::num_hidden_layers);
+        const auto residency_start = std::chrono::steady_clock::now();
+        for (std::uint32_t layer = 0; layer < Qwen38ExpectedInvariants::num_hidden_layers; ++layer) {
+            const auto layer_t0 = std::chrono::steady_clock::now();
+            auto trunk = qwen38_load_layer_trunk(checkpoint_root, layer, &load_tel);
+            if (!trunk) return print_error(trunk.error(), json);
+            trunks.push_back(std::move(trunk.value()));
+            std::cerr << "residency layer " << layer << " "
+                      << (int)std::chrono::duration_cast<std::chrono::milliseconds>(
+                             std::chrono::steady_clock::now() - layer_t0).count() << " ms\n";
+        }
+        std::cerr << "residency total "
+                  << (int)std::chrono::duration_cast<std::chrono::milliseconds>(
+                         std::chrono::steady_clock::now() - residency_start).count() << " ms\n";
+    }
     std::vector<Qwen38LayerRuntimeState> states(Qwen38ExpectedInvariants::num_hidden_layers);
     Qwen38ExpertLru lru;
     lru.capacity = expert_cache.value();
@@ -2246,6 +2297,9 @@ int command_qwen38_greedy(const std::vector<std::string>& args) {
     std::vector<std::uint32_t> generated;
     std::vector<std::uint32_t> sequence = token_ids;
     const std::size_t prompt_len = token_ids.size();
+    double t_trunk = 0.0, t_expert = 0.0, t_fwd = 0.0, t_head = 0.0;
+    auto now_ms = [] { return std::chrono::duration<double, std::milli>(
+        std::chrono::steady_clock::now().time_since_epoch()).count(); };
     // Prefill processes every prompt token (carrying the layer states); the
     // last prompt token and every generated token produce logits.
     for (std::size_t pos = 0; pos < prompt_len + steps.value(); ++pos) {
@@ -2254,18 +2308,23 @@ int command_qwen38_greedy(const std::vector<std::string>& args) {
         if (!row) return print_error(row.error(), json);
         std::vector<float> stream = qwen38_expand_stream(row.value(), C);
         for (std::uint32_t layer = 0; layer < Qwen38ExpectedInvariants::num_hidden_layers; ++layer) {
-            // Streaming: one trunk resident at a time (~270 MiB decoded), so
-            // the full-depth run fits the process memory guard. The trunk is
-            // reloaded for every layer of every token.
-            auto trunk = qwen38_load_layer_trunk(checkpoint_root, layer, &load_tel);
-            if (!trunk) return print_error(trunk.error(), json);
-            trunks.assign(1U, std::move(trunk.value()));
-            const auto& trunk_ref = trunks.front();
+            double t0 = now_ms();
+            if (!trunks_resident) {
+                // Streaming fallback: one trunk resident at a time, reloaded
+                // for every layer of every token.
+                auto trunk = qwen38_load_layer_trunk(checkpoint_root, layer, &load_tel);
+                if (!trunk) return print_error(trunk.error(), json);
+                trunks.assign(1U, std::move(trunk.value()));
+            }
+            const auto& trunk_ref = trunks_resident ? trunks[layer] : trunks.front();
+            double t1 = now_ms();
             auto fwd = qwen38_layer_forward(
                 trunk_ref, stream, states[layer], tid,
                 Qwen38ExpectedInvariants::num_experts,
                 Qwen38ExpectedInvariants::num_experts_per_tok);
+            double t2 = now_ms();
             if (!fwd) return print_error(fwd.error(), json);
+            t_trunk += t1 - t0; t_fwd += t2 - t1;
             std::vector<float> expert_sum(H, 0.0F);
             for (std::size_t i = 0; i < fwd.value().route.indices.size(); ++i) {
                 const auto eid = fwd.value().route.indices[i];
@@ -2300,8 +2359,10 @@ int command_qwen38_greedy(const std::vector<std::string>& args) {
         if (pos + 1 < prompt_len) {
             continue;  // middle prompt tokens do not need the head
         }
+        double th0 = now_ms();
         auto logits = qwen38_gguf_logits(head.value(), stream);
         if (!logits) return print_error(logits.error(), json);
+        t_head += now_ms() - th0;
         std::uint32_t best = 0U;
         for (std::uint32_t v = 1U; v < logits.value().size(); ++v) {
             if (logits.value()[v] > logits.value()[best]) best = v;
@@ -2313,6 +2374,12 @@ int command_qwen38_greedy(const std::vector<std::string>& args) {
         }
     }
 
+    if (!json) {
+        const auto cache_stats = qwen38_raw_cache_stats();
+        std::cerr << "cache fetch=" << cache_stats.first << " hit=" << cache_stats.second << "\n";
+        std::cerr << "phase ms: trunk=" << (int)t_trunk << " expert=" << (int)t_expert
+                  << " forward=" << (int)t_fwd << " head=" << (int)t_head << "\n";
+    }
     std::string text;
     for (const auto id : generated) {
         text += qwen38_gpt2_piece_to_bytes(vocab.value()[id]);

@@ -17,6 +17,8 @@
 #include <limits>
 #include <map>
 #include <mutex>
+#include <thread>
+#include <functional>
 #include <string>
 #include <vector>
 
@@ -24,6 +26,39 @@
 #include "vastloom/model/gguf.hpp"
 
 namespace vastloom::inference {
+
+// [performance] Small static thread pool for the hot scalar kernels. The
+// reference operators stay single-threaded; the GGUF forward path uses this
+// fan-out because a 6B-active decode is otherwise compute-bound on one core.
+unsigned int hw_threads() {
+    static const unsigned int n = [] {
+        const auto h = std::thread::hardware_concurrency();
+        return h == 0U ? 2U : (std::min)(h, 16U);
+    }();
+    return n;
+}
+
+void parallel_for(std::uint64_t begin, std::uint64_t end, std::uint64_t grain,
+                  const std::function<void(std::uint64_t, std::uint64_t)>& fn) {
+    const std::uint64_t total = end > begin ? end - begin : 0U;
+    if (total == 0U) return;
+    const unsigned int n = hw_threads();
+    if (n == 1U || total <= grain) {
+        fn(begin, end);
+        return;
+    }
+    std::vector<std::thread> threads;
+    threads.reserve(n - 1U);
+    const std::uint64_t chunk = (total + n - 1U) / n;
+    for (unsigned int t = 1U; t < n; ++t) {
+        const std::uint64_t lo = begin + t * chunk;
+        if (lo >= end) break;
+        const std::uint64_t hi = (std::min)(end, lo + chunk);
+        threads.emplace_back([&fn, lo, hi] { fn(lo, hi); });
+    }
+    fn(begin, (std::min)(end, begin + chunk));
+    for (auto& th : threads) th.join();
+}
 
 namespace {
 
@@ -127,22 +162,120 @@ Result<std::vector<float>> qwen38_decode_q8_0(
     }
     std::vector<float> out(static_cast<std::size_t>(element_count));
     const auto* bytes = reinterpret_cast<const std::uint8_t*>(payload.data());
-    for (std::uint64_t b = 0; b < blocks; ++b) {
-        const std::uint8_t* block = bytes + b * 34U;
-        std::uint16_t bits = 0U;
-        std::memcpy(&bits, block, 2U);
-        const float scale = qwen38_f16_to_f32(bits);
-        const std::size_t base = static_cast<std::size_t>(b * 32U);
-        const std::size_t count =
-            static_cast<std::size_t>((std::min<std::uint64_t>)(32U, element_count - b * 32U));
-        for (std::size_t i = 0; i < count; ++i) {
-            const auto q = static_cast<std::int8_t>(block[2U + i]);
-            out[base + i] = static_cast<float>(q) * scale;
+    if (blocks < 4096U) {
+        for (std::uint64_t b = 0; b < blocks; ++b) {
+            const std::uint8_t* block = bytes + b * 34U;
+            std::uint16_t bits = 0U;
+            std::memcpy(&bits, block, 2U);
+            const float scale = qwen38_f16_to_f32(bits);
+            const std::size_t base = static_cast<std::size_t>(b * 32U);
+            const std::size_t count =
+                static_cast<std::size_t>((std::min<std::uint64_t>)(32U, element_count - b * 32U));
+            for (std::size_t i = 0; i < count; ++i) {
+                const auto q = static_cast<std::int8_t>(block[2U + i]);
+                out[base + i] = static_cast<float>(q) * scale;
+            }
         }
+        return out;
     }
+    parallel_for(0U, blocks, 8192U, [&](std::uint64_t lo, std::uint64_t hi) {
+        for (std::uint64_t b = lo; b < hi; ++b) {
+            const std::uint8_t* block = bytes + b * 34U;
+            std::uint16_t bits = 0U;
+            std::memcpy(&bits, block, 2U);
+            const float scale = qwen38_f16_to_f32(bits);
+            const std::size_t base = static_cast<std::size_t>(b * 32U);
+            const std::size_t count =
+                static_cast<std::size_t>((std::min<std::uint64_t>)(32U, element_count - b * 32U));
+            for (std::size_t i = 0; i < count; ++i) {
+                const auto q = static_cast<std::int8_t>(block[2U + i]);
+                out[base + i] = static_cast<float>(q) * scale;
+            }
+        }
+    });
     return out;
 }
 
+
+// One persistent read stream per shard file: the forward path opens each
+// tensor read on the same file 20+ times per layer, and reopen+close on a
+// 46 GiB shard costs real milliseconds each time.
+std::mutex& stream_cache_mutex() {
+    static std::mutex m;
+    return m;
+}
+
+std::ifstream& persistent_shard_stream(const std::filesystem::path& path) {
+    static std::map<std::string, std::ifstream> streams;
+    std::lock_guard<std::mutex> lock(stream_cache_mutex());
+    auto it = streams.find(path.string());
+    if (it == streams.end()) {
+        it = streams.emplace(path.string(), std::ifstream(path, std::ios::binary)).first;
+    }
+    return it->second;
+}
+
+// [performance] Resident raw Q8_0 payload cache: the forward path re-reads
+// the same trunk tensors every token. Caching the raw Q8_0 bytes (~7.3 GiB
+// for all 48 layer trunks) removes the NVMe re-read while keeping the
+// dequantization on the compute path. Bounded by an aggregate cap.
+std::mutex& raw_cache_mutex() {
+    static std::mutex m;
+    return m;
+}
+
+struct RawCacheEntry {
+    std::vector<std::byte> bytes;
+};
+
+std::map<std::string, RawCacheEntry>& raw_cache() {
+    static std::map<std::string, RawCacheEntry> cache;
+    return cache;
+}
+
+std::uint64_t& raw_cache_bytes() {
+    static std::uint64_t total = 0U;
+    return total;
+}
+
+constexpr std::uint64_t kRawCacheCapBytes = 16ULL * 1024ULL * 1024ULL * 1024ULL;
+
+std::uint64_t* raw_cache_hits_addr() {
+    static std::uint64_t hits[2] = {0U, 0U};  // [fetches, hits]
+    return hits;
+}
+
+bool& raw_cache_enabled() {
+    static bool enabled = true;
+    return enabled;
+}
+
+std::pair<std::uint64_t, std::uint64_t> qwen38_raw_cache_stats() {
+    auto* h = raw_cache_hits_addr();
+    return {h[0], h[1]};
+}
+
+void qwen38_set_raw_cache_enabled(bool enabled) {
+    raw_cache_enabled() = enabled;
+}
+
+const std::vector<std::byte>* raw_cache_fetch(const std::string& key) {
+    std::lock_guard<std::mutex> lock(raw_cache_mutex());
+    if (!raw_cache_enabled()) return nullptr;
+    ++raw_cache_hits_addr()[0];
+    auto it = raw_cache().find(key);
+    if (it != raw_cache().end()) { ++raw_cache_hits_addr()[1]; }
+    if (it == raw_cache().end()) return nullptr;
+    return &it->second.bytes;
+}
+
+void raw_cache_store(const std::string& key, const std::vector<std::byte>& bytes) {
+    std::lock_guard<std::mutex> lock(raw_cache_mutex());
+    if (!raw_cache_enabled()) return;
+    if (raw_cache_bytes() + bytes.size() > kRawCacheCapBytes) return;
+    raw_cache_bytes() += bytes.size();
+    raw_cache()[key].bytes = bytes;
+}
 Result<Qwen38CheckpointKind> qwen38_detect_checkpoint_kind(
     const std::filesystem::path& checkpoint_root) {
     std::error_code ec;
@@ -261,16 +394,30 @@ Result<std::vector<float>> qwen38_read_gguf_tensor_f32(
         return make_error(ErrorCode::invalid_format, "GGUF tensor out of file bounds",
                           std::string{tensor_name});
     }
-    std::ifstream in(shard.path(), std::ios::binary);
-    if (!in) {
-        return make_error(ErrorCode::io_error, "cannot open gguf shard", shard.path().string());
-    }
-    in.seekg(static_cast<std::streamoff>(begin));
-    std::vector<std::byte> payload(static_cast<std::size_t>(span));
-    in.read(reinterpret_cast<char*>(payload.data()), static_cast<std::streamsize>(span));
-    if (static_cast<std::uint64_t>(in.gcount()) != span) {
-        return make_error(ErrorCode::io_error, "short read of gguf tensor",
-                          std::string{tensor_name});
+    const std::string cache_key = shard.path().string() + "#" + std::to_string(begin)
+        + "#" + std::to_string(span);
+    const std::vector<std::byte>* cached = raw_cache_fetch(cache_key);
+    std::vector<std::byte> owned;
+    std::span<const std::byte> payload;
+    if (cached != nullptr) {
+        // Cache hit: dequantize straight from the resident bytes (no copy).
+        payload = *cached;
+    } else {
+        std::ifstream& in = persistent_shard_stream(shard.path());
+        if (!in) {
+            return make_error(ErrorCode::io_error, "cannot open gguf shard", shard.path().string());
+        }
+        in.seekg(static_cast<std::streamoff>(begin));
+        owned.resize(static_cast<std::size_t>(span));
+        in.read(reinterpret_cast<char*>(owned.data()), static_cast<std::streamsize>(span));
+        if (static_cast<std::uint64_t>(in.gcount()) != span) {
+            return make_error(ErrorCode::io_error, "short read of gguf tensor",
+                              std::string{tensor_name});
+        }
+        raw_cache_store(cache_key, owned);
+        // Point at the resident copy so the miss path decodes identically.
+        cached = raw_cache_fetch(cache_key);
+        payload = cached != nullptr ? std::span<const std::byte>{*cached} : owned;
     }
     if (telemetry) {
         telemetry->payload_bytes_read += span;
@@ -955,14 +1102,16 @@ Result<std::vector<float>> qwen38_gguf_logits(
                           std::to_string(head.lm_head.size()));
     }
     std::vector<float> logits(vocab, 0.0F);
-    for (std::size_t v = 0; v < vocab; ++v) {
-        const float* row = head.lm_head.data() + v * H;
-        double acc = 0.0;
-        for (std::size_t i = 0; i < H; ++i) {
-            acc += static_cast<double>(mixed[i]) * static_cast<double>(row[i]);
+    parallel_for(0U, vocab, 2048U, [&](std::uint64_t lo, std::uint64_t hi) {
+        for (std::uint64_t v = lo; v < hi; ++v) {
+            const float* row = head.lm_head.data() + v * H;
+            double acc = 0.0;
+            for (std::size_t i = 0; i < H; ++i) {
+                acc += static_cast<double>(mixed[i]) * static_cast<double>(row[i]);
+            }
+            logits[v] = static_cast<float>(acc);
         }
-        logits[v] = static_cast<float>(acc);
-    }
+    });
     return logits;
 }
 

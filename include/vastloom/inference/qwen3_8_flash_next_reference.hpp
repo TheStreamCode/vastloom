@@ -659,6 +659,14 @@ enum class Qwen38CheckpointKind {
 [[nodiscard]] Result<Qwen38GgufCheckpoint> qwen38_open_gguf_checkpoint(
     const std::filesystem::path& checkpoint_root);
 
+// Enables/disables the resident raw Q8_0 payload cache (default on). The
+// greedy CLI turns it off when trunk residency is active, so the two caches
+// never compete for the same RAM.
+void qwen38_set_raw_cache_enabled(bool enabled);
+
+// Cache diagnostics: [fetches, hits].
+std::pair<std::uint64_t, std::uint64_t> qwen38_raw_cache_stats();
+
 // Reads one GGUF tensor by exact name, decodes it (Q8_0/BF16/F32) and, when
 // transpose is set, converts the ggml [in, out] layout to row-major [out, in].
 // expected_dims is checked against the GGUF shape verbatim.

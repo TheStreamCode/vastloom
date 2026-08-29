@@ -8,6 +8,8 @@
 #include <limits>
 #include <random>
 #include <span>
+#include <thread>
+#include <functional>
 #include <string>
 #include <utility>
 #include <vector>
@@ -263,6 +265,38 @@ bool is_prime_u32(std::uint32_t value) noexcept {
     return true;
 }
 
+// [performance] Thread fan-out for the hot reference kernels. Row-parallel
+// only: every output element keeps its single-threaded accumulation order,
+// so results are bit-identical to the sequential path.
+unsigned int qwen38_hw_threads() {
+    static const unsigned int n = [] {
+        const auto h = std::thread::hardware_concurrency();
+        return h == 0U ? 2U : (std::min)(h, 16U);
+    }();
+    return n;
+}
+
+void qwen38_parallel_for(std::uint64_t begin, std::uint64_t end, std::uint64_t grain,
+                         const std::function<void(std::uint64_t, std::uint64_t)>& fn) {
+    const std::uint64_t total = end > begin ? end - begin : 0U;
+    if (total == 0U) return;
+    const unsigned int n = qwen38_hw_threads();
+    if (n == 1U || total <= grain) {
+        fn(begin, end);
+        return;
+    }
+    std::vector<std::thread> threads;
+    threads.reserve(n - 1U);
+    const std::uint64_t chunk = (total + n - 1U) / n;
+    for (unsigned int t = 1U; t < n; ++t) {
+        const std::uint64_t lo = begin + t * chunk;
+        if (lo >= end) break;
+        const std::uint64_t hi = (std::min)(end, lo + chunk);
+        threads.emplace_back([&fn, lo, hi] { fn(lo, hi); });
+    }
+    fn(begin, (std::min)(end, begin + chunk));
+    for (auto& th : threads) th.join();
+}
 Result<std::vector<float>> linear_f(
     std::span<const float> input,
     std::span<const float> weight,
@@ -272,6 +306,22 @@ Result<std::vector<float>> linear_f(
         return make_error(ErrorCode::invalid_argument, "linear size mismatch", "qwen38_linear");
     }
     std::vector<float> out(out_dim, 0.0F);
+    // Row-parallel above a work threshold; every output row keeps its own
+    // sequential double accumulation, so results are bit-identical to the
+    // single-threaded path.
+    if (out_dim * in_dim >= 4U * 1024U * 1024U) {
+        qwen38_parallel_for(0U, out_dim, 64U, [&](std::uint64_t lo, std::uint64_t hi) {
+            for (std::uint64_t o = lo; o < hi; ++o) {
+                double acc = 0.0;
+                const std::size_t row = o * in_dim;
+                for (std::size_t i = 0; i < in_dim; ++i) {
+                    acc += static_cast<double>(weight[row + i]) * static_cast<double>(input[i]);
+                }
+                out[o] = static_cast<float>(acc);
+            }
+        });
+        return out;
+    }
     for (std::size_t o = 0; o < out_dim; ++o) {
         double acc = 0.0;
         const std::size_t row = o * in_dim;
@@ -839,6 +889,7 @@ Result<std::vector<float>> qwen38_ngram_lookup(
     }
     return out;
 }
+
 
 Result<std::vector<float>> qwen38_linear(
     std::span<const float> input,

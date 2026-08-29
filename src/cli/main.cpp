@@ -2271,9 +2271,13 @@ int command_qwen38_greedy(const std::vector<std::string>& args) {
     memx.dwLength = sizeof(memx);
     GlobalMemoryStatusEx(&memx);
     const std::uint64_t free_ram = memx.ullAvailPhys;
+    // Q8_0-native trunks still commit ~11 GiB together with the F32 head and
+    // runtime state: keep the 13 GiB policy gate, but the physical-RAM gate
+    // drops to 10 GiB because the resident set is 5.5 GiB smaller than the
+    // old F32 trunks and leaves the OS page cache for expert shard reads.
     const bool trunks_resident =
         (13ULL << 30) + (512ULL << 20) < policy.value().resources.host_memory_hard_limit
-        && free_ram > (14ULL << 30);
+        && free_ram > (10ULL << 30);
     if (trunks_resident) {
         // The decoded-trunk residency replaces the raw Q8_0 payload cache;
         // both together would double-count the same bytes in RAM.

@@ -3640,38 +3640,38 @@ void test_qwen38_reduced_graph(const std::filesystem::path& root) {
     };
     auto fill_res = [&](Qwen38OwnedResidual& r, std::size_t stream, std::size_t rank, bool inject) {
         fill(r.hc_norm, stream, 0.0F, 0.0F);
-        fill(r.mix_down, rank * stream, 0.08F, 0.02F);
-        fill(r.mix_up, stream * rank, 0.07F, -0.01F);
+        fill(r.mix_down.f32, rank * stream, 0.08F, 0.02F);
+        fill(r.mix_up.f32, stream * rank, 0.07F, -0.01F);
         if (inject) {
-            fill(r.block_inject, 2 * stream, 0.05F, 0.0F);
+            fill(r.block_inject.f32, 2 * stream, 0.05F, 0.0F);
         }
     };
     auto fill_dn = [&](Qwen38OwnedDeltaNet& d) {
-        fill(d.in_proj_qkv, 32, 0.06F, 0.0F);
-        fill(d.in_proj_z, 16, 0.05F, 0.01F);
-        fill(d.in_proj_a, 8, 0.04F, 0.0F);
-        fill(d.in_proj_b, 8, 0.04F, 0.02F);
+        fill(d.in_proj_qkv.f32, 32, 0.06F, 0.0F);
+        fill(d.in_proj_z.f32, 16, 0.05F, 0.01F);
+        fill(d.in_proj_a.f32, 8, 0.04F, 0.0F);
+        fill(d.in_proj_b.f32, 8, 0.04F, 0.02F);
         fill(d.conv1d, 16, 0.1F, 0.05F);
         d.a_log = {0.0F, std::log(2.0F)};
         d.dt_bias = {0.0F, 0.25F};
         d.norm = {1.0F, 1.0F};
-        fill(d.out_proj, 16, 0.05F, 0.0F);
+        fill(d.out_proj.f32, 16, 0.05F, 0.0F);
     };
     auto fill_qsa = [&](Qwen38OwnedQsa& q) {
         fill(q.index_qk, 24, 0.05F, 0.0F);
         q.q_layernorm.assign(2, 0.0F);
         q.k_layernorm.assign(2, 0.0F);
-        fill(q.q_proj, 32, 0.06F, 0.0F);
-        fill(q.k_proj, 8, 0.05F, 0.0F);
-        fill(q.v_proj, 8, 0.05F, 0.01F);
-        fill(q.o_proj, 16, 0.04F, 0.0F);
+        fill(q.q_proj.f32, 32, 0.06F, 0.0F);
+        fill(q.k_proj.f32, 8, 0.05F, 0.0F);
+        fill(q.v_proj.f32, 8, 0.05F, 0.01F);
+        fill(q.o_proj.f32, 16, 0.04F, 0.0F);
         q.q_norm.assign(2, 0.0F);
         q.k_norm.assign(2, 0.0F);
     };
     auto fill_mlp = [&](Qwen38OwnedSharedMlp& m) {
-        fill(m.gate_proj, 16, 0.05F, 0.0F);
-        fill(m.up_proj, 16, 0.05F, 0.01F);
-        fill(m.down_proj, 16, 0.04F, 0.0F);
+        fill(m.gate_proj.f32, 16, 0.05F, 0.0F);
+        fill(m.up_proj.f32, 16, 0.05F, 0.01F);
+        fill(m.down_proj.f32, 16, 0.04F, 0.0F);
         fill(m.shared_gate, 4, 0.03F, 0.0F);
     };
     auto fill_moe = [&](Qwen38OwnedMoe& moe, float scale) {
@@ -3758,16 +3758,16 @@ void test_qwen38_reduced_graph(const std::filesystem::path& root) {
             auto stream = qwen38_expand_stream(e0, 2);
             CHECK(stream.size() == 8U);
             vastloom::inference::Qwen38GatedResidualView attn_hc{
-                model.layer0_attn_hc.hc_norm, model.layer0_attn_hc.mix_down,
-                model.layer0_attn_hc.mix_up, model.layer0_attn_hc.block_inject};
+                model.layer0_attn_hc.hc_norm, model.layer0_attn_hc.mix_down.f32,
+                model.layer0_attn_hc.mix_up.f32, model.layer0_attn_hc.block_inject.f32};
             auto gr = qwen38_gated_residual(stream, attn_hc, 2, 4, 2, 1e-6F);
             CHECK(gr);
             if (gr) {
                 vastloom::inference::Qwen38DeltaNetView dn{
-                    model.layer0_delta.in_proj_qkv, model.layer0_delta.in_proj_z,
-                    model.layer0_delta.in_proj_a, model.layer0_delta.in_proj_b,
+                    model.layer0_delta.in_proj_qkv.f32, model.layer0_delta.in_proj_z.f32,
+                    model.layer0_delta.in_proj_a.f32, model.layer0_delta.in_proj_b.f32,
                     model.layer0_delta.conv1d, model.layer0_delta.a_log, model.layer0_delta.dt_bias,
-                    model.layer0_delta.norm, model.layer0_delta.out_proj,
+                    model.layer0_delta.norm, model.layer0_delta.out_proj.f32,
                     4, 1, 2, 2, 2, 2, 1e-6F};
                 auto y = vastloom::inference::qwen38_delta_net_decode(gr.value().mixed_input, dn, st.value().delta);
                 CHECK(y);
@@ -3777,13 +3777,13 @@ void test_qwen38_reduced_graph(const std::filesystem::path& root) {
                     CHECK(comb);
                     if (comb) {
                         vastloom::inference::Qwen38GatedResidualView mlp_hc{
-                            model.layer0_mlp_hc.hc_norm, model.layer0_mlp_hc.mix_down,
-                            model.layer0_mlp_hc.mix_up, model.layer0_mlp_hc.block_inject};
+                            model.layer0_mlp_hc.hc_norm, model.layer0_mlp_hc.mix_down.f32,
+                            model.layer0_mlp_hc.mix_up.f32, model.layer0_mlp_hc.block_inject.f32};
                         auto grm = qwen38_gated_residual(comb.value(), mlp_hc, 2, 4, 2, 1e-6F);
                         CHECK(grm);
                         if (grm) {
-                            auto mlp = qwen38_shared_mlp(grm.value().mixed_input, model.layer0_mlp.gate_proj,
-                                model.layer0_mlp.up_proj, model.layer0_mlp.down_proj, model.layer0_mlp.shared_gate, 4, 4);
+                            auto mlp = qwen38_shared_mlp(grm.value().mixed_input, model.layer0_mlp.gate_proj.f32,
+                                model.layer0_mlp.up_proj.f32, model.layer0_mlp.down_proj.f32, model.layer0_mlp.shared_gate, 4, 4);
                             CHECK(mlp && mlp.value().size() == 4U);
                         }
                     }

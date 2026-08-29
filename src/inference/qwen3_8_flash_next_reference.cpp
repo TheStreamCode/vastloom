@@ -374,6 +374,18 @@ Result<std::vector<float>> linear_from_q8(
     return out;
 }
 
+// F32-or-Q8_0 linear: identical results for the same logical weights.
+Result<std::vector<float>> linear_w(
+    std::span<const float> input,
+    const Qwen38WeightRef& weight,
+    std::size_t out_dim,
+    std::size_t in_dim) {
+    if (weight.is_q8()) {
+        return linear_from_q8(input, weight.q8, out_dim, in_dim);
+    }
+    return linear_f(input, weight.f32, out_dim, in_dim);
+}
+
 std::int64_t wrap_mul_i64(std::int64_t a, std::int64_t b) noexcept {
     return static_cast<std::int64_t>(static_cast<std::uint64_t>(a) * static_cast<std::uint64_t>(b));
 }
@@ -444,7 +456,7 @@ Result<Qwen38GatedResidualResult> qwen38_gated_residual(
     if (!normed) {
         return normed.error();
     }
-    auto bottleneck = linear_f(normed.value(), weights.mix_down, rank, hc_hidden);
+    auto bottleneck = linear_w(normed.value(), weights.mix_down, rank, hc_hidden);
     if (!bottleneck) {
         return bottleneck.error();
     }
@@ -452,7 +464,7 @@ Result<Qwen38GatedResidualResult> qwen38_gated_residual(
     for (float& v : bottleneck.value()) {
         v = silu_f(v * inv_hc);
     }
-    auto mix = linear_f(bottleneck.value(), weights.mix_up, hc_hidden, rank);
+    auto mix = linear_w(bottleneck.value(), weights.mix_up, hc_hidden, rank);
     if (!mix) {
         return mix.error();
     }
@@ -473,7 +485,7 @@ Result<Qwen38GatedResidualResult> qwen38_gated_residual(
         v *= inv_hc;
     }
     if (use_inject) {
-        auto logits = linear_f(normed.value(), weights.block_inject, hc_count, hc_hidden);
+        auto logits = linear_w(normed.value(), weights.block_inject, hc_count, hc_hidden);
         if (!logits) {
             return logits.error();
         }
@@ -536,19 +548,19 @@ Result<std::vector<float>> qwen38_delta_net_decode(
         return make_error(ErrorCode::invalid_argument, "delta-net state shape mismatch", "delta_net");
     }
 
-    auto qkv = linear_f(hidden, weights.in_proj_qkv, conv_dim, hidden_size);
+    auto qkv = linear_w(hidden, weights.in_proj_qkv, conv_dim, hidden_size);
     if (!qkv) {
         return qkv.error();
     }
-    auto z = linear_f(hidden, weights.in_proj_z, value_dim, hidden_size);
+    auto z = linear_w(hidden, weights.in_proj_z, value_dim, hidden_size);
     if (!z) {
         return z.error();
     }
-    auto a = linear_f(hidden, weights.in_proj_a, v_heads, hidden_size);
+    auto a = linear_w(hidden, weights.in_proj_a, v_heads, hidden_size);
     if (!a) {
         return a.error();
     }
-    auto b = linear_f(hidden, weights.in_proj_b, v_heads, hidden_size);
+    auto b = linear_w(hidden, weights.in_proj_b, v_heads, hidden_size);
     if (!b) {
         return b.error();
     }
@@ -648,7 +660,7 @@ Result<std::vector<float>> qwen38_delta_net_decode(
         }
     }
     });  // end v-head parallel loop
-    return linear_f(core, weights.out_proj, hidden_size, value_dim);
+    return linear_w(core, weights.out_proj, hidden_size, value_dim);
 }
 
 void qwen38_apply_partial_rope(
@@ -986,6 +998,42 @@ Result<std::vector<float>> qwen38_shared_mlp(
     return down;
 }
 
+Result<std::vector<float>> qwen38_shared_mlp(
+    std::span<const float> hidden,
+    const Qwen38OwnedSharedMlp& weights,
+    std::uint32_t hidden_size,
+    std::uint32_t intermediate) {
+    const std::size_t h = hidden_size;
+    const std::size_t mid = intermediate;
+    if (h == 0 || mid == 0 || hidden.size() != h) {
+        return make_error(ErrorCode::invalid_argument, "shared mlp dims invalid", "shared_mlp");
+    }
+    auto gate = linear_w(hidden, weights.gate_proj.ref(), mid, h);
+    if (!gate) {
+        return gate.error();
+    }
+    auto up = linear_w(hidden, weights.up_proj.ref(), mid, h);
+    if (!up) {
+        return up.error();
+    }
+    for (std::size_t i = 0; i < mid; ++i) {
+        gate.value()[i] = silu_f(gate.value()[i]) * up.value()[i];
+    }
+    auto down = linear_w(gate.value(), weights.down_proj.ref(), h, mid);
+    if (!down) {
+        return down.error();
+    }
+    auto sg = linear_f(hidden, weights.shared_gate, 1, h);
+    if (!sg) {
+        return sg.error();
+    }
+    const float scale = sigmoid_f(sg.value()[0]);
+    for (float& v : down.value()) {
+        v *= scale;
+    }
+    return down;
+}
+
 Result<Qwen38MoeRoute> qwen38_moe_route(
     std::span<const float> hidden,
     std::span<const float> router,
@@ -1161,8 +1209,7 @@ Result<std::vector<float>> qwen38_moe_block(
             out[d] += y.value()[d] * w;
         }
     }
-    auto shared_out = qwen38_shared_mlp(hidden, shared.gate_proj, shared.up_proj, shared.down_proj,
-        shared.shared_gate, hidden_size, intermediate);
+    auto shared_out = qwen38_shared_mlp(hidden, shared, hidden_size, intermediate);
     if (!shared_out) {
         return shared_out.error();
     }
@@ -1240,7 +1287,7 @@ Result<std::vector<float>> qwen38_qsa_layer_token(
         return selected.error();
     }
 
-    auto qg = linear_f(hidden, weights.q_proj, q_out, h);
+    auto qg = linear_w(hidden, weights.q_proj, q_out, h);
     if (!qg) {
         return qg.error();
     }
@@ -1263,7 +1310,7 @@ Result<std::vector<float>> qwen38_qsa_layer_token(
         std::copy(qn.value().begin(), qn.value().end(), query.begin() + static_cast<std::ptrdiff_t>(head * attn_dim));
         std::copy(g_head.begin(), g_head.end(), gate.begin() + static_cast<std::ptrdiff_t>(head * attn_dim));
     }
-    auto k = linear_f(hidden, weights.k_proj, kv_out, h);
+    auto k = linear_w(hidden, weights.k_proj, kv_out, h);
     if (!k) {
         return k.error();
     }
@@ -1282,7 +1329,7 @@ Result<std::vector<float>> qwen38_qsa_layer_token(
         }
         std::copy(kn.value().begin(), kn.value().end(), k.value().begin() + static_cast<std::ptrdiff_t>(head * attn_dim));
     }
-    auto v = linear_f(hidden, weights.v_proj, kv_out, h);
+    auto v = linear_w(hidden, weights.v_proj, kv_out, h);
     if (!v) {
         return v.error();
     }
@@ -1335,7 +1382,7 @@ Result<std::vector<float>> qwen38_qsa_layer_token(
     for (std::size_t i = 0; i < attn_out.size(); ++i) {
         attn_out[i] *= sigmoid_f(gate[i]);
     }
-    return linear_f(attn_out, weights.o_proj, h, attn_heads * attn_dim);
+    return linear_w(attn_out, weights.o_proj, h, attn_heads * attn_dim);
 }
 
 Result<std::vector<float>> qwen38_qsa_sparse_attention(
@@ -1409,16 +1456,16 @@ Result<std::vector<float>> qwen38_qsa_sparse_attention(
 namespace {
 
 Qwen38GatedResidualView residual_view(const Qwen38OwnedResidual& w) {
-    return {w.hc_norm, w.mix_down, w.mix_up, w.block_inject};
+    return {w.hc_norm, w.mix_down.ref(), w.mix_up.ref(), w.block_inject.ref()};
 }
 
 Qwen38DeltaNetView delta_view(const Qwen38OwnedDeltaNet& w, const Qwen38ReducedDims& d) {
-    return {w.in_proj_qkv, w.in_proj_z, w.in_proj_a, w.in_proj_b, w.conv1d, w.a_log, w.dt_bias, w.norm, w.out_proj,
+    return {w.in_proj_qkv.ref(), w.in_proj_z.ref(), w.in_proj_a.ref(), w.in_proj_b.ref(), w.conv1d, w.a_log, w.dt_bias, w.norm, w.out_proj.ref(),
         d.hidden_size, d.dn_k_heads, d.dn_v_heads, d.dn_key_dim, d.dn_value_dim, d.dn_kernel, d.rms_eps};
 }
 
 Qwen38QsaLayerView qsa_view(const Qwen38OwnedQsa& w, const Qwen38ReducedDims& d) {
-    return {w.index_qk, w.q_layernorm, w.k_layernorm, w.q_proj, w.k_proj, w.v_proj, w.o_proj, w.q_norm, w.k_norm,
+    return {w.index_qk, w.q_layernorm, w.k_layernorm, w.q_proj.ref(), w.k_proj.ref(), w.v_proj.ref(), w.o_proj.ref(), w.q_norm, w.k_norm,
         d.hidden_size, d.indexer_heads, d.indexer_dim, d.budget, d.compress_ratio,
         d.attn_heads, d.attn_kv_heads, d.attn_head_dim, d.rms_eps};
 }

@@ -1637,9 +1637,9 @@ Result<Qwen38LayerTrunk> qwen38_load_layer_trunk(
             telemetry, false);
         if (!inject) return inject.error();
         out.hc_norm = std::move(hc_norm.value());
-        out.mix_down = std::move(mix_down.value());
-        out.mix_up = std::move(mix_up.value());
-        out.block_inject = std::move(inject.value());
+        out.mix_down.f32 = std::move(mix_down.value());
+        out.mix_up.f32 = std::move(mix_up.value());
+        out.block_inject.f32 = std::move(inject.value());
         return {};
     };
 
@@ -1665,7 +1665,7 @@ Result<Qwen38LayerTrunk> qwen38_load_layer_trunk(
                 {static_cast<std::int64_t>(conv_dim), Qwen38ExpectedInvariants::hidden_size},
                 telemetry, false);
             if (!v) return v.error();
-            w.delta_net.in_proj_qkv = std::move(v.value());
+            w.delta_net.in_proj_qkv.f32 = std::move(v.value());
         }
         {
             auto shard = shard_for(b + "in_proj_z.weight");
@@ -1677,7 +1677,7 @@ Result<Qwen38LayerTrunk> qwen38_load_layer_trunk(
                  Qwen38ExpectedInvariants::hidden_size},
                 telemetry, false);
             if (!v) return v.error();
-            w.delta_net.in_proj_z = std::move(v.value());
+            w.delta_net.in_proj_z.f32 = std::move(v.value());
         }
         {
             auto shard = shard_for(b + "in_proj_a.weight");
@@ -1686,7 +1686,7 @@ Result<Qwen38LayerTrunk> qwen38_load_layer_trunk(
                 {Qwen38ExpectedInvariants::linear_num_value_heads, Qwen38ExpectedInvariants::hidden_size},
                 telemetry, false);
             if (!v) return v.error();
-            w.delta_net.in_proj_a = std::move(v.value());
+            w.delta_net.in_proj_a.f32 = std::move(v.value());
         }
         {
             auto shard = shard_for(b + "in_proj_b.weight");
@@ -1695,7 +1695,7 @@ Result<Qwen38LayerTrunk> qwen38_load_layer_trunk(
                 {Qwen38ExpectedInvariants::linear_num_value_heads, Qwen38ExpectedInvariants::hidden_size},
                 telemetry, false);
             if (!v) return v.error();
-            w.delta_net.in_proj_b = std::move(v.value());
+            w.delta_net.in_proj_b.f32 = std::move(v.value());
         }
         {
             auto shard = shard_for(b + "conv1d.weight");
@@ -1741,7 +1741,7 @@ Result<Qwen38LayerTrunk> qwen38_load_layer_trunk(
                      * Qwen38ExpectedInvariants::linear_value_head_dim)},
                 telemetry, false);
             if (!v) return v.error();
-            w.delta_net.out_proj = std::move(v.value());
+            w.delta_net.out_proj.f32 = std::move(v.value());
         }
     } else {
         // QSA full-attention branch: 9 tensors.
@@ -1790,7 +1790,7 @@ Result<Qwen38LayerTrunk> qwen38_load_layer_trunk(
                 {static_cast<std::int64_t>(q_out), Qwen38ExpectedInvariants::hidden_size},
                 telemetry, false);
             if (!v) return v.error();
-            w.qsa.q_proj = std::move(v.value());
+            w.qsa.q_proj.f32 = std::move(v.value());
         }
         {
             auto shard = shard_for(b + "k_proj.weight");
@@ -1799,7 +1799,7 @@ Result<Qwen38LayerTrunk> qwen38_load_layer_trunk(
                 {static_cast<std::int64_t>(kv_out), Qwen38ExpectedInvariants::hidden_size},
                 telemetry, false);
             if (!v) return v.error();
-            w.qsa.k_proj = std::move(v.value());
+            w.qsa.k_proj.f32 = std::move(v.value());
         }
         {
             auto shard = shard_for(b + "v_proj.weight");
@@ -1808,7 +1808,7 @@ Result<Qwen38LayerTrunk> qwen38_load_layer_trunk(
                 {static_cast<std::int64_t>(kv_out), Qwen38ExpectedInvariants::hidden_size},
                 telemetry, false);
             if (!v) return v.error();
-            w.qsa.v_proj = std::move(v.value());
+            w.qsa.v_proj.f32 = std::move(v.value());
         }
         {
             auto shard = shard_for(b + "o_proj.weight");
@@ -1820,7 +1820,7 @@ Result<Qwen38LayerTrunk> qwen38_load_layer_trunk(
                      * Qwen38ExpectedInvariants::head_dim)},
                 telemetry, false);
             if (!v) return v.error();
-            w.qsa.o_proj = std::move(v.value());
+            w.qsa.o_proj.f32 = std::move(v.value());
         }
         {
             auto shard = shard_for(b + "q_norm.weight");
@@ -1856,7 +1856,7 @@ Result<Qwen38LayerTrunk> qwen38_load_layer_trunk(
              Qwen38ExpectedInvariants::hidden_size},
             telemetry, false);
         if (!v) return v.error();
-        w.shared_mlp.gate_proj = std::move(v.value());
+        w.shared_mlp.gate_proj.f32 = std::move(v.value());
     }
     {
         auto shard = shard_for(p + "mlp.shared_expert.up_proj.weight");
@@ -1866,7 +1866,7 @@ Result<Qwen38LayerTrunk> qwen38_load_layer_trunk(
              Qwen38ExpectedInvariants::hidden_size},
             telemetry, false);
         if (!v) return v.error();
-        w.shared_mlp.up_proj = std::move(v.value());
+        w.shared_mlp.up_proj.f32 = std::move(v.value());
     }
     {
         auto shard = shard_for(p + "mlp.shared_expert.down_proj.weight");
@@ -1876,7 +1876,7 @@ Result<Qwen38LayerTrunk> qwen38_load_layer_trunk(
              Qwen38ExpectedInvariants::shared_expert_intermediate_size},
             telemetry, false);
         if (!v) return v.error();
-        w.shared_mlp.down_proj = std::move(v.value());
+        w.shared_mlp.down_proj.f32 = std::move(v.value());
     }
     {
         auto shard = shard_for(p + "mlp.shared_expert_gate.weight");
@@ -1997,8 +1997,8 @@ Result<Qwen38Layer0ForwardResult> qwen38_layer_forward(
     const std::span<const float> stream_in = stream_vec;
 
     Qwen38GatedResidualView attn_view{
-        weights.attn_hyper.hc_norm, weights.attn_hyper.mix_down,
-        weights.attn_hyper.mix_up, weights.attn_hyper.block_inject};
+        weights.attn_hyper.hc_norm, weights.attn_hyper.mix_down.ref(),
+        weights.attn_hyper.mix_up.ref(), weights.attn_hyper.block_inject.ref()};
     // attn gated residual on the input stream
     auto attn_res = qwen38_gated_residual(stream_in, attn_view, C, H, R, 1.0e-6F);
     if (!attn_res) return attn_res.error();
@@ -2009,11 +2009,11 @@ Result<Qwen38Layer0ForwardResult> qwen38_layer_forward(
         // Gated DeltaNet: the caller owns the state (zero it for the first
         // token, reuse it for subsequent tokens so conv history and SSM carry).
         Qwen38DeltaNetView dn_view{
-            weights.delta_net.in_proj_qkv, weights.delta_net.in_proj_z,
-            weights.delta_net.in_proj_a, weights.delta_net.in_proj_b,
+            weights.delta_net.in_proj_qkv.ref(), weights.delta_net.in_proj_z.ref(),
+            weights.delta_net.in_proj_a.ref(), weights.delta_net.in_proj_b.ref(),
             weights.delta_net.conv1d, weights.delta_net.a_log,
             weights.delta_net.dt_bias, weights.delta_net.norm,
-            weights.delta_net.out_proj};
+            weights.delta_net.out_proj.ref()};
         dn_view.hidden_size = H;
         dn_view.num_k_heads = Qwen38ExpectedInvariants::linear_num_key_heads;
         dn_view.num_v_heads = Qwen38ExpectedInvariants::linear_num_value_heads;
@@ -2045,8 +2045,8 @@ Result<Qwen38Layer0ForwardResult> qwen38_layer_forward(
         // QSA full attention: the caller owns the indexer-key and KV caches.
         Qwen38QsaLayerView qsa_view{
             weights.qsa.index_qk, weights.qsa.q_layernorm, weights.qsa.k_layernorm,
-            weights.qsa.q_proj, weights.qsa.k_proj, weights.qsa.v_proj,
-            weights.qsa.o_proj, weights.qsa.q_norm, weights.qsa.k_norm};
+            weights.qsa.q_proj.ref(), weights.qsa.k_proj.ref(), weights.qsa.v_proj.ref(),
+            weights.qsa.o_proj.ref(), weights.qsa.q_norm, weights.qsa.k_norm};
         qsa_view.hidden_size = H;
         qsa_view.indexer_heads = Qwen38ExpectedInvariants::indexer_n_heads;
         qsa_view.indexer_dim = Qwen38ExpectedInvariants::indexer_head_dim;
@@ -2073,8 +2073,8 @@ Result<Qwen38Layer0ForwardResult> qwen38_layer_forward(
 
     // mlp gated residual
     Qwen38GatedResidualView mlp_view{
-        weights.mlp_hyper.hc_norm, weights.mlp_hyper.mix_down,
-        weights.mlp_hyper.mix_up, weights.mlp_hyper.block_inject};
+        weights.mlp_hyper.hc_norm, weights.mlp_hyper.mix_down.ref(),
+        weights.mlp_hyper.mix_up.ref(), weights.mlp_hyper.block_inject.ref()};
     auto mlp_res = qwen38_gated_residual(attn_out.value(), mlp_view, C, H, R, 1.0e-6F);
     if (!mlp_res) return mlp_res.error();
     if (auto r = require_finite(mlp_res.value().mixed_input, "mlp_gr_mixed"); !r) return r.error();
@@ -2085,11 +2085,7 @@ Result<Qwen38Layer0ForwardResult> qwen38_layer_forward(
     if (!route) return route.error();
 
     // shared expert
-    auto shared = qwen38_shared_mlp(mlp_res.value().mixed_input,
-                                    weights.shared_mlp.gate_proj,
-                                    weights.shared_mlp.up_proj,
-                                    weights.shared_mlp.down_proj,
-                                    weights.shared_mlp.shared_gate,
+    auto shared = qwen38_shared_mlp(mlp_res.value().mixed_input, weights.shared_mlp,
                                     H, Qwen38ExpectedInvariants::shared_expert_intermediate_size);
     if (!shared) return shared.error();
     if (auto r = require_finite(shared.value(), "shared_expert"); !r) return r.error();

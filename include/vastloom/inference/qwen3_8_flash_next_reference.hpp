@@ -2,8 +2,10 @@
 
 #include <array>
 #include <chrono>
+#include <concepts>
 #include <cstddef>
 #include <cstdint>
+#include <concepts>
 #include <filesystem>
 #include <functional>
 #include <optional>
@@ -73,11 +75,47 @@ namespace vastloom::inference {
     float epsilon,
     std::size_t group_size = 0);
 
+// A dense weight that can live either as F32 values or as contiguous Q8_0
+// blocks ([out, in] row major). linear_w consumes both forms with the same
+// per-row sequential double accumulation, so a Q8_0 weight is bit-identical
+// to its dequantized F32 form while costing a quarter of the RAM.
+struct Qwen38WeightRef {
+    std::span<const float> f32;
+    std::span<const std::byte> q8;
+
+    Qwen38WeightRef() = default;
+    Qwen38WeightRef(const Qwen38WeightRef&) = default;
+    Qwen38WeightRef& operator=(const Qwen38WeightRef&) = default;
+    // Single user-defined conversion from any float container so existing
+    // span-style construction keeps compiling.
+    template <class Vector>
+        requires (!std::same_as<std::remove_cvref_t<Vector>, Qwen38WeightRef>)
+    Qwen38WeightRef(const Vector& values) : f32(values) {}
+    Qwen38WeightRef(std::span<const float> f, std::span<const std::byte> q)
+        : f32(f), q8(q) {}
+    bool is_q8() const noexcept { return !q8.empty(); }
+    // Logical element count (Q8_0 blocks carry 32 values in 34 bytes).
+    [[nodiscard]] std::size_t size() const noexcept {
+        return is_q8() ? q8.size() / 34U * 32U : f32.size();
+    }
+    [[nodiscard]] bool empty() const noexcept { return size() == 0U; }
+};
+
+struct Qwen38Weight {
+    std::vector<float> f32;
+    std::vector<std::byte> q8;
+    [[nodiscard]] Qwen38WeightRef ref() const noexcept { return {f32, q8}; }
+    // Logical element count: valid for either representation.
+    [[nodiscard]] std::size_t size() const noexcept {
+        return q8.empty() ? f32.size() : q8.size() / 34U * 32U;
+    }
+    [[nodiscard]] bool empty() const noexcept { return size() == 0U; }
+};
 struct Qwen38GatedResidualView {
     std::span<const float> hc_norm;
-    std::span<const float> mix_down;
-    std::span<const float> mix_up;
-    std::span<const float> block_inject;
+    Qwen38WeightRef mix_down;
+    Qwen38WeightRef mix_up;
+    Qwen38WeightRef block_inject;
 };
 
 struct Qwen38GatedResidualResult {
@@ -102,15 +140,15 @@ struct Qwen38GatedResidualResult {
     std::uint32_t hidden_size);
 
 struct Qwen38DeltaNetView {
-    std::span<const float> in_proj_qkv;
-    std::span<const float> in_proj_z;
-    std::span<const float> in_proj_a;
-    std::span<const float> in_proj_b;
+    Qwen38WeightRef in_proj_qkv;
+    Qwen38WeightRef in_proj_z;
+    Qwen38WeightRef in_proj_a;
+    Qwen38WeightRef in_proj_b;
     std::span<const float> conv1d;
     std::span<const float> a_log;
     std::span<const float> dt_bias;
     std::span<const float> norm;
-    std::span<const float> out_proj;
+    Qwen38WeightRef out_proj;
     std::uint32_t hidden_size{0};
     std::uint32_t num_k_heads{0};
     std::uint32_t num_v_heads{0};
@@ -209,6 +247,14 @@ struct Qwen38QsaSelectResult {
     std::uint32_t hidden_size,
     std::uint32_t intermediate);
 
+// Owned (possibly Q8_0) variant used by the layer forward.
+struct Qwen38OwnedSharedMlp;
+[[nodiscard]] Result<std::vector<float>> qwen38_shared_mlp(
+    std::span<const float> hidden,
+    const Qwen38OwnedSharedMlp& weights,
+    std::uint32_t hidden_size,
+    std::uint32_t intermediate);
+
 [[nodiscard]] std::vector<float> qwen38_expand_stream(
     std::span<const float> hidden,
     std::uint32_t hc_count);
@@ -217,10 +263,10 @@ struct Qwen38QsaLayerView {
     std::span<const float> index_qk;
     std::span<const float> q_layernorm;
     std::span<const float> k_layernorm;
-    std::span<const float> q_proj;
-    std::span<const float> k_proj;
-    std::span<const float> v_proj;
-    std::span<const float> o_proj;
+    Qwen38WeightRef q_proj;
+    Qwen38WeightRef k_proj;
+    Qwen38WeightRef v_proj;
+    Qwen38WeightRef o_proj;
     std::span<const float> q_norm;
     std::span<const float> k_norm;
     std::uint32_t hidden_size{0};
@@ -259,41 +305,42 @@ struct Qwen38QsaCache {
     std::uint32_t kv_heads,
     std::uint32_t head_dim);
 
+
 struct Qwen38OwnedResidual {
     std::vector<float> hc_norm;
-    std::vector<float> mix_down;
-    std::vector<float> mix_up;
-    std::vector<float> block_inject;
+    Qwen38Weight mix_down;
+    Qwen38Weight mix_up;
+    Qwen38Weight block_inject;
 };
 
 struct Qwen38OwnedDeltaNet {
-    std::vector<float> in_proj_qkv;
-    std::vector<float> in_proj_z;
-    std::vector<float> in_proj_a;
-    std::vector<float> in_proj_b;
+    Qwen38Weight in_proj_qkv;
+    Qwen38Weight in_proj_z;
+    Qwen38Weight in_proj_a;
+    Qwen38Weight in_proj_b;
     std::vector<float> conv1d;
     std::vector<float> a_log;
     std::vector<float> dt_bias;
     std::vector<float> norm;
-    std::vector<float> out_proj;
+    Qwen38Weight out_proj;
 };
 
 struct Qwen38OwnedQsa {
     std::vector<float> index_qk;
     std::vector<float> q_layernorm;
     std::vector<float> k_layernorm;
-    std::vector<float> q_proj;
-    std::vector<float> k_proj;
-    std::vector<float> v_proj;
-    std::vector<float> o_proj;
+    Qwen38Weight q_proj;
+    Qwen38Weight k_proj;
+    Qwen38Weight v_proj;
+    Qwen38Weight o_proj;
     std::vector<float> q_norm;
     std::vector<float> k_norm;
 };
 
 struct Qwen38OwnedSharedMlp {
-    std::vector<float> gate_proj;
-    std::vector<float> up_proj;
-    std::vector<float> down_proj;
+    Qwen38Weight gate_proj;
+    Qwen38Weight up_proj;
+    Qwen38Weight down_proj;
     std::vector<float> shared_gate;
 };
 

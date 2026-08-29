@@ -273,8 +273,18 @@ void raw_cache_store(const std::string& key, const std::vector<std::byte>& bytes
     std::lock_guard<std::mutex> lock(raw_cache_mutex());
     if (!raw_cache_enabled()) return;
     if (raw_cache_bytes() + bytes.size() > kRawCacheCapBytes) return;
+    try {
+        raw_cache()[key].bytes = bytes;
+    } catch (const std::bad_alloc&) {
+        // Governor discipline: on memory pressure drop the cache instead of
+        // failing the request. The byte budget stays conservative; commit
+        // pressure (Job limits, other tenants) is discovered right here.
+        raw_cache_enabled() = false;
+        raw_cache().clear();
+        raw_cache_bytes() = 0U;
+        return;
+    }
     raw_cache_bytes() += bytes.size();
-    raw_cache()[key].bytes = bytes;
 }
 Result<Qwen38CheckpointKind> qwen38_detect_checkpoint_kind(
     const std::filesystem::path& checkpoint_root) {
@@ -466,6 +476,70 @@ Result<std::vector<float>> qwen38_read_gguf_tensor_f32(
     return flat;
 }
 
+// Matrix reader that keeps Q8_0 tensors in native block form. The ggml flat
+// layout already matches the row-major [out, in] convention every operator
+// consumes (the "transpose" pass is an identity copy), so a Q8_0 tensor can
+// be stored as raw blocks and read by linear_w with results bit-identical to
+// the dequantized F32 form at a quarter of the RAM. Any other type (or a
+// tensor failing the block-shape checks) falls back to F32 unchanged.
+Result<Qwen38Weight> qwen38_read_gguf_weight(
+    const Qwen38GgufCheckpoint& checkpoint,
+    std::string_view tensor_name,
+    const std::vector<std::uint64_t>& expected_dims,
+    Qwen38Layer0Telemetry* telemetry) {
+    const auto loc = checkpoint.catalog.tensors.find(std::string{tensor_name});
+    if (loc != checkpoint.catalog.tensors.end()) {
+        const model::GgufFile& shard = checkpoint.catalog.shards[loc->second.shard_index];
+        const model::GgufTensorDescriptor& desc = shard.tensors()[loc->second.tensor_index];
+        bool shape_ok = desc.shape.size() == expected_dims.size();
+        for (std::size_t i = 0; shape_ok && i < expected_dims.size(); ++i) {
+            shape_ok = desc.shape[i] == expected_dims[i];
+        }
+        if (shape_ok && desc.ggml_type == 8U && desc.encoded_bytes.has_value()
+            && desc.element_count % 32U == 0U) {
+            const std::uint64_t blocks = desc.element_count / 32U;
+            const std::uint64_t span = desc.encoded_bytes.value();
+            const std::uint64_t begin = desc.absolute_offset;
+            if (span == blocks * 34U && begin + span <= shard.file_bytes()) {
+                const std::string cache_key = shard.path().string() + "#"
+                    + std::to_string(begin) + "#" + std::to_string(span);
+                std::vector<std::byte> bytes;
+                if (const std::vector<std::byte>* cached = raw_cache_fetch(cache_key)) {
+                    bytes = *cached;
+                } else {
+                    std::ifstream& in = persistent_shard_stream(shard.path());
+                    if (!in) {
+                        return make_error(ErrorCode::io_error, "cannot open gguf shard",
+                                          shard.path().string());
+                    }
+                    in.seekg(static_cast<std::streamoff>(begin));
+                    bytes.resize(static_cast<std::size_t>(span));
+                    in.read(reinterpret_cast<char*>(bytes.data()),
+                            static_cast<std::streamsize>(span));
+                    if (static_cast<std::uint64_t>(in.gcount()) != span) {
+                        return make_error(ErrorCode::io_error, "short read of gguf tensor",
+                                          std::string{tensor_name});
+                    }
+                    raw_cache_store(cache_key, bytes);
+                }
+                if (telemetry) {
+                    telemetry->payload_bytes_read += span;
+                    telemetry->tensors_read += 1U;
+                }
+                Qwen38Weight weight;
+                weight.q8 = std::move(bytes);
+                return weight;
+            }
+        }
+    }
+    auto f32 = qwen38_read_gguf_tensor_f32(checkpoint, tensor_name, expected_dims, false,
+                                           telemetry);
+    if (!f32) return f32.error();
+    Qwen38Weight weight;
+    weight.f32 = std::move(f32.value());
+    return weight;
+}
+
 namespace {
 
 constexpr std::uint32_t kQwen38FullAttentionInterval = 4U;
@@ -548,17 +622,21 @@ Result<Qwen38LayerTrunk> qwen38_load_gguf_layer_trunk(
                     bool transpose) -> Result<std::vector<float>> {
         return qwen38_read_gguf_tensor_f32(checkpoint.value(), name, dims, transpose, telemetry);
     };
+    auto load_w = [&](const std::string& name,
+                      const std::vector<std::uint64_t>& dims) -> Result<Qwen38Weight> {
+        return qwen38_read_gguf_weight(checkpoint.value(), name, dims, telemetry);
+    };
 
     auto load_residual = [&](const std::string& norm, const std::string& down,
                              const std::string& up, const std::string& inject,
                              Qwen38OwnedResidual& out) -> Result<void> {
         auto hc_norm = load(norm, {kStream}, false);
         if (!hc_norm) return hc_norm.error();
-        auto mix_down = load(down, {kStream, kRank}, true);
+        auto mix_down = load_w(down, {kStream, kRank});
         if (!mix_down) return mix_down.error();
-        auto mix_up = load(up, {kRank, kStream}, true);
+        auto mix_up = load_w(up, {kRank, kStream});
         if (!mix_up) return mix_up.error();
-        auto inject_w = load(inject, {kStream, Qwen38ExpectedInvariants::hc_count}, true);
+        auto inject_w = load_w(inject, {kStream, Qwen38ExpectedInvariants::hc_count});
         if (!inject_w) return inject_w.error();
         shift_norm_weight(hc_norm.value());
         out.hc_norm = std::move(hc_norm.value());
@@ -585,16 +663,16 @@ Result<Qwen38LayerTrunk> qwen38_load_gguf_layer_trunk(
             static_cast<std::uint64_t>(Qwen38ExpectedInvariants::linear_num_value_heads)
             * Qwen38ExpectedInvariants::linear_value_head_dim;
         const std::string b = p + "ssm_";
-        auto qkv = load(p + "attn_qkv.weight", {kHidden, 2U * kDim + vDim}, true);
+        auto qkv = load_w(p + "attn_qkv.weight", {kHidden, 2U * kDim + vDim});
         if (!qkv) return qkv.error();
         w.delta_net.in_proj_qkv = std::move(qkv.value());
-        auto z = load(p + "attn_gate.weight", {kHidden, vDim}, true);
+        auto z = load_w(p + "attn_gate.weight", {kHidden, vDim});
         if (!z) return z.error();
         w.delta_net.in_proj_z = std::move(z.value());
-        auto a = load(b + "alpha.weight", {kHidden, Qwen38ExpectedInvariants::linear_num_value_heads}, true);
+        auto a = load_w(b + "alpha.weight", {kHidden, Qwen38ExpectedInvariants::linear_num_value_heads});
         if (!a) return a.error();
         w.delta_net.in_proj_a = std::move(a.value());
-        auto bb = load(b + "beta.weight", {kHidden, Qwen38ExpectedInvariants::linear_num_value_heads}, true);
+        auto bb = load_w(b + "beta.weight", {kHidden, Qwen38ExpectedInvariants::linear_num_value_heads});
         if (!bb) return bb.error();
         w.delta_net.in_proj_b = std::move(bb.value());
         auto conv = load(b + "conv1d.weight",
@@ -623,7 +701,7 @@ Result<Qwen38LayerTrunk> qwen38_load_gguf_layer_trunk(
         auto norm = load(b + "norm.weight", {Qwen38ExpectedInvariants::linear_value_head_dim}, false);
         if (!norm) return norm.error();
         w.delta_net.norm = std::move(norm.value());
-        auto out = load(b + "out.weight", {vDim, kHidden}, true);
+        auto out = load_w(b + "out.weight", {vDim, kHidden});
         if (!out) return out.error();
         w.delta_net.out_proj = std::move(out.value());
     } else {
@@ -638,16 +716,16 @@ Result<Qwen38LayerTrunk> qwen38_load_gguf_layer_trunk(
             static_cast<std::uint64_t>(Qwen38ExpectedInvariants::indexer_n_heads)
             * Qwen38ExpectedInvariants::indexer_head_dim;
         const std::uint64_t idxK = Qwen38ExpectedInvariants::indexer_head_dim;
-        auto q = load(p + "attn_q.weight", {kHidden, qOut}, true);
+        auto q = load_w(p + "attn_q.weight", {kHidden, qOut});
         if (!q) return q.error();
         w.qsa.q_proj = std::move(q.value());
-        auto k = load(p + "attn_k.weight", {kHidden, kvOut}, true);
+        auto k = load_w(p + "attn_k.weight", {kHidden, kvOut});
         if (!k) return k.error();
         w.qsa.k_proj = std::move(k.value());
-        auto v = load(p + "attn_v.weight", {kHidden, kvOut}, true);
+        auto v = load_w(p + "attn_v.weight", {kHidden, kvOut});
         if (!v) return v.error();
         w.qsa.v_proj = std::move(v.value());
-        auto o = load(p + "attn_output.weight", {qOut / 2U, kHidden}, true);
+        auto o = load_w(p + "attn_output.weight", {qOut / 2U, kHidden});
         if (!o) return o.error();
         w.qsa.o_proj = std::move(o.value());
         auto qn = load(p + "attn_q_norm.weight", {Qwen38ExpectedInvariants::head_dim}, false);
@@ -686,17 +764,17 @@ Result<Qwen38LayerTrunk> qwen38_load_gguf_layer_trunk(
         w.shared_mlp.shared_gate = std::move(sg.value());
     }
     {
-        auto gp = load(names.shared_gate_proj, {kHidden, kInter}, true);
+        auto gp = load_w(names.shared_gate_proj, {kHidden, kInter});
         if (!gp) return gp.error();
         w.shared_mlp.gate_proj = std::move(gp.value());
     }
     {
-        auto up = load(names.shared_up_proj, {kHidden, kInter}, true);
+        auto up = load_w(names.shared_up_proj, {kHidden, kInter});
         if (!up) return up.error();
         w.shared_mlp.up_proj = std::move(up.value());
     }
     {
-        auto dp = load(names.shared_down_proj, {kInter, kHidden}, true);
+        auto dp = load_w(names.shared_down_proj, {kInter, kHidden});
         if (!dp) return dp.error();
         w.shared_mlp.down_proj = std::move(dp.value());
     }
@@ -1119,8 +1197,8 @@ Result<Qwen38GgufHead> qwen38_load_gguf_head(
     if (!up) return up.error();
     shift_norm_weight(norm.value());
     head.mixer.hc_norm = std::move(norm.value());
-    head.mixer.mix_down = std::move(down.value());
-    head.mixer.mix_up = std::move(up.value());
+    head.mixer.mix_down.f32 = std::move(down.value());
+    head.mixer.mix_up.f32 = std::move(up.value());
     auto lm = qwen38_read_gguf_tensor_f32(checkpoint.value(), "output.weight",
                                           {kHidden, Qwen38ExpectedInvariants::vocab_size},
                                           true, telemetry);
@@ -1144,7 +1222,7 @@ Result<std::vector<float>> qwen38_gguf_logits(
     }
     // Global gated-residual mixer with use_combine=false: no block_inject.
     const Qwen38GatedResidualView mixer_view{
-        head.mixer.hc_norm, head.mixer.mix_down, head.mixer.mix_up, {}};
+        head.mixer.hc_norm, head.mixer.mix_down.ref(), head.mixer.mix_up.ref(), {}};
     auto collapsed = qwen38_gated_residual(final_stream, mixer_view, C, H, R, 1.0e-6F);
     if (!collapsed) return collapsed.error();
     const std::vector<float>& mixed = collapsed.value().mixed_input;

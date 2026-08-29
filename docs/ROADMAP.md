@@ -485,21 +485,28 @@ llama.cpp (gap ~10x, strutturale: page cache vs cache nostre).
 Motivazione: il contesto dichiarato dal checkpoint è 262.144 token; gli
 stati DeltaNet sono O(1) e i cache QSA crescono ~72 KB/token in F32 (128k ≈
 9,4 GB, dimezzabili con cache F16 — fattibile in RAM), ma il prefill seriale
-a 1 token (~3,5-4 s/token) rende
-il contesto lungo irraggiungibile in pratica. Senza prefill veloce, Q12
-(prefix-KV) e Q13 (serve) restano demo corte.
+a 1 token (~3,5-4 s/token) rende il contesto lungo irraggiungibile in
+pratica. Senza prefill veloce, Q12 (prefix-KV) e Q13 (serve) restano demo
+corte.
 
-- [ ] Forma chunked della regola delta GDN (scan a blocchi, stato carry tra
-      chunk) con accepts condition: output bit-pari vs il percorso seriale
-      token-per-token fixture e reale (stato dopo N token identico).
-- [ ] Prefill QSA batchato: punteggio indexer e selezione blocchi per più
-      query per passata, append KV/index senza cambiare i risultati.
-- [ ] Conv/PLE/Router/mixing sul percorso prefill allineati al chunking.
-- [ ] Misura: throughput prefill token/s su prompt lunghi vs il baseline
+- [x] Leva trovata prima del chunking: backend SIMD ggml OPT-IN per i
+      matvec Q8_0 (`00df4e9`): forward 6,1→1,7 s, expert 19,6→11,2 s su 8
+      forward; parità 16/16 mantenuta sulla batteria esistente; il GDN
+      chunked in riferimento scalare sarebbe NEGATIVO (O(C²·d) in scalare >
+      ricorrenza seriale O(d) per token) → utile solo insieme ai GEMM SIMD.
+- [ ] DIFETTO D1 (aperto da `--top-logits`): su "Once upon a time," seriale
+      E ggml scelgono ' there' con margine +0,36 contro ' in' di llama.cpp —
+      oltre il rumore float-vs-double ⇒ differenza sistematica a pos≥5.
+      Metodo: diff stadio-per-stadio Q11h su quel prompt esatto.
+- [ ] Prefill a chunk pilotato dal backend ggml: batch T token per layer
+      (GEMM riutilizzano le righe Q8 in cache L2), conv/PLE allineati.
+- [ ] Forma chunked della regola delta GDN solo se il profilo lo richiede.
+- [ ] Prefill QSA batchato: punteggio indexer per più query per passata.
+- [ ] Misura: throughput prefill token/s su prompt lunghi vs baseline
       seriale, bytes/token letti, in report dedicato.
 
-**Gate:** replay bit-paro del prefill multi-token reale (estensione del test
-di regression Q11d a ≥ 64 token) + throughput misurato e documentato.
+**Gate:** parità greedy preservata su una batteria ≥ 4 prompt × 24 token
+Dopo D1; replay bit-paro (o tolerance dichiarata e verificata con oracolo) del prefill multi-token esteso; throughput misurato e documentato.
 
 ## Q12 - prefix-KV MoE stream (porting M13)
 

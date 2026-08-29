@@ -7,6 +7,8 @@
 #include <cstdlib>
 #include <filesystem>
 #include <fstream>
+#include <future>
+#include <tuple>
 #include <iomanip>
 #include <iostream>
 #include <initializer_list>
@@ -2337,7 +2339,10 @@ int command_qwen38_greedy(const std::vector<std::string>& args) {
         }
     };
     GreedyExpertCache lru;
-    lru.capacity = expert_cache.value();
+    // Capacity must exceed one token's distinct experts so that publishing a
+    // miss never evicts a slot this token still points at.
+    lru.capacity = (std::max)(expert_cache.value(),
+                              static_cast<std::size_t>(2U * Qwen38ExpectedInvariants::num_experts_per_tok));
 
     std::vector<std::uint32_t> generated;
     std::vector<std::uint32_t> sequence = token_ids;
@@ -2372,19 +2377,42 @@ int command_qwen38_greedy(const std::vector<std::string>& args) {
             t_trunk += t1 - t0; t_fwd += t2 - t1;
             std::vector<float> expert_sum(H, 0.0F);
             const double tex0 = now_ms();
-            for (std::size_t i = 0; i < fwd.value().route.indices.size(); ++i) {
-                const auto eid = fwd.value().route.indices[i];
+            const auto& route = fwd.value().route;
+            // Phase 1: cache lookup; misses dispatch as concurrent reads (each
+            // slice is ~5 MB and latency-bound, so batching the top-k experts
+            // hides NVMe round trips the sequential loop paid one by one).
+            std::vector<Qwen38OwnedExpertQ8*> slots(route.indices.size(), nullptr);
+            std::vector<std::future<std::tuple<std::uint32_t, std::size_t,
+                Result<Qwen38OwnedExpertQ8>, Qwen38Layer0Telemetry>>> loads;
+            for (std::size_t i = 0; i < route.indices.size(); ++i) {
+                const auto eid = route.indices[i];
                 const std::uint32_t key = (layer << 16U) | eid;
-                Qwen38OwnedExpertQ8* ptr = lru.find(key);
-                if (ptr == nullptr) {
-                    auto real = qwen38_load_layer_expert_q8(
-                        trunk_ref, checkpoint_root, eid, &load_tel);
-                    if (!real) return print_error(real.error(), json);
-                    ptr = &lru.insert(key, std::move(real.value()));
+                slots[i] = lru.find(key);
+                if (slots[i] != nullptr) {
+                    continue;
                 }
-                auto y = qwen38_expert_mlp_q8(fwd.value().mixed_input, *ptr, H, I);
+                loads.emplace_back(std::async(std::launch::async,
+                    [&, eid, key, i] {
+                        Qwen38Layer0Telemetry local;
+                        auto result = qwen38_load_layer_expert_q8(
+                            trunk_ref, checkpoint_root, eid, &local);
+                        return std::make_tuple(key, i, std::move(result), local);
+                    }));
+            }
+            // Phase 2: merge telemetry and publish every miss before the
+            // compute pass, so no cache pointer is used across an eviction.
+            for (auto& pending : loads) {
+                auto [key, idx, result, local] = pending.get();
+                load_tel.payload_bytes_read += local.payload_bytes_read;
+                load_tel.expert_payload_bytes += local.expert_payload_bytes;
+                load_tel.tensors_read += local.tensors_read;
+                if (!result) return print_error(result.error(), json);
+                slots[idx] = &lru.insert(key, std::move(result.value()));
+            }
+            for (std::size_t i = 0; i < slots.size(); ++i) {
+                auto y = qwen38_expert_mlp_q8(fwd.value().mixed_input, *slots[i], H, I);
                 if (!y) return print_error(y.error(), json);
-                const float w = fwd.value().route.weights[i];
+                const float w = route.weights[i];
                 for (std::uint32_t d = 0; d < H; ++d) {
                     expert_sum[d] += y.value()[d] * w;
                 }

@@ -1075,7 +1075,9 @@ Result<Qwen38OwnedExpertQ8> qwen38_load_gguf_expert_q8(
             return make_error(ErrorCode::invalid_format, "expert slice out of bounds",
                               src.shard.string());
         }
-        std::ifstream& in = persistent_shard_stream(src.shard);
+        // Local stream on purpose: the greedy expert loader issues concurrent
+        // slice reads, and the persistent stream mutex would serialize them.
+        std::ifstream in(src.shard, std::ios::binary);
         if (!in) {
             return make_error(ErrorCode::io_error, "cannot open expert shard", src.shard.string());
         }

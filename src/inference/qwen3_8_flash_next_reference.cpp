@@ -1,6 +1,7 @@
 #include "vastloom/inference/qwen3_8_flash_next_reference.hpp"
 
 #include "vastloom/inference/deepseek_v4_reference.hpp"
+#include "vastloom/inference/ggml_compute.hpp"
 
 #include <algorithm>
 #include <chrono>
@@ -352,6 +353,19 @@ Result<std::vector<float>> linear_from_q8(
         return make_error(ErrorCode::invalid_argument, "linear q8 size mismatch", "qwen38_linear_q8");
     }
     std::vector<float> out(out_dim, 0.0F);
+    // Opt-in ggml backend: SIMD kernels over the same Q8_0 bytes with float
+    // accumulation, which is exactly the arithmetic the external oracle uses.
+    // It threads internally, so this path replaces the row-parallel scalar
+    // loop rather than nesting inside it. Anything it refuses falls back to
+    // the sequential double accumulation below.
+    if (ggml_compute_enabled()
+        && ggml_compute_can_run(8U, weight.data(), out_dim, in_dim)) {
+        auto ran = matvec_ggml_backend(8U, weight, out_dim, in_dim, input, out);
+        if (ran) {
+            return out;
+        }
+        ggml_compute_note_fallback();
+    }
     const auto* bytes = reinterpret_cast<const std::uint8_t*>(weight.data());
     const std::uint64_t row_blocks = in_dim / 32U;
     qwen38_parallel_for(0U, out_dim, 32U, [&](std::uint64_t lo, std::uint64_t hi) {

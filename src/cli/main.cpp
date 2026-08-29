@@ -8,6 +8,7 @@
 #include <filesystem>
 #include <fstream>
 #include <future>
+#include <thread>
 #include <tuple>
 #include <iomanip>
 #include <iostream>
@@ -2172,7 +2173,7 @@ int command_qwen38_chain(const std::vector<std::string>& args) {
 // byte-level gpt2 detokenize. The external-parity path against llama.cpp.
 int command_qwen38_greedy(const std::vector<std::string>& args) {
     const bool json = has_flag(args, "--json");
-    auto valid = validate_options(args, 1U, {"--prompt-ids", "--steps", "--expert-cache", "--ram-headroom-gb", "--gpu-limit"}, {"--json", "--show-ids", "--cuda-experts"});
+    auto valid = validate_options(args, 1U, {"--prompt-ids", "--steps", "--expert-cache", "--ram-headroom-gb", "--gpu-limit", "--ggml-threads", "--top-logits"}, {"--json", "--show-ids", "--cuda-experts", "--ggml-backend"});
     if (!valid) return print_error(valid.error(), json);
     const auto ids_csv = option_value(args, "--prompt-ids");
     if (!ids_csv || ids_csv->empty()) {
@@ -2212,6 +2213,8 @@ int command_qwen38_greedy(const std::vector<std::string>& args) {
                            json);
     }
     auto expert_cache = optional_size(args, "--expert-cache", 64U);
+    auto top_logit_dump = optional_size(args, "--top-logits", 0U);
+    if (!top_logit_dump) return print_error(top_logit_dump.error(), json);
     if (!expert_cache) return print_error(expert_cache.error(), json);
     if (expert_cache.value() == 0U || expert_cache.value() > 512U) {
         return print_error(vastloom::make_error(
@@ -2281,6 +2284,32 @@ int command_qwen38_greedy(const std::vector<std::string>& args) {
             } else {
                 accelerator = created.take_value();
             }
+        }
+    }
+
+    // ggml SIMD backend for the Q8_0 matvecs (opt-in): the oracle's float
+    // accumulation order over the same encoded bytes. Refused calls and all
+    // F32 weights stay on the sequential double scalar kernels.
+    bool ggml_backend_on = false;
+    if (has_flag(args, "--ggml-backend")) {
+        vastloom::inference::GgmlComputeOptions ggml_options;
+        ggml_options.threads = (std::max)(1U, std::thread::hardware_concurrency());
+        if (option_value(args, "--ggml-threads").has_value()) {
+            auto threads = optional_size(args, "--ggml-threads", 0U);
+            if (!threads) return print_error(threads.error(), json);
+            if (threads.value() == 0U || threads.value() > 64U) {
+                return print_error(vastloom::make_error(
+                    vastloom::ErrorCode::invalid_argument, "ggml threads must be 1..64"), json);
+            }
+            ggml_options.threads = static_cast<unsigned int>(threads.value());
+        }
+        auto enabled = vastloom::inference::ggml_compute_enable(governor, ggml_options);
+        if (!enabled) {
+            std::cerr << "ggml: " << enabled.error().message
+                      << " (scalar kernels)\n";
+        } else {
+            ggml_backend_on = true;
+            std::cerr << "ggml backend on: threads=" << ggml_options.threads << "\n";
         }
     }
 
@@ -2400,12 +2429,13 @@ int command_qwen38_greedy(const std::vector<std::string>& args) {
     std::vector<std::uint32_t> generated;
     std::vector<std::uint32_t> sequence = token_ids;
     const std::size_t prompt_len = token_ids.size();
-    double t_trunk = 0.0, t_expert = 0.0, t_fwd = 0.0, t_head = 0.0;
+    double t_trunk = 0.0, t_expert = 0.0, t_fwd = 0.0, t_head = 0.0, t_loop = 0.0;
     auto now_ms = [] { return std::chrono::duration<double, std::milli>(
         std::chrono::steady_clock::now().time_since_epoch()).count(); };
     // Prefill processes every prompt token (carrying the layer states); the
     // last prompt token and every generated token produce logits.
     for (std::size_t pos = 0; pos < prompt_len + steps.value(); ++pos) {
+        const double tpos0 = now_ms();
         const std::uint32_t tid = sequence[pos];
         auto row = qwen38_load_embed_row(checkpoint_root, tid, &load_tel);
         if (!row) return print_error(row.error(), json);
@@ -2543,6 +2573,7 @@ int command_qwen38_greedy(const std::vector<std::string>& args) {
             stream = std::move(finished.value());
         }
         if (pos + 1 < prompt_len) {
+            t_loop += now_ms() - tpos0;
             continue;  // middle prompt tokens do not need the head
         }
         double th0 = now_ms();
@@ -2553,18 +2584,33 @@ int command_qwen38_greedy(const std::vector<std::string>& args) {
         for (std::uint32_t v = 1U; v < logits.value().size(); ++v) {
             if (logits.value()[v] > logits.value()[best]) best = v;
         }
+        if (top_logit_dump.value() > 0U && pos + 1U == prompt_len) {
+            std::vector<std::uint32_t> order(logits.value().size());
+            std::iota(order.begin(), order.end(), 0U);
+            std::partial_sort(order.begin(),
+                              order.begin() + top_logit_dump.value(), order.end(),
+                              [&](std::uint32_t a, std::uint32_t b) {
+                                  return logits.value()[a] > logits.value()[b];
+                              });
+            for (std::size_t k = 0U; k < top_logit_dump.value(); ++k) {
+                std::cerr << "top[" << k << "] id=" << order[k]
+                          << " logit=" << logits.value()[order[k]] << "\n";
+            }
+        }
         sequence.push_back(best);
         generated.push_back(best);
         if (has_flag(args, "--show-ids")) {
             std::cout << best << (generated.size() < steps.value() ? ',' : '\n');
         }
+        t_loop += now_ms() - tpos0;
     }
 
     if (!json) {
         const auto cache_stats = qwen38_raw_cache_stats();
         std::cerr << "cache fetch=" << cache_stats.first << " hit=" << cache_stats.second << "\n";
         std::cerr << "phase ms: trunk=" << (int)t_trunk << " expert=" << (int)t_expert
-                  << " forward=" << (int)t_fwd << " head=" << (int)t_head << "\n";
+                  << " forward=" << (int)t_fwd << " head=" << (int)t_head
+                  << " other=" << (int)(t_loop - t_trunk - t_expert - t_fwd - t_head) << "\n";
         std::cerr << "expert cache: cap=" << lru.capacity << " hits=" << lru.hits
                   << " misses=" << lru.misses << " evictions=" << lru.evictions << "\n";
         if (accelerator) {
@@ -2601,6 +2647,13 @@ int command_qwen38_greedy(const std::vector<std::string>& args) {
                   << "}\n";
     } else {
         std::cout << "generated: " << text << '\n';
+    }
+    if (ggml_backend_on) {
+        if (!json) {
+            std::cerr << "ggml backend: accelerated=" << vastloom::inference::ggml_compute_accelerated_count()
+                      << " fallback=" << vastloom::inference::ggml_compute_fallback_count() << "\n";
+        }
+        vastloom::inference::ggml_compute_disable();
     }
     return 0;
 }

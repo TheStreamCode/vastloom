@@ -25,9 +25,12 @@ unsloth **Q8_0 GGUF** checkpoint (175.3 GiB, canonical immutable import at
 end-to-end and achieves **greedy token parity with llama.cpp** (`6fe7498`,
 CPU, same checkpoint). Do not claim competitive throughput: the reference-PC greedy CLI runs
 ~4 s/token against llama.cpp's ~3.2 tok/s on the same machine; trunks stream from NVMe per
-token unless an explicit RAM-headroom override permits F32 residency, and experts resolve
-through a bounded Q8_0 cache; VRAM-resident expert tiers
-and cross-layer prefetch are designed but not implemented. The DeepSeek V4
+token unless an explicit RAM-headroom override permits Q8_0-native residency (~3.3 s/token
+when resident), and experts resolve through a bounded Q8_0 cache. A VRAM-resident expert tier
+is implemented and bit-identical (`--cuda-experts`) but measures slower than the 12-thread
+CPU Q8_0 kernel on the reference RTX 4070 Super — FP64 parity accumulation cannot use the
+device's parallel reductions — so it stays opt-in; cross-layer prefetch is not implemented.
+The DeepSeek V4
 Flash 0731 track is historical: `UD-IQ2_XXS` was its only execution quant,
 IQ1 / `UD-IQ1_S` was deleted; its pinned decoders and reduced-graph fixtures
 remain as historical tests, not as the execution path.
@@ -176,14 +179,20 @@ order: this reference sums in `double` where ggml sums in `float`, and their log
 
 Measured position: a token still moves 8.76 GB of weights (6.99 GB always-active trunk plus
 globals, 1.77 GB selected experts). The Qwen3.8 greedy CLI on the reference PC (CPU, trunk
-F32 residency, Q8_0-native expert matvec, concurrent expert reads, 512-entry expert cache)
-runs ~4 s/token end to end; llama.cpp `6fe7498` on the same machine and checkpoint reaches
-~3.2 tok/s, so the honest ratio is roughly twelve times, not competitive. The remaining gap
-is architectural, not kernel-level: llama.cpp keeps everything in Q8_0 under the OS page
-cache while we hold ~13 GB of F32 trunks that evict it. Closing this needs Q8_0-native trunk
-residency and then CUDA expert/tile execution; neither exists yet. Do not describe any
-throughput here as competitive. Do not compare an IQ2_XXS second-per-token to an older
-IQ1_S figure as if they were the same experiment.
+Q8_0-native residency under a RAM-headroom override, Q8_0-native expert matvec, concurrent
+expert reads, 512-entry expert cache) runs ~3.3-4 s/token end to end; llama.cpp `6fe7498` on
+the same machine and checkpoint reaches ~3.2 tok/s, so the honest ratio is roughly ten to
+twelve times, not competitive. The remaining gap is structural: llama.cpp keeps everything
+in Q8_0 under the OS page cache, while our ~7.3 GB Q8_0 trunk residency plus cache and
+runtime state still leaves less RAM for the page cache than an mmap-only runtime uses.
+Trunk residency was cut from 13 GB of F32 to Q8_0 bytes in P2d (bit-identical, startup
+16.8 -> 3.1 s); the CUDA expert tier was measured and rejected as a default (P3a: the FP64
+parity accumulation cannot use parallel reductions on consumer parts, so the 12-thread CPU
+kernel stays ahead). What could still close the gap is a smaller expert quant (Q4_K/IQ4
+re-import: halves the ~2.5 GB/token expert traffic) and float-precision device kernels
+where the parity bar admits them. Do not describe any throughput here as competitive.
+Do not compare an IQ2_XXS second-per-token to an older IQ1_S figure as if they were the
+same experiment.
 
 Before trusting a number, ask under what conditions it was taken. Five checks in this milestone
 could not fail: dyadic parity values that cannot separate f32 from f64; a cost breakdown by

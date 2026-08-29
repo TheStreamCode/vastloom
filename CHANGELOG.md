@@ -2,6 +2,23 @@
 
 ## Unreleased
 
+- **Q11j - Q8_0-native trunks (P2d) and the measured CUDA expert verdict (P3a).**
+  The large trunk projections (hyper-connections, DeltaNet and QSA
+  projections, shared expert) now keep native Q8_0 blocks through a
+  `Qwen38Weight`/`linear_w` seam that is bit-identical to the F32 path, so
+  resident startup went 16.8 s -> 3.1 s, the 8-forward greedy run 72.6 s ->
+  29.8 s (~3.3 s/token) and the no-override streaming path 194 s -> 32 s;
+  the streaming raw-payload cache also degrades gracefully under commit
+  pressure instead of crashing (a pre-existing defect found while A/B-ing).
+  `--cuda-experts` was then wired through the existing VRAM-resident Q8_0
+  matvec accelerator with device-only cache entries (no NVMe read, no host
+  payload for experts the device already holds). It is bit-identical but
+  SLOWER than the 12-thread CPU kernel on the reference RTX 4070 Super
+  (39.8-43.5 s vs 35.7 s over 8 forwards): the FP64 parity accumulation
+  cannot use the device's parallel reductions and the parity-friendly grids
+  are tiny, so the tier stays opt-in and the CPU kernel is the product path.
+  The next performance lever is a smaller expert quant, not the GPU.
+
 - **Q11i - Q8_0-native experts and concurrent prefetch (4x greedy speedup).**
   Routed experts are no longer dequantized to a 19.7 MB F32 copy per use:
   `qwen38_expert_mlp_q8` reads contiguous Q8_0 blocks directly with the same

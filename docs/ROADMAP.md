@@ -494,10 +494,18 @@ corte.
       forward; parità 16/16 mantenuta sulla batteria esistente; il GDN
       chunked in riferimento scalare sarebbe NEGATIVO (O(C²·d) in scalare >
       ricorrenza seriale O(d) per token) → utile solo insieme ai GEMM SIMD.
-- [ ] DIFETTO D1 (aperto da `--top-logits`): su "Once upon a time," seriale
-      E ggml scelgono ' there' con margine +0,36 contro ' in' di llama.cpp —
-      oltre il rumore float-vs-double ⇒ differenza sistematica a pos≥5.
-      Metodo: diff stadio-per-stadio Q11h su quel prompt esatto.
+- [x] DIFETTO D1 RISOLTO COME DIAGNOSI (`a32f6af`): bisezione di stage su
+      "Once" — hc_norm pari a 1e-6, hc_gate deviazza 3,6e-2; la replica
+      numpy di ggml_vec_dot_q8_0_q8_0 (attivazioni quantizzate Q8_0) chiude
+      il gap 8,6x. Causa: llama.cpp quantizza le ATTIVAZIONI per ogni matvec
+      con pesi Q8_0; il nostro percorso double è più preciso del reference e
+      sui near-tie (margine 0,36 su quel prompt) può flippare. Non è un
+      difetto dei kernel.
+- [ ] Decisione di parita aperta: modalita `--llama-activation-quant` (matvec
+      Q8_0 con attivazioni quantizzate + accumulo f32 nell'ordine ggml) per
+      parità STABILE su tutta la batteria con llama.cpp CPU; il percorso
+      double resta il reference interno. Validare: battery ≥6 prompt × 24
+      token tutti identici, e confronto con i margini logit.
 - [ ] Prefill a chunk pilotato dal backend ggml: batch T token per layer
       (GEMM riutilizzano le righe Q8 in cache L2), conv/PLE allineati.
 - [ ] Forma chunked della regola delta GDN solo se il profilo lo richiede.

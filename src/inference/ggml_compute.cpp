@@ -4,6 +4,7 @@
 #include <cstdint>
 #include <cstring>
 #include <mutex>
+#include <thread>
 #include <span>
 #include <vector>
 
@@ -50,6 +51,11 @@ struct GgmlBackendState {
     ggml_threadpool_t threadpool{nullptr};
     unsigned threads{0U};
     QuantizedActivation activation;
+    // The backend owns a shared context, graph pool and thread pool: only the
+    // thread that called ggml_compute_enable may execute matvecs. Guarding
+    // the contract here turns a silent concurrent corruption into a visible
+    // error at the first cross-thread call.
+    std::thread::id owner_thread{};
 };
 
 std::uint64_t fingerprint_f32(std::span<const float> input) noexcept {
@@ -176,6 +182,7 @@ Result<void> ggml_compute_enable(safety::ResourceGovernor& governor,
         return make_error(ErrorCode::internal_error, "Unable to init the ggml compute context");
     }
     state.threads = options.threads;
+    state.owner_thread = std::this_thread::get_id();
     g_active.store(true, std::memory_order_release);
     return {};
 }
@@ -247,6 +254,10 @@ Result<void> matvec_ggml_backend(std::uint32_t ggml_type,
     auto& state = backend_state();
     if (state.context == nullptr) {
         return make_error(ErrorCode::internal_error, "ggml compute context is not initialized");
+    }
+    if (state.owner_thread != std::this_thread::get_id()) {
+        return make_error(ErrorCode::invalid_argument,
+                          "ggml matvec is single-threaded: call it from the enabling thread only");
     }
     ggml_reset(state.context);
     ggml_context* context = state.context;

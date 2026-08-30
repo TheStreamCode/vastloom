@@ -5,7 +5,7 @@
 - **Q11i-Q11j performance work**: Q8_0-native expert matvec (bit-identical),
   O(1) expert LRU, concurrent expert prefetch, Q8_0-native trunk residency;
   greedy path 33.75 -> ~3.3-4 s/token on the reference PC while keeping the
-  llama.cpp parity battery green.
+  llama.cpp parity checks green (the structured margin-aware battery tooling is a pending Q11l deliverable).
 - **P3a `--cuda-experts`**: bit-identical VRAM-resident Q8_0 expert tier;
   measured slower than the 12-thread CPU kernel (FP64 parity accumulation
   cannot use parallel reductions on consumer GPUs) and kept opt-in.
@@ -1646,7 +1646,11 @@
   46.0% median warm buffered-pipeline improvement over whole 12 MiB reads on three paired
   WSL runs. This is not a physical-NVMe or DeepSeek throughput claim.
 
-## 0.4.0-alpha.4 — 2026-08-09
+- Qwen3.8 performance groundwork (commit `e6ae192`): resident F32 trunks, a bounded raw
+  Q8_0 payload cache with graceful degradation under commit pressure, persistent shard
+  streams and parallel hot kernels; greedy per-token wall time went from 33.75 s to
+  2.7 s/token in the forward phase before the later Q11i Q8_0-native rework.
+## 0.4.0-alpha.4 (rebrand) - 2026-08-09
 
 - Renamed the public project, CLI, C++ namespace, headers, CMake targets and current
   documentation to **Vastloom** with the slogan “Run giant models. Keep your machine yours.”

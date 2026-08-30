@@ -102,7 +102,7 @@ handle while deliberately leaving its Governor bytes charged and keeps the drive
 until process teardown. That fail-closed state prevents a second worker from treating uncertain
 VRAM as available.
 
-The next M8 slice adds one bounded synchronous data-plane transaction:
+The M8 slice adds one bounded synchronous data-plane transaction:
 
 ```text
 accounted caller input + weight
@@ -866,7 +866,10 @@ router decisions or accepted output tokens.
 
 - `hardware/`: non-invasive machine probe.
 - `cuda/`: dynamically loaded Windows/Linux CUDA capability probe, Governor-backed move-only VRAM
-  allocation, synchronous copies and a bounded scalar FP32 RMSNorm parity kernel.
+  allocation, synchronous copies, a bounded scalar FP32 RMSNorm parity kernel and the
+  `CudaMatvecAccelerator`: a VRAM-resident quantized Q8_0/IQ matvec tier (used by
+  `qwen38-greedy --cuda-experts` and the DeepSeek graph) with LRU eviction that prefers
+  recurring weights and device-only fast paths keyed on stable weight identities.
 - `planner/`: conservative capacity and placement plan.
 - `safety/`: reservations, state machine and heartbeat.
 - `model/`: manifest/Safetensors/GGUF parsing, imported-checkpoint and closed-world partial-range
@@ -876,16 +879,23 @@ router decisions or accepted output tokens.
 - `research/`: native-telemetry-driven no-cache/LRU/LFU/static-hot simulation and exact
   unique-expert reuse distance.
 - `inference/`: TinyTransformer, pinned SmolLM2 generation, pinned OLMoE routed CPU
-  reference/streaming, DeepSeek Safetensors/GGUF inspection and the reduced router-first
-  selected-expert reference path, plus exact non-executing DeepSeek trunk-artifact binding and
-  complete reduced packed-catalog tensor-set consumption.
+  reference/streaming, the primary **Qwen3.8-Flash-Next (qwen4exp)** track - Safetensors/GGUF
+  dispatcher, Q8_0-native trunk weights (`Qwen38Weight` + `linear_w`, bit-identical F32-or-Q8
+  matvec seam), routed-expert Q8_0 matvecs with an O(1) LRU and concurrent prefetch, DeltaNet
+  parallel decode and the `qwen38-inspect/layer/prefill/chain/greedy` command family - plus the
+  DeepSeek Safetensors/GGUF inspection, the reduced router-first selected-expert reference path,
+  exact non-executing DeepSeek trunk-artifact binding and complete reduced packed-catalog
+  tensor-set consumption.
 - `inference/ggml_compute`: opt-in delegation of CPU matrix-vector products to a pinned ggml
   checkout, enabled at configure time by `VASTLOOM_GGML_ROOT` and at run time by
-  `deepseek-forward --ggml-compute`. The Governor charges its fixed pool before allocation, one
-  thread pool is created at the Governor's thread budget, and both are torn down at exit.
-  Dispatch sits at the two existing choke points — the transactional matvec and the fused routed
-  expert — and falls back to the scalar reference kernels call by call. The scalar kernels remain
-  the default and the parity reference; a backend error is an error, never a silent switch.
+  `deepseek-forward --ggml-compute` or `qwen38-greedy --ggml-backend`. The Governor charges its
+  fixed pool before allocation, one thread pool is created at the Governor's thread budget, and
+  both are torn down at exit. The backend is single-threaded by contract (the enabling thread
+  owns all matvecs; a cross-thread call is a visible error, never a silent race). Dispatch sits
+  at the existing choke points - the transactional matvec, the fused routed expert and the
+  Qwen3.8 Q8_0 linear - and falls back to the scalar reference kernels call by call. The scalar
+  kernels remain the default and the parity reference; a backend error is an error, never a
+  silent switch.
 - `cli/`: interactive and one-shot model client commands.
 - `api/`: OpenAI request/response protocol with bounded parsing, and the loopback-only HTTP
   server behind `vastloom serve` (single connection at a time, SSE streaming, Governor

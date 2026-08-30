@@ -9,6 +9,7 @@
 #include "vastloom/inference/qwen3_8_flash_next_reference.hpp"
 
 #include <algorithm>
+#include <atomic>
 #include <chrono>
 #include <cmath>
 #include <cstring>
@@ -30,6 +31,8 @@ namespace vastloom::inference {
 // [performance] Small static thread pool for the hot scalar kernels. The
 // reference operators stay single-threaded; the GGUF forward path uses this
 // fan-out because a 6B-active decode is otherwise compute-bound on one core.
+namespace {
+
 unsigned int hw_threads() {
     static const unsigned int n = [] {
         const auto h = std::thread::hardware_concurrency();
@@ -59,6 +62,8 @@ void parallel_for(std::uint64_t begin, std::uint64_t end, std::uint64_t grain,
     fn(begin, (std::min)(end, begin + chunk));
     for (auto& th : threads) th.join();
 }
+
+}  // namespace
 
 namespace {
 
@@ -97,16 +102,14 @@ Result<GgmlLayout> ggml_layout(std::uint32_t ggml_type) {
     }
 }
 
-std::vector<float> transpose_ggml(std::span<const float> flat,
-                                  std::uint64_t ne0,
-                                  std::uint64_t ne1) {
-    // ggml flat index = i0 + i1 * ne0 (ne0 contiguous); row-major [ne1, ne0]
-    // out[o * ne0 + i] = flat[i + o * ne0] is a plain copy of that layout, so
-    // the ggml [in, out] tensor becomes row-major [out, in] directly.
+// ggml flat index = i0 + i1 * ne0 (ne0 contiguous); that byte order IS the
+// row-major [out, in] layout every operator consumes, so this "transpose"
+// is an element-preserving copy. Nothing is permuted; the name describes
+// the caller's intent, and the copy exists because the read path returns
+// an owned buffer either way.
+std::vector<float> identity_copy_row_major(std::span<const float> flat) {
     std::vector<float> out(flat.size());
     std::memcpy(out.data(), flat.data(), flat.size() * sizeof(float));
-    std::ignore = ne0;
-    std::ignore = ne1;
     return out;
 }
 
@@ -240,10 +243,8 @@ std::uint64_t& raw_cache_bytes() {
 
 constexpr std::uint64_t kRawCacheCapBytes = 16ULL * 1024ULL * 1024ULL * 1024ULL;
 
-std::uint64_t* raw_cache_hits_addr() {
-    static std::uint64_t hits[2] = {0U, 0U};  // [fetches, hits]
-    return hits;
-}
+std::atomic<std::uint64_t> raw_cache_fetches{0U};
+std::atomic<std::uint64_t> raw_cache_hits{0U};
 
 bool& raw_cache_enabled() {
     static bool enabled = true;
@@ -251,30 +252,38 @@ bool& raw_cache_enabled() {
 }
 
 std::pair<std::uint64_t, std::uint64_t> qwen38_raw_cache_stats() {
-    auto* h = raw_cache_hits_addr();
-    return {h[0], h[1]};
+    return {raw_cache_fetches.load(std::memory_order_relaxed),
+            raw_cache_hits.load(std::memory_order_relaxed)};
 }
 
 void qwen38_set_raw_cache_enabled(bool enabled) {
+    std::lock_guard<std::mutex> lock(raw_cache_mutex());
     raw_cache_enabled() = enabled;
 }
 
 const std::vector<std::byte>* raw_cache_fetch(const std::string& key) {
     std::lock_guard<std::mutex> lock(raw_cache_mutex());
     if (!raw_cache_enabled()) return nullptr;
-    ++raw_cache_hits_addr()[0];
+    raw_cache_fetches.fetch_add(1U, std::memory_order_relaxed);
     auto it = raw_cache().find(key);
-    if (it != raw_cache().end()) { ++raw_cache_hits_addr()[1]; }
+    if (it != raw_cache().end()) {
+        raw_cache_hits.fetch_add(1U, std::memory_order_relaxed);
+    }
     if (it == raw_cache().end()) return nullptr;
     return &it->second.bytes;
 }
 
-void raw_cache_store(const std::string& key, const std::vector<std::byte>& bytes) {
+// Returns true when the cache accepted the payload (the buffer is consumed);
+// false when disabled, full, or out of memory (the buffer is left intact).
+bool raw_cache_store(const std::string& key, std::vector<std::byte>&& bytes) {
     std::lock_guard<std::mutex> lock(raw_cache_mutex());
-    if (!raw_cache_enabled()) return;
-    if (raw_cache_bytes() + bytes.size() > kRawCacheCapBytes) return;
+    if (!raw_cache_enabled()) return false;
+    const std::size_t size = bytes.size();
+    if (raw_cache_bytes() + size > kRawCacheCapBytes) return false;
     try {
-        raw_cache()[key].bytes = bytes;
+        // Move the payload into the map so a store never doubles its byte
+        // footprint (the caller's buffer is transferred, not copied).
+        raw_cache()[key].bytes = std::move(bytes);
     } catch (const std::bad_alloc&) {
         // Governor discipline: on memory pressure drop the cache instead of
         // failing the request. The byte budget stays conservative; commit
@@ -282,9 +291,10 @@ void raw_cache_store(const std::string& key, const std::vector<std::byte>& bytes
         raw_cache_enabled() = false;
         raw_cache().clear();
         raw_cache_bytes() = 0U;
-        return;
+        return false;
     }
-    raw_cache_bytes() += bytes.size();
+    raw_cache_bytes() += size;
+    return true;
 }
 Result<Qwen38CheckpointKind> qwen38_detect_checkpoint_kind(
     const std::filesystem::path& checkpoint_root) {
@@ -322,6 +332,10 @@ Result<Qwen38GgufCheckpoint> qwen38_open_gguf_checkpoint(
     std::vector<std::filesystem::path> shard_paths;
     std::error_code ec;
     for (const auto& entry : std::filesystem::directory_iterator(checkpoint_root, ec)) {
+        if (ec) {
+            return make_error(ErrorCode::io_error, "cannot scan checkpoint root",
+                              ec.message() + " [" + checkpoint_root.string() + "]");
+        }
         if (entry.is_regular_file() && entry.path().extension() == ".gguf") {
             shard_paths.push_back(entry.path());
         } else if (entry.is_directory()) {
@@ -424,10 +438,15 @@ Result<std::vector<float>> qwen38_read_gguf_tensor_f32(
             return make_error(ErrorCode::io_error, "short read of gguf tensor",
                               std::string{tensor_name});
         }
-        raw_cache_store(cache_key, owned);
-        // Point at the resident copy so the miss path decodes identically.
-        cached = raw_cache_fetch(cache_key);
-        payload = cached != nullptr ? std::span<const std::byte>{*cached} : owned;
+        // Move the payload into the cache when it accepts it; otherwise the
+        // buffer stays owned here and is used directly below.
+        auto candidate = std::move(owned);
+        if (raw_cache_store(cache_key, std::move(candidate))) {
+            cached = raw_cache_fetch(cache_key);
+            payload = cached != nullptr ? std::span<const std::byte>{*cached} : candidate;
+        } else {
+            payload = candidate;
+        }
     }
     if (telemetry) {
         telemetry->payload_bytes_read += span;
@@ -471,7 +490,7 @@ Result<std::vector<float>> qwen38_read_gguf_tensor_f32(
     if (transpose && desc.shape.size() == 2U) {
         // ggml [in, out] flat (ne0 contiguous over in) is exactly row-major
         // [out, in]; reinterpret without per-element work.
-        return transpose_ggml(flat, desc.shape[0], desc.shape[1]);
+        return identity_copy_row_major(flat);
     }
     return flat;
 }
@@ -520,7 +539,11 @@ Result<Qwen38Weight> qwen38_read_gguf_weight(
                         return make_error(ErrorCode::io_error, "short read of gguf tensor",
                                           std::string{tensor_name});
                     }
-                    raw_cache_store(cache_key, bytes);
+                    // The cache keeps its own copy only when it is enabled (resident trunks
+                    // disable it); the weight always owns the original bytes.
+                    if (raw_cache_enabled() && !bytes.empty()) {
+                        raw_cache_store(cache_key, std::vector<std::byte>{bytes});
+                    }
                 }
                 if (telemetry) {
                     telemetry->payload_bytes_read += span;
@@ -1269,44 +1292,80 @@ Result<std::pair<std::uint64_t, std::uint64_t>> locate_gguf_kv(
     if (loaded < 24U || header_buffer[0] != std::byte{0x47U}) {
         return make_error(ErrorCode::invalid_format, "not a GGUF header", shard_path.string());
     }
-    const auto u32_at = [&](std::uint64_t p) {
+    const auto need = [&](std::uint64_t p, std::uint64_t n) -> Result<std::uint64_t> {
+        if (n > loaded || p > loaded - n) {
+            return make_error(ErrorCode::invalid_format, "gguf header read out of bounds",
+                              shard_path.string());
+        }
+        return p + n;
+    };
+    const auto u32_at = [&](std::uint64_t p) -> Result<std::uint32_t> {
+        auto end = need(p, 4U);
+        if (!end) return end.error();
         std::uint32_t v = 0U;
         std::memcpy(&v, header_buffer.data() + p, 4U);
         return v;
     };
-    const auto u64_at = [&](std::uint64_t p) {
+    const auto u64_at = [&](std::uint64_t p) -> Result<std::uint64_t> {
+        auto end = need(p, 8U);
+        if (!end) return end.error();
         std::uint64_t v = 0U;
         std::memcpy(&v, header_buffer.data() + p, 8U);
         return v;
     };
     const auto str_at = [&](std::uint64_t p, std::string* out) -> Result<std::uint64_t> {
-        const std::uint64_t len = u64_at(p);
-        if (p + 8U + len > loaded) {
-            return make_error(ErrorCode::invalid_format, "gguf string out of header",
-                              shard_path.string());
-        }
+        auto len_result = u64_at(p);
+        if (!len_result) return len_result.error();
+        const std::uint64_t len = len_result.value();
+        auto end = need(p + 8U, len);
+        if (!end) return end.error();
         out->assign(reinterpret_cast<const char*>(header_buffer.data()) + p + 8U,
                     static_cast<std::size_t>(len));
-        return p + 8U + len;
+        return end.value();
+    };
+    const auto array_bytes = [&](std::uint64_t et, std::uint64_t n) -> Result<std::uint64_t> {
+        std::uint64_t sz = 0U;
+        switch (et) {
+            case 0U: case 1U: case 7U: sz = 1U; break;
+            case 2U: case 3U: sz = 2U; break;
+            case 4U: case 5U: case 6U: sz = 4U; break;
+            case 10U: case 11U: case 12U: sz = 8U; break;
+            default:
+                return make_error(ErrorCode::invalid_format,
+                                  "gguf array element type unsupported", std::to_string(et));
+        }
+        if (n > loaded / sz) {
+            return make_error(ErrorCode::invalid_format, "gguf array size overflows header",
+                              shard_path.string());
+        }
+        return n * sz;
     };
     std::uint64_t pos = 24U;  // magic + version + tensor_count + kv_count
-    const std::uint64_t kv_count = u64_at(16U);
+    auto kv_count_result = u64_at(16U);
+    if (!kv_count_result) return kv_count_result.error();
+    const std::uint64_t kv_count = kv_count_result.value();
     const std::uint64_t header_end = loaded;
     for (std::uint64_t i = 0; i < kv_count && pos < header_end; ++i) {
         std::string k;
         auto after_key = str_at(pos, &k);
         if (!after_key) return after_key.error();
         pos = after_key.value();
-        const std::uint32_t type = u32_at(pos);
+        auto type_result = u32_at(pos);
+        if (!type_result) return type_result.error();
+        const std::uint32_t type = type_result.value();
         pos += 4U;
         if (k == key) {
             // Value spans until the next KV key start; compute by walking it.
             // Caller only needs scalar/array-of-string values, so walk here.
             std::uint64_t value_begin = pos;
             if (type == 9U) {
-                const std::uint32_t et = u32_at(pos);
+                auto et_result = u32_at(pos);
+                if (!et_result) return et_result.error();
+                const std::uint32_t et = et_result.value();
                 pos += 4U;
-                const std::uint64_t n = u64_at(pos);
+                auto n_result = u64_at(pos);
+                if (!n_result) return n_result.error();
+                const std::uint64_t n = n_result.value();
                 pos += 8U;
                 if (et == 8U) {
                     for (std::uint64_t j = 0; j < n; ++j) {
@@ -1315,43 +1374,34 @@ Result<std::pair<std::uint64_t, std::uint64_t>> locate_gguf_kv(
                         pos = next.value();
                     }
                 } else {
-                    std::uint64_t sz = 0U;
-                    switch (et) {
-                        case 0U: case 1U: case 7U: sz = 1U; break;
-                        case 2U: case 3U: sz = 2U; break;
-                        case 4U: case 5U: case 6U: sz = 4U; break;
-                        case 10U: case 11U: case 12U: sz = 8U; break;
-                        default:
-                            return make_error(ErrorCode::invalid_format,
-                                              "gguf array element type unsupported",
-                                              std::to_string(et));
-                    }
-                    pos += n * sz;
+                    auto span = array_bytes(et, n);
+                    if (!span) return span.error();
+                    auto end = need(pos, span.value());
+                    if (!end) return end.error();
+                    pos = end.value();
                 }
             } else if (type == 8U) {
                 auto next = str_at(pos, &k);
                 if (!next) return next.error();
                 pos = next.value();
             } else {
-                std::uint64_t sz = 0U;
-                switch (type) {
-                    case 0U: case 1U: case 7U: sz = 1U; break;
-                    case 2U: case 3U: sz = 2U; break;
-                    case 4U: case 5U: case 6U: sz = 4U; break;
-                    case 10U: case 11U: case 12U: sz = 8U; break;
-                    default:
-                        return make_error(ErrorCode::invalid_format,
-                                          "gguf value type unsupported", std::to_string(type));
-                }
-                pos += sz;
+                auto span = array_bytes(type, 1U);
+                if (!span) return span.error();
+                auto end = need(pos, span.value());
+                if (!end) return end.error();
+                pos = end.value();
             }
             return std::pair<std::uint64_t, std::uint64_t>{value_begin, pos - value_begin};
         }
         // Skip this KV's value entirely.
         if (type == 9U) {
-            const std::uint32_t et = u32_at(pos);
+            auto et_result = u32_at(pos);
+            if (!et_result) return et_result.error();
+            const std::uint32_t et = et_result.value();
             pos += 4U;
-            const std::uint64_t n = u64_at(pos);
+            auto n_result = u64_at(pos);
+            if (!n_result) return n_result.error();
+            const std::uint64_t n = n_result.value();
             pos += 8U;
             if (et == 8U) {
                 for (std::uint64_t j = 0; j < n; ++j) {
@@ -1360,35 +1410,22 @@ Result<std::pair<std::uint64_t, std::uint64_t>> locate_gguf_kv(
                     pos = next.value();
                 }
             } else {
-                std::uint64_t sz = 0U;
-                switch (et) {
-                    case 0U: case 1U: case 7U: sz = 1U; break;
-                    case 2U: case 3U: sz = 2U; break;
-                    case 4U: case 5U: case 6U: sz = 4U; break;
-                    case 10U: case 11U: case 12U: sz = 8U; break;
-                    default:
-                        return make_error(ErrorCode::invalid_format,
-                                          "gguf array element type unsupported",
-                                          std::to_string(et));
-                }
-                pos += n * sz;
+                auto span = array_bytes(et, n);
+                if (!span) return span.error();
+                auto end = need(pos, span.value());
+                if (!end) return end.error();
+                pos = end.value();
             }
         } else if (type == 8U) {
             auto next = str_at(pos, &k);
             if (!next) return next.error();
             pos = next.value();
         } else {
-            std::uint64_t sz = 0U;
-            switch (type) {
-                case 0U: case 1U: case 7U: sz = 1U; break;
-                case 2U: case 3U: sz = 2U; break;
-                case 4U: case 5U: case 6U: sz = 4U; break;
-                case 10U: case 11U: case 12U: sz = 8U; break;
-                default:
-                    return make_error(ErrorCode::invalid_format,
-                                      "gguf value type unsupported", std::to_string(type));
-            }
-            pos += sz;
+            auto span = array_bytes(type, 1U);
+            if (!span) return span.error();
+            auto end = need(pos, span.value());
+            if (!end) return end.error();
+            pos = end.value();
         }
     }
     return make_error(ErrorCode::not_found, "gguf key not found", std::string{key});

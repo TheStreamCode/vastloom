@@ -1,7 +1,7 @@
 # Capability-transfer feasibility matrix (F1 evidence synthesis)
 
 **Status:** research synthesis, dated 2026-08-21. This document answers the five F1
-questions posed in `CAPABILITY_TRANSFER_VISION.md` against two evidence sources: the pinned
+questions posed in `docs/archive/deepseek_0731/CAPABILITY_TRANSFER_VISION.md` against two evidence sources: the pinned
 local artifacts (ggml checkout `30bf868`, ggml 0.19.0; the repository's own device and
 inference layers) and published work cited below. It contains no implementation and makes no
 performance claim; every number is either measured earlier by this project (linked) or an

@@ -3,6 +3,13 @@
 #include "vastloom/inference/deepseek_v4_reference.hpp"
 #include "vastloom/inference/ggml_compute.hpp"
 
+#if defined(_WIN32)
+#ifndef NOMINMAX
+#define NOMINMAX
+#endif
+#include <windows.h>
+#endif
+
 #include <algorithm>
 #include <chrono>
 #include <cmath>
@@ -526,7 +533,12 @@ Result<Qwen38GatedResidualResult> qwen38_gated_residual(
             std::FILE* f = nullptr;
             bool opened = false;
 #if defined(_WIN32)
-            const std::wstring wide(path, path + std::strlen(path));
+            // UTF-8 to UTF-16, not byte widening: diagnostic paths may contain accents.
+            const int wide_length = MultiByteToWideChar(
+                CP_UTF8, 0, path, static_cast<int>(std::strlen(path)), nullptr, 0);
+            std::wstring wide(static_cast<std::size_t>(wide_length), L'\0');
+            MultiByteToWideChar(CP_UTF8, 0, path,
+                                static_cast<int>(std::strlen(path)), wide.data(), wide_length);
             opened = _wfopen_s(&f, wide.c_str(), L"ab") == 0 && f != nullptr;
 #else
             f = std::fopen(path, "ab");
@@ -758,7 +770,12 @@ Result<std::vector<float>> qwen38_delta_net_decode(
             std::FILE* f = nullptr;
             bool opened = false;
 #if defined(_WIN32)
-            const std::wstring wide(path, path + std::strlen(path));
+            // UTF-8 to UTF-16, not byte widening: diagnostic paths may contain accents.
+            const int wide_length = MultiByteToWideChar(
+                CP_UTF8, 0, path, static_cast<int>(std::strlen(path)), nullptr, 0);
+            std::wstring wide(static_cast<std::size_t>(wide_length), L'\0');
+            MultiByteToWideChar(CP_UTF8, 0, path,
+                                static_cast<int>(std::strlen(path)), wide.data(), wide_length);
             opened = _wfopen_s(&f, wide.c_str(), L"ab") == 0 && f != nullptr;
 #else
             f = std::fopen(path, "ab");
@@ -1281,7 +1298,12 @@ Result<std::vector<float>> matvec_q8_preferring_device(
     if (device != nullptr) {
         std::vector<float> out(out_dim, 0.0F);
         auto served = device->matvec(matrix, input, out);
-        if (served && served.value()) {
+        if (!served) {
+            // A real device failure (launch/DMA) is a hard error, not a
+            // decline: propagate it instead of silently recomputing on CPU.
+            return served.error();
+        }
+        if (served.value()) {
             return out;
         }
     }

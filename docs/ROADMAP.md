@@ -5,7 +5,7 @@ A command existing in the CLI is not enough; it must run against a validated mod
 
 > **Pivot architetturale (2026-08-26):** il track DeepSeek V4 Flash 0731 (M0–M13) è
 > congelato in `docs/archive/deepseek_0731/`. Nuovo track: **Qwen3.8-Flash-Next**
-> (preview architettura Qwen4). Roadmap Q1–Q13 sotto.
+> (preview architettura Qwen4). Roadmap Q0–Q14 below (active track kept in Italian; section titles are self-explanatory).
 
 ---
 
@@ -438,7 +438,7 @@ l'oracolo llama.cpp e per la residenza esperti in VRAM.
   `llama-completion`, `llama-tokenize`, `llama-debug` (+ patch di dump
   opzionale via env, solo nel clone locale, non committata).
 - [x] Debug sistematico per stadio con dump intermedi (`hc_norm`, `hc_mixed`,
-  `attn_output`, `final_output`) e replica numpy — cinque difetti trovati e
+  `attn_output`, `final_output`) e replica numpy — sei difetti trovati e
   corretti:
   1. **z-gate del DeltaNet: sigmoid, non silu** — llama: "the one numerical
      difference from Qwen3.5's GDN: sigmoid output gate, not silu"; il
@@ -567,4 +567,4 @@ brevi; il contesto lungo realistico dipende da Q11k+Q12, non da Q13.
 Il track M0–M13 (DeepSeek V4 Flash 0731) è congelato in `docs/archive/deepseek_0731/`.
 I test C++ che difendono la parità pinned-ggml per IQ1_S/IQ2_XXS/Q4_K restano
 compilati e verdi — sono contratti storici. Per il M14+ originale (multi-backend,
-Kimi K3, Laguna, MiniMax, Vulkan/ROCm, multi-NVMe) vedi la roadmap archiviata.
+Kimi K3, Laguna, MiniMax, Vulkan/ROCm, multi-NVMe) see the archived roadmap preserved in git history (the previous content of this file, retrievable with `git log --follow docs/ROADMAP.md`).

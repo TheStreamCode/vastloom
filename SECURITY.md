@@ -22,8 +22,9 @@ The maintainer will acknowledge receipt, coordinate triage and agree on disclosu
 
 ## Trust boundaries
 
-- The native runtime processes local models, prompts and hardware metadata. It has no HTTP
-  inference server and does not transmit prompts or telemetry.
+- The native runtime processes local models, prompts and hardware metadata. Its only HTTP
+  surface is the explicit `serve` command, which binds to 127.0.0.1 (loopback only, no
+  remote interface); it does not transmit prompts or telemetry anywhere.
 - `tools/import_hf_model.py` is a separate opt-in network tool. It downloads only explicitly
   pinned HTTPS artifacts, checks declared sizes and hashes, preserves free-disk headroom and
   publishes an immutable checkpoint atomically.

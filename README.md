@@ -24,7 +24,7 @@ model conversion.
 
 The further north star — a fast resident **frontman** expanded at runtime by a **dormant
 brain** on NVMe through bounded bridges — is documented separately in
-[`docs/research/CAPABILITY_TRANSFER_VISION.md`](docs/research/CAPABILITY_TRANSFER_VISION.md).
+[`docs/archive/deepseek_0731/CAPABILITY_TRANSFER_VISION.md`](docs/archive/deepseek_0731/CAPABILITY_TRANSFER_VISION.md).
 It is a compass for future work, not a claim about what runs today.
 
 > [!NOTE]
@@ -385,8 +385,8 @@ portability target, not a validated platform claim.
 - **Reference parity:** exact token IDs and greedy outputs, with final-token logits
   matching the pinned Transformers reference within the declared tolerance.
 - **Fail-closed runtime:** full checkpoint verification by default, Resource Governor
-  reservations, live memory-headroom checks, Windows Job Object cap and at most six
-  CPU inference threads.
+  reservations, live memory-headroom checks, Windows Job Object cap and the CPU
+  thread pool capped to half the logical cores (max 12; `runtime_policy.cpp`).
 
 ### Real MoE and NVMe-to-RAM path
 
@@ -700,8 +700,11 @@ the selected install prefix.
 
 The default build registers the tests whose inputs live in the repository. The real-model and real
 GPU checks are opt-in: they only run where their checkpoints, slices or NVIDIA driver are present,
-and none of them runs in CI. The CMake variables that enable them (`VASTLOOM_QWEN38_MODEL`,
-`VASTLOOM_DEEPSEEK_V4_*`, `VASTLOOM_GGML_ROOT`) are listed in [`AGENTS.md`](AGENTS.md) under
+and none of them runs in CI. The CMake variables that enable them are the cache paths declared in
+the root `CMakeLists.txt` (`VASTLOOM_QWEN38_MODEL`, `VASTLOOM_SMOLLM2_MODEL`, `VASTLOOM_OLMOE_MODEL`,
+`VASTLOOM_OLMOE_FULL_MODEL`, `VASTLOOM_DEEPSEEK_V4_MODEL`, `VASTLOOM_DEEPSEEK_V4_GGUF_HEADER`,
+`VASTLOOM_DEEPSEEK_V4_*_ARTIFACT`, `VASTLOOM_DEEPSEEK_V4_IQ1S_SLICE`, `VASTLOOM_DEEPSEEK_V4_IQ3XXS_SLICE`,
+`VASTLOOM_GGML_ROOT`); `VASTLOOM_QWEN38_MODEL` is also described in [`AGENTS.md`](AGENTS.md) under
 Standard gates. Governed commands report `SKIPPED` with the reason when the host is too short on
 memory or disk to run them safely, so read the run output rather than the exit code alone.
 
@@ -1008,16 +1011,30 @@ vastloom doctor
 vastloom cuda-info [--allocation-smoke SIZE|--rmsnorm-smoke]
     [--minimum-free-vram SIZE] [--json]
 vastloom inspect MANIFEST_OR_MODEL_HEADERS [--declared-size SIZE] [--tensor-limit N]
-vastloom verify MANIFEST [--full]
+vastloom verify MANIFEST [--full] [--model-root PATH]
 vastloom plan MANIFEST
 vastloom trace-sim TRACE.csv
 vastloom io-smoke FILE
 vastloom store-init PATH [--reserve 300GiB]
 vastloom store-info PATH [--reserve 300GiB]
 vastloom runtime-policy [--storage PATH] [--json]
-vastloom tokenize MODEL_DIRECTORY --text TEXT [--chat] [--json]
+vastloom tokenize MODEL_DIRECTORY --text TEXT [--system TEXT] [--chat] [--json]
 vastloom real-logits MODEL_DIRECTORY --text TEXT [--chat] [--top N] [--json]
-vastloom moe-inspect MODEL_DIRECTORY [--no-verify] [--json]
+vastloom module-init MODEL OUT --name NAME [--rank N] [--scale F] [--seed N]
+    [--layers N] [--targets LIST] [--zero-a] [--json]
+vastloom module-fit MODEL TRANSCRIPT OUT --name NAME [--rank N] [--steps N]
+    [--lr F] [--reg F] [--seed N] [--max-records N]
+    [--site lm-head|hidden] [--no-verify] [--json]
+vastloom qwen38-inspect MODEL_DIRECTORY
+vastloom qwen38-layer MODEL_DIRECTORY --layer N [--token N]
+vastloom qwen38-prefill MODEL_DIRECTORY --tokens CSV [--layer N] [--expert-cache N]
+vastloom qwen38-chain MODEL_DIRECTORY --layers CSV --tokens CSV [--expert-cache N]
+vastloom qwen38-greedy MODEL_DIRECTORY --prompt-ids CSV [--steps N] [--expert-cache N]
+    [--ram-headroom-gb N] [--cuda-experts] [--ggml-backend] [--ggml-threads N]
+    [--top-logits N] [--show-ids]
+vastloom deepseek-expert-redundancy MODEL_DIRECTORY
+vastloom deepseek-forward MODEL_DIRECTORY [--layers N] [--expert-cache N]
+    [--ggml-compute]
 vastloom deepseek-inspect MODEL_DIRECTORY [--no-verify] [--json]
 vastloom deepseek-gguf-inspect SHARD... [--declared-sizes CSV] [--revision ID] [--json]
 vastloom deepseek-gguf-checkpoint MODEL_DIRECTORY [--context N] [--batch-size N]
@@ -1174,7 +1191,7 @@ research thesis. It currently has:
   six-global fixture transaction now feeds every global consumer from one aggregate lease, while
   the official 596,000,788-byte global payload, any official trunk payload read and the full-model
   loop remain absent;
-- no VRAM expert tier or pinned host buffers; direct/unbuffered I/O is currently an
+- no default VRAM expert tier (the bit-identical `--cuda-experts` tier exists but stays opt-in after measuring slower than the 12-thread CPU kernel; pinned host buffers are not implemented); direct/unbuffered I/O is currently an
   opt-in OLMoE measurement protocol, not the production path for every adapter;
 - OLMoE currently exposes final-logit probes and route telemetry, not decoding/chat;
 - the scalar CPU kernels remain the default and the parity reference; production CPU speed
@@ -1186,7 +1203,8 @@ research thesis. It currently has:
   checkpoint has an unambiguous local-device mapping, but whole-device deltas can include
   unrelated traffic and SSD temperature/power telemetry is not implemented;
 - no persistent KV reuse between chat turns; history is currently recomputed;
-- no local HTTP API yet.
+- no remote/networked API: the `serve` endpoint binds to 127.0.0.1 only and
+  is the entire HTTP surface.
 
 The TinyChat throughput is not representative of a large model because the complete
 fixture is smaller than one megabyte and remains resident in CPU RAM.
@@ -1231,7 +1249,7 @@ The reference-PC working-set rule is defined in
 Vastloom is an independent project and currently contains no copied code from the
 following projects. They remain important engineering and benchmarking references:
 
-- [Colibr�](https://github.com/JustVugg/colibri)
+- [Colibri](https://github.com/JustVugg/colibri)
 - [DwarfStar / DS4](https://github.com/antirez/ds4)
 - [kimi-k3-in-c](https://github.com/FareedKhan-dev/kimi-k3-in-c)
 - [DeepSeekV4SSD](https://github.com/yanun0323/deepseek_ssd) - reviewed in

@@ -2240,11 +2240,10 @@ int command_qwen38_greedy(const std::vector<std::string>& args) {
                                    "ram headroom override must be 0..24 GiB"),
                                json);
         }
-        MEMORYSTATUSEX mem{};
-        mem.dwLength = sizeof(mem);
-        GlobalMemoryStatusEx(&mem);
+        auto mem = vastloom::hardware::HardwareProbe::collect(checkpoint_root);
+        if (!mem) return print_error(mem.error(), json);
         const std::uint64_t ceiling =
-            mem.ullTotalPhys - static_cast<std::uint64_t>(gb) * (1ULL << 30);
+            mem.value().memory.total_bytes - static_cast<std::uint64_t>(gb) * (1ULL << 30);
         const auto raised = std::max(policy.value().resources.host_memory_hard_limit, ceiling);
         policy.value().resources.host_memory_hard_limit = raised;
         // The Windows Job Object enforces ram_hard_limit, not host_memory_hard_limit.
@@ -2329,10 +2328,9 @@ int command_qwen38_greedy(const std::vector<std::string>& args) {
     // reported by the hardware probe; falls back to per-token streaming when
     // the budget refuses.
     std::vector<Qwen38LayerTrunk> trunks;
-    MEMORYSTATUSEX memx{};
-    memx.dwLength = sizeof(memx);
-    GlobalMemoryStatusEx(&memx);
-    const std::uint64_t free_ram = memx.ullAvailPhys;
+    auto memx = vastloom::hardware::HardwareProbe::collect(checkpoint_root);
+    if (!memx) return print_error(memx.error(), json);
+    const std::uint64_t free_ram = memx.value().memory.available_bytes;
     // Q8_0-native trunks still commit ~11 GiB together with the F32 head and
     // runtime state: keep the 13 GiB policy gate, but the physical-RAM gate
     // drops to 10 GiB because the resident set is 5.5 GiB smaller than the
@@ -2564,6 +2562,11 @@ int command_qwen38_greedy(const std::vector<std::string>& args) {
                 if (!y) return print_error(y.error(), json);
                 const float w = route.weights[i];
                 for (std::uint32_t d = 0; d < H; ++d) {
+                    if (!std::isfinite(y.value()[d])) {
+                        return print_error(vastloom::make_error(
+                            vastloom::ErrorCode::invalid_format,
+                            "non-finite expert output"), json);
+                    }
                     expert_sum[d] += y.value()[d] * w;
                 }
             }

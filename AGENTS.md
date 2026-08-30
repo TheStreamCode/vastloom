@@ -9,7 +9,7 @@ Vastloom is a native, hardware-adaptive local inference runtime that treats VRAM
 NVMe as a model-aware hierarchy.
 
 **North star.** The capability-transfer vision lives in
-`docs/research/CAPABILITY_TRANSFER_VISION.md`: a fast, dense, resident **frontman**
+`docs/archive/deepseek_0731/CAPABILITY_TRANSFER_VISION.md`: a fast, dense, resident **frontman**
 (default `gemma-4-12B-it` QAT Q4) expanded at runtime by a **dormant brain**
 (`deepseek-v4-flash-0731` on NVMe) through bounded bridges — offline distillation into
 compact low-rank modules, a selective oracle wake-up, and retrieval. It is explicitly *not*
@@ -40,7 +40,7 @@ unsloth **Q8_0 GGUF** checkpoint (175.3 GiB, canonical immutable import at
 `C:\vastloom-store`, FP8 safetensors deleted after the GGUF replaced it)
 end-to-end and achieves **greedy token parity with llama.cpp** (`6fe7498`,
 CPU, same checkpoint). Do not claim competitive throughput: the reference-PC greedy CLI runs
-~4 s/token against llama.cpp's ~3.2 tok/s on the same machine; trunks stream from NVMe per
+~4 s/token when streaming (no residency) against llama.cpp's ~3.2 tok/s on the same machine; trunks stream from NVMe per
 token unless an explicit RAM-headroom override permits Q8_0-native residency (~3.3 s/token
 when resident), and experts resolve through a bounded Q8_0 cache. A VRAM-resident expert tier
 is implemented and bit-identical (`--cuda-experts`) but measures slower than the 12-thread

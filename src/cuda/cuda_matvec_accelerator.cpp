@@ -219,13 +219,15 @@ Result<CudaMatvecAccelerator::Resident*> CudaMatvecAccelerator::ensure_resident(
         return uploaded.error();
     }
     stats_.uploaded_bytes += matrix_bytes;
-    stats_.resident_bytes += total;
     try {
         entry = resident_.emplace(matrix.cache_identity, std::move(resident)).first;
     } catch (const std::bad_alloc&) {
+        // The device allocation is released by Resident's destructor on
+        // unwind; account for nothing so the counters stay accurate.
         return make_error(ErrorCode::resource_exhausted,
                           "Unable to record a resident CUDA matrix");
     }
+    stats_.resident_bytes += total;
     stats_.resident_matrices = resident_.size();
     return &entry->second;
 }

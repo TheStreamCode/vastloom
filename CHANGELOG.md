@@ -1,6 +1,26 @@
 # Changelog
 
-## Unreleased
+## 0.4.0-alpha.5 - Unreleased
+
+- **Q11i-Q11j performance work**: Q8_0-native expert matvec (bit-identical),
+  O(1) expert LRU, concurrent expert prefetch, Q8_0-native trunk residency;
+  greedy path 33.75 -> ~3.3-4 s/token on the reference PC while keeping the
+  llama.cpp parity battery green.
+- **P3a `--cuda-experts`**: bit-identical VRAM-resident Q8_0 expert tier;
+  measured slower than the 12-thread CPU kernel (FP64 parity accumulation
+  cannot use parallel reductions on consumer GPUs) and kept opt-in.
+- **Q11k ggml backend**: opt-in `--ggml-backend` SIMD Q8_0 matvecs
+  (forward ~2x on compute); piece-aligned with the margin-aware parity
+  definition introduced with D1's root-cause analysis.
+- **D1**: the oracle quantizes activations per matvec; parity is enforced
+  margin-aware and the activation-quantization mirror was considered and
+  dropped. Landscape: ik_llama.cpp (Qwen-3.8 support) and KTransformers
+  named as the state of the art for hierarchical MoE inference; Vastloom's
+  differentiation is the Safety Governor and the capability-transfer path.
+- **Project hygiene**: .clang-format policy added; personal RESUME.md
+  removed from version control and ignored.
+
+## 0.4.0-alpha.4 - 2026-08-09
 
 - **Strategic alignment - parity redefined, two pillars, landscape checked.**
   D1's root cause (the oracle quantizes activations to Q8_0 on every Q8_0

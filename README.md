@@ -1136,11 +1136,20 @@ Alpha.4 proves one real dense path, one real CPU MoE streaming path and the
 Qwen3.8-Flash-Next externally-parity-validated path — not the final Vastloom
 research thesis. It currently has:
 
-- **Qwen3.8-Flash-Next**: greedy parity validated, but no throughput claim yet —
-  trunks stream from NVMe per token (one resident at a time) and experts resolve
-  through a bounded LRU; the VRAM-resident expert tiers and cross-layer prefetch
-  that would make streaming fast are designed but not implemented; the MTP draft
-  head and vision tower are not executed; sampling is greedy-only in the parity
+- **Qwen3.8-Flash-Next**: greedy parity validated margin-aware — identical
+  tokens wherever the oracle's logit margin is clear; near-tie continuations
+  may diverge by documented design (D1: the oracle quantizes activations to
+  Q8_0 on every Q8_0 matvec while Vastloom's double reference is more
+  accurate, so Vastloom does not mirror llama.cpp's rounding); measured
+  ~3.3-4 s/token with trunk residency on the reference PC against
+  llama.cpp ~0.3 s/token and ik_llama.cpp ~0.4 s/token on the same
+  checkpoint — an honest ~10x gap whose remaining levers are expert-quant
+  re-import, a ggml-SIMD default (`--ggml-backend`, measured ~2x on compute
+  as an opt-in today) and a routing-aware VRAM expert tier; Q8_0-native
+  trunk residency and a device-resident bit-identical expert tier
+  (`--cuda-experts`, measured slower than the 12-thread CPU kernel on
+  consumer GPUs and kept opt-in) are implemented; the MTP draft head and
+  vision tower are not executed; sampling is greedy-only in the parity
   CLI;
 - two executable pinned Hugging Face adapters plus a DeepSeek metadata/tokenizer, reduced
   FP32 prefill oracle, file-backed governed Q8_0 layer, official 0731 GGUF metadata catalog and

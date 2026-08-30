@@ -9,3 +9,6 @@
 Thumbs.db
 __pycache__/
 *.py[cod]
+
+# Personal files (never publish)
+RESUME.md

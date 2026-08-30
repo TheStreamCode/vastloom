@@ -1,0 +1,25 @@
+# Vastloom formatting policy (description only: the codebase predates this
+# file and is NOT fully reformatted line-by-line; new code should match it,
+# and clang-format -i may be applied per-file when touched for other reasons.
+Language: Cpp
+Standard: c++20
+BasedOnStyle: LLVM
+IndentWidth: 4
+TabWidth: 4
+UseTab: Never
+ColumnLimit: 100
+AccessModifierOffset: -4
+PointerAlignment: Left
+DerivePointerAlignment: false
+AllowShortFunctionsOnASingleLine: Inline
+AllowShortIfStatementsOnASingleLine: Never
+AllowShortLoopsOnASingleLine: false
+BreakBeforeBraces: Attach
+AlwaysBreakTemplateDeclarations: Yes
+IncludeBlocks: Preserve
+SortIncludes: CaseInsensitive
+AlignAfterOpenBracket: Align
+AlignConsecutiveAssignments: false
+AlignConsecutiveDeclarations: false
+SpacesBeforeTrailingComments: 1
+FixNamespaceComments: true

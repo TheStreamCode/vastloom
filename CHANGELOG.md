@@ -2,6 +2,21 @@
 
 ## Unreleased
 
+- **Strategic alignment - parity redefined, two pillars, landscape checked.**
+  D1's root cause (the oracle quantizes activations to Q8_0 on every Q8_0
+  matvec; our double path is more accurate) closed the token-parity question:
+  parity with llama.cpp is now a margin-aware verification instrument, not a
+  product target, and reproducing the oracle's activation quantization was
+  considered and dropped. The project declares two pillars: (1) governed
+  hierarchical memory + capability transfer research, and (2) competitive
+  pursuit only through levers an mmap-only runtime lacks (expert-quant
+  re-import, ggml SIMD as default, a routing-aware VRAM expert tier beating
+  the page cache). The README now names the checked state of the art:
+  ik_llama.cpp (Qwen-3.8-Flash-Next supported, PR 2365, fused delta-net,
+  auto-fit VRAM MoE offload) and KTransformers (CPU-GPU expert scheduling,
+  3-tier prefix cache) are ahead for plain hierarchical inference on a 12 GB
+  card, and honest benchmarking must include them.
+
 - **Q11j - Q8_0-native trunks (P2d) and the measured CUDA expert verdict (P3a).**
   The large trunk projections (hyper-connections, DeltaNet and QSA
   projections, shared expert) now keep native Q8_0 blocks through a

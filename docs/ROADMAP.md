@@ -501,11 +501,27 @@ corte.
       con pesi Q8_0; il nostro percorso double è più preciso del reference e
       sui near-tie (margine 0,36 su quel prompt) può flippare. Non è un
       difetto dei kernel.
-- [ ] Decisione di parita aperta: modalita `--llama-activation-quant` (matvec
-      Q8_0 con attivazioni quantizzate + accumulo f32 nell'ordine ggml) per
-      parità STABILE su tutta la batteria con llama.cpp CPU; il percorso
-      double resta il reference interno. Validare: battery ≥6 prompt × 24
-      token tutti identici, e confronto con i margini logit.
+- [x] Decisione di parità chiusa (agosto 2026): la parità è strumento di
+      verifica margin-aware (token identici dove il margine logit > soglia;
+      near-tie = deviazione documentata perché il nostro percorso double è
+      più preciso dell'oracolo che quantizza le attivazioni). La modalità
+      `--llama-activation-quant` fu considerata e SCARTATA: non si clona
+      l'arrotondamento dell'oracolo per parità.
+- [ ] Q11l - ggml SIMD di default + lm_head Q8_0 (`output.weight` è Q8_0:
+      660 MB residenti vs 2,5 GB F32, matvec SIMD) e batteria di parità
+      margin-aware (tools/parity_battery.py, ≥6 prompt EN/IT con dump dei
+      margini; exit-code gate). Misura onesta vs llama.cpp E ik_llama.cpp.
+- [ ] Q11m - re-import esperti Q4_K (profilo nuovo accanto a Q8_0, gating
+      da minimo-working-set; ~1,3 GB/token di traffico esperti) con decoder
+      pinned-ggml già in repo.
+- [ ] Q11n - tier VRAM model-aware: pinning esperti per statistiche di
+      routing + prefetch layer N+1 durante N, sotto Governor. Obiettivo
+      falsificabile: battere la page cache dell'OS sull'hit-rate esperti a
+      parità di RAM - verificabile SOLO Vastloom può farlo; benchmark contro
+      ik_llama.cpp (`--cpu-moe`/`-ot`) e mainline llama.cpp.
+- [ ] Q14 - capability transfer: solo DESIGN + ladder falsificabile per ora
+      (task suite fissa, frontman residente, wake-up selettivo N+1 via hash
+      già risolto, ponti distillati con il tooling `distill_*` esistente).
 - [ ] Prefill a chunk pilotato dal backend ggml: batch T token per layer
       (GEMM riutilizzano le righe Q8 in cache L2), conv/PLE allineati.
 - [ ] Forma chunked della regola delta GDN solo se il profilo lo richiede.
@@ -513,8 +529,10 @@ corte.
 - [ ] Misura: throughput prefill token/s su prompt lunghi vs baseline
       seriale, bytes/token letti, in report dedicato.
 
-**Gate:** parità greedy preservata su una batteria ≥ 4 prompt × 24 token
-Dopo D1; replay bit-paro (o tolerance dichiarata e verificata con oracolo) del prefill multi-token esteso; throughput misurato e documentato.
+**Gate:** parità margin-aware (token uguali dove il margine supera soglia,
+near-tie documentati) su batteria ≥ 6 prompt × 24 token; replay
+tolerance-dichiarata del prefill multi-token esteso; throughput misurato e
+documentato.
 
 ## Q12 - prefix-KV MoE stream (porting M13)
 

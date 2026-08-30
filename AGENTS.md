@@ -18,6 +18,22 @@ architectures is listed as excluded, and "x100 intelligence" is replaced by a ta
 falsification ladder. Treat it as a compass; do not let it rewrite the execution checkpoint
 below or any present-tense validation claim.
 
+**Two declared pillars (August 2026 decision).** (1) Research: guaranteed hierarchical
+memory under the Safety Governor plus the capability-transfer path - the properties
+llama.cpp, ik_llama.cpp and KTransformers do not offer (see "Prior art" in README for the
+checked landscape; ik_llama.cpp already ships Qwen-3.8-Flash-Next and is today's fastest
+open option for large-MoE-on-12GB-VRAM, so honest benchmarking must measure against it,
+not only mainline llama.cpp). (2) Competitive pursuit as a second pillar, pursued only
+through the levers an mmap-only runtime lacks: expert-quant re-import, ggml SIMD default,
+and a routing-aware VRAM expert tier that beats the OS page cache.
+
+**Parity is a verification instrument, not a product target.** Greedy token parity with
+llama.cpp is required where logit margins are large; near-tie continuations may diverge
+documented (D1: the oracle quantizes activations to Q8_0 for every Q8_0 matvec, our
+double-precision path is more accurate, so near ties may legitimately flip, oracle
+self-consistency notwithstanding). Do not reproduce the oracle's activation quantization
+for parity's sake; `--llama-activation-quant` was considered and dropped.
+
 **Execution checkpoint.** The primary track is now **Qwen3.8-Flash-Next**
 (`qwen4exp`, 125B MoE, 6B active): the native runtime executes the official
 unsloth **Q8_0 GGUF** checkpoint (175.3 GiB, canonical immutable import at
@@ -189,8 +205,10 @@ Trunk residency was cut from 13 GB of F32 to Q8_0 bytes in P2d (bit-identical, s
 16.8 -> 3.1 s); the CUDA expert tier was measured and rejected as a default (P3a: the FP64
 parity accumulation cannot use parallel reductions on consumer parts, so the 12-thread CPU
 kernel stays ahead). What could still close the gap is a smaller expert quant (Q4_K/IQ4
-re-import: halves the ~2.5 GB/token expert traffic) and float-precision device kernels
-where the parity bar admits them. The checkpoint declares a 262,144-token context and
+re-import: halves the ~2.5 GB/token expert traffic), the ggml SIMD backend promoted to
+default (measured ~2x on compute, opt-in via `--ggml-backend`), and a model-aware VRAM
+expert tier that beats the page cache by pinning routing-hot experts - the one lever an
+mmap-only runtime cannot replicate. The checkpoint declares a 262,144-token context and
 the state architecture scales well (36 of 48 layers are O(1) DeltaNet; the 12 QSA layers
 add ~72 KB/token of F32 caches, ~9.4 GB at 128k — halving to ~4.7 GB if the caches go
 F16), but the serial one-token prefill (~3.5-4 s/token) makes

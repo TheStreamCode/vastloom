@@ -1222,14 +1222,34 @@ The reference-PC working-set rule is defined in
 Vastloom is an independent project and currently contains no copied code from the
 following projects. They remain important engineering and benchmarking references:
 
-- [Colibrì](https://github.com/JustVugg/colibri)
+- [Colibr�](https://github.com/JustVugg/colibri)
 - [DwarfStar / DS4](https://github.com/antirez/ds4)
 - [kimi-k3-in-c](https://github.com/FareedKhan-dev/kimi-k3-in-c)
-- [DeepSeekV4SSD](https://github.com/yanun0323/deepseek_ssd) — reviewed in
+- [DeepSeekV4SSD](https://github.com/yanun0323/deepseek_ssd) - reviewed in
   [`docs/research/DEEPSEEK_SSD_REVIEW.md`](docs/research/DEEPSEEK_SSD_REVIEW.md)
 - [llama.cpp / GGML](https://github.com/ggml-org/llama.cpp)
 
-A future public release must preserve all applicable notices for any code that is later
+**Where the state of the art stands (checked August 2026).** For plain
+hierarchical CPU+GPU MoE inference this project is not the state of the art:
+
+- [ik_llama.cpp](https://github.com/ikawrakow/ik_llama.cpp) (llama.cpp fork):
+  Qwen-3.8-Flash-Next supported (PR 2365), fused delta-net, tensor overrides
+  and auto-fit MoE offload to VRAM with the rest streamed from RAM/NVMe under
+  the page cache. This is today's fastest open option for exactly the
+  "large MoE, 12 GB VRAM, rest on SSD" use case, and it is our oracle.
+- [KTransformers / kt-kernel](https://github.com/kvcache-ai/ktransformers)
+  (Tsinghua, 19k stars): CPU-GPU expert scheduling with hot-expert placement,
+  3-tier GPU-RAM-disk prefix cache, FP8 kernels, SFT on consumer hardware.
+  This is the strongest public reference for the heterogeneous-expert-
+  placement problem this runtime researches.
+
+Neither provides the Safety Governor's reservation semantics, a double
+reference oracle, or the capability-transfer path (resident frontman plus
+selective dormant-brain wake-up); that gap is Vastloom's research scope.
+For pure competitive inference runs today, these projects are ahead of
+Vastloom, and honest benchmarking must measure against them, not just
+mainline llama.cpp (currently ~10x in Vastloom's disfavor on the reference
+PC). A future public release must preserve all applicable notices for any code that is later
 adapted rather than independently implemented.
 
 ## Community and license

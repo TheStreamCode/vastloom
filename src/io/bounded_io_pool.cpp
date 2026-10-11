@@ -467,9 +467,21 @@ BoundedIoPool::BoundedIoPool(IoPoolOptions options, safety::ResourceGovernor& go
     if (options_.fault.kind != IoFaultKind::none && options_.fault.request_sequence == 0U) {
         options_.fault.request_sequence = 1U;
     }
-    workers_.reserve(options_.workers);
-    for (unsigned index = 0; index < options_.workers; ++index) {
-        workers_.emplace_back([this] { worker_loop(); });
+    try {
+        workers_.reserve(options_.workers);
+        for (unsigned index = 0; index < options_.workers; ++index) {
+            workers_.emplace_back([this] { worker_loop(); });
+        }
+    } catch (...) {
+        // A worker that never started must not leave its siblings waiting forever: wake them,
+        // let them observe stopping_, join and rethrow, mirroring BoundedExpertLoadPool.
+        {
+            std::scoped_lock lock(mutex_);
+            stopping_ = true;
+        }
+        condition_.notify_all();
+        workers_.clear();
+        throw;
     }
 }
 

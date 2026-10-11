@@ -2249,6 +2249,12 @@ int command_qwen38_greedy(const std::vector<std::string>& args) {
         // The Windows Job Object enforces ram_hard_limit, not host_memory_hard_limit.
         policy.value().resources.ram_hard_limit = raised;
     }
+    // The raw payload cache is the one large allocation outside the Governor; pin its ceiling
+    // to the same safe policy that bounds every other one (a quarter of the effective safe host
+    // limit, never above the historical 16 GiB reference-PC ceiling).
+    vastloom::inference::qwen38_set_raw_cache_cap_bytes(std::min<std::uint64_t>(
+        policy.value().resources.host_memory_hard_limit / 4U,
+        16ULL * 1024ULL * 1024ULL * 1024ULL));
     auto guard = vastloom::safety::ProcessSafetyGuard::apply(policy.value());
     if (!guard) return print_error(guard.error(), json);
 
@@ -2516,9 +2522,22 @@ int command_qwen38_greedy(const std::vector<std::string>& args) {
                 loads.emplace_back(std::async(std::launch::async,
                     [&, eid, key, i] {
                         Qwen38Layer0Telemetry local;
-                        auto result = qwen38_load_layer_expert_q8(
-                            trunk_ref, checkpoint_root, eid, &local);
-                        return std::make_tuple(key, i, std::move(result), local);
+                        // future.get() rethrows whatever escapes the task: any allocation
+                        // failure must surface as a Result error, not as std::terminate.
+                        try {
+                            auto result = qwen38_load_layer_expert_q8(
+                                trunk_ref, checkpoint_root, eid, &local);
+                            return std::make_tuple(key, i, std::move(result), local);
+                        } catch (const std::bad_alloc&) {
+                            auto failure = Result<Qwen38OwnedExpertQ8>(vastloom::make_error(
+                                vastloom::ErrorCode::resource_exhausted,
+                                "expert prefetch exhausted host memory"));
+                            return std::make_tuple(key, i, std::move(failure), local);
+                        } catch (const std::exception& error) {
+                            auto failure = Result<Qwen38OwnedExpertQ8>(vastloom::make_error(
+                                vastloom::ErrorCode::internal_error, error.what()));
+                            return std::make_tuple(key, i, std::move(failure), local);
+                        }
                     }));
             }
             // Phase 2: merge telemetry and publish every miss before the
@@ -2638,14 +2657,9 @@ int command_qwen38_greedy(const std::vector<std::string>& args) {
             std::cout << generated[i];
         }
         std::cout << "],\n"
-                  << "  \"text\": \"";
-        for (const char ch : text) {
-            if (ch == '"' || ch == '\\') std::cout << '\\';
-            if (static_cast<unsigned char>(ch) >= 0x20U || ch == '\n' || ch == '\t') {
-                std::cout << ch;
-            }
-        }
-        std::cout << "\",\n"
+                  << "  \"text\": \""
+                  << vastloom::util::json_escape(text)
+                  << "\",\n"
                   << "  \"payload_bytes_read\": " << load_tel.payload_bytes_read << "\n"
                   << "}\n";
     } else {
@@ -5755,6 +5769,7 @@ int command_serve_real(const std::vector<std::string>& args) {
                     auto skel = skeleton;
                     bool first = true;
                     bool alive = true;
+                    vastloom::api::StopSequenceFilter stop_filter(parsed.value().stop);
                     vastloom::inference::LlamaGenerationOptions stream_options = options;
                     stream_options.cancelled = [&alive] { return !alive; };
                     auto result = model.value().generate(messages, stream_options,
@@ -5762,15 +5777,30 @@ int command_serve_real(const std::vector<std::string>& args) {
                                                          &runtime.value().process_guard,
                                                          [&](std::string_view piece) {
                                                              if (!alive) return;
-                                                             auto chunk = vastloom::api::serialize_chat_completion_chunk(skel, piece, first, false);
+                                                             const auto safe = stop_filter.feed(piece);
+                                                             if (safe.empty()) return;
+                                                             auto chunk = vastloom::api::serialize_chat_completion_chunk(skel, safe, first, false);
                                                              first = false;
                                                              if (!chunk) { alive = false; return; }
                                                              alive = emit("data: " + chunk.take_value() + "\n\n");
                                                          },
                                                          nullptr,
                                                          session_ptr);
-                    skel.finish_reason =
-                        (result && result.value().stats.stopped_on_max_tokens) ? "length" : "stop";
+                    if (alive && !stop_filter.stopped() && result) {
+                        const auto tail = stop_filter.flush();
+                        if (!tail.empty()) {
+                            auto chunk = vastloom::api::serialize_chat_completion_chunk(skel, tail, first, false);
+                            first = false;
+                            if (!chunk) {
+                                alive = false;
+                            } else {
+                                alive = emit("data: " + chunk.take_value() + "\n\n");
+                            }
+                        }
+                    }
+                    skel.finish_reason = (result && !stop_filter.stopped() &&
+                                          result.value().stats.stopped_on_max_tokens)
+                                                 ? "length" : "stop";
                     if (alive) {
                         auto last = vastloom::api::serialize_chat_completion_chunk(skel, "", false, true);
                         if (last) alive = emit("data: " + last.take_value() + "\n\n");
@@ -5793,9 +5823,10 @@ int command_serve_real(const std::vector<std::string>& args) {
             vastloom::api::ChatCompletionResponse completion;
             completion.id = "chatcmpl-vastloom-real";
             completion.model = std::string(model.value().model_id());
-            completion.content = generated.value().text;
+            vastloom::api::StopSequenceFilter stop_filter(parsed.value().stop);
+            completion.content = stop_filter.apply(generated.value().text);
             completion.finish_reason =
-                generated.value().stats.stopped_on_max_tokens ? "length" : "stop";
+                (generated.value().stats.stopped_on_max_tokens && !stop_filter.stopped()) ? "length" : "stop";
             completion.created = started_at;
             completion.prompt_tokens = generated.value().stats.prompt_tokens;
             completion.completion_tokens = generated.value().stats.generated_tokens;

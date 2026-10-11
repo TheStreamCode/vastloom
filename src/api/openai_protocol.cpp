@@ -1,5 +1,6 @@
 #include "vastloom/api/openai_protocol.hpp"
 
+#include <cmath>
 #include <new>
 #include <sstream>
 
@@ -31,6 +32,70 @@ Result<std::string> required_string(const util::JsonValue::Object& object,
 }
 
 }  // namespace
+
+StopSequenceFilter::StopSequenceFilter(const std::vector<std::string>& sequences) {
+    sequences_.reserve(sequences.size());
+    for (const auto& sequence : sequences) {
+        if (!sequence.empty()) sequences_.push_back(sequence);
+    }
+}
+
+std::string_view StopSequenceFilter::feed(std::string_view piece) {
+    if (stopped_ || sequences_.empty()) return {};
+    pending_.append(piece);
+
+    std::size_t earliest = std::string::npos;
+    for (const auto& sequence : sequences_) {
+        const auto at = pending_.find(sequence);
+        if (at != std::string::npos && (earliest == std::string::npos || at < earliest)) {
+            earliest = at;
+        }
+    }
+    if (earliest != std::string::npos) {
+        stopped_ = true;
+        emitted_.assign(pending_, 0U, earliest);
+        pending_.clear();
+        return emitted_;
+    }
+
+    // Hold back the longest suffix that is still a prefix of some stop sequence: it may complete
+    // on the next piece. Everything before it can never be cut and is safe to emit.
+    std::size_t holdback = 0U;
+    for (const auto& sequence : sequences_) {
+        const std::size_t longest = std::min(sequence.size() - 1U, pending_.size());
+        for (std::size_t k = longest; k > holdback; --k) {
+            if (pending_.compare(pending_.size() - k, k, sequence, 0U, k) == 0) {
+                holdback = k;
+                break;
+            }
+        }
+    }
+    emitted_.assign(pending_, 0U, pending_.size() - holdback);
+    pending_.erase(0U, pending_.size() - holdback);
+    return emitted_;
+}
+
+std::string_view StopSequenceFilter::flush() {
+    if (stopped_ || pending_.empty()) return {};
+    emitted_ = std::move(pending_);
+    pending_.clear();
+    return emitted_;
+}
+
+std::string StopSequenceFilter::apply(std::string_view text) {
+    std::size_t earliest = std::string_view::npos;
+    for (const auto& sequence : sequences_) {
+        const auto at = text.find(sequence);
+        if (at != std::string_view::npos && (earliest == std::string_view::npos || at < earliest)) {
+            earliest = at;
+        }
+    }
+    if (earliest == std::string_view::npos) {
+        return std::string(text);
+    }
+    stopped_ = true;
+    return std::string(text.substr(0U, earliest));
+}
 
 Result<ChatCompletionRequest> parse_chat_completion_request(std::string_view body,
                                                             const ChatCompletionLimits& limits) {
@@ -109,6 +174,13 @@ Result<ChatCompletionRequest> parse_chat_completion_request(std::string_view bod
             temperature != object.end() && !temperature->second.is_null()) {
             auto value = temperature->second.as_double();
             if (!value) return value.error();
+            // A finite double above FLT_MAX would silently become +inf once cast to the
+            // sampler's float, so the bound is refused here where the client can see it.
+            if (!std::isfinite(value.value()) || value.value() < 0.0 || value.value() > 10.0) {
+                return make_error(ErrorCode::invalid_argument,
+                                  "Chat request temperature must be between 0 and 10",
+                                  std::to_string(value.value()));
+            }
             request.temperature = value.value();
         }
 

@@ -44,6 +44,21 @@ struct WsaInit {
 #endif
 };
 
+// A local client that goes silent mid-request must not hold the serial server (and therefore
+// stop()) hostage: every accepted connection carries a receive deadline, and a recv that hits
+// it fails the receive loop that already treats received <= 0 as an aborted request.
+void apply_receive_deadline(socket_t client) {
+#ifdef _WIN32
+    const DWORD timeout_ms = 30000;
+    ::setsockopt(client, SOL_SOCKET, SO_RCVTIMEO, reinterpret_cast<const char*>(&timeout_ms),
+                 sizeof(timeout_ms));
+#else
+    timeval timeout{30, 0};
+    ::setsockopt(client, SOL_SOCKET, SO_RCVTIMEO, reinterpret_cast<const char*>(&timeout),
+                 sizeof(timeout));
+#endif
+}
+
 const char* reason_for(int status) {
     switch (status) {
         case 200: return "OK";
@@ -81,6 +96,7 @@ struct LoopbackServer::Impl {
     std::size_t max_body_bytes{1U * 1024U * 1024U};
 
     void serve_one(socket_t client) {
+        apply_receive_deadline(client);
         std::string buffer;
         char chunk[4096];
         std::string::size_type header_end = std::string::npos;

@@ -2,6 +2,52 @@
 
 ## 0.4.0-alpha.5 - Unreleased
 
+- **Whole-project review (October 2026)**: a full read of every source area
+  (model loading and governed I/O, inference kernels, runtime/API/build)
+  found no CRITICAL defects; every MAJOR finding was fixed without touching
+  a single measured parity claim:
+  - Windows Unicode safety restored where it was violated: the heartbeat
+    write and the verification-receipt write now stage through
+    `std::filesystem::path` (previously narrow-string names could corrupt or
+    mismatch the atomic rename), and the receipt write no longer swallows
+    its own failure.
+  - `BoundedIoPool` survives a worker-start failure (wake, observe
+    stopping_, join, rethrow) mirroring `BoundedExpertLoadPool`; the IO pool
+    was the only pool that could hang the process under thread exhaustion.
+  - The loopback server applies a 30 s receive deadline per connection: a
+    client that opens a socket and goes silent can no longer wedge the
+    serial server (and `stop()`) forever.
+  - The OpenAI protocol's `stop` sequences are now actually honoured in both
+    serve handlers (tiny and real model): a holdback-filter truncates
+    streaming output at the earliest stop sequence, non-streaming text is
+    cut before it, and the finish reason reports `stop`.
+  - `qwen38_delta_net_decode` and `qwen38_reduced_zero_state` reject
+    conv kernels above the fixed 8-slot history window (previously a stack
+    out-of-bounds write with kernel >= 9; the pinned Qwen3.8 invariant is 4).
+  - The raw Q8_0 payload cache is bounded by the machine's own safe runtime
+    policy (at most a quarter of the effective safe host limit, never above
+    the historical 16 GiB) instead of a hardcoded ceiling, and its enable
+    flag is `std::atomic` (the unsynchronized read was a formal data race).
+  - Expert prefetch converts allocation failures into `Result` errors
+    instead of `std::terminate` at `future.get()`; `file_size` uses the
+    `error_code` overload on both expert slice paths.
+  - `RowWorkPool` no longer deadlocks or terminates when a worker job
+    throws: the first failure is rethrown at the caller once every helper
+    has finished, and an inline failure releases the generation.
+  - The GGUF vocab reader guards the corrupt-length wraparound
+    (`pos + len` -> subtraction with bound) that could request a ~2^64
+    allocation.
+  - The watchdog validates option ranges (no `chrono` UB from unbounded
+    `stoull`), and `--enforce` now requires two consecutive stale samples
+    before terminating the runtime.
+  - The chat protocol refuses `temperature` outside 0..10 (a finite double
+    above FLT_MAX previously became `+inf` after the float cast), and
+    `qwen38-greedy --json` emits text through the shared `json_escape`
+    (control bytes are escaped instead of silently dropped).
+  - Documented contracts that were implicit: `ggml_compute_disable` is
+    owner-thread-only, the persistent shard stream is single-thread by
+    design, the expert LRU pointer is invalidated by the next acquire, and
+    the 64-byte GGUF tensor-name bound is the reader's own.
 - **Q11i-Q11j performance work**: Q8_0-native expert matvec (bit-identical),
   O(1) expert LRU, concurrent expert prefetch, Q8_0-native trunk residency;
   greedy path 33.75 -> ~3.3-4 s/token on the reference PC while keeping the

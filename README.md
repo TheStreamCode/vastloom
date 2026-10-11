@@ -22,6 +22,14 @@ goal is practical local inference for giant sparse Mixture-of-Experts models on 
 consumer hardware—without uncontrolled swapping, surprise resource exhaustion or destructive
 model conversion.
 
+**What this repository is.** An independent research project — a lab notebook as much as a
+codebase. Every milestone was measured before it was claimed, on one reference machine
+(31 GiB RAM, RTX 4070 Super 12 GiB), with validation reports under `docs/reports/` and an
+external llama.cpp oracle as the authority for parity. It is not a product, not a llama.cpp
+replacement, and does not claim competitive throughput; read
+[`docs/ROADMAP.md`](docs/ROADMAP.md) for what is done, what is open, and what is explicitly
+out of scope.
+
 The further north star — a fast resident **frontman** expanded at runtime by a **dormant
 brain** on NVMe through bounded bridges — is documented separately in
 [`docs/archive/deepseek_0731/CAPABILITY_TRANSFER_VISION.md`](docs/archive/deepseek_0731/CAPABILITY_TRANSFER_VISION.md).

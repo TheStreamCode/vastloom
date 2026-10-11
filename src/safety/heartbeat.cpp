@@ -53,11 +53,12 @@ Result<void> write_heartbeat_atomic(const std::filesystem::path& path,
         return make_error(ErrorCode::not_found, "Heartbeat parent directory does not exist", parent.string());
     }
 
-    const auto temporary = path.string() + ".tmp." + std::to_string(heartbeat.pid);
+    std::filesystem::path temporary = path;
+    temporary += ".tmp." + std::to_string(heartbeat.pid);
     {
         std::ofstream output(temporary, std::ios::trunc);
         if (!output) {
-            return make_error(ErrorCode::io_error, "Unable to create temporary heartbeat", temporary);
+            return make_error(ErrorCode::io_error, "Unable to create temporary heartbeat", temporary.string());
         }
         output << kHeartbeatFormat << '\n'
                << "pid=" << heartbeat.pid << '\n'
@@ -68,7 +69,7 @@ Result<void> write_heartbeat_atomic(const std::filesystem::path& path,
                << "vram_reserved=" << heartbeat.vram_reserved << '\n';
         output.flush();
         if (!output) {
-            return make_error(ErrorCode::io_error, "Unable to flush temporary heartbeat", temporary);
+            return make_error(ErrorCode::io_error, "Unable to flush temporary heartbeat", temporary.string());
         }
     }
 

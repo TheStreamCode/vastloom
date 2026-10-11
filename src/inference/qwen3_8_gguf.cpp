@@ -211,6 +211,10 @@ std::mutex& stream_cache_mutex() {
 std::ifstream& persistent_shard_stream(const std::filesystem::path& path) {
     static std::map<std::string, std::ifstream> streams;
     std::lock_guard<std::mutex> lock(stream_cache_mutex());
+    // Single-thread contract: the lock guards only the lookup, and the returned stream is
+    // seeked/read by the caller without it. Trunk reads are serial by design; the concurrent
+    // expert loader deliberately uses local streams instead. A concurrent trunk reader would
+    // interleave seekg/read on the same stream and must not be added without a per-use lock.
     auto it = streams.find(path.string());
     if (it == streams.end()) {
         it = streams.emplace(path.string(), std::ifstream(path, std::ios::binary)).first;
@@ -241,13 +245,16 @@ std::uint64_t& raw_cache_bytes() {
     return total;
 }
 
-constexpr std::uint64_t kRawCacheCapBytes = 16ULL * 1024ULL * 1024ULL * 1024ULL;
+// The raw payload cache is host RAM the Governor does not track, so its ceiling must come from
+// the machine's own safe policy instead of a constant tuned on the reference PC: the CLI pins
+// it to a fraction of the safe host limit (never above the historical 16 GiB) before use.
+std::atomic<std::uint64_t> raw_cache_cap_bytes{16ULL * 1024ULL * 1024ULL * 1024ULL};
 
 std::atomic<std::uint64_t> raw_cache_fetches{0U};
 std::atomic<std::uint64_t> raw_cache_hits{0U};
 
-bool& raw_cache_enabled() {
-    static bool enabled = true;
+std::atomic<bool>& raw_cache_enabled() {
+    static std::atomic<bool> enabled{true};
     return enabled;
 }
 
@@ -257,13 +264,16 @@ std::pair<std::uint64_t, std::uint64_t> qwen38_raw_cache_stats() {
 }
 
 void qwen38_set_raw_cache_enabled(bool enabled) {
-    std::lock_guard<std::mutex> lock(raw_cache_mutex());
-    raw_cache_enabled() = enabled;
+    raw_cache_enabled().store(enabled, std::memory_order_relaxed);
+}
+
+void qwen38_set_raw_cache_cap_bytes(std::uint64_t cap_bytes) {
+    raw_cache_cap_bytes.store(cap_bytes, std::memory_order_relaxed);
 }
 
 const std::vector<std::byte>* raw_cache_fetch(const std::string& key) {
     std::lock_guard<std::mutex> lock(raw_cache_mutex());
-    if (!raw_cache_enabled()) return nullptr;
+    if (!raw_cache_enabled().load(std::memory_order_relaxed)) return nullptr;
     raw_cache_fetches.fetch_add(1U, std::memory_order_relaxed);
     auto it = raw_cache().find(key);
     if (it != raw_cache().end()) {
@@ -277,9 +287,11 @@ const std::vector<std::byte>* raw_cache_fetch(const std::string& key) {
 // false when disabled, full, or out of memory (the buffer is left intact).
 bool raw_cache_store(const std::string& key, std::vector<std::byte>&& bytes) {
     std::lock_guard<std::mutex> lock(raw_cache_mutex());
-    if (!raw_cache_enabled()) return false;
+    if (!raw_cache_enabled().load(std::memory_order_relaxed)) return false;
     const std::size_t size = bytes.size();
-    if (raw_cache_bytes() + size > kRawCacheCapBytes) return false;
+    if (raw_cache_bytes() + size > raw_cache_cap_bytes.load(std::memory_order_relaxed)) {
+        return false;
+    }
     try {
         // Move the payload into the map so a store never doubles its byte
         // footprint (the caller's buffer is transferred, not copied).
@@ -288,7 +300,7 @@ bool raw_cache_store(const std::string& key, std::vector<std::byte>&& bytes) {
         // Governor discipline: on memory pressure drop the cache instead of
         // failing the request. The byte budget stays conservative; commit
         // pressure (Job limits, other tenants) is discovered right here.
-        raw_cache_enabled() = false;
+        raw_cache_enabled().store(false, std::memory_order_relaxed);
         raw_cache().clear();
         raw_cache_bytes() = 0U;
         return false;
@@ -541,7 +553,7 @@ Result<Qwen38Weight> qwen38_read_gguf_weight(
                     }
                     // The cache keeps its own copy only when it is enabled (resident trunks
                     // disable it); the weight always owns the original bytes.
-                    if (raw_cache_enabled() && !bytes.empty()) {
+                    if (raw_cache_enabled().load(std::memory_order_relaxed) && !bytes.empty()) {
                         raw_cache_store(cache_key, std::vector<std::byte>{bytes});
                     }
                 }
@@ -1106,7 +1118,12 @@ Result<Qwen38OwnedExpert> qwen38_load_gguf_expert(
         }
         const std::uint64_t begin = src.data_offset
             + static_cast<std::uint64_t>(expert_id) * src.expert_stride_bytes;
-        if (begin + span > std::filesystem::file_size(src.shard)) {
+        std::error_code stat_error;
+        const std::uint64_t shard_bytes = std::filesystem::file_size(src.shard, stat_error);
+        if (stat_error) {
+            return make_error(ErrorCode::io_error, "cannot stat expert shard", src.shard.string());
+        }
+        if (begin + span > shard_bytes) {
             return make_error(ErrorCode::invalid_format, "expert slice out of bounds",
                               src.shard.string());
         }
@@ -1172,7 +1189,12 @@ Result<Qwen38OwnedExpertQ8> qwen38_load_gguf_expert_q8(
         }
         const std::uint64_t begin = src.data_offset
             + static_cast<std::uint64_t>(expert_id) * src.expert_stride_bytes;
-        if (begin + span > std::filesystem::file_size(src.shard)) {
+        std::error_code stat_error;
+        const std::uint64_t shard_bytes = std::filesystem::file_size(src.shard, stat_error);
+        if (stat_error) {
+            return make_error(ErrorCode::io_error, "cannot stat expert shard", src.shard.string());
+        }
+        if (begin + span > shard_bytes) {
             return make_error(ErrorCode::invalid_format, "expert slice out of bounds",
                               src.shard.string());
         }
@@ -1464,7 +1486,9 @@ Result<std::vector<std::string>> qwen38_load_gguf_vocab(
             std::uint64_t len = 0U;
             std::memcpy(&len, value.data() + pos, 8U);
             pos += 8U;
-            if (pos + len > length) {
+            // Subtraction instead of an addition: a corrupt length near 2^64 would
+            // wrap pos + len past the bound and request a huge allocation.
+            if (len > length - pos) {
                 return make_error(ErrorCode::invalid_format, "vocab string out of range",
                                   shard.path().string());
             }

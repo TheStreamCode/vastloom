@@ -634,6 +634,9 @@ Result<GgufFile> GgufFile::open_with_declared_size(const std::filesystem::path& 
         result.alignment_ = alignment.value();
 
         for (std::uint64_t index = 0U; index < tensor_count.value(); ++index) {
+            // GGUF itself puts no length limit on tensor names; 64 bytes is this reader's own
+            // bound (every DeepSeek/Qwen tensor name fits comfortably inside it). A future
+            // import with longer legitimate names must raise this bound, not bypass it.
             auto name = reader.read_string(64U, true);
             auto dimensions = reader.read_u32();
             if (!name) return name.error();

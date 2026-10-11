@@ -41,6 +41,35 @@ struct ChatCompletionLimits {
     std::size_t max_stop_sequences{8U};
 };
 
+// Applies the request's stop sequences to generation as it happens. The OpenAI contract: text
+// before the first stop sequence is returned, the stop sequence itself and everything after it
+// is discarded, and the finish reason is "stop". A streaming emitter cannot see the future, so
+// the tail that could still complete a stop sequence is held back until the next piece resolves
+// it; `flush` releases that tail once generation has ended without a match. Empty sequences are
+// ignored: they would match at position zero and discard a whole response a client asked for.
+class StopSequenceFilter {
+public:
+    explicit StopSequenceFilter(const std::vector<std::string>& sequences);
+
+    // Feeds one generated piece and returns the bytes that are safe to emit now. The returned
+    // view is valid until the next call on this filter.
+    [[nodiscard]] std::string_view feed(std::string_view piece);
+
+    // Ends generation: a stop sequence that never completed releases its held-back tail.
+    [[nodiscard]] std::string_view flush();
+
+    [[nodiscard]] bool stopped() const noexcept { return stopped_; }
+
+    // Truncates complete text before the earliest stop sequence (the non-streaming form).
+    [[nodiscard]] std::string apply(std::string_view text);
+
+private:
+    std::vector<std::string> sequences_;
+    std::string pending_;
+    std::string emitted_;
+    bool stopped_{false};
+};
+
 // Parses an OpenAI chat request, refusing anything outside its bounds rather than clamping it. A
 // clamped request is one the caller believes it made and did not.
 [[nodiscard]] Result<ChatCompletionRequest> parse_chat_completion_request(

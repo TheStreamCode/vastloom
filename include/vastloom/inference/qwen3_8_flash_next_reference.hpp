@@ -432,6 +432,10 @@ class DeepseekV4MatvecAccelerator;
     std::uint32_t intermediate,
     DeepseekV4MatvecAccelerator* device);
 
+// Acquires one expert from the LRU, inserting the source when it is a miss. The returned
+// pointer aliases an element of cache.values: any later acquire on the same cache can evict or
+// reallocate it, so consume the expert before the next acquire (as the greedy driver does).
+// The cached F32 expert copies live outside the Governor, bounded only by capacity.
 [[nodiscard]] Result<const Qwen38OwnedExpert*> qwen38_expert_cache_acquire(
     Qwen38ExpertLru& cache,
     std::uint32_t key,
@@ -759,6 +763,12 @@ enum class Qwen38CheckpointKind {
 // greedy CLI turns it off when trunk residency is active, so the two caches
 // never compete for the same RAM.
 void qwen38_set_raw_cache_enabled(bool enabled);
+
+// Bounds the raw payload cache. The cache is host RAM the Governor does not
+// track, so the caller pins its ceiling to a value derived from the machine's
+// safe runtime policy before the first store; the default stays at the
+// historical 16 GiB reference-PC ceiling.
+void qwen38_set_raw_cache_cap_bytes(std::uint64_t cap_bytes);
 
 // Cache diagnostics: [fetches, hits].
 std::pair<std::uint64_t, std::uint64_t> qwen38_raw_cache_stats();

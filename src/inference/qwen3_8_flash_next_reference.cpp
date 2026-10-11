@@ -622,8 +622,11 @@ Result<std::vector<float>> qwen38_delta_net_decode(
     const std::size_t dk = weights.key_head_dim;
     const std::size_t dv = weights.value_head_dim;
     const std::size_t kernel = weights.conv_kernel;
+    // The conv history window below is a fixed stack array of 8 slots, so a kernel above 8 would
+    // write out of bounds; the pinned Qwen3.8 invariant is 4, this is the operator's own ceiling.
+    constexpr std::size_t kMaxConvKernel = 8U;
     if (hidden_size == 0 || k_heads == 0 || v_heads == 0 || dk == 0 || dv == 0 || kernel < 2
-        || (v_heads % k_heads) != 0 || hidden.size() != hidden_size) {
+        || kernel > kMaxConvKernel || (v_heads % k_heads) != 0 || hidden.size() != hidden_size) {
         return make_error(ErrorCode::invalid_argument, "delta-net dims invalid", "delta_net");
     }
     const std::size_t key_dim = dk * k_heads;
@@ -1841,7 +1844,10 @@ Result<std::vector<float>> reduced_one_token(
 }  // namespace
 
 Result<Qwen38ReducedState> qwen38_reduced_zero_state(const Qwen38ReducedDims& dims) {
-    if (dims.hidden_size == 0 || dims.dn_kernel < 2 || dims.dn_k_heads == 0 || dims.dn_v_heads == 0
+    // Mirrors qwen38_delta_net_decode's ceiling: the conv history window is a fixed 8 slots.
+    constexpr std::uint32_t kMaxConvKernel = 8U;
+    if (dims.hidden_size == 0 || dims.dn_kernel < 2 || dims.dn_kernel > kMaxConvKernel
+        || dims.dn_k_heads == 0 || dims.dn_v_heads == 0
         || (dims.dn_v_heads % dims.dn_k_heads) != 0) {
         return make_error(ErrorCode::invalid_argument, "reduced dims invalid", "zero_state");
     }

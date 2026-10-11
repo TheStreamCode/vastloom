@@ -96,11 +96,16 @@ int main(int argc, char** argv) {
         }
     }
 
-    if (pid == 0 || heartbeat_path.empty() || timeout_ms < 250 || interval_ms < 50) {
+    if (pid == 0 || heartbeat_path.empty() || timeout_ms < 250 || timeout_ms > 3'600'000 ||
+        interval_ms < 50 || interval_ms > 3'600'000 || grace_ms > 600'000) {
         usage();
         return 64;
     }
 
+    // One unreadable heartbeat can be a transient I/O failure, not a dead runtime: with
+    // --enforce, act only when two consecutive samples agree it is stale. Observe-only mode
+    // reports on the first stale sample, which is the point of observing.
+    unsigned consecutive_stale = 0;
     while (process_alive(pid)) {
         auto heartbeat = vastloom::safety::read_heartbeat(heartbeat_path);
         if (heartbeat && heartbeat.value().pid != pid) {
@@ -111,14 +116,21 @@ int main(int argc, char** argv) {
         const bool stale = !heartbeat || now < heartbeat.value().unix_time_ms ||
                            now - heartbeat.value().unix_time_ms > timeout_ms;
         if (stale) {
-            std::cerr << "Vastloom heartbeat is stale or unreadable.";
             if (!enforce) {
-                std::cerr << " Observe-only mode: no process signal was sent.\n";
+                std::cerr << "Vastloom heartbeat is stale or unreadable."
+                          << " Observe-only mode: no process signal was sent.\n";
                 return 2;
             }
-            std::cerr << " Terminating the runtime to protect the host.\n";
+            ++consecutive_stale;
+            if (consecutive_stale < 2U) {
+                std::this_thread::sleep_for(std::chrono::milliseconds(interval_ms));
+                continue;
+            }
+            std::cerr << "Vastloom heartbeat is stale or unreadable."
+                      << " Terminating the runtime to protect the host.\n";
             return terminate_process(pid, std::chrono::milliseconds(grace_ms)) ? 3 : 4;
         }
+        consecutive_stale = 0;
         std::this_thread::sleep_for(std::chrono::milliseconds(interval_ms));
     }
     return 0;

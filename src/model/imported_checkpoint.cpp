@@ -79,6 +79,9 @@ std::map<std::string, ReceiptEntry, std::less<>> read_verification_receipt(
     std::error_code error;
     const auto path = root / std::filesystem::path(std::string(kVerificationReceiptName));
     if (!std::filesystem::is_regular_file(path, error) || error) return entries;
+    error.clear();
+    const auto receipt_bytes = std::filesystem::file_size(path, error);
+    if (error || receipt_bytes > 4U * static_cast<std::uintmax_t>(MiB)) return entries;
     std::ifstream input(path, std::ios::binary);
     if (!input) return entries;
     std::string text((std::istreambuf_iterator<char>(input)), std::istreambuf_iterator<char>());
@@ -118,9 +121,9 @@ std::map<std::string, ReceiptEntry, std::less<>> read_verification_receipt(
     return entries;
 }
 
-void write_verification_receipt(const std::filesystem::path& root,
-                                std::string_view manifest_hash,
-                                const std::vector<std::pair<std::string, ReceiptEntry>>& entries) {
+Result<void> write_verification_receipt(const std::filesystem::path& root,
+                                        std::string_view manifest_hash,
+                                        const std::vector<std::pair<std::string, ReceiptEntry>>& entries) {
     std::ostringstream document;
     document << "{\"format\":\"vastloom.verification-receipt.v1\",\"manifest_sha256\":\""
              << util::json_escape(std::string(manifest_hash)) << "\",\"files\":[";
@@ -135,15 +138,24 @@ void write_verification_receipt(const std::filesystem::path& root,
 
     std::error_code error;
     const auto final_path = root / std::filesystem::path(std::string(kVerificationReceiptName));
-    const auto staging = final_path.string() + ".partial";
+    std::filesystem::path staging = final_path;
+    staging += ".partial";
     {
         std::ofstream output(staging, std::ios::binary | std::ios::trunc);
-        if (!output) return;
+        if (!output) {
+            return make_error(ErrorCode::io_error, "Unable to create verification receipt", staging.string());
+        }
         output << document.str();
-        if (!output) return;
+        if (!output) {
+            return make_error(ErrorCode::io_error, "Unable to write verification receipt", staging.string());
+        }
     }
     std::filesystem::rename(staging, final_path, error);
-    if (error) std::filesystem::remove(staging, error);
+    if (error) {
+        std::filesystem::remove(staging, error);
+        return make_error(ErrorCode::io_error, "Unable to publish verification receipt", final_path.string());
+    }
+    return {};
 }
 
 }  // namespace
@@ -301,10 +313,12 @@ Result<ImportedCheckpoint> verify_imported_checkpoint(const std::filesystem::pat
     }
 
     // Written only after every file passed, so a failed verification never leaves a receipt that
-    // would let the next run skip the work.
+    // would let the next run skip the work. The receipt is an optimization: a failed write (for
+    // example on a read-only store) only costs the next run a full rehash, so its outcome is
+    // explicit here but never fails an otherwise successful verification.
     if (full_hash_verification && !manifest_hash.empty() &&
         confirmed.size() == result.files.size()) {
-        write_verification_receipt(root, manifest_hash, confirmed);
+        static_cast<void>(write_verification_receipt(root, manifest_hash, confirmed));
     }
     return result;
 }

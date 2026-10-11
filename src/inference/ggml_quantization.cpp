@@ -5,6 +5,7 @@
 #include <bit>
 #include <cmath>
 #include <cstdint>
+#include <exception>
 #include <functional>
 #include <condition_variable>
 #include <limits>
@@ -674,13 +675,31 @@ public:
             helpers_ = helpers;
             claimed_ = 0U;
             finished_ = 0U;
+            failure_ = nullptr;
             ++generation_;
         }
         wake_.notify_all();
-        inline_job();
+        try {
+            inline_job();
+        } catch (...) {
+            // The caller's own share failed: release this generation so the pool stays
+            // usable, then surface the failure instead of leaving a stuck job behind.
+            {
+                const std::lock_guard<std::mutex> lock(mutex_);
+                job_ = nullptr;
+            }
+            throw;
+        }
         std::unique_lock<std::mutex> lock(mutex_);
         done_.wait(lock, [this, helpers]() { return finished_ == helpers; });
         job_ = nullptr;
+        if (failure_ != nullptr) {
+            // A worker's job threw: every helper has finished by now, so rethrow at the
+            // caller (which is Result-disciplined) rather than deadlocking the wait.
+            std::exception_ptr failure = failure_;
+            failure_ = nullptr;
+            std::rethrow_exception(failure);
+        }
         return true;
     }
 
@@ -702,7 +721,18 @@ private:
                 job = job_;
                 if (claimed_ >= helpers_) seen = generation_;
             }
-            (*job)(index);
+            try {
+                (*job)(index);
+            } catch (...) {
+                // The wait must still complete, so count this index as finished and keep the
+                // first failure for run() to rethrow at its caller.
+                const std::lock_guard<std::mutex> lock(mutex_);
+                if (failure_ == nullptr) failure_ = std::current_exception();
+                ++finished_;
+                seen = generation_;
+                done_.notify_all();
+                continue;
+            }
             {
                 const std::lock_guard<std::mutex> lock(mutex_);
                 ++finished_;
@@ -721,6 +751,7 @@ private:
     unsigned claimed_{0U};
     unsigned finished_{0U};
     std::uint64_t generation_{0U};
+    std::exception_ptr failure_{nullptr};
     bool stopping_{false};
 };
 

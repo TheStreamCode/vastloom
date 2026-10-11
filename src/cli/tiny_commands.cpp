@@ -617,23 +617,39 @@ int command_serve(const std::vector<std::string>& args) {
                     response.streaming = true;
                     response.status = 200;
                     response.produce = [model, governor, prompt, skeleton, stream_max,
-                                        stream_temperature](const std::function<bool(std::string_view)>& emit) {
+                                        stream_temperature, stops = parsed.value().stop](const std::function<bool(std::string_view)>& emit) {
                         GenerationOptions options;
                         options.max_new_tokens = stream_max;
                         options.temperature = stream_temperature;
                     auto skel = skeleton;
                     bool first = true;
                     bool alive = true;
+                    api::StopSequenceFilter stop_filter(stops);
                     options.on_text = [&](std::string_view piece) {
                         if (!alive) return;
-                        auto chunk = api::serialize_chat_completion_chunk(skel, piece, first, false);
+                        const auto safe = stop_filter.feed(piece);
+                        if (safe.empty()) return;
+                        auto chunk = api::serialize_chat_completion_chunk(skel, safe, first, false);
                         first = false;
                         if (!chunk) { alive = false; return; }
                         alive = emit("data: " + chunk.take_value() + "\n\n");
                     };
                     auto result = model->generate(prompt, options, *governor);
-                    skel.finish_reason =
-                        (result && result.value().stats.stopped_on_max_tokens) ? "length" : "stop";
+                    if (alive && !stop_filter.stopped() && result) {
+                        const auto tail = stop_filter.flush();
+                        if (!tail.empty()) {
+                            auto chunk = api::serialize_chat_completion_chunk(skel, tail, first, false);
+                            first = false;
+                            if (!chunk) {
+                                alive = false;
+                            } else {
+                                alive = emit("data: " + chunk.take_value() + "\n\n");
+                            }
+                        }
+                    }
+                    skel.finish_reason = (result && !stop_filter.stopped() &&
+                                          result.value().stats.stopped_on_max_tokens)
+                                                 ? "length" : "stop";
                     if (alive) {
                         auto last = api::serialize_chat_completion_chunk(skel, "", false, true);
                         if (last) alive = emit("data: " + last.take_value() + "\n\n");
@@ -656,8 +672,10 @@ int command_serve(const std::vector<std::string>& args) {
             api::ChatCompletionResponse completion;
             completion.id = "chatcmpl-vastloom";
             completion.model = model_id;
-            completion.content = result.value().text;
-            completion.finish_reason = result.value().stats.stopped_on_max_tokens ? "length" : "stop";
+            api::StopSequenceFilter stop_filter(parsed.value().stop);
+            completion.content = stop_filter.apply(result.value().text);
+            completion.finish_reason =
+                (result.value().stats.stopped_on_max_tokens && !stop_filter.stopped()) ? "length" : "stop";
             completion.created = now;
             completion.prompt_tokens = result.value().stats.prompt_tokens;
             completion.completion_tokens = result.value().stats.generated_tokens;

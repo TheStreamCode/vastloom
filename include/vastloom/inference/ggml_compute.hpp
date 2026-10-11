@@ -38,6 +38,9 @@ struct GgmlComputeOptions {
     safety::ResourceGovernor& governor, const GgmlComputeOptions& options = {});
 
 // Releases the thread pool, graph pool and Governor reservation. Safe when not enabled.
+// Must be called from the same thread that runs the matvecs (the CLI's owner thread): the
+// backend frees its ggml context here, and a concurrent matvec on another thread would use
+// freed memory.
 void ggml_compute_disable() noexcept;
 
 // True for storage types the backend can multiply.

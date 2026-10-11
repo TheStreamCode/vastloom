@@ -28,13 +28,19 @@ from import_hf_model import (  # noqa: E402
 )
 
 MODEL_ID = "unsloth/Qwen3.8-Flash-Next-FP8"
-REVISION = "main"
+# Immutable revision snapshots: the file set is still discovered from the repository tree,
+# but always from the exact commit that was imported and validated on the reference PC.
+# A moving "main" would silently download different bytes for the same claimed revision.
+PINNED_REVISIONS = {
+    "unsloth/Qwen3.8-Flash-Next-GGUF": "766911a6b7369840a91dbcd95f9f997acaab6cd6",
+    "unsloth/Qwen3.8-Flash-Next-FP8": "41cc25fe32cc20053a59c89716196897580cddf6",
+}
 TREE_URL = "https://huggingface.co/api/models/{repo}/tree/{rev}?recursive=true"
 META_SUFFIXES = (".json", ".txt")
 
 
-def fetch_tree(repo: str) -> list[dict]:
-    url = TREE_URL.format(repo=repo, rev=REVISION)
+def fetch_tree(repo: str, revision: str) -> list[dict]:
+    url = TREE_URL.format(repo=repo, rev=revision)
     headers = {"User-Agent": "vastloom-local-ai/0.4-importer"}
     token = os.environ.get("HF_TOKEN")
     if token:
@@ -44,8 +50,20 @@ def fetch_tree(repo: str) -> list[dict]:
         return json.loads(response.read().decode("utf-8"))
 
 
-def build_spec(repo: str, gguf_dir: str | None) -> ModelSpec:
-    tree = fetch_tree(repo)
+def resolve_revision(repo: str, override: str | None) -> str:
+    if override is not None:
+        return override
+    pinned = PINNED_REVISIONS.get(repo)
+    if pinned is None:
+        raise RuntimeError(
+            f"no pinned revision for {repo}: pass --revision explicitly "
+            "(an unpinned 'main' import is not reproducible)"
+        )
+    return pinned
+
+
+def build_spec(repo: str, revision: str, gguf_dir: str | None) -> ModelSpec:
+    tree = fetch_tree(repo, revision)
     files: list[FileSpec] = []
     for entry in sorted(tree, key=lambda item: item["path"]):
         path = entry["path"]
@@ -67,7 +85,7 @@ def build_spec(repo: str, gguf_dir: str | None) -> ModelSpec:
     artifact = alias
     if gguf_dir:
         artifact += "-" + gguf_dir.strip("/").lower().replace("/", "-")
-    return ModelSpec(alias=alias, model_id=repo, revision=REVISION, files=tuple(files),
+    return ModelSpec(alias=alias, model_id=repo, revision=revision, files=tuple(files),
                      artifact_name=artifact)
 
 
@@ -75,6 +93,9 @@ def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--store", type=Path, required=True)
     parser.add_argument("--repo", default=MODEL_ID)
+    parser.add_argument("--revision", default=None,
+                        help="import this exact commit (defaults to the pinned snapshot "
+                             "for the known repos)")
     parser.add_argument("--gguf-dir", default=None,
                         help="include only *.gguf under this repo directory (e.g. Q8_0/)")
     parser.add_argument("--reserve-gib", type=int, default=300)
@@ -86,10 +107,12 @@ def parse_args() -> argparse.Namespace:
 
 def main() -> int:
     args = parse_args()
-    spec = build_spec(args.repo, args.gguf_dir)
-    weight_bytes = sum(item.size for item in spec.files if item.weight)
-    print(f"spec: {len(spec.files)} files, {weight_bytes / GIB:.1f} GiB weights", file=sys.stderr, flush=True)
     try:
+        revision = resolve_revision(args.repo, args.revision)
+        spec = build_spec(args.repo, revision, args.gguf_dir)
+        weight_bytes = sum(item.size for item in spec.files if item.weight)
+        print(f"spec: {len(spec.files)} files, {weight_bytes / GIB:.1f} GiB weights",
+              file=sys.stderr, flush=True)
         target = import_model(
             args.store,
             spec,
@@ -98,7 +121,9 @@ def main() -> int:
             timeout=args.timeout,
             dry_run=args.dry_run,
             max_bytes_per_second=args.max_mib_per_sec * 1024 * 1024,
-            allow_large_download=True,
+            allow_large_download=True,  # explicit by design: this tool is the dedicated
+            # driver for the multi-hundred-GiB primary-track checkpoint; the base
+            # importer's guard stays on for every other use.
         )
     except (OSError, RuntimeError, ValueError, json.JSONDecodeError) as error:
         print(f"ERROR: {error}", file=sys.stderr)

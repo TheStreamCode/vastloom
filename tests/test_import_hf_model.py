@@ -209,7 +209,7 @@ def main() -> int:
         )
         require(
             all(
-                item.metadata_only_only and item.source_name and item.source_size
+                item.metadata_only and item.source_name and item.source_size
                 for item in deepseek_metadata
                 if item.range_prefix
             ),
@@ -407,7 +407,7 @@ def main() -> int:
                 len(prefix),
                 hashlib.sha256(prefix).hexdigest(),
                 source_name="weights",
-                metadata_only_only=True,
+                metadata_only=True,
                 range_prefix=True,
                 source_size=len(payload),
             )

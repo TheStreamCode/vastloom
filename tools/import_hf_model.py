@@ -17,6 +17,8 @@ import sys
 import time
 from typing import Iterable
 from urllib.parse import quote
+import http.client
+from urllib.error import HTTPError, URLError
 from urllib.request import Request, urlopen
 
 if os.name == "nt":
@@ -53,7 +55,7 @@ class FileSpec:
     sha256: str | None = None
     weight: bool = False
     source_name: str | None = None
-    metadata_only_only: bool = False
+    metadata_only: bool = False
     range_prefix: bool = False
     source_size: int | None = None
 
@@ -244,7 +246,7 @@ def _deepseek_header_files() -> tuple[FileSpec, ...]:
             size=size,
             sha256=sha256,
             source_name=name,
-            metadata_only_only=True,
+            metadata_only=True,
             range_prefix=True,
             source_size=source_sizes[name],
         )
@@ -298,7 +300,7 @@ DEEPSEEK_V4_FLASH_0731_GGUF_IQ1S = ModelSpec(
             52_320,
             "7128e5c180640517eb10a2ba2eb22a5153f80b3d8316ec70122246a5a2f3db47",
             source_name="UD-IQ1_S/DeepSeek-V4-Flash-0731-UD-IQ1_S-00002-of-00003.gguf",
-            metadata_only_only=True,
+            metadata_only=True,
             range_prefix=True,
             source_size=49_093_726_624,
         ),
@@ -307,7 +309,7 @@ DEEPSEEK_V4_FLASH_0731_GGUF_IQ1S = ModelSpec(
             33_600,
             "48c9b417ec3c389e834bb299a3273376e8dabbc2855116d12cadb92977091717",
             source_name="UD-IQ1_S/DeepSeek-V4-Flash-0731-UD-IQ1_S-00003-of-00003.gguf",
-            metadata_only_only=True,
+            metadata_only=True,
             range_prefix=True,
             source_size=33_440_253_504,
         ),
@@ -387,7 +389,7 @@ def target_name(spec: ModelSpec, metadata_only: bool) -> str:
 def selected_files(spec: ModelSpec, metadata_only: bool) -> tuple[FileSpec, ...]:
     if metadata_only:
         return tuple(item for item in spec.files if not item.weight)
-    return tuple(item for item in spec.files if not item.metadata_only_only)
+    return tuple(item for item in spec.files if not item.metadata_only)
 
 
 def preflight_disk(root: Path, required_bytes: int, reserve_bytes: int) -> None:
@@ -463,7 +465,44 @@ def validate_existing(target: Path, spec: ModelSpec, files: Iterable[FileSpec], 
             raise RuntimeError(f"existing immutable artifact failed SHA-256 validation: {path}")
 
 
+DOWNLOAD_ATTEMPTS = 3
+DOWNLOAD_RETRY_BACKOFF_SECONDS = 5.0
+
+
+def _is_transient_download_error(error: BaseException) -> bool:
+    if isinstance(error, HTTPError):
+        return error.code == 429 or error.code >= 500
+    return isinstance(error, (URLError, TimeoutError, ConnectionError, http.client.HTTPException))
+
+
 def download_file(
+    url: str,
+    partial: Path,
+    item: FileSpec,
+    timeout: float,
+    max_bytes_per_second: int,
+) -> str:
+    # A multi-gigabyte shard must survive a flaky link: a transient transport failure
+    # (reset, timeout, truncated response) retries with resume - the partial file is
+    # preserved and the next attempt re-opens with a Range header. Clear protocol
+    # refusals (4xx) are not retried.
+    attempt = 1
+    while True:
+        try:
+            return _download_file_attempt(url, partial, item, timeout, max_bytes_per_second)
+        except (HTTPError, URLError, TimeoutError, ConnectionError, http.client.HTTPException) as error:
+            if attempt >= DOWNLOAD_ATTEMPTS or not _is_transient_download_error(error):
+                raise
+            delay = DOWNLOAD_RETRY_BACKOFF_SECONDS * attempt
+            progress(
+                f"transient download error for {item.name} ({error}); "
+                f"resuming in {delay:.0f}s (attempt {attempt + 1}/{DOWNLOAD_ATTEMPTS})"
+            )
+            time.sleep(delay)
+            attempt += 1
+
+
+def _download_file_attempt(
     url: str,
     partial: Path,
     item: FileSpec,

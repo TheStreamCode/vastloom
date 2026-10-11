@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import html
 import re
+import argparse
 import sys
 from pathlib import Path
 
@@ -282,10 +283,14 @@ def render(input_path: Path, output_path: Path) -> None:
 
 
 def main() -> int:
-    input_path = Path(sys.argv[1]) if len(sys.argv) > 1 else DEFAULT_INPUT
-    output_path = Path(sys.argv[2]) if len(sys.argv) > 2 else DEFAULT_OUTPUT
-    render(input_path, output_path)
-    print(f"rendered {output_path}")
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("input", type=Path, nargs="?", default=Path(DEFAULT_INPUT),
+                        help="markdown source (default: %(default)s)")
+    parser.add_argument("output", type=Path, nargs="?", default=Path(DEFAULT_OUTPUT),
+                        help="PDF destination (default: %(default)s)")
+    arguments = parser.parse_args()
+    render(arguments.input, arguments.output)
+    print(f"rendered {arguments.output}")
     return 0
 
 

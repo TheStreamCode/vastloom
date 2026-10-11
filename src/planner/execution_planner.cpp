@@ -30,22 +30,99 @@ struct ProfilePolicy {
 };
 
 ProfilePolicy policy_for(Profile profile) {
+    // Designated initializers make each number name its own budget: a transposed pair
+    // of adjacent literals would otherwise be a silent policy corruption.
     switch (profile) {
         case Profile::safe:
-            return {0.64, 0.25, 6U * GiB, 0.08, 2U * GiB, 0.16, 1536U * MiB,
-                    0.06, 24U * GiB, 100U * GiB, 0.055, 0.12, 0.05, 6, 2};
+            return {
+                .ram_cap_ratio = 0.64,
+                .os_reserve_ratio = 0.25,
+                .minimum_os_reserve = 6U * GiB,
+                .emergency_ratio = 0.08,
+                .minimum_emergency_reserve = 2U * GiB,
+                .vram_reserve_ratio = 0.16,
+                .minimum_vram_reserve = 1536U * MiB,
+                .storage_reserve_ratio = 0.06,
+                .minimum_storage_reserve = 24U * GiB,
+                .maximum_storage_reserve = 100U * GiB,
+                .staging_ratio = 0.055,
+                .kv_ratio = 0.12,
+                .scratch_ratio = 0.05,
+                .max_io_workers = 6,
+                .speculative_window = 2,
+            };
         case Profile::balanced:
-            return {0.72, 0.20, 5U * GiB, 0.06, 2U * GiB, 0.13, 1280U * MiB,
-                    0.05, 20U * GiB, 100U * GiB, 0.065, 0.14, 0.04, 10, 4};
+            return {
+                .ram_cap_ratio = 0.72,
+                .os_reserve_ratio = 0.20,
+                .minimum_os_reserve = 5U * GiB,
+                .emergency_ratio = 0.06,
+                .minimum_emergency_reserve = 2U * GiB,
+                .vram_reserve_ratio = 0.13,
+                .minimum_vram_reserve = 1280U * MiB,
+                .storage_reserve_ratio = 0.05,
+                .minimum_storage_reserve = 20U * GiB,
+                .maximum_storage_reserve = 100U * GiB,
+                .staging_ratio = 0.065,
+                .kv_ratio = 0.14,
+                .scratch_ratio = 0.04,
+                .max_io_workers = 10,
+                .speculative_window = 4,
+            };
         case Profile::performance:
-            return {0.80, 0.15, 4U * GiB, 0.05, 1536U * MiB, 0.10, 1024U * MiB,
-                    0.04, 20U * GiB, 80U * GiB, 0.08, 0.16, 0.035, 16, 5};
+            return {
+                .ram_cap_ratio = 0.80,
+                .os_reserve_ratio = 0.15,
+                .minimum_os_reserve = 4U * GiB,
+                .emergency_ratio = 0.05,
+                .minimum_emergency_reserve = 1536U * MiB,
+                .vram_reserve_ratio = 0.10,
+                .minimum_vram_reserve = 1024U * MiB,
+                .storage_reserve_ratio = 0.04,
+                .minimum_storage_reserve = 20U * GiB,
+                .maximum_storage_reserve = 80U * GiB,
+                .staging_ratio = 0.08,
+                .kv_ratio = 0.16,
+                .scratch_ratio = 0.035,
+                .max_io_workers = 16,
+                .speculative_window = 5,
+            };
         case Profile::low_memory:
-            return {0.56, 0.28, 6U * GiB, 0.09, 2U * GiB, 0.18, 1536U * MiB,
-                    0.07, 24U * GiB, 120U * GiB, 0.05, 0.09, 0.05, 5, 1};
+            return {
+                .ram_cap_ratio = 0.56,
+                .os_reserve_ratio = 0.28,
+                .minimum_os_reserve = 6U * GiB,
+                .emergency_ratio = 0.09,
+                .minimum_emergency_reserve = 2U * GiB,
+                .vram_reserve_ratio = 0.18,
+                .minimum_vram_reserve = 1536U * MiB,
+                .storage_reserve_ratio = 0.07,
+                .minimum_storage_reserve = 24U * GiB,
+                .maximum_storage_reserve = 120U * GiB,
+                .staging_ratio = 0.05,
+                .kv_ratio = 0.09,
+                .scratch_ratio = 0.05,
+                .max_io_workers = 5,
+                .speculative_window = 1,
+            };
         case Profile::quiet:
-            return {0.68, 0.22, 5U * GiB, 0.07, 2U * GiB, 0.15, 1536U * MiB,
-                    0.06, 24U * GiB, 100U * GiB, 0.055, 0.12, 0.04, 4, 2};
+            return {
+                .ram_cap_ratio = 0.68,
+                .os_reserve_ratio = 0.22,
+                .minimum_os_reserve = 5U * GiB,
+                .emergency_ratio = 0.07,
+                .minimum_emergency_reserve = 2U * GiB,
+                .vram_reserve_ratio = 0.15,
+                .minimum_vram_reserve = 1536U * MiB,
+                .storage_reserve_ratio = 0.06,
+                .minimum_storage_reserve = 24U * GiB,
+                .maximum_storage_reserve = 100U * GiB,
+                .staging_ratio = 0.055,
+                .kv_ratio = 0.12,
+                .scratch_ratio = 0.04,
+                .max_io_workers = 4,
+                .speculative_window = 2,
+            };
     }
     return policy_for(Profile::balanced);
 }

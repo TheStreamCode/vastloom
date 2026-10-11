@@ -14,6 +14,8 @@ import stat
 import sys
 import time
 from typing import Any, Iterable
+import http.client
+from urllib.error import HTTPError, URLError
 from urllib.request import Request, urlopen
 
 import import_hf_model as base
@@ -377,7 +379,42 @@ def _write_json_atomic(path: Path, document: dict[str, object]) -> None:
         partial.unlink(missing_ok=True)
 
 
+DOWNLOAD_ATTEMPTS = 3
+DOWNLOAD_RETRY_BACKOFF_SECONDS = 5.0
+
+
+def _is_transient_download_error(error: BaseException) -> bool:
+    if isinstance(error, HTTPError):
+        return error.code == 429 or error.code >= 500
+    return isinstance(error, (URLError, TimeoutError, ConnectionError, http.client.HTTPException))
+
+
 def download_range(
+    url: str,
+    partial: Path,
+    entry: SourceRange,
+    timeout: float,
+    max_bytes_per_second: int,
+) -> str:
+    # Each range is bounded, so a transient failure simply retries the whole read;
+    # a clean protocol refusal is not retried.
+    attempt = 1
+    while True:
+        try:
+            return _download_range_attempt(url, partial, entry, timeout, max_bytes_per_second)
+        except (HTTPError, URLError, TimeoutError, ConnectionError, http.client.HTTPException) as error:
+            if attempt >= DOWNLOAD_ATTEMPTS or not _is_transient_download_error(error):
+                raise
+            delay = DOWNLOAD_RETRY_BACKOFF_SECONDS * attempt
+            base.progress(
+                f"transient range error for {entry.label} ({error}); "
+                f"retrying in {delay:.0f}s (attempt {attempt + 1}/{DOWNLOAD_ATTEMPTS})"
+            )
+            time.sleep(delay)
+            attempt += 1
+
+
+def _download_range_attempt(
     url: str,
     partial: Path,
     entry: SourceRange,

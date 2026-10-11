@@ -181,10 +181,58 @@ Result<StorageInfo> detect_storage(const std::filesystem::path& input_path) {
 
 std::string capture_command(const char* command) {
 #if defined(_WIN32)
-    FILE* pipe = _popen(command, "r");
+    // A wedged driver must not wedge the whole CLI: every shell-out here is bounded by a
+    // hard deadline and terminated, mirroring the timeout(1) guard on POSIX. _popen cannot
+    // be given a deadline, so the child runs under CreateProcess with an explicit pipe.
+    constexpr DWORD kCommandDeadlineMs = 3000U;
+    SECURITY_ATTRIBUTES inheritable{};
+    inheritable.nLength = sizeof(inheritable);
+    inheritable.bInheritHandle = TRUE;
+    HANDLE read_end = nullptr;
+    HANDLE write_end = nullptr;
+    if (CreatePipe(&read_end, &write_end, &inheritable, 0U) == 0) {
+        return {};
+    }
+    // The parent's read end must not leak into the child.
+    SetHandleInformation(read_end, HANDLE_FLAG_INHERIT, 0U);
+
+    std::string command_line = std::string("cmd.exe /c ") + command;
+    STARTUPINFOA startup{};
+    startup.cb = sizeof(startup);
+    startup.dwFlags = STARTF_USESTDHANDLES;
+    startup.hStdOutput = write_end;
+    startup.hStdError = write_end;
+    startup.hStdInput = GetStdHandle(STD_INPUT_HANDLE);
+    PROCESS_INFORMATION process{};
+    std::string output;
+    const bool spawned = CreateProcessA(nullptr, command_line.data(), nullptr, nullptr, TRUE,
+                                         CREATE_NO_WINDOW, nullptr, nullptr, &startup,
+                                         &process) != 0;
+    // The child owns its end of the pipe now.
+    CloseHandle(write_end);
+    if (spawned) {
+        std::thread reader([&] {
+            std::array<char, 4096> buffer{};
+            DWORD read_bytes = 0U;
+            while (ReadFile(read_end, buffer.data(), static_cast<DWORD>(buffer.size()),
+                            &read_bytes, nullptr) != 0 &&
+                   read_bytes > 0U) {
+                output.append(buffer.data(), static_cast<std::size_t>(read_bytes));
+                if (output.size() > 1024U * 1024U) break;
+            }
+        });
+        if (WaitForSingleObject(process.hProcess, kCommandDeadlineMs) == WAIT_TIMEOUT) {
+            TerminateProcess(process.hProcess, 1U);
+            WaitForSingleObject(process.hProcess, 500U);
+        }
+        reader.join();
+        CloseHandle(process.hProcess);
+        CloseHandle(process.hThread);
+    }
+    CloseHandle(read_end);
+    return output;
 #else
     FILE* pipe = popen(command, "r");
-#endif
     if (pipe == nullptr) {
         return {};
     }
@@ -196,12 +244,9 @@ std::string capture_command(const char* command) {
             break;
         }
     }
-#if defined(_WIN32)
-    _pclose(pipe);
-#else
     pclose(pipe);
-#endif
     return output;
+#endif
 }
 
 std::optional<double> parse_double(std::string_view value) {

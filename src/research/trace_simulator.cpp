@@ -13,6 +13,7 @@
 #include <optional>
 #include <set>
 #include <sstream>
+#include <tuple>
 #include <unordered_map>
 #include <unordered_set>
 #include <utility>
@@ -277,14 +278,17 @@ public:
     void touch(ExpertKey key) {
         const auto iterator = entries_.find(key);
         if (iterator == entries_.end()) return;
+        ranking_.erase(ranking_key(iterator->first, iterator->second));
         ++iterator->second.frequency;
         iterator->second.last_use = ++clock_;
+        ranking_.emplace(iterator->second.frequency, iterator->second.last_use, key);
     }
 
     bool erase(ExpertKey key) {
         const auto iterator = entries_.find(key);
         if (iterator == entries_.end()) return false;
         used_ -= iterator->second.size;
+        ranking_.erase(ranking_key(iterator->first, iterator->second));
         entries_.erase(iterator);
         return true;
     }
@@ -296,19 +300,18 @@ public:
             touch(key);
             return evicted;
         }
+        // The ordered index keeps the least (frequency, last_use) entry at the front, so an
+        // eviction is O(log n) instead of a full scan per victim on million-record traces.
         while (!entries_.empty() && used_ > capacity_ - size) {
-            auto victim = entries_.begin();
-            for (auto iterator = std::next(entries_.begin()); iterator != entries_.end(); ++iterator) {
-                if (std::pair{iterator->second.frequency, iterator->second.last_use} <
-                    std::pair{victim->second.frequency, victim->second.last_use}) {
-                    victim = iterator;
-                }
-            }
-            evicted.emplace_back(victim->first, victim->second.size);
-            used_ -= victim->second.size;
-            entries_.erase(victim);
+            const ExpertKey victim = std::get<2>(*ranking_.begin());
+            const auto iterator = entries_.find(victim);
+            evicted.emplace_back(victim, iterator->second.size);
+            used_ -= iterator->second.size;
+            ranking_.erase(ranking_.begin());
+            entries_.erase(iterator);
         }
         entries_.emplace(key, Entry{size, 1U, ++clock_});
+        ranking_.emplace(1U, clock_, key);
         used_ += size;
         return evicted;
     }
@@ -319,10 +322,17 @@ private:
         std::uint64_t frequency{0U};
         std::uint64_t last_use{0U};
     };
+
+    static std::tuple<std::uint64_t, std::uint64_t, ExpertKey> ranking_key(
+        ExpertKey key, const Entry& entry) noexcept {
+        return {entry.frequency, entry.last_use, key};
+    }
+
     ByteCount capacity_{0U};
     ByteCount used_{0U};
     std::uint64_t clock_{0U};
     std::unordered_map<ExpertKey, Entry> entries_;
+    std::set<std::tuple<std::uint64_t, std::uint64_t, ExpertKey>> ranking_;
 };
 
 template <typename Value>

@@ -2,6 +2,29 @@
 
 ## 0.4.0-alpha.5 - Unreleased
 
+- **Robustness pass (October 2026)**:
+  - every shell-out in the hardware probe is now bounded by a hard 3 s deadline on
+    Windows too (CreateProcess with an explicit pipe and TerminateProcess on
+    timeout): a wedged driver can no longer freeze `HardwareProbe::collect` and
+    with it every CLI entry point;
+  - `vastloom-watchdog` gains an always-on smoke test (argument ranges,
+    stale/unreadable heartbeat in observe mode, PID mismatch, and the enforced
+    two-sample termination of a live child);
+  - the trace simulator's LFU policy keeps its victim ranking in an ordered
+    index: evictions are O(log n) instead of a full map scan per victim, which
+    made million-record traces unusable;
+  - the Qwen importer pins both known Unsloth revisions to immutable commits
+    (a moving `main` silently downloaded different bytes under the same claimed
+    revision) and requires `--revision` for any other repository;
+  - checkpoint downloads retry transient transport failures (resets, timeouts,
+    truncated responses) up to three times with backoff and resume, in both the
+    full-file and the bounded-range importers; clean protocol refusals are not
+    retried;
+  - the safety-profile budget tables use designated initializers (a transposed
+    pair of literals was a silent policy corruption), the release workflow
+    refuses tags that disagree with the CMake project version, the
+    `metadata_only_only` field typo is renamed, and `render_paper_pdf.py` uses
+    argparse like every other tool.
 - **Cross-platform build restored (October 2026)**: the tree now compiles clean with
   GCC/Clang under `-Wall -Wextra -Wconversion -Wsign-conversion -Wdouble-promotion
   -Werror` (the CI matrix and CodeQL build had been failing on Linux since the

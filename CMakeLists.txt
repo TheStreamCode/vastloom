@@ -359,6 +359,13 @@ if(BUILD_TESTING AND VASTLOOM_BUILD_TESTS)
                 --vastloom $<TARGET_FILE:vastloom>
         )
         set_tests_properties(vastloom_range_artifact_cli PROPERTIES TIMEOUT 30)
+        add_test(
+            NAME vastloom_watchdog_cli
+            COMMAND ${Python3_EXECUTABLE}
+                ${CMAKE_CURRENT_SOURCE_DIR}/tests/test_watchdog_cli.py
+                --watchdog $<TARGET_FILE:vastloom-watchdog>
+        )
+        set_tests_properties(vastloom_watchdog_cli PROPERTIES TIMEOUT 60)
         if(VASTLOOM_SMOLLM2_MODEL)
             add_test(
                 NAME vastloom_smollm2_reference

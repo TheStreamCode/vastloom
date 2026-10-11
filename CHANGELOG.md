@@ -2,6 +2,18 @@
 
 ## 0.4.0-alpha.5 - Unreleased
 
+- **Cross-platform build restored (October 2026)**: the tree now compiles clean with
+  GCC/Clang under `-Wall -Wextra -Wconversion -Wsign-conversion -Wdouble-promotion
+  -Werror` (the CI matrix and CodeQL build had been failing on Linux since the
+  repository went public). Platform-typed socket results, explicit float-to-double
+  casts at every double-promotion site, `[[maybe_unused]]` on ggml-only helpers,
+  and bounded explicit reads replacing the `istreambuf_iterator` forms that trip
+  GCC 13's `-Wnull-dereference` false positive at `-O3`. CI now also runs the
+  offline distill test suites, which no runner had executed before.
+- **Trace simulator defect**: an expert too large for the VRAM tier now falls back
+  to the RAM tier instead of silently becoming a permanent storage miss (LRU and
+  LFU, both hit-promotion and storage-miss paths), and PCIe traffic is only
+  counted when the VRAM tier actually accepts the payload.
 - **Whole-project review (October 2026)**: a full read of every source area
   (model loading and governed I/O, inference kernels, runtime/API/build)
   found no CRITICAL defects; every MAJOR finding was fixed without touching

@@ -128,6 +128,16 @@ model graph exists yet. This proves the first real GPU math/copy boundary only.
 
 ## Current inference paths
 
+> **Track boundary (October 2026).** The narrative in this section was written against the
+> DeepSeek V4 Flash 0731 track (M5-M9), which the roadmap froze in
+> `docs/archive/deepseek_0731/`. It documents the mechanisms that still exist in the code
+> today and are exercised by the historical tests, but the primary execution track is
+> Qwen3.8-Flash-Next: its token path is described in the
+> [roadmap's Q11 series](ROADMAP.md) and the [Q11C parity report](reports/Q11C_QWEN38_LLAMA_PARITY_VALIDATION.md).
+> Read this section as the anatomy of the engine's mechanisms, not as a description of the
+> model the runtime currently targets.
+
+
 Alpha.2 retains the complete synthetic CPU-only reference slice:
 
 ```text

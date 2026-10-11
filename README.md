@@ -35,6 +35,28 @@ research project, not a product: current throughput is reported honestly as behi
 inference engine. Read [`docs/ROADMAP.md`](docs/ROADMAP.md) for what is done, what is open,
 and what is explicitly out of scope.
 
+## Contents
+
+- [Why Vastloom exists](#why-vastloom-exists)
+- [Reference target](#reference-target)
+- [What works in the current source](#what-works-in-the-current-source)
+- [Build and validate](#build-and-validate)
+- [Run the primary track (Qwen3.8-Flash-Next)](#run-the-primary-track-qwen38-flash-next)
+- [Chat with the bundled model](#chat-with-the-bundled-model)
+- [Serve a local OpenAI-compatible endpoint](#serve-a-local-openai-compatible-endpoint)
+- [Chat with the real SmolLM2 checkpoint](#chat-with-the-real-smollm2-checkpoint)
+- [Probe the real OLMoE checkpoint](#probe-the-real-olmoe-checkpoint)
+- [Inspect DeepSeek V4 Flash without downloading the weights](#inspect-deepseek-v4-flash-without-downloading-the-weights)
+- [TinyChat CLI options](#tinychat-cli-options)
+- [Reproduce the validation model](#reproduce-the-validation-model)
+- [Other commands](#other-commands)
+- [Safety invariants](#safety-invariants)
+- [Reference planning result](#reference-planning-result)
+- [Current limitations](#current-limitations)
+- [Research path](#research-path)
+- [Prior art and research baselines](#prior-art-and-research-baselines)
+- [Community and license](#community-and-license)
+
 The further north star — a fast resident **frontman** expanded at runtime by a **dormant
 brain** on NVMe through bounded bridges — is documented separately in
 [`docs/archive/deepseek_0731/CAPABILITY_TRANSFER_VISION.md`](docs/archive/deepseek_0731/CAPABILITY_TRANSFER_VISION.md).
@@ -238,93 +260,18 @@ The current vertical slices prove native dense inference, real MoE routing, boun
 streaming on a smaller published checkpoint and one complete real DeepSeek expert before the
 runtime scales the new selected-expert layer path to verified official payloads and generation.
 
-Measured results and limitations are recorded in the
-[`Alpha 4 OLMoE report`](docs/reports/ALPHA4_OLMOE_VALIDATION.md) and the
-[`Alpha 4.2 async-I/O report`](docs/reports/ALPHA4_ASYNC_IO_VALIDATION.md). The newest
-reader, counter and reuse-distance results are in the
-[`Alpha 4.3 I/O-observability report`](docs/reports/ALPHA4_IO_OBSERVABILITY_VALIDATION.md).
-The rebrand, compatibility, packaging and open-source readiness checks are recorded in the
-[`Alpha 4 open-source validation report`](docs/reports/ALPHA4_OPEN_SOURCE_REBRAND_VALIDATION.md).
-The newest staged-read and readiness results are in the
-[`M5 staged-I/O validation report`](docs/reports/M5_READINESS_STAGED_IO_VALIDATION.md).
-The completed physical-counter and cache-bypass gate is documented in the
-[`M5 device-I/O validation report`](docs/reports/M5_DEVICE_IO_CACHE_BYPASS_VALIDATION.md).
-The first DeepSeek-specific slice is documented in the
-[`M6 metadata inspection report`](docs/reports/M6_DEEPSEEK_METADATA_INSPECTION_VALIDATION.md).
-Native prompt encoding is documented in the
-[`M6 tokenizer validation report`](docs/reports/M6_DEEPSEEK_TOKENIZER_VALIDATION.md).
-The first bounded mathematical primitives are documented in the
-[`M6 reference-operator report`](docs/reports/M6_DEEPSEEK_REFERENCE_OPERATORS_VALIDATION.md).
-The completed reduced graph gate is documented in the
-[`M6 reduced-graph validation report`](docs/reports/M6_DEEPSEEK_GRAPH_VALIDATION.md).
-The checkpoint-shaped MTP reference gate is documented in the
-[`M7 MTP validation report`](docs/reports/M7_DEEPSEEK_MTP_VALIDATION.md).
-The five-step raw/compressed cache gate is documented in the
-[`M7 incremental-state report`](docs/reports/M7_DEEPSEEK_INCREMENTAL_VALIDATION.md).
-The model-independent role/range binding is documented in the
-[`M7 logical tensor catalog report`](docs/reports/M7_LOGICAL_TENSOR_CATALOG_VALIDATION.md).
-The reservation-backed NVMe/RAM/VRAM control plane is documented in the
-[`M9 residency-state report`](docs/reports/M9_RESIDENCY_STATE_VALIDATION.md).
-The first governed multi-range-to-packed-buffer transaction is documented in the
-[`M9 packed expert load report`](docs/reports/M9_PACKED_EXPERT_LOAD_VALIDATION.md).
-The bounded shared worker/queue transaction is documented in the
-[`M9 asynchronous expert-load report`](docs/reports/M9_ASYNC_EXPERT_LOAD_VALIDATION.md).
-The official 0731 GGUF header and packed-expert binding is documented in the
-[`M7 0731 GGUF catalog report`](docs/reports/M7_DEEPSEEK_0731_GGUF_CATALOG_VALIDATION.md).
-The first real quantized matrix parity gate is documented in the
-[`M7 IQ1_S kernel report`](docs/reports/M7_DEEPSEEK_IQ1S_KERNEL_VALIDATION.md).
-The first complete real quantized expert and governed-load gate is documented in the
-[`M7 real-expert report`](docs/reports/M7_DEEPSEEK_REAL_EXPERT_VALIDATION.md).
-The derived resident/streamed trunk capacity gate is documented in the
-[`M7 working-set report`](docs/reports/M7_DEEPSEEK_WORKING_SET_VALIDATION.md).
-The first model-independent per-layer trunk plan and governed tile transaction are documented in
-the [`M9 layer-trunk streaming report`](docs/reports/M9_LAYER_TRUNK_STREAMING_VALIDATION.md).
-The complete layer-trunk storage-type kernel gate is documented in the
-[`M9 trunk storage-kernel report`](docs/reports/M9_DEEPSEEK_TRUNK_STORAGE_KERNEL_VALIDATION.md).
-The first architecture-level packed layer is documented in the
-[`M9 packed-layer report`](docs/reports/M9_DEEPSEEK_PACKED_LAYER_VALIDATION.md).
-Its file-backed, Governor-owned execution is documented in the
-[`M9 governed-layer report`](docs/reports/M9_DEEPSEEK_GOVERNED_LAYER_VALIDATION.md).
-Its router-first bounded selected-expert execution is documented in the
-[`M9 selected-expert streaming report`](docs/reports/M9_DEEPSEEK_SELECTED_EXPERT_STREAMING_VALIDATION.md).
-The canonical real-expert catalog/cache/kernel bridge is documented in the
-[`M9 real selected-expert report`](docs/reports/M9_DEEPSEEK_REAL_SELECTED_EXPERT_VALIDATION.md).
-The bounded router-to-future-to-compute scheduler and controlled overlap result are documented in
-the [`M9 asynchronous overlap report`](docs/reports/M9_DEEPSEEK_ASYNC_COMPUTE_OVERLAP_VALIDATION.md).
-The complete reduced Q8_0/IQ1_S/IQ3_XXS layer composition is documented in the
-[`M9 mixed-format layer report`](docs/reports/M9_DEEPSEEK_MIXED_FORMAT_LAYER_VALIDATION.md).
-The first exact checkpoint-shaped range plan and its explicit non-execution/routing boundary are
-documented in the
-[`M9 layer probe plan report`](docs/reports/M9_DEEPSEEK_LAYER_PROBE_PLAN_VALIDATION.md).
-The bounded immutable range importer and its real-metadata no-network gate are documented in the
-[`M9 range artifact import report`](docs/reports/M9_DEEPSEEK_RANGE_ARTIFACT_IMPORT_VALIDATION.md).
-The closed-world native verifier and exact pinned-catalog trunk binding are documented in the
-[`M9 range artifact binding report`](docs/reports/M9_DEEPSEEK_RANGE_ARTIFACT_BINDING_VALIDATION.md).
-The first governed bound-range-to-scalar transaction is documented in the
-[`M9 bound trunk-load report`](docs/reports/M9_DEEPSEEK_BOUND_TRUNK_LOAD_VALIDATION.md).
-The complete reduced artifact tensor-set transaction and graph parity gate are documented in the
-[`M9 trunk tensor-set report`](docs/reports/M9_DEEPSEEK_TRUNK_TENSOR_SET_VALIDATION.md).
-The verified GGUF metadata-to-reference-config bridge and 21-descriptor layer-0 gate are documented
-in the
-[`M9 metadata-to-graph report`](docs/reports/M9_DEEPSEEK_METADATA_TO_GRAPH_VALIDATION.md).
-The complete 43-layer/1,193-descriptor metadata-to-consumer contract is documented in the
-[`M9 all-layer catalog report`](docs/reports/M9_DEEPSEEK_ALL_LAYER_CATALOG_VALIDATION.md).
-The full global/trunk/expert physical and logical closure is documented in the
-[`M9 checkpoint catalog report`](docs/reports/M9_DEEPSEEK_CHECKPOINT_CATALOG_VALIDATION.md).
-The first packed global-weight execution slice is documented in the
-[`M9 Q4_K global-kernel report`](docs/reports/M9_DEEPSEEK_Q4K_GLOBAL_KERNEL_VALIDATION.md).
-The alternate packed gate/up execution slice is documented in the
-[`M9 IQ2_XXS expert-kernel report`](docs/reports/M9_DEEPSEEK_IQ2XXS_EXPERT_KERNEL_VALIDATION.md).
-The alternate packed down-projection execution slice is documented in the
-[`M9 MXFP4 expert-kernel report`](docs/reports/M9_DEEPSEEK_MXFP4_EXPERT_KERNEL_VALIDATION.md).
-The complete governed six-global plan, artifact and consumer boundary is documented in the
-[`M9 global tensor-set report`](docs/reports/M9_DEEPSEEK_GLOBAL_TENSOR_SET_VALIDATION.md).
-The bounded token-level prefill/decode loop and trusted greedy/seeded vectors are documented in
-the [`M9 reference-generation report`](docs/reports/M9_DEEPSEEK_REFERENCE_GENERATION_VALIDATION.md).
-The native driver capability and governed VRAM allocation boundary are documented in the
-[`M8 CUDA driver report`](docs/reports/M8_CUDA_DRIVER_VALIDATION.md).
-The pinned importer and immutable full-source admission boundary are documented in the
-[`M7 checkpoint-binding report`](docs/reports/M7_DEEPSEEK_GGUF_CHECKPOINT_BINDING_VALIDATION.md).
+Every milestone has a dated validation report under [`docs/reports/`](docs/reports/README.md);
+the index there lists all of them, current track first. The ones to read first:
+
+- [`Q11C Qwen3.8 llama.cpp parity`](docs/reports/Q11C_QWEN38_LLAMA_PARITY_VALIDATION.md) — the
+  primary track's external validation, including the six defects only the oracle could find.
+- [`Q11B real 125B catalog validation`](docs/reports/Q11B_QWEN38_REAL_CATALOG_VALIDATION.md) —
+  the imported FP8 checkpoint's catalog closed end-to-end in native C++.
+- [`Alpha 4 OLMoE validation`](docs/reports/ALPHA4_OLMOE_VALIDATION.md) — real MoE routing and
+  bounded expert streaming on a published checkpoint.
+- [`M9 complete forward validation`](docs/reports/M9_DEEPSEEK_COMPLETE_FORWARD_VALIDATION.md) —
+  the full 43-layer DeepSeek execution on the reference PC (historical track).
+
 Current and candidate model support is kept explicit in the
 [`model compatibility matrix`](docs/MODEL_COMPATIBILITY.md).
 
@@ -720,6 +667,32 @@ the root `CMakeLists.txt` (`VASTLOOM_QWEN38_MODEL`, `VASTLOOM_SMOLLM2_MODEL`, `V
 `VASTLOOM_GGML_ROOT`); `VASTLOOM_QWEN38_MODEL` is also described in [`AGENTS.md`](AGENTS.md) under
 Standard gates. Governed commands report `SKIPPED` with the reason when the host is too short on
 memory or disk to run them safely, so read the run output rather than the exit code alone.
+
+## Run the primary track (Qwen3.8-Flash-Next)
+
+The primary track needs the official Unsloth Q8_0 GGUF checkpoint (`qwen4exp`, 6 shards,
+175.3 GiB) imported through the canonical store first. The import is one-time, verified and
+read-only: bounded download, per-file SHA-256, atomic manifest, immutable publication.
+
+```powershell
+python tools/import_qwen38_fp8.py --store C:astloom-store `
+    --repo unsloth/Qwen3.8-Flash-Next-GGUF --gguf-dir Q8_0/
+```
+
+Then, on the imported checkpoint directory:
+
+```powershell
+vastloom qwen38-inspect <checkpoint-directory>            # catalog validation
+vastloom qwen38-layer <checkpoint-directory> --layer 3    # one real QSA layer
+vastloom qwen38-greedy <checkpoint-directory> --prompt-ids <ids> --steps 16
+```
+
+The greedy CLI takes token ids, not text: the native text tokenizer for qwen4exp is the
+Q13 roadmap item. The pinned parity prompt ("The capital of France is") and its 16-token
+continuation are recorded in the
+[`Q11C parity report`](docs/reports/Q11C_QWEN38_LLAMA_PARITY_VALIDATION.md); on the reference
+PC the same continuation comes out of both Vastloom and llama.cpp, at the honest ~3.3-4
+s/token versus llama.cpp's ~0.32 s/token (see the measured-position note above).
 
 ## Chat with the bundled model
 

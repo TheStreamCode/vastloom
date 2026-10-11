@@ -418,14 +418,30 @@ its exact source, device identity and scope. Cache-bypass mode is stricter: it r
 start without a trustworthy mapping and rejects a run whose device bytes are below the
 logical expert payload. Whole-device counters can still include unrelated host traffic.
 
+## Qwen3.8 primary-track gates
+
+The primary execution track adds its own safety boundary on top of the shared rules:
+
+- the greedy CLI derives every budget from the safe runtime policy before any allocation,
+  including the raw Q8_0 payload cache, whose ceiling is pinned to a quarter of the
+  effective safe host limit (never above the historical 16 GiB) instead of a constant;
+- trunk residency is refused unless the safe RAM limit leaves headroom above the resident
+  set, and the explicit `--ram-headroom-gb` override can only raise the ceiling, never skip
+  the residency check;
+- the expert LRU is bounded by capacity (clamped, not allocated unbounded), the concurrent
+  prefetch converts allocation failures into refused requests instead of terminating, and
+  abandoned loads are drained and counted;
+- the opt-in `--cuda-experts` VRAM tier holds a live VRAM reserve and falls back to the CPU
+  kernel on any refusal; it is never the default path.
+
 ## Watchdog
 
 `vastloom-watchdog` is a separate process. It validates that the heartbeat belongs to the
 expected PID and is recent. Observe-only mode is the default. `--enforce` must be
 supplied explicitly before it can terminate a stale runtime.
 
-The alpha.2 TinyChat CLI does not yet publish a continuous generation heartbeat; that
-integration remains required before long-running large-model inference.
+The TinyChat CLI does not publish a continuous generation heartbeat; long-running
+large-model inference remains gated on that integration.
 
 ## Tests implemented through alpha.4
 

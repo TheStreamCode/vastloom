@@ -1,0 +1,5 @@
+# Lint selection for the Python tools and offline tests. Deliberately narrow and
+# stable: correctness classes only (syntax errors, unused names, undefined names).
+# Style-only rule families are intentionally not part of the CI gate.
+[lint]
+select = ["E4", "E7", "E9", "F"]

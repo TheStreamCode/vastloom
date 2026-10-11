@@ -13,7 +13,6 @@ from __future__ import annotations
 import html
 import re
 import argparse
-import sys
 from pathlib import Path
 
 from reportlab.lib import colors
@@ -25,7 +24,6 @@ from reportlab.pdfbase import pdfmetrics
 from reportlab.pdfbase.ttfonts import TTFont
 from reportlab.platypus import (
     HRFlowable,
-    PageBreak,
     Paragraph,
     SimpleDocTemplate,
     Spacer,

@@ -13,6 +13,9 @@ described in the top-level `docs/ROADMAP.md` (Q1..Q13) and budgeted in
 
 ## What is here
 
+- `ARCHITECTURE_NARRATIVE.md` — the engine mechanism narrative (loading, residency,
+  graph and kernel anatomy) as written against this track, extracted verbatim from
+  `docs/ARCHITECTURE.md` when the primary path moved to Qwen3.8.
 - `VALIDATION_MATRIX.md` — the validation matrix that defended every DeepSeek
   claim up to and including M13 (prefix-KV session reuse on the dense
   SmolLM2 serve path).

@@ -270,8 +270,14 @@ std::vector<GpuInfo> detect_nvidia_gpus() {
     constexpr const char* command = "timeout 3s nvidia-smi --query-gpu=name,memory.total,memory.free,temperature.gpu,power.limit,driver_version --format=csv,noheader,nounits 2>/dev/null";
 #endif
     const std::string output = capture_command(command);
+    return parse_nvidia_smi_csv(output);
+}
+
+}  // namespace
+
+std::vector<GpuInfo> parse_nvidia_smi_csv(std::string_view output) {
     std::vector<GpuInfo> gpus;
-    std::istringstream lines(output);
+    std::istringstream lines{std::string(output)};
     std::string line;
     while (std::getline(lines, line)) {
         const auto fields = util::split(line, ',', true);
@@ -295,8 +301,6 @@ std::vector<GpuInfo> detect_nvidia_gpus() {
     }
     return gpus;
 }
-
-}  // namespace
 
 Result<HardwareSnapshot> HardwareProbe::collect(const std::filesystem::path& storage_path) {
     HardwareSnapshot snapshot;

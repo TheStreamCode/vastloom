@@ -2,6 +2,21 @@
 
 ## 0.4.0-alpha.5 - Unreleased
 
+- **Maintainability pass (October 2026)**:
+  - the `nvidia-smi` CSV parser is a pure, exported seam (`parse_nvidia_smi_csv`) with an
+    always-on test on canned multi-GPU, `[N/A]`-telemetry, malformed and negative rows -
+    the most environment-dependent parser no longer depends on a physical GPU for
+    regression cover;
+  - a narrow, stable `ruff` gate (correctness classes only) runs in CI over the Python
+    tools and tests, with an explicit `ruff.toml` selection so the gate cannot drift with
+    upstream defaults; the four unused imports it found on first run are fixed;
+  - the M5-M9 DeepSeek mechanism narrative moved verbatim into
+    `docs/archive/deepseek_0731/ARCHITECTURE_NARRATIVE.md` where the frozen track keeps
+    its documentation, and `docs/ARCHITECTURE.md` now describes the token path the
+    runtime actually executes today (the Qwen3.8 chain, trunk/expert serving and
+    measured-position pointers);
+  - the safety documentation's test inventory is current (the alpha.5 additions:
+    stop-sequence filter, watchdog smoke suite, GPU CSV seam, trace-simulator fallback).
 - **Robustness pass (October 2026)**:
   - every shell-out in the hardware probe is now bounded by a hard 3 s deadline on
     Windows too (CreateProcess with an explicit pipe and TerminateProcess on

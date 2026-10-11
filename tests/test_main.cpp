@@ -9623,6 +9623,46 @@ void test_heartbeat(const std::filesystem::path& root) {
     if (loaded) CHECK(loaded.value().state == vastloom::safety::SafetyState::pressure);
 }
 
+void test_nvidia_smi_parsing() {
+    // The exact nvidia-smi CSV contract the probe shells out for, exercised without a GPU.
+    const std::string two_gpus =
+        "NVIDIA GeForce RTX 4070 SUPER, 12282, 11085, 41.0, 220.0, 566.36\n"
+        "NVIDIA GeForce RTX 3060, 12288, 8192, [N/A], [N/A], 566.36\n";
+    auto gpus = vastloom::hardware::parse_nvidia_smi_csv(two_gpus);
+    CHECK(gpus.size() == 2U);
+    if (gpus.size() == 2U) {
+        CHECK(gpus[0].name == "NVIDIA GeForce RTX 4070 SUPER");
+        CHECK(gpus[0].backend == "CUDA");
+        CHECK(gpus[0].total_vram_bytes == 12282U * vastloom::MiB);
+        CHECK(gpus[0].free_vram_bytes == 11085U * vastloom::MiB);
+        CHECK(gpus[0].temperature_celsius.has_value() && *gpus[0].temperature_celsius == 41.0);
+        CHECK(gpus[0].power_limit_watts.has_value() && *gpus[0].power_limit_watts == 220.0);
+        CHECK(gpus[0].driver_version == "566.36");
+        // [N/A] telemetry is optional; [N/A] memory would make the row unusable.
+        CHECK(gpus[1].name == "NVIDIA GeForce RTX 3060");
+        CHECK(gpus[1].total_vram_bytes == 12288U * vastloom::MiB);
+        CHECK(!gpus[1].temperature_celsius.has_value());
+        CHECK(!gpus[1].power_limit_watts.has_value());
+    }
+
+    const std::string malformed =
+        "garbage without commas\n"
+        "GPU, 4096, 2048, 55.0, 320.0\n"                     // five fields: skipped
+        "GPU, -8, 2048, 55.0, 320.0, 1.2\n"                  // negative memory: skipped
+        "GPU, [N/A], [N/A], 55.0, 320.0, 1.2\n"               // unusable memory: skipped
+        "GPU, 4096, 2048, [N/A], [N/A], 550.90\n";           // valid with optional telemetry
+    auto skipped = vastloom::hardware::parse_nvidia_smi_csv(malformed);
+    CHECK(skipped.size() == 1U);
+    if (skipped.size() == 1U) {
+        CHECK(!skipped[0].temperature_celsius.has_value());
+        CHECK(!skipped[0].power_limit_watts.has_value());
+        CHECK(skipped[0].driver_version == "550.90");
+    }
+
+    CHECK(vastloom::hardware::parse_nvidia_smi_csv("").empty());
+    CHECK(vastloom::hardware::parse_nvidia_smi_csv("no nvidia-smi on this host\n").empty());
+}
+
 }  // namespace
 
 int main() {
@@ -9671,6 +9711,7 @@ int main() {
     test_io_pool(root);
     test_device_io_counters(root);
     test_trace(root);
+    test_nvidia_smi_parsing();
     test_tiny_model(root);
     test_capability_module(root);
     test_llama_session_prefix();

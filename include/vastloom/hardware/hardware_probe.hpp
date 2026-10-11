@@ -3,6 +3,7 @@
 #include <filesystem>
 #include <optional>
 #include <string>
+#include <string_view>
 #include <vector>
 
 #include "vastloom/core/bytes.hpp"
@@ -54,6 +55,12 @@ class HardwareProbe {
 public:
     [[nodiscard]] static Result<HardwareSnapshot> collect(const std::filesystem::path& storage_path);
 };
+
+// Parses the exact `nvidia-smi --query-gpu=name,memory.total,memory.free,temperature.gpu,
+// power.limit,driver_version --format=csv,noheader,nounits` output into GpuInfo entries.
+// Exposed as a pure seam so the parsing has an always-on test without a physical GPU;
+// malformed rows are skipped exactly as the live probe skips them.
+[[nodiscard]] std::vector<GpuInfo> parse_nvidia_smi_csv(std::string_view output);
 
 [[nodiscard]] std::string to_json(const HardwareSnapshot& snapshot);
 [[nodiscard]] std::string to_text(const HardwareSnapshot& snapshot);

@@ -443,7 +443,7 @@ supplied explicitly before it can terminate a stale runtime.
 The TinyChat CLI does not publish a continuous generation heartbeat; long-running
 large-model inference remains gated on that integration.
 
-## Tests implemented through alpha.4
+## Tests implemented
 
 - allocation oversubscription and reservation release;
 - critical/emergency state escalation and hysteretic recovery;
@@ -503,6 +503,19 @@ large-model inference remains gated on that integration.
   queued-request shutdown cancellation and ThreadSanitizer coverage.
 - bounded GGUF v3 header/split parsing, packed-expert slicing, exact quantized byte spans,
   Unicode Windows paths, malformed-header rejection and non-executable snapshot enforcement.
+
+Through `0.4.0-alpha.5` the same suite additionally covers:
+
+- the OpenAI stop-sequence filter (streaming holdback and non-streaming truncation) and
+  the protocol temperature bound;
+- the watchdog binary itself: argument ranges, stale and unreadable heartbeats in
+  observe-only mode, PID-mismatch refusal, and the enforced two-sample termination of a
+  live child process;
+- the `nvidia-smi` CSV parser as a pure seam (multi-GPU rows, `[N/A]` telemetry, malformed
+  and negative rows skipped), so the most environment-dependent parser has a regression
+  guard without a physical GPU;
+- the trace simulator's RAM-tier fallback for experts that do not fit the VRAM tier, on
+  both LRU and LFU policies.
 
 ## Safety tests still required for production adapters
 

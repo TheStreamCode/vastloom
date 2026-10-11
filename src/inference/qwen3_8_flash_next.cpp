@@ -661,7 +661,7 @@ std::vector<Qwen38LayerSummary> qwen38_summarize_layers(
             layer = std::stoi(name.substr(pos, dot - pos));
         } catch (...) { continue; }
         if (layer < 0 || layer >= 48) continue;
-        auto& s = layers[layer];
+        auto& s = layers[static_cast<std::size_t>(layer)];
         ++s.total;
         if (name.find("linear_attn.") != std::string::npos) ++s.linear_attn;
         else if (name.find("self_attn.") != std::string::npos) ++s.self_attn;

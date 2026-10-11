@@ -497,7 +497,8 @@ short demos.
       considered and DROPPED: the oracle's rounding is not cloned for parity's sake.
 - [ ] Q11l - ggml SIMD as default + Q8_0 lm_head (`output.weight` is Q8_0: 660 MB
       resident vs 2.5 GB F32, SIMD matvec) and the margin-aware parity battery
-      (tools/parity_battery.py, ≥6 EN/IT prompts with margin dumps; exit-code gate).
+      (tools/parity_battery.py, to be created: ≥6 EN/IT prompts with margin dumps;
+      exit-code gate).
       Honest measurement vs llama.cpp AND ik_llama.cpp.
 - [ ] Q11m - Q4_K expert re-import (a new profile beside Q8_0, gated by the
       minimum working set; ~1.3 GB/token of expert traffic) with the pinned-ggml
@@ -541,7 +542,7 @@ documented.
       the qwen38-greedy loop extracted from the CLI, with cancel/timeout from the
       reduce_generate pattern.
 - [ ] `/v1/models`, `/v1/chat/completions` endpoints (streaming + non-stream).
-- [ ] Opt-in Python test via `tests/test_qwen38_cli.py`.
+- [ ] Opt-in Python test via `tests/test_qwen38_cli.py` (to be created).
 
 **Gate:** end-to-end green smoke test. Honesty note: before Q11k the serve session
 re-prefills every turn at ~3.5-4 s/token → short-context demos; the realistic long

@@ -29,7 +29,7 @@ std::atomic<std::uint64_t> g_input_quantize_hits{0U};
 // they were measured on. Anything less stays on the scalar reference path.
 constexpr std::size_t kMinimumDataAlignment = alignof(std::max_align_t);
 
-bool aligned_enough(const void* pointer) noexcept {
+[[maybe_unused]] bool aligned_enough(const void* pointer) noexcept {
     return (reinterpret_cast<std::uintptr_t>(pointer) % kMinimumDataAlignment) == 0U;
 }
 

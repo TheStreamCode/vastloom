@@ -41,7 +41,7 @@ brain** on NVMe through bounded bridges — is documented separately in
 It is a compass for future work, not a claim about what runs today.
 
 > [!NOTE]
-> **Current measured position (August 2026, reference PC: 31 GiB RAM, RTX 4070 Super 12 GiB).**
+> **Current measured position (August 2026, reference PC: 32 GiB RAM installed, ~31 GiB visible, RTX 4070 Super 12 GiB).**
 > The primary track is now **Qwen3.8-Flash-Next** (`qwen4exp`, 125B MoE, 6B active,
 > 48 layers = 36 Gated DeltaNet + 12 QSA, 512 routed experts top-10 + shared). The
 > native runtime executes the official unsloth **Q8_0 GGUF** checkpoint (175.3 GiB,
@@ -55,7 +55,7 @@ It is a compass for future work, not a claim about what runs today.
 > below is a chronological lab log; where it disagrees with this box, this box wins.
 
 > [!IMPORTANT]
-> **Lab log - `0.4.0-alpha.4` plus unreleased DeepSeek and multitier-control slices.**
+> **Lab log - unreleased work after `0.4.0-alpha.4` (DeepSeek and multitier-control slices).**
 > Historical figures in this note (60 s/token, 6.9 s GPU, "kernels are the gap",
 > "generation unvalidated") are superseded by the box above. They stay as the path that
 > got here.
@@ -347,7 +347,7 @@ allocation plan is derived from detected capacity and conservative headroom.
 |---|---|
 | Windows 11 x86-64 | Native CPU paths plus CUDA driver capability/governed allocation validated with MSVC; primary consumer target |
 | Linux x86-64 | Native CPU paths plus CUDA driver capability/governed allocation validated with GCC and Clang; ASan/UBSan and focused TSan binaries pass |
-| macOS | Source includes a portable CPU/RAM probe; CPU CI and Metal are explicit unvalidated [M14 roadmap](docs/ROADMAP.md#public-macos-and-metal-track) work |
+| macOS | Source includes a portable CPU/RAM probe; CPU CI and Metal are explicit unvalidated roadmap work (the original M14 track is archived in git history, see the Archived track section of [docs/ROADMAP.md](docs/ROADMAP.md)) |
 
 Vastloom must therefore be described as working on Windows and Linux today. macOS is a planned
 portability target, not a validated platform claim.
@@ -791,8 +791,10 @@ latest metrics, but it does not concatenate conversation history for this model.
 Exposes `GET /v1/models` and `POST /v1/chat/completions` (including `"stream": true`
 server-sent events) on `127.0.0.1` only - remote access is out of scope by construction.
 One connection at a time, bounded request bodies, Governor refusals surfaced as HTTP 503.
-This is the M13 endpoint slice on the validation model; prefix-KV session reuse is the
-next milestone piece.
+This is the M13 endpoint slice on the validation model. Pointing `serve` at a real SmolLM2
+checkpoint starts the real-model engine with a prefix-KV session instead: consecutive turns
+reuse the cached prefix, and each response reports the reused token count in the
+`vastloom_cached_prefix_tokens` field.
 
 ## Chat with the real SmolLM2 checkpoint
 
@@ -1215,7 +1217,8 @@ research thesis. It currently has:
 - device counters and a repeatable OS-cache-bypass protocol are available where the
   checkpoint has an unambiguous local-device mapping, but whole-device deltas can include
   unrelated traffic and SSD temperature/power telemetry is not implemented;
-- no persistent KV reuse between chat turns; history is currently recomputed;
+- no persistent KV reuse in the chat CLI or on the MoE stream path (roadmap Q12); the dense
+  real-model serve keeps a prefix-KV session;
 - no remote/networked API: the `serve` endpoint binds to 127.0.0.1 only and
   is the entire HTTP surface.
 

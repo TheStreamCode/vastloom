@@ -82,4 +82,6 @@ jobs:
       - name: Run offline tool tests
         run: |
           python -m unittest tests/test_manifest_tool.py -v
+          python -m unittest tests/test_distill_transcript.py -v
+          python -m unittest tests/test_distill_evaluate.py -v
           python tests/test_import_hf_model.py

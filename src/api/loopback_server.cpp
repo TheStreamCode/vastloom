@@ -27,11 +27,14 @@ using socket_t = SOCKET;
 constexpr socket_t kInvalidSocket = INVALID_SOCKET;
 void close_socket(socket_t s) { closesocket(s); }
 int last_socket_error() { return static_cast<int>(WSAGetLastError()); }
+// The send length is int on Winsock and size_t on POSIX.
+using send_length_t = int;
 #else
 using socket_t = int;
 constexpr socket_t kInvalidSocket = -1;
 void close_socket(socket_t s) { ::close(s); }
 int last_socket_error() { return errno; }
+using send_length_t = std::size_t;
 #endif
 
 struct WsaInit {
@@ -101,7 +104,7 @@ struct LoopbackServer::Impl {
         char chunk[4096];
         std::string::size_type header_end = std::string::npos;
         while (header_end == std::string::npos) {
-            const int received = ::recv(client, chunk, sizeof(chunk), 0);
+            const auto received = ::recv(client, chunk, sizeof(chunk), 0);
             if (received <= 0) return;
             buffer.append(chunk, static_cast<std::size_t>(received));
             if (buffer.size() > max_body_bytes + 65536U) return;
@@ -129,7 +132,7 @@ struct LoopbackServer::Impl {
             const std::size_t drain_cap =
                 std::min(content_length, max_body_bytes + 65536U);
             while (drained < drain_cap) {
-                const int received = ::recv(client, chunk, sizeof(chunk), 0);
+                const auto received = ::recv(client, chunk, sizeof(chunk), 0);
                 if (received <= 0) break;
                 drained += static_cast<std::size_t>(received);
             }
@@ -141,7 +144,7 @@ struct LoopbackServer::Impl {
         }
         request.body = buffer.substr(header_end + 4);
         while (request.body.size() < content_length) {
-            const int received = ::recv(client, chunk, sizeof(chunk), 0);
+            const auto received = ::recv(client, chunk, sizeof(chunk), 0);
             if (received <= 0) return;
             request.body.append(chunk, static_cast<std::size_t>(received));
         }
@@ -158,8 +161,8 @@ struct LoopbackServer::Impl {
     static bool send_all(socket_t client, const std::string& out) {
         std::size_t sent = 0U;
         while (sent < out.size()) {
-            const int n = ::send(client, out.data() + sent,
-                                 static_cast<int>(out.size() - sent), 0);
+            const auto n = ::send(client, out.data() + sent,
+                                 static_cast<send_length_t>(out.size() - sent), 0);
             if (n <= 0) return false;
             sent += static_cast<std::size_t>(n);
         }
@@ -223,7 +226,7 @@ Result<void> LoopbackServer::start(std::uint16_t port, LoopbackHandler handler,
     if (impl_ != nullptr) {
         return make_error(ErrorCode::invalid_argument, "loopback server already started");
     }
-    static WsaInit wsa;
+    [[maybe_unused]] static WsaInit wsa;
     auto* impl = new Impl();
     impl->handler = std::move(handler);
     impl->max_body_bytes = max_body_bytes;

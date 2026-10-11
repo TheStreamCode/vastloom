@@ -9,6 +9,7 @@ or matching tensor dimensions is never enough to enable execution automatically.
 
 | Model/profile | Current evidence | Execution status |
 |---|---|---|
+| `unsloth/Qwen3.8-Flash-Next-GGUF` `Q8_0` (`qwen4exp`, 125B MoE, 175.3 GiB) | **Primary track.** Full 48-layer chain, PLE n-gram block and partial RoPE on the official checkpoint; greedy 16/16 token parity with llama.cpp `6fe7498` (CPU, same checkpoint); ~3.3-4 s/token greedy on the reference PC | **Execution path.** Real checkpoint end-to-end; greedy-only, throughput behind llama.cpp and honestly reported |
 | Synthetic TinyTransformer | Native loader, tokenizer, KV cache, generation and CLI vectors | Validated CPU execution |
 | SmolLM2-135M-Instruct | Pinned Safetensors, tokenizer/chat and Transformers parity | Validated dense CPU execution |
 | OLMoE-1B-7B-0924-Instruct | Pinned shards, top-k routes, expert streaming and I/O telemetry | Validated CPU expert streaming |

@@ -5,6 +5,7 @@
 #include <csignal>
 #include <cstdint>
 #include <cstdlib>
+#include <cstring>
 #include <filesystem>
 #include <fstream>
 #include <future>
@@ -2057,7 +2058,7 @@ int command_qwen38_chain(const std::vector<std::string>& args) {
             if (!fwd) return print_error(fwd.error(), json);
             if (has_flag(args, "--trace-layers")) {
                 double msum = 0.0;
-                for (const float v : fwd.value().mixed_input) msum += v;
+                for (const float v : fwd.value().mixed_input) msum += static_cast<double>(v);
                 std::cerr << "trace: layer " << layers[li]
                           << (trunk_ref.is_qsa ? " (QSA)" : " (DN)")
                           << " mixed_sum=" << msum << std::endl;
@@ -2610,7 +2611,7 @@ int command_qwen38_greedy(const std::vector<std::string>& args) {
             std::vector<std::uint32_t> order(logits.value().size());
             std::iota(order.begin(), order.end(), 0U);
             std::partial_sort(order.begin(),
-                              order.begin() + top_logit_dump.value(), order.end(),
+                              order.begin() + static_cast<std::ptrdiff_t>(top_logit_dump.value()), order.end(),
                               [&](std::uint32_t a, std::uint32_t b) {
                                   return logits.value()[a] > logits.value()[b];
                               });
@@ -3677,14 +3678,16 @@ int command_deepseek_expert_redundancy(const std::vector<std::string>& args) {
     std::vector<double> norms(samples.size(), 0.0);
     for (std::size_t index = 0U; index < samples.size(); ++index) {
         double sum = 0.0;
-        for (const float value : samples[index]) sum += static_cast<double>(value) * value;
+        for (const float value : samples[index]) sum += static_cast<double>(value) * static_cast<double>(value);
         norms[index] = std::sqrt(sum);
     }
 
     // The shared component, if there is one, is what every expert has in common: their mean.
     std::vector<double> mean(elements, 0.0);
     for (const auto& sample : samples) {
-        for (std::size_t index = 0U; index < elements; ++index) mean[index] += sample[index];
+        for (std::size_t index = 0U; index < elements; ++index) {
+            mean[index] += static_cast<double>(sample[index]);
+        }
     }
     for (double& value : mean) value /= static_cast<double>(samples.size());
     double mean_energy = 0.0;

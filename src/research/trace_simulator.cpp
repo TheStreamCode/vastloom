@@ -518,12 +518,18 @@ TraceSimulationReport simulate_lru(const std::vector<TraceRecord>& records, cons
             ++report.ram_hits;
             ram.erase(key);
             if (config.vram_cache_bytes != 0) {
-                report.pcie_bytes += record.size;
                 const auto evicted = vram.insert(key, record.size);
-                report.evictions += evicted.size();
-                for (const auto& [victim, size] : evicted) {
-                    const auto ram_evicted = ram.insert(victim, size);
-                    report.evictions += ram_evicted.size();
+                if (vram.contains(key)) {
+                    report.pcie_bytes += record.size;
+                    report.evictions += evicted.size();
+                    for (const auto& [victim, size] : evicted) {
+                        const auto ram_evicted = ram.insert(victim, size);
+                        report.evictions += ram_evicted.size();
+                    }
+                } else {
+                    // An expert too large for the VRAM tier stays resident in the RAM tier
+                    // instead of silently becoming a permanent storage miss.
+                    ram.insert(key, record.size);
                 }
             } else {
                 ram.insert(key, record.size);
@@ -535,11 +541,18 @@ TraceSimulationReport simulate_lru(const std::vector<TraceRecord>& records, cons
         report.nvme_bytes += record.size;
         per_token[record.token] += record.size;
         if (config.vram_cache_bytes != 0) {
-            report.pcie_bytes += record.size;
             const auto evicted = vram.insert(key, record.size);
-            report.evictions += evicted.size();
-            for (const auto& [victim, size] : evicted) {
-                const auto ram_evicted = ram.insert(victim, size);
+            if (vram.contains(key)) {
+                report.pcie_bytes += record.size;
+                report.evictions += evicted.size();
+                for (const auto& [victim, size] : evicted) {
+                    const auto ram_evicted = ram.insert(victim, size);
+                    report.evictions += ram_evicted.size();
+                }
+            } else {
+                // An expert too large for the VRAM tier belongs in the RAM tier: a
+                // declined insert must not turn into a permanent storage miss.
+                const auto ram_evicted = ram.insert(key, record.size);
                 report.evictions += ram_evicted.size();
             }
         } else {
@@ -573,12 +586,17 @@ TraceSimulationReport simulate_lfu(const std::vector<TraceRecord>& records, cons
             ++report.ram_hits;
             if (config.vram_cache_bytes != 0U) {
                 ram.erase(key);
-                report.pcie_bytes += record.size;
                 const auto evicted = vram.insert(key, record.size);
-                report.evictions += evicted.size();
-                for (const auto& [victim, size] : evicted) {
-                    const auto ram_evicted = ram.insert(victim, size);
-                    report.evictions += ram_evicted.size();
+                if (vram.contains(key)) {
+                    report.pcie_bytes += record.size;
+                    report.evictions += evicted.size();
+                    for (const auto& [victim, size] : evicted) {
+                        const auto ram_evicted = ram.insert(victim, size);
+                        report.evictions += ram_evicted.size();
+                    }
+                } else {
+                    // An expert too large for the VRAM tier stays resident in the RAM tier.
+                    ram.insert(key, record.size);
                 }
             } else {
                 ram.touch(key);
@@ -589,11 +607,17 @@ TraceSimulationReport simulate_lfu(const std::vector<TraceRecord>& records, cons
         report.nvme_bytes += record.size;
         per_token[record.token] += record.size;
         if (config.vram_cache_bytes != 0U) {
-            report.pcie_bytes += record.size;
             const auto evicted = vram.insert(key, record.size);
-            report.evictions += evicted.size();
-            for (const auto& [victim, size] : evicted) {
-                const auto ram_evicted = ram.insert(victim, size);
+            if (vram.contains(key)) {
+                report.pcie_bytes += record.size;
+                report.evictions += evicted.size();
+                for (const auto& [victim, size] : evicted) {
+                    const auto ram_evicted = ram.insert(victim, size);
+                    report.evictions += ram_evicted.size();
+                }
+            } else {
+                // An expert too large for the VRAM tier belongs in the RAM tier.
+                const auto ram_evicted = ram.insert(key, record.size);
                 report.evictions += ram_evicted.size();
             }
         } else {

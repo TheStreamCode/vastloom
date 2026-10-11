@@ -435,7 +435,9 @@ std::array<float, kRoutingEmbeddingDim> embed_request(std::string_view request) 
         previous = character;
     }
     double squares = 0.0;
-    for (const float value : bag) squares += static_cast<double>(value) * value;
+    for (const float value : bag) {
+        squares += static_cast<double>(value) * static_cast<double>(value);
+    }
     if (squares <= 0.0) return bag;
     const float norm = static_cast<float>(std::sqrt(squares));
     for (float& value : bag) value /= norm;
@@ -446,7 +448,9 @@ std::vector<RoutedModule> route_modules(const std::vector<CapabilityModule>& mod
                                         std::string_view request, std::size_t top_k) {
     const auto query = embed_request(request);
     double query_square = 0.0;
-    for (const float value : query) query_square += static_cast<double>(value) * value;
+    for (const float value : query) {
+        query_square += static_cast<double>(value) * static_cast<double>(value);
+    }
 
     std::vector<RoutedModule> ranked;
     ranked.reserve(modules.size());
@@ -457,7 +461,7 @@ std::vector<RoutedModule> route_modules(const std::vector<CapabilityModule>& mod
             dot += static_cast<double>(query[dim]) *
                    static_cast<double>(modules[index].routing_embedding[dim]);
             module_square += static_cast<double>(modules[index].routing_embedding[dim]) *
-                             modules[index].routing_embedding[dim];
+                             static_cast<double>(modules[index].routing_embedding[dim]);
         }
         RoutedModule routed;
         routed.index = index;
@@ -567,7 +571,9 @@ Result<CapabilityFitResult> fit_lm_head_lora(
             for (std::size_t i = 0; i < vocab_size; ++i) {
                 const float* row = result.b.data() + i * rank;
                 double delta = 0.0;
-                for (std::size_t r = 0; r < rank; ++r) delta += row[r] * u[r];
+                for (std::size_t r = 0; r < rank; ++r) {
+                    delta += static_cast<double>(row[r]) * u[r];
+                }
                 const double z = static_cast<double>(sample.base_logits[i]) + delta;
                 probabilities[i] = z;
                 if (z > maximum) maximum = z;
@@ -750,7 +756,9 @@ Result<CapabilityFitResult> fit_final_hidden_lora(
                 const double weight = static_cast<double>(w_row[h]);
                 if (weight == 0.0) continue;
                 const float* b_row = result.b.data() + h * rank;
-                for (std::size_t r = 0; r < rank; ++r) g_row[r] += weight * b_row[r];
+                for (std::size_t r = 0; r < rank; ++r) {
+                    g_row[r] += weight * static_cast<double>(b_row[r]);
+                }
             }
         }
     };

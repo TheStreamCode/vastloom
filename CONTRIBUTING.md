@@ -41,8 +41,10 @@ cmake --preset debug && cmake --build --preset debug --parallel && ctest --prese
 cmake --preset asan && cmake --build --preset asan --parallel && ctest --preset asan
 ```
 
-External real-model tests are opt-in through the `VASTLOOM_SMOLLM2_MODEL`,
-`VASTLOOM_OLMOE_MODEL` and `VASTLOOM_OLMOE_FULL_MODEL` CMake paths. Do not download large
+External real-model tests are opt-in through CMake paths: `VASTLOOM_QWEN38_MODEL` (the
+primary Qwen3.8 track), `VASTLOOM_SMOLLM2_MODEL`, `VASTLOOM_OLMOE_MODEL` and
+`VASTLOOM_OLMOE_FULL_MODEL`, the `VASTLOOM_DEEPSEEK_V4_*` family, and `VASTLOOM_GGML_ROOT`
+(the external ggml checkout for the opt-in SIMD backend). Do not download large
 models merely to satisfy a pull-request check.
 
 ## Pull requests

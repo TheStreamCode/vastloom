@@ -9024,17 +9024,22 @@ RawHttpResponse http_round_trip(std::uint16_t port, const std::string& method,
     std::string request = method + " " + path + " HTTP/1.1\r\nHost: 127.0.0.1\r\n";
     if (!body.empty()) request += "Content-Length: " + std::to_string(body.size()) + "\r\n";
     request += "Connection: close\r\n\r\n" + body;
+#ifdef _WIN32
+    using socket_length_t = int;
+#else
+    using socket_length_t = std::size_t;
+#endif
     std::size_t sent = 0U;
     while (sent < request.size()) {
-        const int n = ::send(s, request.data() + sent,
-                             static_cast<int>(request.size() - sent), 0);
+        const auto n = ::send(s, request.data() + sent,
+                             static_cast<socket_length_t>(request.size() - sent), 0);
         if (n <= 0) break;
         sent += static_cast<std::size_t>(n);
     }
     std::string raw;
     char buf[4096];
     for (;;) {
-        const int n = ::recv(s, buf, sizeof(buf), 0);
+        const auto n = ::recv(s, buf, sizeof(buf), 0);
         if (n <= 0) break;
         raw.append(buf, static_cast<std::size_t>(n));
     }

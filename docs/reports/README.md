@@ -11,7 +11,16 @@ the already-downloaded model stores and checkpoint manifests usable without muta
 Start with the newest report for current claims, then consult milestone-specific reports for exact
 hardware, commands, measurements and limitations.
 
-## Current report
+## Current reports
+
+- [`Q11C_QWEN38_LLAMA_PARITY_VALIDATION.md`](Q11C_QWEN38_LLAMA_PARITY_VALIDATION.md) —
+  the primary track's external validation: the native runtime's greedy generation matches
+  llama.cpp token for token on the official Q8_0 `qwen4exp` checkpoint, and the six defects
+  only the external oracle could find.
+- [`Q11B_QWEN38_REAL_CATALOG_VALIDATION.md`](Q11B_QWEN38_REAL_CATALOG_VALIDATION.md) —
+  the real 125B FP8 catalog validated end-to-end in native C++.
+
+## Earlier milestone reports
 
 - [`M9_DEEPSEEK_CUDA_EXPERT_KERNEL_VALIDATION.md`](M9_DEEPSEEK_CUDA_EXPERT_KERNEL_VALIDATION.md) —
   every storage type on the routed path given a device kernel: 5.60× on a 16-layer generation with

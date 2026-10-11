@@ -90,7 +90,7 @@ struct GgmlLayout {
     std::uint64_t block_bytes;
 };
 
-Result<GgmlLayout> ggml_layout(std::uint32_t ggml_type) {
+[[maybe_unused]] Result<GgmlLayout> ggml_layout(std::uint32_t ggml_type) {
     switch (ggml_type) {
         case 0U: return GgmlLayout{1U, 4U};    // F32
         case 1U: return GgmlLayout{1U, 2U};    // F16

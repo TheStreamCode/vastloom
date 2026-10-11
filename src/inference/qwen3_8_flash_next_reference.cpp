@@ -547,19 +547,19 @@ Result<Qwen38GatedResidualResult> qwen38_gated_residual(
             if (opened) {
                 std::fprintf(f, "grnm-%d", weights.debug_tag);
                 for (std::size_t j = 0; j < hc_hidden; ++j) {
-                    std::fprintf(f, " %.6f", normed.value()[j]);
+                    std::fprintf(f, " %.6f", static_cast<double>(normed.value()[j]));
                 }
                 std::fprintf(f, "\ngrrt-%d", weights.debug_tag);
                 for (std::size_t j = 0; j < static_cast<std::size_t>(rank); ++j) {
-                    std::fprintf(f, " %.6f", bottleneck.value()[j]);
+                    std::fprintf(f, " %.6f", static_cast<double>(bottleneck.value()[j]));
                 }
                 std::fprintf(f, "\ngrgt-%d", weights.debug_tag);
                 for (std::size_t j = 0; j < hc_hidden; ++j) {
-                    std::fprintf(f, " %.6f", mix.value()[j]);
+                    std::fprintf(f, " %.6f", static_cast<double>(mix.value()[j]));
                 }
                 std::fprintf(f, "\ngrmo-%d", weights.debug_tag);
                 for (std::size_t j = 0; j < hidden_size; ++j) {
-                    std::fprintf(f, " %.6f", out.mixed_input[j]);
+                    std::fprintf(f, " %.6f", static_cast<double>(out.mixed_input[j]));
                 }
                 std::fprintf(f, "\n");
                 std::fclose(f);
@@ -787,17 +787,17 @@ Result<std::vector<float>> qwen38_delta_net_decode(
             if (opened) {
                 std::fprintf(f, "core-%d", weights.debug_layer);
                 for (std::size_t j = 0; j < value_dim; ++j) {
-                    std::fprintf(f, " %.6f", core[j]);
+                    std::fprintf(f, " %.6f", static_cast<double>(core[j]));
                 }
                 std::fprintf(f, "\n");
                 std::fprintf(f, "cvs-%d", weights.debug_layer);
                 for (std::size_t j = 0; j < conv_dim; ++j) {
-                    std::fprintf(f, " %.6f", conv_out[j]);
+                    std::fprintf(f, " %.6f", static_cast<double>(conv_out[j]));
                 }
                 std::fprintf(f, "\n");
                 std::fprintf(f, "xin-%d", weights.debug_layer);
                 for (std::size_t j = 0; j < hidden_size; ++j) {
-                    std::fprintf(f, " %.6f", hidden[j]);
+                    std::fprintf(f, " %.6f", static_cast<double>(hidden[j]));
                 }
                 std::fprintf(f, "\n");
                 std::fclose(f);

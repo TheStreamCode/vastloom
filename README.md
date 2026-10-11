@@ -22,13 +22,18 @@ goal is practical local inference for giant sparse Mixture-of-Experts models on 
 consumer hardware—without uncontrolled swapping, surprise resource exhaustion or destructive
 model conversion.
 
-**What this repository is.** An independent research project — a lab notebook as much as a
-codebase. Every milestone was measured before it was claimed, on one reference machine
-(31 GiB RAM, RTX 4070 Super 12 GiB), with validation reports under `docs/reports/` and an
-external llama.cpp oracle as the authority for parity. It is not a product, not a llama.cpp
-replacement, and does not claim competitive throughput; read
-[`docs/ROADMAP.md`](docs/ROADMAP.md) for what is done, what is open, and what is explicitly
-out of scope.
+**Objective.** Two questions drive this project. First: can a giant Mixture-of-Experts model
+run end-to-end on a small consumer machine — one reference PC with 31 GiB RAM and an
+RTX 4070 Super 12 GiB — under the Safety Governor's hard budgets? Second: what inference
+methods does a conventional mmap-based runtime structurally miss, and what do they buy?
+Vastloom explores the levers an mmap-only engine cannot take: a governed VRAM → RAM → NVMe
+hierarchy, expert-quant re-import, model-aware VRAM expert tiers, and the capability-transfer
+path. Every milestone is measured before it is claimed, with validation reports under
+`docs/reports/` and an external llama.cpp oracle as the authority for parity. This is a
+research project, not a product: current throughput is reported honestly as behind llama.cpp
+(see the measured position below), and the pursued value is the new levers, not another
+inference engine. Read [`docs/ROADMAP.md`](docs/ROADMAP.md) for what is done, what is open,
+and what is explicitly out of scope.
 
 The further north star — a fast resident **frontman** expanded at runtime by a **dormant
 brain** on NVMe through bounded bridges — is documented separately in

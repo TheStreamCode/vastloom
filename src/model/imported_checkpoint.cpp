@@ -84,7 +84,12 @@ std::map<std::string, ReceiptEntry, std::less<>> read_verification_receipt(
     if (error || receipt_bytes > 4U * static_cast<std::uintmax_t>(MiB)) return entries;
     std::ifstream input(path, std::ios::binary);
     if (!input) return entries;
-    std::string text((std::istreambuf_iterator<char>(input)), std::istreambuf_iterator<char>());
+    // Bounded explicit read instead of istreambuf_iterator: the size is already known and
+    // capped above, and the iterator form trips GCC 13's -Wnull-dereference false positive
+    // inside libstdc++'s streambuf at -O3.
+    std::string text(static_cast<std::size_t>(receipt_bytes), '\0');
+    input.read(text.data(), static_cast<std::streamsize>(text.size()));
+    if (input.gcount() != static_cast<std::streamsize>(text.size())) return entries;
     util::JsonLimits limits;
     limits.max_input_bytes = 4U * MiB;
     limits.max_nodes = 16'384;

@@ -9205,8 +9205,14 @@ void test_capability_module(const std::filesystem::path& root) {
 
     const auto read_bytes = [](const std::filesystem::path& path) {
         std::ifstream input(path, std::ios::binary);
-        std::vector<char> characters{std::istreambuf_iterator<char>(input),
-                                     std::istreambuf_iterator<char>()};
+        // Bounded explicit read: the istreambuf_iterator form trips GCC 13's
+        // -Wnull-dereference false positive inside libstdc++'s streambuf at -O3.
+        std::vector<char> characters;
+        char buffer[4096];
+        while (input.read(buffer, sizeof(buffer)) || input.gcount() > 0) {
+            characters.insert(characters.end(), buffer, buffer + input.gcount());
+            if (!input) break;
+        }
         std::vector<std::byte> bytes;
         bytes.reserve(characters.size());
         for (const char character : characters) {

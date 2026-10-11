@@ -468,11 +468,11 @@ sul checkpoint ufficiale Q8_0. L'oracolo esterno è stabilito per Q12+.
 ## Q11j - Throughput P2b-P3a - complete
 
 - [x] Q8_0-native expert matvec + LRU O(1) + decode DeltaNet parallelo
-  (`c5b62db`): bit-identico, 33.75 → ~7 s/token.
-- [x] Prefetch concorrente dei top-k esperti (`843430b`): ~4 s/token.
-- [x] Trunk Q8_0-native in residenza, P2d (`4ed0fad`): startup residenza
+  (`71b8a5a`): bit-identico, 33.75 → ~7 s/token.
+- [x] Prefetch concorrente dei top-k esperti (`8e9c970`): ~4 s/token.
+- [x] Trunk Q8_0-native in residenza, P2d (`19b3319`): startup residenza
   16,8 → 3,1 s; streaming senza override 194 → 32 s; parità invariata.
-- [x] P3a `--cuda-experts` (`ee927b5`): bit-identico ma MISURATO più lento
+- [x] P3a `--cuda-experts` (`70a8e6b`): bit-identico ma MISURATO più lento
   del kernel CPU a 12 thread (FP64 1/64-rate + griglie vincolate dalla
   parità) → resta opt-in, il CPU kernel è la product path.
 
@@ -490,11 +490,11 @@ pratica. Senza prefill veloce, Q12 (prefix-KV) e Q13 (serve) restano demo
 corte.
 
 - [x] Leva trovata prima del chunking: backend SIMD ggml OPT-IN per i
-      matvec Q8_0 (`00df4e9`): forward 6,1→1,7 s, expert 19,6→11,2 s su 8
+      matvec Q8_0 (`4b42627`): forward 6,1→1,7 s, expert 19,6→11,2 s su 8
       forward; parità 16/16 mantenuta sulla batteria esistente; il GDN
       chunked in riferimento scalare sarebbe NEGATIVO (O(C²·d) in scalare >
       ricorrenza seriale O(d) per token) → utile solo insieme ai GEMM SIMD.
-- [x] DIFETTO D1 RISOLTO COME DIAGNOSI (`a32f6af`): bisezione di stage su
+- [x] DIFETTO D1 RISOLTO COME DIAGNOSI (`299988a`): bisezione di stage su
       "Once" — hc_norm pari a 1e-6, hc_gate deviazza 3,6e-2; la replica
       numpy di ggml_vec_dot_q8_0_q8_0 (attivazioni quantizzate Q8_0) chiude
       il gap 8,6x. Causa: llama.cpp quantizza le ATTIVAZIONI per ogni matvec

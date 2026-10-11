@@ -1692,7 +1692,7 @@
   46.0% median warm buffered-pipeline improvement over whole 12 MiB reads on three paired
   WSL runs. This is not a physical-NVMe or DeepSeek throughput claim.
 
-- Qwen3.8 performance groundwork (commit `e6ae192`): resident F32 trunks, a bounded raw
+- Qwen3.8 performance groundwork (commit `02fa840`): resident F32 trunks, a bounded raw
   Q8_0 payload cache with graceful degradation under commit pressure, persistent shard
   streams and parallel hot kernels; greedy per-token wall time went from 33.75 s to
   2.7 s/token in the forward phase before the later Q11i Q8_0-native rework.

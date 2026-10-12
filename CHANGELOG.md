@@ -2,6 +2,22 @@
 
 ## 0.4.0-alpha.5 - Unreleased
 
+- **OLMoE prefix-KV session + serve endpoint (October 2026)**:
+  - the interrupted OLMoE session work is closed: `OlmoeSession` (persistent
+    Governor-reserved KV workspace, M13 pattern) with prefix reuse and
+    stateless degradation on divergence/overflow, plus `serve` dispatch to a
+    greedy-only OpenAI-compatible endpoint with `vastloom_cached_prefix_tokens`
+    observability;
+  - two opt-in tests gated on `VASTLOOM_OLMOE_FULL_MODEL`: `vastloom_olmoe_session`
+    (C++ session-vs-stateless logit equivalence, divergence/overflow, capacity
+    validation) and `vastloom_olmoe_serve` (Python endpoint smoke: models listing,
+    two turns, temperature refusal, SSE terminator);
+  - all three `serve` paths now flush the port announcement so piped supervisors
+    see readiness; the serve-test harness was verified without weights (dead-server
+    detection plus the full HTTP contract against the tiny serve), the
+    real-checkpoint runs are pending;
+  - this is a Q12 pre-validation on the OLMoE stream, not Q12 itself (Qwen
+    DeltaNet/QSA stream stays open).
 - **Maintainability pass (October 2026)**:
   - the `nvidia-smi` CSV parser is a pure, exported seam (`parse_nvidia_smi_csv`) with an
     always-on test on canned multi-GPU, `[N/A]`-telemetry, malformed and negative rows -

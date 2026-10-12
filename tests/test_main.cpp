@@ -9609,6 +9609,17 @@ void test_llama_session_prefix() {
     CHECK(!session.ready() && session.cached_token_count() == 0U);
 }
 
+void test_olmoe_session_prefix() {
+    // The MoE stream session mirrors the dense one: inert until create_session fills it,
+    // reset only clears the cache, and common_prefix (already covered above) drives reuse.
+    vastloom::inference::OlmoeSession session;
+    CHECK(!session.ready());
+    CHECK(session.capacity() == 0U);
+    CHECK(session.cached_token_count() == 0U);
+    session.reset();
+    CHECK(!session.ready() && session.cached_token_count() == 0U);
+}
+
 void test_heartbeat(const std::filesystem::path& root) {
     const auto path = root / "heartbeat";
     vastloom::safety::HeartbeatRecord heartbeat;
@@ -9715,6 +9726,7 @@ int main() {
     test_tiny_model(root);
     test_capability_module(root);
     test_llama_session_prefix();
+    test_olmoe_session_prefix();
     test_loopback_server();
     test_heartbeat(root);
     std::error_code error;

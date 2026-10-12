@@ -284,6 +284,21 @@ if(BUILD_TESTING AND VASTLOOM_BUILD_TESTS)
             RUN_SERIAL TRUE
         )
     endif()
+    if(VASTLOOM_OLMOE_FULL_MODEL)
+        add_executable(vastloom_olmoe_session_test tests/test_olmoe_session.cpp)
+        target_link_libraries(vastloom_olmoe_session_test PRIVATE Vastloom::Core)
+        target_compile_features(vastloom_olmoe_session_test PRIVATE cxx_std_20)
+        vastloom_set_project_warnings(vastloom_olmoe_session_test)
+        vastloom_enable_sanitizers(vastloom_olmoe_session_test)
+        add_test(
+            NAME vastloom_olmoe_session
+            COMMAND vastloom_olmoe_session_test ${VASTLOOM_OLMOE_FULL_MODEL}
+        )
+        set_tests_properties(vastloom_olmoe_session PROPERTIES
+            TIMEOUT 1200
+            RUN_SERIAL TRUE
+        )
+    endif()
     add_test(
         NAME vastloom_cli_tiny_chat
         COMMAND vastloom chat
@@ -397,6 +412,14 @@ if(BUILD_TESTING AND VASTLOOM_BUILD_TESTS)
                     --fixture ${CMAKE_CURRENT_SOURCE_DIR}/tests/fixtures/olmoe_reference.json
             )
             set_tests_properties(vastloom_olmoe_runtime_reference PROPERTIES TIMEOUT 1200 RUN_SERIAL TRUE)
+            add_test(
+                NAME vastloom_olmoe_serve
+                COMMAND ${Python3_EXECUTABLE}
+                    ${CMAKE_CURRENT_SOURCE_DIR}/tests/test_olmoe_serve_cli.py
+                    --vastloom $<TARGET_FILE:vastloom>
+                    --model ${VASTLOOM_OLMOE_FULL_MODEL}
+            )
+            set_tests_properties(vastloom_olmoe_serve PROPERTIES TIMEOUT 1200 RUN_SERIAL TRUE)
         endif()
         if(VASTLOOM_DEEPSEEK_V4_MODEL)
             add_test(

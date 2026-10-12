@@ -5858,7 +5858,235 @@ int command_serve_real(const std::vector<std::string>& args) {
                                 1U * 1024U * 1024U);    if (!started) return print_error(started.error());
     std::cout << "Vastloom real-model API serving " << model.value().model_id()
               << " (prefix-KV session: " << session_capacity << " tokens) on http://127.0.0.1:"
-              << server.port() << " (Ctrl+C to stop)\n";
+              << server.port() << " (Ctrl+C to stop)\n"
+              << std::flush;
+    while (server.running()) {
+        std::this_thread::sleep_for(std::chrono::milliseconds(100));
+    }
+    return 0;
+}
+
+bool is_olmoe_checkpoint(const std::filesystem::path& model_path) {
+    // Bounded explicit read: this only needs the model_type field of config.json.
+    std::error_code error;
+    const auto config_path = model_path / "config.json";
+    const auto bytes = std::filesystem::file_size(config_path, error);
+    if (error || bytes > 4U * 1024U * 1024U) return false;
+    std::ifstream config(config_path, std::ios::binary);
+    if (!config) return false;
+    std::string text(static_cast<std::size_t>(bytes), '\0');
+    config.read(text.data(), static_cast<std::streamsize>(text.size()));
+    if (config.gcount() != static_cast<std::streamsize>(text.size())) return false;
+    return text.find("\"model_type\": \"olmoe\"") != std::string::npos ||
+           text.find("\"model_type\":\"olmoe\"") != std::string::npos;
+}
+
+// The OLMoE stream served through the M13 endpoint shape: one bounded session, greedy
+// decoding, and every turn's prompt prefix served from the session's KV cache when the
+// history extends it (roadmap Q12). Temperature sampling is refused: this engine has
+// no sampler, and a refused request is honest where a silently greedy one is not.
+int command_serve_olmoe(const std::vector<std::string>& args) {
+    auto valid = validate_options(args, 1U, {"--port"}, {"--no-verify"});
+    if (!valid) return print_error(valid.error());
+    auto port = optional_size(args, "--port", 8099U);
+    if (!port || port.value() > 65'535U) {
+        return print_error(port ? vastloom::make_error(vastloom::ErrorCode::invalid_argument,
+                                                 "--port must be between 0 and 65535")
+                                : port.error());
+    }
+    const auto model_path = cli_path(args[0]);
+    auto runtime = start_real_runtime(model_path);
+    if (!runtime) return print_error(runtime.error());
+    auto model = vastloom::inference::OlmoeRuntimeModel::load(
+        model_path, *runtime.value().governor, {!has_flag(args, "--no-verify"), runtime.value().policy.cpu_threads});
+    if (!model) return print_error(model.error());
+
+    const std::size_t session_capacity =
+        std::min<std::size_t>(model.value().config().max_position_embeddings, 4096U);
+    auto created = model.value().create_session(*runtime.value().governor, session_capacity);
+    if (!created) return print_error(created.error());
+    auto conversation = created.take_value();
+    vastloom::inference::OlmoeSession* session_ptr = &conversation;
+
+    const std::string model_id = model_path.filename().string();
+    const std::uint64_t started_at = static_cast<std::uint64_t>(
+        std::chrono::duration_cast<std::chrono::seconds>(
+            std::chrono::system_clock::now().time_since_epoch()).count());
+
+    vastloom::api::LoopbackHandler handler = [&](const vastloom::api::HttpRequest& request)
+                                      -> vastloom::api::HttpResponse {
+        vastloom::api::HttpResponse response;
+        if (request.method == "GET" && request.path == "/v1/models") {
+            auto body = vastloom::api::serialize_model_list(model_id, started_at);
+            if (!body) {
+                response.status = 500;
+                response.body = vastloom::api::serialize_error(body.error().message, "api_error", 500);
+                return response;
+            }
+            response.body = body.take_value();
+            return response;
+        }
+        if (request.method == "POST" && request.path == "/v1/chat/completions") {
+            auto parsed = vastloom::api::parse_chat_completion_request(request.body);
+            if (!parsed) {
+                response.status = vastloom::api::http_status_for(parsed.error().code);
+                response.body = vastloom::api::serialize_error(parsed.error().message,
+                                                               "invalid_request_error", response.status);
+                return response;
+            }
+            if (parsed.value().temperature.has_value() && *parsed.value().temperature > 0.0) {
+                response.status = 400;
+                response.body = vastloom::api::serialize_error(
+                    "This engine serves greedy decoding only; temperature > 0 is not implemented",
+                    "invalid_request_error", 400);
+                return response;
+            }
+            std::vector<vastloom::inference::ChatMessage> messages;
+            messages.reserve(parsed.value().messages.size());
+            for (const auto& message : parsed.value().messages) {
+                messages.push_back({message.role, message.content});
+            }
+            auto formatted = model.value().tokenizer().apply_olmoe_chat_template(messages, true);
+            if (!formatted) {
+                response.status = 500;
+                response.body = vastloom::api::serialize_error(formatted.error().message, "api_error", 500);
+                return response;
+            }
+            auto encoded = model.value().tokenizer().encode(formatted.value());
+            if (!encoded) {
+                response.status = 500;
+                response.body = vastloom::api::serialize_error(encoded.error().message, "api_error", 500);
+                return response;
+            }
+            std::vector<std::uint32_t> sequence = encoded.take_value();
+            if (sequence.empty() || sequence.size() >= session_capacity) {
+                response.status = 400;
+                response.body = vastloom::api::serialize_error(
+                    "Formatted prompt is empty or exceeds the session capacity",
+                    "invalid_request_error", 400);
+                return response;
+            }
+            const std::size_t prompt_tokens = sequence.size();
+            std::string generated_text;
+            std::size_t generated_tokens = 0U;
+            std::size_t cached_prefix_tokens = 0U;
+            bool stopped_on_eos = false;
+            vastloom::api::StopSequenceFilter stop_filter(parsed.value().stop);
+            bool stop_hit = false;
+
+            vastloom::inference::OlmoeForwardOptions options;
+            for (std::size_t step = 0U; step < parsed.value().max_tokens; ++step) {
+                auto forwarded = model.value().forward(sequence, options,
+                                                       *runtime.value().governor,
+                                                       &runtime.value().process_guard,
+                                                       session_ptr);
+                if (!forwarded) {
+                    response.status = vastloom::api::http_status_for(forwarded.error().code);
+                    response.body = vastloom::api::serialize_error(forwarded.error().message,
+                                                                   "api_error", response.status);
+                    return response;
+                }
+                if (step == 0U) {
+                    cached_prefix_tokens = forwarded.value().stats.cached_prefix_tokens;
+                }
+                const auto& logits = forwarded.value().logits;
+                if (logits.empty()) {
+                    response.status = 500;
+                    response.body = vastloom::api::serialize_error("The engine produced no logits",
+                                                                   "api_error", 500);
+                    return response;
+                }
+                const auto best = std::max_element(logits.begin(), logits.end());
+                const auto next = static_cast<std::uint32_t>(std::distance(logits.begin(), best));
+                if (next == model.value().config().eos_token_id) {
+                    stopped_on_eos = true;
+                    break;
+                }
+                auto piece = model.value().tokenizer().decode({next}, false);
+                if (!piece) {
+                    response.status = 500;
+                    response.body = vastloom::api::serialize_error(piece.error().message, "api_error", 500);
+                    return response;
+                }
+                sequence.push_back(next);
+                ++generated_tokens;
+                generated_text += piece.value();
+                static_cast<void>(stop_filter.feed(piece.value()));
+                if (stop_filter.stopped()) {
+                    stop_hit = true;
+                    break;
+                }
+                if (sequence.size() >= session_capacity) {
+                    break;
+                }
+            }
+            const std::string content = stop_filter.apply(generated_text);
+            const char* finish_reason = (stop_hit || stopped_on_eos) ? "stop" : "length";
+
+            if (parsed.value().stream) {
+                vastloom::api::ChatCompletionResponse skeleton;
+                skeleton.id = "chatcmpl-vastloom-olmoe";
+                skeleton.model = model_id;
+                skeleton.created = started_at;
+                skeleton.finish_reason = finish_reason;
+                response.streaming = true;
+                response.status = 200;
+                response.produce = [skeleton, content](const std::function<bool(std::string_view)>& emit) {
+                    auto skel = skeleton;
+                    bool alive = true;
+                    if (!content.empty()) {
+                        auto chunk = vastloom::api::serialize_chat_completion_chunk(skel, content, true, false);
+                        if (!chunk) {
+                            alive = false;
+                        } else {
+                            alive = emit("data: " + chunk.take_value() + "\n\n");
+                        }
+                    }
+                    if (alive) {
+                        auto last = vastloom::api::serialize_chat_completion_chunk(skel, "", false, true);
+                        if (last) alive = emit("data: " + last.take_value() + "\n\n");
+                    }
+                    if (alive) emit("data: [DONE]\n\n");
+                };
+                return response;
+            }
+
+            vastloom::api::ChatCompletionResponse completion;
+            completion.id = "chatcmpl-vastloom-olmoe";
+            completion.model = model_id;
+            completion.content = content;
+            completion.finish_reason = finish_reason;
+            completion.created = started_at;
+            completion.prompt_tokens = prompt_tokens;
+            completion.completion_tokens = generated_tokens;
+            auto body = vastloom::api::serialize_chat_completion_response(completion);
+            if (!body) {
+                response.status = 500;
+                response.body = vastloom::api::serialize_error(body.error().message, "api_error", 500);
+                return response;
+            }
+            // Non-standard observability field: how many prompt tokens were served from
+            // the session's KV cache instead of re-evaluated. Zero on the first turn.
+            std::string payload = body.take_value();
+            payload.insert(payload.size() - 1U,
+                           std::string(",\"vastloom_cached_prefix_tokens\":") +
+                               std::to_string(cached_prefix_tokens));
+            response.body = std::move(payload);
+            return response;
+        }
+        response.status = 404;
+        response.body = vastloom::api::serialize_error("unknown route", "not_found", 404);
+        return response;
+    };
+
+    vastloom::api::LoopbackServer server;
+    auto started = server.start(static_cast<std::uint16_t>(port.value()), std::move(handler),
+                                1U * 1024U * 1024U);
+    if (!started) return print_error(started.error());
+    std::cout << "Vastloom OLMoE stream API serving " << model_id
+              << " (prefix-KV session: " << session_capacity << " tokens) on http://127.0.0.1:"
+              << server.port() << " (Ctrl+C to stop)\n"
+              << std::flush;
     while (server.running()) {
         std::this_thread::sleep_for(std::chrono::milliseconds(100));
     }
@@ -5907,6 +6135,7 @@ int dispatch_cli(const std::vector<std::string>& arguments) {
         if (command == "serve") {
             std::error_code serve_error;
             if (!args.empty() && std::filesystem::is_directory(cli_path(args[0]), serve_error)) {
+                if (is_olmoe_checkpoint(cli_path(args[0]))) return command_serve_olmoe(args);
                 return command_serve_real(args);
             }
             return vastloom::cli::command_serve(args);

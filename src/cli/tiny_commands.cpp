@@ -693,7 +693,8 @@ int command_serve(const std::vector<std::string>& args) {
     auto started = server.start(static_cast<std::uint16_t>(port.value()), std::move(handler), 1U * 1024U * 1024U);
     if (!started) return print_error(started.error());
     std::cout << "Vastloom loopback API serving model " << model_id << " on http://127.0.0.1:"
-              << server.port() << " (Ctrl+C to stop)\n";
+              << server.port() << " (Ctrl+C to stop)\n"
+              << std::flush;
     while (server.running()) {
         std::this_thread::sleep_for(std::chrono::milliseconds(100));
     }

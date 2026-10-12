@@ -1,5 +1,7 @@
 #include "vastloom/inference/olmoe_runtime.hpp"
 
+#include "vastloom/inference/llama_model.hpp"
+
 #include <algorithm>
 #include <atomic>
 #include <bit>
@@ -615,13 +617,32 @@ private:
 struct Session {
     ParallelExecutor executor;
     std::size_t sequence_length{0U};
+    std::size_t kv_stride{0U};
     std::size_t hidden_size{0U};
-    std::vector<float> keys;
-    std::vector<float> values;
+    std::vector<float> owned_keys;
+    std::vector<float> owned_values;
+    // Active storage: the owned buffers on the stateless path, the persistent session
+    // buffers (rows indexed by the session capacity) when a prefix is reused.
+    std::span<float> keys;
+    std::span<float> values;
 
     Session(const OlmoeRuntimeModel& model, std::size_t sequence)
-        : executor(model.cpu_threads()), sequence_length(sequence), hidden_size(model.config().hidden_size),
-          keys(static_cast<std::size_t>(model.config().num_hidden_layers) * sequence * hidden_size), values(keys.size()) {}
+        : Session(model, sequence, sequence, {}, {}) {}
+
+    Session(const OlmoeRuntimeModel& model, std::size_t sequence, std::size_t stride,
+            std::span<float> external_keys, std::span<float> external_values)
+        : executor(model.cpu_threads()), sequence_length(sequence), kv_stride(stride),
+          hidden_size(model.config().hidden_size) {
+        if (!external_keys.empty()) {
+            keys = external_keys;
+            values = external_values;
+        } else {
+            owned_keys.assign(static_cast<std::size_t>(model.config().num_hidden_layers) * stride * hidden_size, 0.0F);
+            owned_values.assign(owned_keys.size(), 0.0F);
+            keys = owned_keys;
+            values = owned_values;
+        }
+    }
 };
 
 bool expert_tensor_name(std::string_view name) {
@@ -905,7 +926,8 @@ Result<std::array<OlmoeRuntimeModel::ExpertTensorRead, 3>> OlmoeRuntimeModel::ex
 Result<OlmoeForwardResult> OlmoeRuntimeModel::forward(const std::vector<std::uint32_t>& token_ids,
                                                       const OlmoeForwardOptions& options,
                                                       safety::ResourceGovernor& governor,
-                                                      const safety::ProcessSafetyGuard* process_guard) const {
+                                                      const safety::ProcessSafetyGuard* process_guard,
+                                                      OlmoeSession* session) const {
     if (token_ids.empty() || token_ids.size() > config_.max_position_embeddings) {
         return make_error(ErrorCode::invalid_argument, "OLMoE forward input is empty or exceeds context");
     }
@@ -937,12 +959,32 @@ Result<OlmoeForwardResult> OlmoeRuntimeModel::forward(const std::vector<std::uin
     for (const auto token : token_ids) {
         if (token >= config_.vocab_size) return make_error(ErrorCode::invalid_argument, "OLMoE input token exceeds vocabulary");
     }
+    // Prefix reuse (M13 pattern): when a ready session holds the whole shared prefix and
+    // the request fits its buffers, only the diverging tail is evaluated against the
+    // cached Key/Value states. Divergence or overflow degrade to the stateless path.
+    std::size_t start_position = 0U;
+    bool prefix_reuse = false;
+    if (session != nullptr && session->ready()) {
+        const std::size_t shared = common_prefix(token_ids, session->cached_ids_);
+        if (shared == session->cached_ids_.size() && shared < token_ids.size() &&
+            token_ids.size() <= session->capacity_) {
+            start_position = shared;
+            prefix_reuse = true;
+        } else {
+            session->reset();
+        }
+    }
+
     auto cache = ExpertCache::create(*this, options.cache_policy, options.expert_cache_bytes, governor);
     if (!cache) return cache.error();
-    auto kv_bytes = kv_cache_bytes(config_, token_ids.size());
-    if (!kv_bytes) return kv_bytes.error();
-    auto kv_reservation = governor.try_reserve(safety::ResourceKind::ram, kv_bytes.value(), "OLMoE incremental KV cache");
-    if (!kv_reservation) return kv_reservation.error();
+    std::optional<safety::Reservation> kv_reservation;
+    if (!prefix_reuse) {
+        auto kv_bytes = kv_cache_bytes(config_, token_ids.size());
+        if (!kv_bytes) return kv_bytes.error();
+        auto reserved = governor.try_reserve(safety::ResourceKind::ram, kv_bytes.value(), "OLMoE incremental KV cache");
+        if (!reserved) return reserved.error();
+        kv_reservation.emplace(reserved.take_value());
+    }
     auto scratch_reservation = governor.try_reserve(safety::ResourceKind::scratch, 64U * MiB, "OLMoE reference activation scratch");
     if (!scratch_reservation) return scratch_reservation.error();
 
@@ -980,7 +1022,10 @@ Result<OlmoeForwardResult> OlmoeRuntimeModel::forward(const std::vector<std::uin
     result.stats.input_tokens = token_ids.size();
     result.stats.load_ms = load_ms_;
     try {
-        Session session(*this, token_ids.size());
+        Session workspace(*this, token_ids.size(),
+                          prefix_reuse && session != nullptr ? session->capacity_ : token_ids.size(),
+                          prefix_reuse && session != nullptr ? std::span<float>(session->keys_) : std::span<float>{},
+                          prefix_reuse && session != nullptr ? std::span<float>(session->values_) : std::span<float>{});
         const std::size_t hidden_size = config_.hidden_size;
         const std::size_t head_size = hidden_size / config_.num_attention_heads;
         std::vector<float> hidden(hidden_size);
@@ -1002,7 +1047,7 @@ Result<OlmoeForwardResult> OlmoeRuntimeModel::forward(const std::vector<std::uin
         std::array<std::uint32_t, 64> expert_order{};
         result.trace.reserve(token_ids.size() * config_.num_hidden_layers * config_.num_experts_per_token);
 
-        for (std::size_t position = 0U; position < token_ids.size(); ++position) {
+        for (std::size_t position = start_position; position < token_ids.size(); ++position) {
             const std::size_t embedding_offset = embedding_.offset + static_cast<std::size_t>(token_ids[position]) * hidden_size;
             for (std::size_t index = 0U; index < hidden_size; ++index) {
                 hidden[index] = bf16_to_float(resident_[embedding_offset + index]);
@@ -1018,27 +1063,27 @@ Result<OlmoeForwardResult> OlmoeRuntimeModel::forward(const std::vector<std::uin
                 const auto& weights = layers_[layer];
                 residual = hidden;
                 rms_norm(resident_, weights.input_norm, hidden, normalized, config_.rms_norm_eps);
-                matrix_vector(resident_, weights.q, normalized, query, session.executor);
-                matrix_vector(resident_, weights.k, normalized, key, session.executor);
-                matrix_vector(resident_, weights.v, normalized, value, session.executor);
+                matrix_vector(resident_, weights.q, normalized, query, workspace.executor);
+                matrix_vector(resident_, weights.k, normalized, key, workspace.executor);
+                matrix_vector(resident_, weights.v, normalized, value, workspace.executor);
                 rms_norm(resident_, weights.q_norm, query, query, config_.rms_norm_eps);
                 rms_norm(resident_, weights.k_norm, key, key, config_.rms_norm_eps);
                 apply_rope(query, key, config_.num_attention_heads, head_size, position, config_.rope_theta);
 
-                const std::size_t kv_base = (static_cast<std::size_t>(layer) * token_ids.size() + position) * hidden_size;
-                std::copy(key.begin(), key.end(), session.keys.begin() + static_cast<std::ptrdiff_t>(kv_base));
-                std::copy(value.begin(), value.end(), session.values.begin() + static_cast<std::ptrdiff_t>(kv_base));
+                const std::size_t kv_base = (static_cast<std::size_t>(layer) * workspace.kv_stride + position) * hidden_size;
+                std::copy(key.begin(), key.end(), workspace.keys.begin() + static_cast<std::ptrdiff_t>(kv_base));
+                std::copy(value.begin(), value.end(), workspace.values.begin() + static_cast<std::ptrdiff_t>(kv_base));
                 std::fill(attention.begin(), attention.end(), 0.0F);
                 const float attention_scale = 1.0F / std::sqrt(static_cast<float>(head_size));
                 for (std::size_t head = 0U; head < config_.num_attention_heads; ++head) {
                     float maximum = -std::numeric_limits<float>::infinity();
                     for (std::size_t source = 0U; source <= position; ++source) {
                         const std::size_t source_base =
-                            (static_cast<std::size_t>(layer) * token_ids.size() + source) * hidden_size + head * head_size;
+                            (static_cast<std::size_t>(layer) * workspace.kv_stride + source) * hidden_size + head * head_size;
                         double dot = 0.0;
                         for (std::size_t index = 0U; index < head_size; ++index) {
                             dot += static_cast<double>(query[head * head_size + index]) *
-                                   static_cast<double>(session.keys[source_base + index]);
+                                   static_cast<double>(workspace.keys[source_base + index]);
                         }
                         scores[source] = static_cast<float>(dot) * attention_scale;
                         maximum = std::max(maximum, scores[source]);
@@ -1051,18 +1096,18 @@ Result<OlmoeForwardResult> OlmoeRuntimeModel::forward(const std::vector<std::uin
                     for (std::size_t source = 0U; source <= position; ++source) {
                         const float probability = scores[source] / static_cast<float>(denominator);
                         const std::size_t source_base =
-                            (static_cast<std::size_t>(layer) * token_ids.size() + source) * hidden_size + head * head_size;
+                            (static_cast<std::size_t>(layer) * workspace.kv_stride + source) * hidden_size + head * head_size;
                         for (std::size_t index = 0U; index < head_size; ++index) {
-                            attention[head * head_size + index] += probability * session.values[source_base + index];
+                            attention[head * head_size + index] += probability * workspace.values[source_base + index];
                         }
                     }
                 }
-                matrix_vector(resident_, weights.o, attention, projected, session.executor);
+                matrix_vector(resident_, weights.o, attention, projected, workspace.executor);
                 for (std::size_t index = 0U; index < hidden_size; ++index) hidden[index] = residual[index] + projected[index];
 
                 residual = hidden;
                 rms_norm(resident_, weights.post_norm, hidden, normalized, config_.rms_norm_eps);
-                matrix_vector(resident_, weights.router, normalized, router_logits, session.executor);
+                matrix_vector(resident_, weights.router, normalized, router_logits, workspace.executor);
                 const float maximum_router = *std::max_element(router_logits.begin(), router_logits.end());
                 double router_denominator = 0.0;
                 for (std::size_t expert = 0U; expert < router_logits.size(); ++expert) {
@@ -1137,9 +1182,9 @@ Result<OlmoeForwardResult> OlmoeRuntimeModel::forward(const std::vector<std::uin
                             loaded.value().timing.service_started, loaded.value().timing.completed);
                         const auto compute_started = std::chrono::steady_clock::now();
                         matrix_vector(loaded.value().weights.values, loaded.value().weights.gate,
-                                      normalized, gate, session.executor);
+                                      normalized, gate, workspace.executor);
                         matrix_vector(loaded.value().weights.values, loaded.value().weights.up,
-                                      normalized, up, session.executor);
+                                      normalized, up, workspace.executor);
                         for (std::size_t index = 0U; index < intermediate.size(); ++index) {
                             intermediate[index] = (gate[index] / (1.0F + std::exp(-gate[index]))) * up[index];
                         }
@@ -1155,7 +1200,7 @@ Result<OlmoeForwardResult> OlmoeRuntimeModel::forward(const std::vector<std::uin
                             down.value().service_started, down.value().completed);
                         const auto down_compute_started = std::chrono::steady_clock::now();
                         matrix_vector(loaded.value().weights.values, loaded.value().weights.down,
-                                      intermediate, expert_output, session.executor);
+                                      intermediate, expert_output, workspace.executor);
                         const float route_weight = routing_weights[expert];
                         for (std::size_t index = 0U; index < hidden_size; ++index) {
                             moe[index] += route_weight * expert_output[index];
@@ -1219,12 +1264,12 @@ Result<OlmoeForwardResult> OlmoeRuntimeModel::forward(const std::vector<std::uin
                     }
                     const auto& expert_weights = *acquired.value().weights;
                     const auto compute_started = std::chrono::steady_clock::now();
-                    matrix_vector(expert_weights.values, expert_weights.gate, normalized, gate, session.executor);
-                    matrix_vector(expert_weights.values, expert_weights.up, normalized, up, session.executor);
+                    matrix_vector(expert_weights.values, expert_weights.gate, normalized, gate, workspace.executor);
+                    matrix_vector(expert_weights.values, expert_weights.up, normalized, up, workspace.executor);
                     for (std::size_t index = 0U; index < intermediate.size(); ++index) {
                         intermediate[index] = (gate[index] / (1.0F + std::exp(-gate[index]))) * up[index];
                     }
-                    matrix_vector(expert_weights.values, expert_weights.down, intermediate, expert_output, session.executor);
+                    matrix_vector(expert_weights.values, expert_weights.down, intermediate, expert_output, workspace.executor);
                     const float route_weight = routing_weights[expert];
                     for (std::size_t index = 0U; index < hidden_size; ++index) {
                         moe[index] += route_weight * expert_output[index];
@@ -1256,7 +1301,7 @@ Result<OlmoeForwardResult> OlmoeRuntimeModel::forward(const std::vector<std::uin
         }
         rms_norm(resident_, final_norm_, hidden, normalized, config_.rms_norm_eps);
         result.logits.resize(config_.vocab_size);
-        matrix_vector(resident_, lm_head_, normalized, result.logits, session.executor);
+        matrix_vector(resident_, lm_head_, normalized, result.logits, workspace.executor);
     } catch (const std::bad_alloc&) {
         return make_error(ErrorCode::resource_exhausted, "Unable to allocate reserved OLMoE forward buffers");
     }
@@ -1289,6 +1334,14 @@ Result<OlmoeForwardResult> OlmoeRuntimeModel::forward(const std::vector<std::uin
             }
         }
     }
+    result.stats.cached_prefix_tokens = start_position;
+    if (session != nullptr) {
+        if (prefix_reuse) {
+            session->cached_ids_ = token_ids;
+        } else {
+            session->reset();
+        }
+    }
     if (options.io_cache_mode == io::IoCacheMode::bypass) {
         if (!result.stats.device_io_available) {
             return make_error(ErrorCode::unsupported,
@@ -1301,6 +1354,39 @@ Result<OlmoeForwardResult> OlmoeRuntimeModel::forward(const std::vector<std::uin
         }
     }
     return result;
+}
+
+OlmoeSession::~OlmoeSession() = default;
+OlmoeSession::OlmoeSession(OlmoeSession&&) noexcept = default;
+OlmoeSession& OlmoeSession::operator=(OlmoeSession&&) noexcept = default;
+
+void OlmoeSession::reset() {
+    cached_ids_.clear();
+}
+
+Result<OlmoeSession> OlmoeRuntimeModel::create_session(safety::ResourceGovernor& governor,
+                                                       std::size_t capacity) const {
+    if (capacity == 0U || capacity > static_cast<std::size_t>(config_.max_position_embeddings)) {
+        return make_error(ErrorCode::invalid_argument,
+                          "Session capacity is outside the model context",
+                          std::to_string(capacity));
+    }
+    auto kv_bytes = kv_cache_bytes(config_, capacity);
+    if (!kv_bytes) return kv_bytes.error();
+    auto reservation = governor.try_reserve(safety::ResourceKind::ram, kv_bytes.value(),
+                                            "OLMoE persistent session KV cache");
+    if (!reservation) return reservation.error();
+    try {
+        OlmoeSession session;
+        session.reservation_ = reservation.take_value();
+        session.capacity_ = capacity;
+        session.keys_.assign(static_cast<std::size_t>(config_.num_hidden_layers) * capacity * config_.hidden_size, 0.0F);
+        session.values_.assign(session.keys_.size(), 0.0F);
+        return session;
+    } catch (const std::bad_alloc&) {
+        return make_error(ErrorCode::resource_exhausted,
+                          "Unable to allocate reserved persistent session buffers");
+    }
 }
 
 }  // namespace vastloom::inference

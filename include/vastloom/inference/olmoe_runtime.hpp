@@ -88,6 +88,7 @@ struct ExpertTraceEvent {
 
 struct OlmoeForwardStats {
     std::size_t input_tokens{0};
+    std::size_t cached_prefix_tokens{0};
     double load_ms{0.0};
     double forward_ms{0.0};
     ByteCount expert_bytes_read{0};
@@ -113,6 +114,35 @@ struct OlmoeForwardResult {
     std::vector<float> logits;
     std::vector<ExpertTraceEvent> trace;
     OlmoeForwardStats stats;
+};
+
+// A resumable KV workspace for the MoE stream, the M13 session pattern applied to the
+// OLMoE path: a caller that resends a shared prefix (a chat template with history, a
+// coding agent replaying a transcript) only has the diverging tail evaluated, because the
+// Key/Value states of the cached prefix are kept in Governor-reserved buffers owned by
+// the session. Divergence, overflow or a cold start degrade to the stateless path and
+// never to wrong output.
+class OlmoeSession {
+public:
+    OlmoeSession() = default;
+    ~OlmoeSession();
+    OlmoeSession(OlmoeSession&&) noexcept;
+    OlmoeSession& operator=(OlmoeSession&&) noexcept;
+    OlmoeSession(const OlmoeSession&) = delete;
+    OlmoeSession& operator=(const OlmoeSession&) = delete;
+
+    [[nodiscard]] bool ready() const noexcept { return capacity_ != 0U; }
+    [[nodiscard]] std::size_t capacity() const noexcept { return capacity_; }
+    [[nodiscard]] std::size_t cached_token_count() const noexcept { return cached_ids_.size(); }
+    void reset();
+
+private:
+    friend class OlmoeRuntimeModel;
+    safety::Reservation reservation_;
+    std::size_t capacity_{0};
+    std::vector<float> keys_;
+    std::vector<float> values_;
+    std::vector<std::uint32_t> cached_ids_;
 };
 
 class OlmoeRuntimeModel {
@@ -171,7 +201,13 @@ public:
         const std::vector<std::uint32_t>& token_ids,
         const OlmoeForwardOptions& options,
         safety::ResourceGovernor& governor,
-        const safety::ProcessSafetyGuard* process_guard = nullptr) const;
+        const safety::ProcessSafetyGuard* process_guard = nullptr,
+        OlmoeSession* session = nullptr) const;
+
+    // Reserves the persistent session KV workspace once; the session owns both the
+    // reservation and the buffers for its whole lifetime.
+    [[nodiscard]] Result<OlmoeSession> create_session(safety::ResourceGovernor& governor,
+                                                      std::size_t capacity) const;
 
     [[nodiscard]] Result<ExpertWeights> read_expert(std::uint32_t layer, std::uint32_t expert) const;
     [[nodiscard]] Result<std::array<ExpertTensorRead, 3>> expert_read_plan(

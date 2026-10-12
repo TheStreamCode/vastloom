@@ -332,7 +332,9 @@ router decisions or accepted output tokens.
 - `cli/`: interactive and one-shot model client commands.
 - `api/`: OpenAI request/response protocol with bounded parsing, and the loopback-only HTTP
   server behind `vastloom serve` (single connection at a time, SSE streaming, Governor
-  refusals surfaced as HTTP 503).
+  refusals surfaced as HTTP 503). The OLMoE stream is served through the same shape with
+  a persistent prefix-KV session (`OlmoeSession`, greedy-only); the Qwen3.8 serve path
+  stays roadmap work (Q13).
 - `tools/`: pinned full/metadata import plus bounded non-executable range-artifact publication.
 
 The data plane now has device-level I/O plus a repeatable operating-system cache-bypass

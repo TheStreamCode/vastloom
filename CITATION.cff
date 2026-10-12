@@ -8,8 +8,8 @@ authors:
 repository-code: "https://github.com/TheStreamCode/vastloom"
 url: "https://github.com/TheStreamCode/vastloom"
 license: Apache-2.0
-version: 0.4.0-alpha.4
-date-released: 2026-08-09
+version: 0.4.0-alpha.5
+date-released: 2026-10-12
 abstract: >-
   A safety-first native inference runtime that treats VRAM, RAM and NVMe as a
   model-aware memory hierarchy for oversized open-weight and sparse MoE models.

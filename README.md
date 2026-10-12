@@ -266,10 +266,10 @@ verified model → safe hardware plan → model-aware placement → bounded infe
                      VRAM ↔ RAM ↔ NVMe
 ```
 
-This is real systems research, not a claim that the full DeepSeek V4 Flash model already runs.
-The current vertical slices prove native dense inference, real MoE routing, bounded expert
-streaming on a smaller published checkpoint and one complete real DeepSeek expert before the
-runtime scales the new selected-expert layer path to verified official payloads and generation.
+This was real systems research, run as vertical slices: native dense inference, real
+MoE routing, bounded expert streaming on a smaller published checkpoint, a complete real
+DeepSeek expert, and finally full native execution of Qwen3.8-Flash-Next with externally
+validated greedy parity — the result the Key results section records.
 
 Every milestone has a dated validation report under [`docs/reports/`](docs/reports/README.md);
 the index there lists all of them, current track first. The ones to read first:
@@ -724,7 +724,7 @@ Start the interactive chat:
 Example session:
 
 ```text
-Vastloom 0.4.0-alpha.4 — TinyChat CLI
+Vastloom 0.4.0-alpha.5 — TinyChat CLI
 Model: vastloom/tinychat-v1 (128 token context)
 Weights: SHA-256 verified
 This validation model is stateless: each line is an independent prompt.
@@ -778,7 +778,9 @@ One connection at a time, bounded request bodies, Governor refusals surfaced as 
 This is the M13 endpoint slice on the validation model. Pointing `serve` at a real SmolLM2
 checkpoint starts the real-model engine with a prefix-KV session instead: consecutive turns
 reuse the cached prefix, and each response reports the reused token count in the
-`vastloom_cached_prefix_tokens` field.
+`vastloom_cached_prefix_tokens` field. Pointing `serve` at a complete pinned OLMoE
+checkpoint serves the streamed MoE engine the same way (greedy decoding only,
+bounded session, same observability field).
 
 ## Chat with the real SmolLM2 checkpoint
 

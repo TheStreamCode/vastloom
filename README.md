@@ -1170,10 +1170,31 @@ prior-art landscape below). What it does offer is the scaffolding around the
 matvecs — the control plane an mmap-only runtime structurally lacks:
 
 - **Safety Governor with reservation semantics** — every large allocation is
-  reserved before it is made, under host RAM, VRAM, staging and scratch
-  ceilings plus OS and emergency headroom; on pressure the runtime sheds
-  cache and prefetch first, and on emergency it aborts generation instead of
-  risking host stability ([`docs/SAFETY.md`](docs/SAFETY.md));
+  reserved before it is made through move-only RAII reservations, under
+  per-kind plus aggregate host-memory ceilings; workers that race on the
+  same free memory cannot jointly oversubscribe it
+  ([`docs/SAFETY.md`](docs/SAFETY.md));
+- **OS, emergency and storage headroom** — the planner subtracts host, VRAM
+  and free-space reserves before budgeting a single weight, and live
+  headroom is re-sampled during execution;
+- **OS-enforced process caps** — on Windows the process runs under a Job
+  Object memory limit with lowered priority; VRAM is a separate tier that is
+  never summed with RAM to admit an expert, and device allocations are
+  charged against the host budget they also consume;
+- **pressure ladder, not hope** — on pressure the runtime sheds cache,
+  prefetch and speculation first; on emergency it aborts the generation and
+  releases resources instead of risking host stability;
+- **bounded execution everywhere** — queues, workers, prefetch depth, request
+  bodies, generation lengths, timeouts and cancellation are explicit
+  parameters; every shell-out carries a hard deadline and a watchdog guards
+  the process heartbeat;
+- **no silent behavior** — declined shapes fall back to the scalar reference
+  kernels call by call and visibly; a backend failure is an error, never a
+  quiet substitution; temperature sampling the engine lacks is refused
+  rather than served as secret greedy output;
+- **overflow-safe accounting** — byte, shape and offset math is
+  checked-add throughout, so a corrupt header cannot turn into an overflowed
+  allocation;
 - **immutable, verified model imports** — pinned revisions, per-file SHA-256,
   temporary staging with atomic publication, read-only stores; original
   weights are never mutated ([`docs/MANIFEST_V1.md`](docs/MANIFEST_V1.md));
@@ -1184,9 +1205,6 @@ matvecs — the control plane an mmap-only runtime structurally lacks:
 - **admission planning** — a capacity gate that refuses a model whose working
   set cannot fit the live machine before anything downloads
   ([`docs/REFERENCE_PLAN.md`](docs/REFERENCE_PLAN.md));
-- **bounded execution everywhere** — queues, workers, prefetch depth,
-  timeouts and cancellation are explicit parameters, and a watchdog guards
-  the process heartbeat;
 - **external-oracle validation method** — greedy parity against independently
   built llama.cpp as a falsification instrument, with per-milestone evidence
   snapshots under [`docs/reports/`](docs/reports/README.md).

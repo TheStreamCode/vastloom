@@ -1,5 +1,10 @@
 # Roadmap and acceptance gates
 
+> **Closed (October 2026).** Active development has concluded; the open items
+> below (Q11l–Q11n, chunked prefill, Q12–Q14) are preserved as the planned
+> sequence, not as scheduled work. The repository remains a working record:
+> every completed milestone links to the report or test that defends it.
+
 Vastloom advances only when each milestone has a measurable correctness and safety gate.
 A command existing in the CLI is not enough; it must run against a validated model path.
 
@@ -529,6 +534,17 @@ documented.
 - [ ] OpenAI-compatible endpoint as for the M13 SmolLM2 one.
 
 **Gate:** two consecutive turns with cached_prefix_tokens > 0 on the MoE stream.
+
+> **Pre-validation on the OLMoE stream (October 2026, done):** the M13 session
+> pattern is implemented for `OlmoeRuntimeModel` (`OlmoeSession` with a
+> Governor-reserved persistent KV workspace, prefix reuse with stateless
+> degradation on divergence/overflow) and served through `serve <olmoe-dir>`
+> (`/v1/models`, `/v1/chat/completions` streaming + non-stream, greedy-only,
+> `vastloom_cached_prefix_tokens` observability). Covered by the opt-in
+> `vastloom_olmoe_session` C++ equivalence test and the `vastloom_olmoe_serve`
+> Python smoke test (both gated on `VASTLOOM_OLMOE_FULL_MODEL`; harness
+> verified without weights, real-checkpoint run pending). Q12 itself — the
+> same pattern on the Qwen DeltaNet/QSA stream — stays open.
 
 ## Q13 - vastloom serve for Qwen3.8
 

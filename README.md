@@ -14,7 +14,7 @@
   <a href="https://github.com/TheStreamCode/vastloom/actions/workflows/ci.yml"><img alt="CI" src="https://github.com/TheStreamCode/vastloom/actions/workflows/ci.yml/badge.svg"></a>
   <a href="https://github.com/TheStreamCode/vastloom/security/code-scanning"><img alt="CodeQL" src="https://github.com/TheStreamCode/vastloom/actions/workflows/codeql.yml/badge.svg"></a>
   <a href="LICENSE"><img alt="License: Apache-2.0" src="https://img.shields.io/badge/license-Apache--2.0-6ee7ff.svg"></a>
-  <img alt="Status: experimental alpha" src="https://img.shields.io/badge/status-experimental_alpha-bd7bff.svg">
+  <img alt="Status: concluded research" src="https://img.shields.io/badge/status-concluded_research-bd7bff.svg">
 </p>
 
 Vastloom treats **VRAM → RAM → NVMe** as one model-aware memory hierarchy. Its long-term
@@ -35,6 +35,14 @@ research project, not a product: current throughput is reported honestly as behi
 inference engine. Read [`docs/ROADMAP.md`](docs/ROADMAP.md) for what is done, what is open,
 and what is explicitly out of scope.
 
+> [!NOTE]
+> **Project status (October 2026): concluded.** Vastloom was a summer-2026
+> research experiment in governed local inference for giant MoE models,
+> first on DeepSeek V4 Flash and then on Qwen3.8-Flash-Next. Active
+> development has ended; the repository is preserved as a working record:
+> it builds, its test suites pass, and every measured claim below links to
+> the report or test that defends it. No further milestones are planned.
+
 ## Contents
 
 - [Why Vastloom exists](#why-vastloom-exists)
@@ -52,6 +60,8 @@ and what is explicitly out of scope.
 - [Other commands](#other-commands)
 - [Safety invariants](#safety-invariants)
 - [Reference planning result](#reference-planning-result)
+- [Research paper](#research-paper)
+- [What Vastloom adds over an mmap-only runtime](#what-vastloom-adds-over-an-mmap-only-runtime)
 - [Current limitations](#current-limitations)
 - [Research path](#research-path)
 - [Prior art and research baselines](#prior-art-and-research-baselines)
@@ -1135,6 +1145,55 @@ The bounded range importer accepted the 21-range trunk scope in dry-run mode and
 138,867,160-byte disk plan without creating an artifact or opening a payload connection. Expert
 and complete scopes remain fail-closed while routing authority is unverified.
 
+## Research paper
+
+The systems experience of this project is written up as a working paper (August
+2026, not peer-reviewed):
+
+- [`docs/research/CONSUMER_STREAMING_INFERENCE.md`](docs/research/CONSUMER_STREAMING_INFERENCE.md)
+  — consumer streaming inference for large MoE models: governed memory
+  hierarchy, measured results and negative results;
+- [`docs/research/vastloom-streaming-moe-inference.pdf`](docs/research/vastloom-streaming-moe-inference.pdf)
+  — the same paper rendered for reading and sharing.
+
+Related feasibility notes live beside it: the
+[capability-transfer analysis](docs/research/CAPABILITY_TRANSFER_FEASIBILITY.md),
+the [DeepSeek-on-SSD review](docs/research/DEEPSEEK_SSD_REVIEW.md) and the
+[speculation feasibility study](docs/research/PHASE_A1_SPECULATION_FEASIBILITY.md).
+
+## What Vastloom adds over an mmap-only runtime
+
+Throughput was never Vastloom's win: on the reference PC it decodes roughly
+ten times slower than the mmap-based engines (see Current limitations and the
+prior-art landscape below). What it does offer is the scaffolding around the
+matvecs — the control plane an mmap-only runtime structurally lacks:
+
+- **Safety Governor with reservation semantics** — every large allocation is
+  reserved before it is made, under host RAM, VRAM, staging and scratch
+  ceilings plus OS and emergency headroom; on pressure the runtime sheds
+  cache and prefetch first, and on emergency it aborts generation instead of
+  risking host stability ([`docs/SAFETY.md`](docs/SAFETY.md));
+- **immutable, verified model imports** — pinned revisions, per-file SHA-256,
+  temporary staging with atomic publication, read-only stores; original
+  weights are never mutated ([`docs/MANIFEST_V1.md`](docs/MANIFEST_V1.md));
+- **exact, sourced telemetry** — per-expert routing traces, logical vs
+  process-visible vs physical-device byte counters, and a reuse-distance
+  trace simulator; Windows and Linux counters are reported with their scope,
+  never conflated;
+- **admission planning** — a capacity gate that refuses a model whose working
+  set cannot fit the live machine before anything downloads
+  ([`docs/REFERENCE_PLAN.md`](docs/REFERENCE_PLAN.md));
+- **bounded execution everywhere** — queues, workers, prefetch depth,
+  timeouts and cancellation are explicit parameters, and a watchdog guards
+  the process heartbeat;
+- **external-oracle validation method** — greedy parity against independently
+  built llama.cpp as a falsification instrument, with per-milestone evidence
+  snapshots under [`docs/reports/`](docs/reports/README.md).
+
+That scaffolding is the project's transferable result: the parts a faster
+engine would still need before running untrusted hundred-gigabyte models on
+someone's desktop.
+
 ## Current limitations
 
 Alpha.4 proves one real dense path, one real CPU MoE streaming path and the
@@ -1199,6 +1258,9 @@ The TinyChat throughput is not representative of a large model because the compl
 fixture is smaller than one megabyte and remains resident in CPU RAM.
 
 ## Research path
+
+> Closed with the project's conclusion (October 2026); preserved below as the
+> planned sequence that was not executed further.
 
 The first production target is DeepSeek V4 Flash-class memory pressure, followed only by MoE
 profiles whose runtime state fits safe host RAM and whose complete expert bundle fits one real RAM
@@ -1270,9 +1332,11 @@ adapted rather than independently implemented.
 
 ## Community and license
 
-Vastloom is available under the [Apache License 2.0](LICENSE). Contributions are welcome;
-start with [CONTRIBUTING.md](CONTRIBUTING.md), follow the [Code of Conduct](CODE_OF_CONDUCT.md)
-and use the private process in [SECURITY.md](SECURITY.md) for vulnerabilities. Governance,
+Vastloom is available under the [Apache License 2.0](LICENSE). Active development has
+concluded; the repository is kept as a public research record. The contribution
+process in [CONTRIBUTING.md](CONTRIBUTING.md), the [Code of Conduct](CODE_OF_CONDUCT.md)
+and the private process in [SECURITY.md](SECURITY.md) for vulnerabilities remain
+the reference for any future work. Governance,
 support scope, release gates and brand assets are documented in [GOVERNANCE.md](GOVERNANCE.md),
 [SUPPORT.md](SUPPORT.md), [docs/RELEASING.md](docs/RELEASING.md) and
 [docs/BRANDING.md](docs/BRANDING.md).

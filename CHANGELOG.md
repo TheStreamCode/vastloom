@@ -1,7 +1,14 @@
 # Changelog
 
-## 0.4.0-alpha.5 - Unreleased
+## 0.4.0-alpha.5 - 2026-10-12
 
+- **Project conclusion (October 2026)**:
+  - active development has ended after the summer-2026 DeepSeek → Qwen3.8
+    research arc; the repository is preserved as a working record that builds
+    green and keeps every measured claim linked to its report or test;
+  - README now states the concluded status, links the working paper and names
+    the scaffolding an mmap-only runtime lacks; the ROADMAP keeps its open
+    items as the unexecuted plan, not as scheduled work.
 - **OLMoE prefix-KV session + serve endpoint (October 2026)**:
   - the interrupted OLMoE session work is closed: `OlmoeSession` (persistent
     Governor-reserved KV workspace, M13 pattern) with prefix reuse and

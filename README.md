@@ -62,6 +62,7 @@ and what is explicitly out of scope.
 - [Reference planning result](#reference-planning-result)
 - [Research paper](#research-paper)
 - [What Vastloom adds over an mmap-only runtime](#what-vastloom-adds-over-an-mmap-only-runtime)
+- [Key results](#key-results)
 - [Current limitations](#current-limitations)
 - [Research path](#research-path)
 - [Prior art and research baselines](#prior-art-and-research-baselines)
@@ -1193,6 +1194,32 @@ matvecs — the control plane an mmap-only runtime structurally lacks:
 That scaffolding is the project's transferable result: the parts a faster
 engine would still need before running untrusted hundred-gigabyte models on
 someone's desktop.
+
+## Key results
+
+What the project established, each with its evidence:
+
+- **Independent greedy parity on a 125B MoE.** The native runtime generates
+  the identical 16-token continuation as stock llama.cpp (`6fe7498`, CPU,
+  same official Q8_0 checkpoint) on the pinned prompt — two independent
+  implementations agreeing token for token
+  ([parity report](docs/reports/Q11C_QWEN38_LLAMA_PARITY_VALIDATION.md)).
+- **Full native execution, not a demo slice.** All 48 layers end to end (36
+  Gated DeltaNet + 12 QSA), MoE top-10-of-512 routing with shared expert,
+  PLE n-gram block, partial RoPE, and multi-token prefill with carried
+  conv/SSM/KV state.
+- **Five real defects found only by the external oracle** — a sigmoid (not
+  silu) DeltaNet output gate, pre-transformed `ssm_a`, `(1+w)` norm storage,
+  ggml-repeat k-head tiling, and a stale-trunk bug in the greedy CLI — none
+  of them visible to self-pinned tests.
+- **Measured negative results kept as findings.** A bit-identical CUDA
+  expert tier measured slower than the 12-thread CPU kernel and left opt-in;
+  scalar chunked prefill shown to be a negative return; the near-tie parity
+  deviation diagnosed (D1) as the oracle's activation quantization and
+  deliberately not mirrored.
+- **A working governed runtime around it.** Immutable verified imports, a
+  reservation-based Safety Governor, exact sourced telemetry, three
+  OpenAI-compatible serve endpoints, and a validation report per milestone.
 
 ## Current limitations
 

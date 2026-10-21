@@ -4,6 +4,10 @@ Thank you for helping build safer local inference for models that exceed convent
 memory limits. Vastloom is experimental systems software: correctness, reproducibility
 and host safety take precedence over benchmark headlines.
 
+Active development concluded in October 2026 and the repository is preserved as a working
+record, so new feature work is not planned. Defect reports and focused documentation fixes
+remain welcome.
+
 By participating, you agree to the [Code of Conduct](CODE_OF_CONDUCT.md). For usage
 questions, see [Support](SUPPORT.md). Report vulnerabilities through the private process
 in [Security](SECURITY.md), never through a public issue.
@@ -75,5 +79,6 @@ not claim a backend or model works until it has been built and executed.
 ## Style and commits
 
 Follow the surrounding C++ and Python style, keep public interfaces documented, and avoid
-unrelated formatting churn. Use imperative commit subjects such as `Add legacy manifest
-compatibility`. Contributions are accepted under the repository's Apache-2.0 license.
+unrelated formatting churn. Use Conventional Commits (`type(scope): summary`, English,
+imperative mood) such as `docs: clarify the admission gate`, and keep one logical change per
+commit. Contributions are accepted under the repository's Apache-2.0 license.

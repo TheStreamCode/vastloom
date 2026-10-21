@@ -6,19 +6,37 @@ Vastloom is pre-release research software. Security fixes are made on the latest
 older snapshots are not maintained.
 
 | Version | Supported |
-|---|---|
-| Latest `0.4.0-alpha.*` | Yes |
+| --- | --- |
+| Latest alpha release | Yes |
 | Older alpha releases | No |
 
 ## Reporting a vulnerability
 
-Please email `dev@mikesoft.it` with the subject `Vastloom security report`. Do not open a
-public issue for path traversal, arbitrary file access, unsafe process termination, model
-artifact corruption, malformed-model crashes, resource exhaustion or privacy failures.
+Do not open a public issue for a security problem. Report it privately through GitHub Security
+Advisories on this repository
+(<https://github.com/TheStreamCode/vastloom/security/advisories/new>), or by email to
+<michael@mikesoft.it> with the subject `Vastloom security report` when GitHub is not available.
 
-Include the affected revision, platform, reproduction steps and impact. Avoid attaching
-copyrighted model weights or sensitive prompts. You may use a minimal synthetic fixture.
-The maintainer will acknowledge receipt, coordinate triage and agree on disclosure timing.
+Include the affected revision and platform, a description of the issue and its impact, reproduction
+steps or a proof of concept, and any mitigation you already know about. Avoid attaching copyrighted
+model weights or sensitive prompts; a minimal synthetic fixture is enough. You can expect an initial
+acknowledgement within 7 days and a status update within 30 days. Disclosure timing is agreed with
+the reporter, and credit is given unless you ask otherwise.
+
+## Scope
+
+In scope:
+
+- path traversal, arbitrary file access, unsafe process termination, model artifact corruption,
+  malformed-model crashes, resource exhaustion and privacy failures in this repository;
+- credential or secret exposure caused by this project;
+- defects in the runtime, build scripts or release artifacts.
+
+Out of scope:
+
+- vulnerabilities in third-party models, weights, libraries or drivers; report those upstream;
+- misconfiguration of a user's environment;
+- model license questions and the consequences of running untrusted model code.
 
 ## Trust boundaries
 
@@ -34,6 +52,11 @@ The maintainer will acknowledge receipt, coordinate triage and agree on disclosu
   separately validated, atomically published artifact.
 - The watchdog observes by default. Process termination requires explicit `--enforce` plus
   matching PID and heartbeat checks.
+
+## Handling of credentials
+
+This project never asks for credentials in issues, pull requests or logs. Do not paste API keys,
+tokens, cookies or personal data in a report. Redact secrets from logs before attaching them.
 
 Vastloom cannot make untrusted model licenses safe, guarantee that a host has adequate
 cooling, or prevent all consequences of running experimental native code. Keep backups,

@@ -826,7 +826,9 @@ governed RAM first: this is device residency, not a VRAM *payload* tier
 
 **Closing note (October 2026).** Remaining: the VRAM *payload* tier, ratio-128 layers and
 learned-router/full-depth execution — not planned in this concluded research record (they need
-new subsystems or the full checkpoint); no further milestones. A full 90.86 GB checkpoint
+new subsystems or the full checkpoint); no further milestones. The consolidated, dependency-ordered
+backlog for resuming the research — including the Qwen revalidation checklist and the safety entry
+criteria — is [`planning/FUTURE_WORK.md`](planning/FUTURE_WORK.md). A full 90.86 GB checkpoint
 download, IQ1/`UD-IQ1_S` execution, CUDA dense/attention kernels, speculative decoding and any
 Qwen feature work were already out of scope, and a gate that would need a llama.cpp comparison
 against the full checkpoint stays blocked rather than changing that rule.

@@ -176,6 +176,7 @@ External model tests are opt-in through the `VASTLOOM_*_MODEL` cache paths; neve
 - [`docs/DEEPSEEK_V4_FLASH.md`](docs/DEEPSEEK_V4_FLASH.md) — the DeepSeek V4 Flash 0731 reduced-payload track, its measured gates and the dated metadata/reference foundation.
 - [`docs/reports/`](docs/reports/README.md) — dated validation reports for every milestone, including the DeepSeek reduced-payload series: the layer-0 range execution, the device-residency and layer-0-oracle reports, and the chain, chain-oracle and multi-token-oracle reports.
 - [`docs/planning/D4_ON_DEMAND_EXPERT_RANGES.md`](docs/planning/D4_ON_DEMAND_EXPERT_RANGES.md) — the design-only on-demand expert-range plan and byte budget.
+- [`docs/planning/FUTURE_WORK.md`](docs/planning/FUTURE_WORK.md) — the consolidated, dependency-ordered backlog for resuming the research, with entry criteria and explicit non-goals.
 - [`docs/research/CONSUMER_STREAMING_INFERENCE.md`](docs/research/CONSUMER_STREAMING_INFERENCE.md) and the [PDF edition](docs/research/vastloom-streaming-moe-inference.pdf) — the systems working paper.
 - [`docs/MANIFEST_V1.md`](docs/MANIFEST_V1.md), [`docs/TINY_MODEL_V1.md`](docs/TINY_MODEL_V1.md), [`docs/RELEASING.md`](docs/RELEASING.md) and [`docs/BRANDING.md`](docs/BRANDING.md) — format, fixture, release and brand references.
 

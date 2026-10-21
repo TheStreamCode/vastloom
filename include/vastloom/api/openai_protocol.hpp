@@ -20,6 +20,14 @@ struct ChatMessage {
     std::string content;
 };
 
+// What the caller asked the model to produce. Plain text and one JSON object are
+// implemented; schema- or grammar-constrained output is a separate constraint
+// implementation behind the same decoder hook.
+enum class ResponseFormat {
+    text,
+    json_object,
+};
+
 // What a coding agent actually sends. Everything optional has a bounded default rather than an
 // unbounded one, because a request arriving over a socket decides how much work this process does.
 struct ChatCompletionRequest {
@@ -31,6 +39,7 @@ struct ChatCompletionRequest {
     // refused rather than quietly served greedy output, because a sampler this runtime does not
     // implement must not be reported as honoured.
     std::optional<double> temperature;
+    ResponseFormat response_format{ResponseFormat::text};
     std::vector<std::string> stop;
 };
 
@@ -85,6 +94,11 @@ struct ChatCompletionResponse {
     std::uint64_t created{0U};
     std::size_t prompt_tokens{0U};
     std::size_t completion_tokens{0U};
+    // Present only when a decoder constraint ran: true when the constrained
+    // document reached its accepting state before generation stopped. With
+    // "length" and false the returned text is a valid prefix, not a complete
+    // document, and the response does not claim otherwise.
+    std::optional<bool> constraint_complete;
 };
 
 [[nodiscard]] Result<std::string> serialize_chat_completion_response(

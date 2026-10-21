@@ -15,6 +15,7 @@
 #include "vastloom/core/status.hpp"
 #include "vastloom/inference/capability_module.hpp"
 #include "vastloom/inference/gpt2_tokenizer.hpp"
+#include "vastloom/inference/token_constraint.hpp"
 #include "vastloom/safety/resource_governor.hpp"
 #include "vastloom/safety/runtime_policy.hpp"
 
@@ -48,6 +49,11 @@ struct LlamaGenerationOptions {
     std::uint64_t seed{1};
     std::chrono::milliseconds timeout{std::chrono::minutes(5)};
     std::function<bool()> cancelled;
+    // Optional decoder constraint (for example a JSON-object grammar). The
+    // caller owns the object and must keep it alive for the whole call; every
+    // token it masks out is removed from the sampling distribution, so the
+    // target model's arithmetic is untouched.
+    TokenConstraint* constraint{nullptr};
 };
 
 struct LlamaGenerationStats {
@@ -61,6 +67,10 @@ struct LlamaGenerationStats {
     bool stopped_on_eos{false};
     bool stopped_on_context_limit{false};
     bool stopped_on_max_tokens{false};
+    // True when a decoder constraint ran; constraint_complete is true when that
+    // constraint reached its accepting state before generation stopped.
+    bool constrained{false};
+    bool constraint_complete{false};
 };
 
 // A resumable KV workspace for conversational prefix reuse. Coding agents resend the whole

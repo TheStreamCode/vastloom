@@ -599,6 +599,13 @@ int command_serve(const std::vector<std::string>& args) {
                 response.body = api::serialize_error(parsed.error().message, "invalid_request_error", response.status);
                 return response;
             }
+            if (parsed.value().response_format != api::ResponseFormat::text) {
+                response.status = 400;
+                response.body = api::serialize_error(
+                    "This engine does not implement response_format constraints",
+                    "invalid_request_error", 400);
+                return response;
+            }
             std::string prompt;
             for (const auto& message : parsed.value().messages) {
                 if (!prompt.empty()) prompt += '\n';

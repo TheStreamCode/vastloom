@@ -645,6 +645,33 @@ std::uint32_t sample_token(const std::vector<float>& logits,
     return indices[distribution(generator)];
 }
 
+// Removes disallowed tokens from a copy of the step logits. The original logits
+// stay untouched because later metrics and dumps may still need them.
+Result<void> apply_token_constraint(std::vector<float>& logits, TokenConstraint& constraint) {
+    auto mask = constraint.allowed_mask();
+    if (!mask) return mask.error();
+    if (mask.value().size() != logits.size()) {
+        return make_error(ErrorCode::internal_error,
+                          "decoder constraint mask size differs from the model vocabulary");
+    }
+    bool any_allowed = false;
+    for (std::size_t index = 0U; index < logits.size(); ++index) {
+        if (mask.value()[index] != 0U) {
+            any_allowed = true;
+        } else {
+            logits[index] = -std::numeric_limits<float>::infinity();
+        }
+    }
+    if (!any_allowed) {
+        // A correct mask always allows something: EOS at minimum when the
+        // document is complete, otherwise a continuation byte. Reaching this
+        // point means the constraint itself is inconsistent, so fail closed.
+        return make_error(ErrorCode::internal_error,
+                          "decoder constraint allows no token at this position");
+    }
+    return {};
+}
+
 }  // namespace
 
 std::string_view LlamaModel::model_id() const noexcept {
@@ -874,14 +901,31 @@ Result<LlamaGenerationResult> LlamaModel::generate(const std::vector<ChatMessage
         const auto prompt_finished = std::chrono::steady_clock::now();
         result.stats.prompt_eval_ms = std::chrono::duration<double, std::milli>(prompt_finished - started).count();
         std::mt19937_64 generator(options.seed);
+        result.stats.constrained = options.constraint != nullptr;
         for (std::size_t index = 0; index < maximum_new; ++index) {
             if (std::chrono::steady_clock::now() - started > options.timeout) {
                 return make_error(ErrorCode::resource_exhausted, "Llama generation timed out safely");
             }
-            const std::uint32_t next = sample_token(current_logits, options, generator);
+            std::vector<float> constrained_logits;
+            const std::vector<float>* sampling_logits = &current_logits;
+            if (options.constraint != nullptr) {
+                constrained_logits = current_logits;
+                auto masked = apply_token_constraint(constrained_logits, *options.constraint);
+                if (!masked) return masked.error();
+                sampling_logits = &constrained_logits;
+            }
+            const std::uint32_t next = sample_token(*sampling_logits, options, generator);
             if (next == config_.eos_token_id) {
+                if (options.constraint != nullptr && !options.constraint->complete()) {
+                    return make_error(ErrorCode::internal_error,
+                                      "decoder constraint let EOS through before the document completed");
+                }
                 result.stats.stopped_on_eos = true;
                 break;
+            }
+            if (options.constraint != nullptr) {
+                auto accepted = options.constraint->accept_token(next);
+                if (!accepted) return accepted.error();
             }
             result.generated_ids.push_back(next);
             auto piece = tokenizer_.decode({next}, true);
@@ -899,6 +943,7 @@ Result<LlamaGenerationResult> LlamaModel::generate(const std::vector<ChatMessage
         result.stats.generated_tokens = result.generated_ids.size();
         result.stats.stopped_on_context_limit = !result.stats.stopped_on_eos && maximum_new < options.max_new_tokens;
         result.stats.stopped_on_max_tokens = !result.stats.stopped_on_eos && maximum_new == options.max_new_tokens;
+        result.stats.constraint_complete = options.constraint != nullptr && options.constraint->complete();
         // Hand the updated Key/Value states and the full evaluated sequence back to the
         // session so the next request can reuse them. Only sequences that fit the session's
         // capacity are cached; anything longer leaves it empty for a clean future start.

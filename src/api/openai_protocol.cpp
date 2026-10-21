@@ -41,7 +41,14 @@ StopSequenceFilter::StopSequenceFilter(const std::vector<std::string>& sequences
 }
 
 std::string_view StopSequenceFilter::feed(std::string_view piece) {
-    if (stopped_ || sequences_.empty()) return {};
+    if (stopped_) return {};
+    if (sequences_.empty()) {
+        // Without stop sequences every byte is safe to emit immediately. The
+        // empty-filter case previously returned nothing, which silently turned
+        // every streaming response into an empty body.
+        emitted_.assign(piece.data(), piece.size());
+        return emitted_;
+    }
     pending_.append(piece);
 
     std::size_t earliest = std::string::npos;
@@ -205,6 +212,31 @@ Result<ChatCompletionRequest> parse_chat_completion_request(std::string_view bod
                 }
             }
         }
+
+        if (const auto format = object.find("response_format");
+            format != object.end() && !format->second.is_null()) {
+            auto format_object = format->second.as_object();
+            if (!format_object) return format_object.error();
+            auto type = required_string(*format_object.value(), "type", 64U);
+            if (!type) return type.error();
+            if (type.value() == "text") {
+                request.response_format = ResponseFormat::text;
+            } else if (type.value() == "json_object") {
+                request.response_format = ResponseFormat::json_object;
+            } else {
+                // A silent text response for a schema-constrained request is the one
+                // failure mode the OpenAI contract cannot recover from, so refuse it.
+                return make_error(ErrorCode::invalid_argument,
+                                  "Chat request response_format is not supported by this engine",
+                                  type.value());
+            }
+        }
+        if (request.response_format == ResponseFormat::json_object && !request.stop.empty()) {
+            // A stop sequence can truncate the object mid-document; the response
+            // would then be a JSON prefix whose completeness the API cannot state.
+            return make_error(ErrorCode::invalid_argument,
+                              "Chat request response_format=json_object does not support stop sequences");
+        }
         return request;
     } catch (const std::bad_alloc&) {
         return make_error(ErrorCode::resource_exhausted, "Unable to allocate the parsed chat request");
@@ -223,7 +255,12 @@ Result<std::string> serialize_chat_completion_response(const ChatCompletionRespo
             << "\"}],\"usage\":{\"prompt_tokens\":" << response.prompt_tokens
             << ",\"completion_tokens\":" << response.completion_tokens
             << ",\"total_tokens\":" << response.prompt_tokens + response.completion_tokens
-            << "}}";
+            << "}";
+        if (response.constraint_complete.has_value()) {
+            out << ",\"vastloom_constraint_complete\":"
+                << (*response.constraint_complete ? "true" : "false");
+        }
+        out << "}";
         return out.str();
     } catch (const std::bad_alloc&) {
         return make_error(ErrorCode::resource_exhausted, "Unable to allocate a chat response");
@@ -251,7 +288,12 @@ Result<std::string> serialize_chat_completion_chunk(const ChatCompletionResponse
         } else {
             out << "null";
         }
-        out << "}]}";
+        out << "}]";
+        if (last && response.constraint_complete.has_value()) {
+            out << ",\"vastloom_constraint_complete\":"
+                << (*response.constraint_complete ? "true" : "false");
+        }
+        out << "}";
         return out.str();
     } catch (const std::bad_alloc&) {
         return make_error(ErrorCode::resource_exhausted, "Unable to allocate a chat response chunk");

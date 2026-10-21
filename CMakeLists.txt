@@ -2,7 +2,7 @@ cmake_minimum_required(VERSION 3.24)
 
 project(
     Vastloom
-    VERSION 0.4.0
+    VERSION 0.5.0
     DESCRIPTION "Run giant models locally without surrendering control of the host"
     HOMEPAGE_URL "https://github.com/TheStreamCode/vastloom"
     LANGUAGES CXX
@@ -49,6 +49,28 @@ set(VASTLOOM_DEEPSEEK_V4_EXPERT_ARTIFACT "" CACHE PATH
     "Optional imported vastloom.range-artifact.v1 directory holding the selected expert bundles")
 set(VASTLOOM_DEEPSEEK_V4_GLOBALS_ARTIFACT "" CACHE PATH
     "Optional imported vastloom.range-artifact.v1 directory holding the official global tensors")
+set(VASTLOOM_DEEPSEEK_V4_ORACLE_PYTHON "" CACHE FILEPATH
+    "Optional Python interpreter with NumPy for the independent layer-0 oracle test")
+set(VASTLOOM_DEEPSEEK_V4_CHAIN_GLOBALS "" CACHE PATH
+    "Optional globals artifact for the hash-routed chain contract")
+set(VASTLOOM_DEEPSEEK_V4_CHAIN_TRUNK0 "" CACHE PATH
+    "Optional layer-0 trunk artifact for the chain contract")
+set(VASTLOOM_DEEPSEEK_V4_CHAIN_TRUNK1 "" CACHE PATH
+    "Optional layer-1 trunk artifact for the chain contract")
+set(VASTLOOM_DEEPSEEK_V4_CHAIN_TRUNK2 "" CACHE PATH
+    "Optional layer-2 trunk artifact for the chain contract")
+set(VASTLOOM_DEEPSEEK_V4_CHAIN_EXPERTS0 "" CACHE PATH
+    "Optional layer-0 expert artifact for the chain contract")
+set(VASTLOOM_DEEPSEEK_V4_CHAIN_EXPERTS1 "" CACHE PATH
+    "Optional layer-1 expert artifact for the chain contract")
+set(VASTLOOM_DEEPSEEK_V4_CHAIN_EXPERTS2 "" CACHE PATH
+    "Optional layer-2 expert artifact for the chain contract")
+set(VASTLOOM_DEEPSEEK_V4_CHAIN_EXPERTS1_0 "" CACHE PATH
+    "Optional token-1 layer-0 expert artifact for the chain oracle test")
+set(VASTLOOM_DEEPSEEK_V4_CHAIN_EXPERTS1_1 "" CACHE PATH
+    "Optional token-1 layer-1 expert artifact for the chain oracle test")
+set(VASTLOOM_DEEPSEEK_V4_CHAIN_EXPERTS1_2 "" CACHE PATH
+    "Optional token-1 layer-2 expert artifact for the chain oracle test")
 set(VASTLOOM_DEEPSEEK_V4_GGUF_CHECKPOINT "" CACHE PATH
     "Optional pinned DeepSeek V4 Flash 0731 UD-IQ1_S imported checkpoint")
 set(VASTLOOM_DEEPSEEK_V4_IQ1S_SLICE "" CACHE FILEPATH
@@ -81,12 +103,14 @@ include(CMakePackageConfigHelpers)
 add_library(vastloom_core STATIC
     src/api/openai_protocol.cpp
     src/api/loopback_server.cpp
+    src/api/utf8_stream.cpp
     src/core/bytes.cpp
     src/cuda/cuda_driver.cpp
     src/cuda/cuda_matvec_accelerator.cpp
     src/cuda/cuda_rms_norm.cpp
     src/hardware/hardware_probe.cpp
     src/inference/gpt2_tokenizer.cpp
+    src/inference/json_constraint.cpp
     src/inference/ggml_quantization.cpp
     src/inference/ggml_compute.cpp
     src/inference/capability_module.cpp
@@ -391,6 +415,17 @@ if(BUILD_TESTING AND VASTLOOM_BUILD_TESTS)
                     --fixture ${CMAKE_CURRENT_SOURCE_DIR}/tests/fixtures/smollm2_reference.json
             )
             set_tests_properties(vastloom_smollm2_reference PROPERTIES TIMEOUT 300)
+            add_test(
+                NAME vastloom_smollm2_serve
+                COMMAND ${Python3_EXECUTABLE}
+                    ${CMAKE_CURRENT_SOURCE_DIR}/tests/test_smollm2_serve.py
+                    --vastloom $<TARGET_FILE:vastloom>
+                    --model ${VASTLOOM_SMOLLM2_MODEL}
+            )
+            set_tests_properties(vastloom_smollm2_serve PROPERTIES
+                TIMEOUT 900
+                RUN_SERIAL TRUE
+            )
         endif()
         if(VASTLOOM_OLMOE_MODEL)
             add_test(
@@ -517,6 +552,100 @@ if(BUILD_TESTING AND VASTLOOM_BUILD_TESTS)
                     TIMEOUT 900
                     RUN_SERIAL TRUE
                 )
+                # D2b device-residency gate: the experts run on the device under a fixed ceiling
+                # and fall back to the CPU when it cannot hold them. The two runs must produce the
+                # same logits as the CPU reference; a host without a CUDA driver skips (exit 75).
+                add_test(
+                    NAME vastloom_deepseek_v4_gpu_residency
+                    COMMAND ${Python3_EXECUTABLE}
+                        ${CMAKE_CURRENT_SOURCE_DIR}/tests/test_deepseek_gguf_contract.py
+                        --vastloom $<TARGET_FILE:vastloom>
+                        --model ${VASTLOOM_DEEPSEEK_V4_GGUF_CHECKPOINT}
+                        --artifact ${VASTLOOM_DEEPSEEK_V4_TRUNK_ARTIFACT}
+                        --experts ${VASTLOOM_DEEPSEEK_V4_EXPERT_ARTIFACT}
+                        --globals ${VASTLOOM_DEEPSEEK_V4_GLOBALS_ARTIFACT}
+                        --command layer-probe-gpu
+                )
+                set_tests_properties(vastloom_deepseek_v4_gpu_residency PROPERTIES
+                    TIMEOUT 900
+                    RUN_SERIAL TRUE
+                )
+                # D2b.2 oracle: the independent NumPy implementation reads the same artifacts and
+                # must reproduce the probe's logits and hidden state within the declared tolerance.
+                # Registered only when a NumPy-capable interpreter is supplied; a host without
+                # NumPy does not silently weaken the check.
+                if(VASTLOOM_DEEPSEEK_V4_ORACLE_PYTHON)
+                    add_test(
+                        NAME vastloom_deepseek_v4_layer_oracle
+                        COMMAND ${VASTLOOM_DEEPSEEK_V4_ORACLE_PYTHON}
+                            ${CMAKE_CURRENT_SOURCE_DIR}/tests/test_deepseek_layer_oracle.py
+                            --vastloom $<TARGET_FILE:vastloom>
+                            --model ${VASTLOOM_DEEPSEEK_V4_GGUF_CHECKPOINT}
+                            --artifact ${VASTLOOM_DEEPSEEK_V4_TRUNK_ARTIFACT}
+                            --experts ${VASTLOOM_DEEPSEEK_V4_EXPERT_ARTIFACT}
+                            --globals ${VASTLOOM_DEEPSEEK_V4_GLOBALS_ARTIFACT}
+                    )
+                    set_tests_properties(vastloom_deepseek_v4_layer_oracle PROPERTIES
+                        TIMEOUT 3600
+                        RUN_SERIAL TRUE
+                    )
+                endif()
+                if(VASTLOOM_DEEPSEEK_V4_CHAIN_GLOBALS AND
+                   VASTLOOM_DEEPSEEK_V4_CHAIN_TRUNK0 AND VASTLOOM_DEEPSEEK_V4_CHAIN_TRUNK1 AND
+                   VASTLOOM_DEEPSEEK_V4_CHAIN_TRUNK2 AND VASTLOOM_DEEPSEEK_V4_CHAIN_EXPERTS0 AND
+                   VASTLOOM_DEEPSEEK_V4_CHAIN_EXPERTS1 AND VASTLOOM_DEEPSEEK_V4_CHAIN_EXPERTS2)
+                    add_test(
+                        NAME vastloom_deepseek_v4_chain_probe
+                        COMMAND ${Python3_EXECUTABLE}
+                            ${CMAKE_CURRENT_SOURCE_DIR}/tests/test_deepseek_chain_contract.py
+                            --vastloom $<TARGET_FILE:vastloom>
+                            --model ${VASTLOOM_DEEPSEEK_V4_GGUF_CHECKPOINT}
+                            --globals ${VASTLOOM_DEEPSEEK_V4_CHAIN_GLOBALS}
+                            --trunk0 ${VASTLOOM_DEEPSEEK_V4_CHAIN_TRUNK0}
+                            --trunk1 ${VASTLOOM_DEEPSEEK_V4_CHAIN_TRUNK1}
+                            --trunk2 ${VASTLOOM_DEEPSEEK_V4_CHAIN_TRUNK2}
+                            --experts0 ${VASTLOOM_DEEPSEEK_V4_CHAIN_EXPERTS0}
+                            --experts1 ${VASTLOOM_DEEPSEEK_V4_CHAIN_EXPERTS1}
+                            --experts2 ${VASTLOOM_DEEPSEEK_V4_CHAIN_EXPERTS2}
+                    )
+                    set_tests_properties(vastloom_deepseek_v4_chain_probe PROPERTIES
+                        TIMEOUT 1800
+                        RUN_SERIAL TRUE
+                    )
+                endif()
+                if(VASTLOOM_DEEPSEEK_V4_ORACLE_PYTHON AND
+                   VASTLOOM_DEEPSEEK_V4_CHAIN_GLOBALS AND
+                   VASTLOOM_DEEPSEEK_V4_CHAIN_TRUNK0 AND VASTLOOM_DEEPSEEK_V4_CHAIN_TRUNK1 AND
+                   VASTLOOM_DEEPSEEK_V4_CHAIN_TRUNK2 AND
+                   VASTLOOM_DEEPSEEK_V4_CHAIN_EXPERTS0 AND VASTLOOM_DEEPSEEK_V4_CHAIN_EXPERTS1 AND
+                   VASTLOOM_DEEPSEEK_V4_CHAIN_EXPERTS2 AND
+                   VASTLOOM_DEEPSEEK_V4_CHAIN_EXPERTS1_0 AND
+                   VASTLOOM_DEEPSEEK_V4_CHAIN_EXPERTS1_1 AND
+                   VASTLOOM_DEEPSEEK_V4_CHAIN_EXPERTS1_2)
+                    add_test(
+                        NAME vastloom_deepseek_v4_chain_oracle
+                        COMMAND ${VASTLOOM_DEEPSEEK_V4_ORACLE_PYTHON}
+                            ${CMAKE_CURRENT_SOURCE_DIR}/tests/test_deepseek_layer_oracle.py
+                            --vastloom $<TARGET_FILE:vastloom>
+                            --model ${VASTLOOM_DEEPSEEK_V4_GGUF_CHECKPOINT}
+                            --globals ${VASTLOOM_DEEPSEEK_V4_CHAIN_GLOBALS}
+                            --chain-trunk 0=${VASTLOOM_DEEPSEEK_V4_CHAIN_TRUNK0}
+                            --chain-trunk 1=${VASTLOOM_DEEPSEEK_V4_CHAIN_TRUNK1}
+                            --chain-trunk 2=${VASTLOOM_DEEPSEEK_V4_CHAIN_TRUNK2}
+                            --chain-experts 0:0=${VASTLOOM_DEEPSEEK_V4_CHAIN_EXPERTS0}
+                            --chain-experts 0:1=${VASTLOOM_DEEPSEEK_V4_CHAIN_EXPERTS1}
+                            --chain-experts 0:2=${VASTLOOM_DEEPSEEK_V4_CHAIN_EXPERTS2}
+                            --chain-experts 1:0=${VASTLOOM_DEEPSEEK_V4_CHAIN_EXPERTS1_0}
+                            --chain-experts 1:1=${VASTLOOM_DEEPSEEK_V4_CHAIN_EXPERTS1_1}
+                            --chain-experts 1:2=${VASTLOOM_DEEPSEEK_V4_CHAIN_EXPERTS1_2}
+                            --chain-tokens 0,1
+                            --chain-depths 1,2,3
+                    )
+                    set_tests_properties(vastloom_deepseek_v4_chain_oracle PROPERTIES
+                        TIMEOUT 3600
+                        RUN_SERIAL TRUE
+                    )
+                endif()
             endif()
             if(VASTLOOM_DEEPSEEK_V4_GLOBALS_ARTIFACT)
                 add_test(

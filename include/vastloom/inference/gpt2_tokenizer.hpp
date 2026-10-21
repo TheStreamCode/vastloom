@@ -40,6 +40,18 @@ public:
     [[nodiscard]] std::uint32_t pad_token_id() const noexcept { return pad_token_id_; }
     [[nodiscard]] bool is_deepseek_v4() const noexcept { return pretokenizer_mode_ == PretokenizerMode::deepseek_v4; }
 
+    // True when `id` is one of the tokenizer's control/special tokens. A
+    // constrained decoder never emits one of these except EOS.
+    [[nodiscard]] bool is_special_token(std::uint32_t id) const noexcept;
+    // Exact bytes a token contributes to a decoded stream. Control tokens return
+    // their literal marker text; constrained decoding excludes them through
+    // is_special_token() rather than through this accessor.
+    [[nodiscard]] Result<std::string> token_bytes(std::uint32_t id) const;
+    // Rejects message content that would encode a control token when a chat
+    // template frames it and encode() scans it for added tokens. Fail-closed: the
+    // caller refuses the request instead of silently reinterpreting user text.
+    [[nodiscard]] Result<void> validate_chat_content(std::string_view content) const;
+
 private:
     enum class PretokenizerMode : std::uint8_t {
         gpt2,

@@ -837,6 +837,27 @@ Result<std::string> Gpt2Tokenizer::decode(const std::vector<std::uint32_t>& toke
     return output;
 }
 
+bool Gpt2Tokenizer::is_special_token(std::uint32_t id) const noexcept {
+    return id < special_ids_.size() && special_ids_[id];
+}
+
+Result<std::string> Gpt2Tokenizer::token_bytes(std::uint32_t id) const {
+    return decode({id}, false);
+}
+
+Result<void> Gpt2Tokenizer::validate_chat_content(std::string_view content) const {
+    for (const auto& token : added_tokens_) {
+        if (token.id < special_ids_.size() && special_ids_[token.id] &&
+            content.find(token.content) != std::string_view::npos) {
+            // Deliberately does not echo the content or the token itself: the
+            // refusal must not become a probe for reserved markers.
+            return make_error(ErrorCode::invalid_argument,
+                              "chat message content contains a reserved control token");
+        }
+    }
+    return {};
+}
+
 Result<std::string> Gpt2Tokenizer::apply_smol_chat_template(const std::vector<ChatMessage>& messages,
                                                             bool add_generation_prompt) const {
     if (messages.empty() || messages.size() > kMaximumMessages) {
@@ -858,6 +879,10 @@ Result<std::string> Gpt2Tokenizer::apply_smol_chat_template(const std::vector<Ch
             message.content.size() > kMaximumInputBytes) {
             return make_error(ErrorCode::invalid_argument, "Invalid chat role or oversized message", message.role);
         }
+        auto safe = validate_chat_content(message.content);
+        if (!safe) {
+            return make_error(safe.error().code, safe.error().message, message.role);
+        }
         append_message(message.role, message.content);
     }
     if (add_generation_prompt) output += "<|im_start|>assistant\n";
@@ -876,6 +901,10 @@ Result<std::string> Gpt2Tokenizer::apply_olmoe_chat_template(const std::vector<C
         if ((message.role != "system" && message.role != "user" && message.role != "assistant") ||
             message.content.size() > kMaximumInputBytes) {
             return make_error(ErrorCode::invalid_argument, "Invalid OLMoE chat role or oversized message", message.role);
+        }
+        auto safe = validate_chat_content(message.content);
+        if (!safe) {
+            return make_error(safe.error().code, safe.error().message, message.role);
         }
         output += "<|";
         output += message.role;
@@ -915,6 +944,10 @@ Result<std::string> Gpt2Tokenizer::apply_deepseek_v4_chat_template(
         if (message.content.size() > kMaximumInputBytes) {
             return make_error(ErrorCode::invalid_argument,
                               "DeepSeek V4 chat message exceeds 16 MiB", message.role);
+        }
+        auto safe = validate_chat_content(message.content);
+        if (!safe) {
+            return make_error(safe.error().code, safe.error().message, message.role);
         }
         if (message.role == "system") {
             if (index != 0U || saw_system) {

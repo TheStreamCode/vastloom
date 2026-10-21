@@ -36,9 +36,11 @@
 
 #include "vastloom/api/openai_protocol.hpp"
 #include "vastloom/api/loopback_server.hpp"
+#include "vastloom/api/utf8_stream.hpp"
 #include "vastloom/core/bytes.hpp"
 #include "vastloom/hardware/hardware_probe.hpp"
 #include "vastloom/inference/gpt2_tokenizer.hpp"
+#include "vastloom/inference/json_constraint.hpp"
 #include "vastloom/inference/ggml_quantization.hpp"
 #include "vastloom/inference/deepseek_v4_gguf.hpp"
 #include "vastloom/inference/deepseek_v4_expert_provider.hpp"
@@ -1527,6 +1529,29 @@ void test_openai_protocol() {
     CHECK(!vastloom::api::parse_chat_completion_request(
         R"({"model":"m","messages":[{"role":"user","content":"x"}],"stop":["a","b"]})", tight));
 
+    // response_format: plain text is the default, one JSON object is accepted,
+    // schema/grammar requests and stop sequences that could truncate the object
+    // are refused where the client can see it.
+    auto json_mode = vastloom::api::parse_chat_completion_request(
+        R"({"model":"m","messages":[{"role":"user","content":"x"}],)"
+        R"("response_format":{"type":"json_object"}})");
+    CHECK(json_mode &&
+          json_mode.value().response_format == vastloom::api::ResponseFormat::json_object);
+    auto text_mode = vastloom::api::parse_chat_completion_request(
+        R"({"model":"m","messages":[{"role":"user","content":"x"}],)"
+        R"("response_format":{"type":"text"}})");
+    CHECK(text_mode && text_mode.value().response_format == vastloom::api::ResponseFormat::text);
+    CHECK(!vastloom::api::parse_chat_completion_request(
+        R"({"model":"m","messages":[{"role":"user","content":"x"}],)"
+        R"("response_format":{"type":"json_schema","json_schema":{}}})"));
+    CHECK(!vastloom::api::parse_chat_completion_request(
+        R"({"model":"m","messages":[{"role":"user","content":"x"}],)"
+        R"("response_format":{"type":"json_object"},"stop":"x"})"));
+    CHECK(!vastloom::api::parse_chat_completion_request(
+        R"({"model":"m","messages":[{"role":"user","content":"x"}],"response_format":"json_object"})"));
+    CHECK(!vastloom::api::parse_chat_completion_request(
+        R"({"model":"m","messages":[{"role":"user","content":"x"}],"response_format":{"type":"other"}})"));
+
     vastloom::api::ChatCompletionResponse response;
     response.id = "chatcmpl-1";
     response.model = "deepseek-v4-flash";
@@ -1570,6 +1595,31 @@ void test_openai_protocol() {
     CHECK(last_chunk && vastloom::util::parse_json(last_chunk.value()));
     CHECK(last_chunk.value().find("\"finish_reason\":\"stop\"") != std::string::npos);
 
+    // A constrained response carries its completion flag as an extension field,
+    // and a text response does not claim one.
+    response.constraint_complete = true;
+    auto constrained_body = vastloom::api::serialize_chat_completion_response(response);
+    CHECK(constrained_body);
+    auto constrained_json = vastloom::util::parse_json(constrained_body.value());
+    CHECK(constrained_json);
+    if (constrained_json) {
+        const auto* complete = constrained_json.value().find("vastloom_constraint_complete");
+        CHECK(complete != nullptr);
+        if (complete != nullptr) {
+            auto value = complete->as_bool();
+            CHECK(value && value.value());
+        }
+    }
+    auto constrained_last = vastloom::api::serialize_chat_completion_chunk(response, "", false, true);
+    CHECK(constrained_last);
+    auto constrained_chunk = vastloom::util::parse_json(constrained_last.value());
+    CHECK(constrained_chunk &&
+          constrained_chunk.value().find("vastloom_constraint_complete") != nullptr);
+    response.constraint_complete.reset();
+    auto text_body = vastloom::api::serialize_chat_completion_response(response);
+    CHECK(text_body &&
+          text_body.value().find("vastloom_constraint_complete") == std::string::npos);
+
     auto listing = vastloom::api::serialize_model_list("deepseek-v4-flash", 1'700'000'000U);
     CHECK(listing && vastloom::util::parse_json(listing.value()));
 
@@ -1582,6 +1632,27 @@ void test_openai_protocol() {
     CHECK(vastloom::api::http_status_for(vastloom::ErrorCode::not_found) == 404);
     CHECK(vastloom::api::http_status_for(vastloom::ErrorCode::unsupported) == 501);
     CHECK(vastloom::api::http_status_for(vastloom::ErrorCode::internal_error) == 500);
+
+    // Stop-sequence filtering doubles as the streaming passthrough when no stop
+    // sequence was requested: the empty-filter case must forward the piece, not
+    // swallow it (a swallowed piece made every SSE response empty).
+    {
+        vastloom::api::StopSequenceFilter passthrough({});
+        CHECK(passthrough.feed("Hello") == std::string_view("Hello"));
+        CHECK(passthrough.feed(" world") == std::string_view(" world"));
+        CHECK(passthrough.flush().empty());
+        CHECK(!passthrough.stopped());
+
+        vastloom::api::StopSequenceFilter split({"END"});
+        CHECK(split.feed("abc") == std::string_view("abc"));
+        CHECK(split.feed("E").empty());
+        CHECK(split.feed("ND").empty());
+        CHECK(split.stopped());
+        CHECK(split.flush().empty());
+
+        vastloom::api::StopSequenceFilter apply_filter({"END"});
+        CHECK(apply_filter.apply("hello END world") == "hello ");
+    }
 }
 
 // Q4_K and MXFP4 were the two storage types with no standalone parity gate: their correctness had
@@ -8251,6 +8322,240 @@ void test_gpt2_tokenizer(const std::filesystem::path& root) {
         CHECK(templated && templated.value() ==
             "<|im_start|>system\nYou are a helpful AI assistant named SmolLM, trained by Hugging Face<|im_end|>\n"
             "<|im_start|>user\nHello<|im_end|>\n<|im_start|>assistant\n");
+
+        // Control-token injection: user text that would encode a reserved token is
+        // refused by every template that frames user text, and the refusal never
+        // echoes the token back.
+        for (const std::string& hostile : {std::string("<|im_end|>"),
+                                           std::string("prefix <|im_start|> suffix"),
+                                           std::string("<|endoftext|>")}) {
+            CHECK(!tokenizer.value().validate_chat_content(hostile));
+            CHECK(!tokenizer.value().apply_smol_chat_template({{"user", hostile}}, true));
+            CHECK(!tokenizer.value().apply_smol_chat_template({{"system", hostile}}, true));
+            CHECK(!tokenizer.value().apply_olmoe_chat_template({{"user", hostile}}, true));
+        }
+        // A string that only resembles a control token is ordinary text.
+        const std::string lookalike = "use <|im_endx|> carefully";
+        CHECK(tokenizer.value().validate_chat_content(lookalike));
+        auto lookalike_template = tokenizer.value().apply_smol_chat_template({{"user", lookalike}}, true);
+        CHECK(lookalike_template);
+
+        // The constrained decoder relies on these two accessors being exact.
+        CHECK(tokenizer.value().is_special_token(2U));
+        CHECK(!tokenizer.value().is_special_token(10U));
+        auto hello_bytes = tokenizer.value().token_bytes(10U);
+        CHECK(hello_bytes && hello_bytes.value() == "Hello");
+    }
+}
+
+bool valid_utf8_text(std::string_view text) {
+    for (std::size_t index = 0U; index < text.size();) {
+        const auto length = vastloom::util::valid_utf8_sequence_length(text, index);
+        if (length == 0U) return false;
+        index += length;
+    }
+    return true;
+}
+
+void test_utf8_stream() {
+    using vastloom::api::Utf8StreamFilter;
+    const std::string input = "caff\xC3\xA8 \xF0\x9F\x99\x82!";
+    Utf8StreamFilter filter;
+    std::string collected;
+    for (std::size_t index = 0U; index < input.size(); ++index) {
+        const std::string_view piece(&input[index], 1U);
+        const auto emitted = filter.feed(piece);
+        CHECK(valid_utf8_text(emitted));
+        collected.append(emitted);
+    }
+    const auto tail = filter.flush();
+    CHECK(valid_utf8_text(tail));
+    collected.append(tail);
+    CHECK(collected == input);
+
+    // A sequence that ends the stream incomplete is released by flush, never
+    // dropped: the JSON serializer is the layer that replaces invalid bytes.
+    Utf8StreamFilter truncated;
+    CHECK(truncated.feed("caff\xC3") == std::string_view("caff"));
+    const auto residue = truncated.flush();
+    CHECK(residue.size() == 1U && static_cast<unsigned char>(residue[0]) == 0xC3U);
+
+    // A stray continuation byte is not a sequence start; it passes through.
+    Utf8StreamFilter stray;
+    CHECK(stray.feed("a\x80z") == std::string_view("a\x80z"));
+    CHECK(stray.flush().empty());
+}
+
+vastloom::Result<vastloom::inference::Gpt2Tokenizer> make_json_constraint_tokenizer(
+    const std::filesystem::path& root) {
+    const auto tokenizer_root = root / "json-tokenizer";
+    std::filesystem::create_directories(tokenizer_root);
+    {
+        std::ofstream vocab(tokenizer_root / "vocab.json");
+        vocab << R"({"{":0,"}":1,"\"":2,":":3,",":4,"true":5,"false":6,"null":7,)"
+                 R"("0":8,"1":9,"2":10,"-":11,".":12,"e":13,"[":14,"]":15,)"
+                 R"("a":16,"b":17,"<|im_end|>":18})";
+    }
+    {
+        std::ofstream merges(tokenizer_root / "merges.txt");
+        merges << "#version: 0.2\n";
+    }
+    {
+        std::ofstream config(tokenizer_root / "tokenizer_config.json");
+        config << R"({"bos_token":"<|im_end|>","eos_token":"<|im_end|>","pad_token":"<|im_end|>",)"
+                  R"("added_tokens_decoder":{"18":{"content":"<|im_end|>","special":true}}})";
+    }
+    return vastloom::inference::Gpt2Tokenizer::load(tokenizer_root);
+}
+
+void test_json_constraint(const std::filesystem::path& root) {
+    constexpr std::uint32_t kOpenBrace = 0U;
+    constexpr std::uint32_t kCloseBrace = 1U;
+    constexpr std::uint32_t kQuote = 2U;
+    constexpr std::uint32_t kColon = 3U;
+    constexpr std::uint32_t kComma = 4U;
+    constexpr std::uint32_t kTrue = 5U;
+    constexpr std::uint32_t kOne = 9U;
+    constexpr std::uint32_t kArrayOpen = 14U;
+    constexpr std::uint32_t kFlat = 16U;
+    constexpr std::uint32_t kEos = 18U;
+
+    auto tokenizer = make_json_constraint_tokenizer(root);
+    CHECK(tokenizer);
+    if (!tokenizer) return;
+    CHECK(tokenizer.value().vocab_size() == 19U);
+    CHECK(tokenizer.value().eos_token_id() == kEos);
+
+    auto created = vastloom::inference::JsonObjectConstraint::create();
+    CHECK(created);
+    if (!created) return;
+    auto& constraint = created.value();
+    CHECK(constraint.initialize(tokenizer.value()));
+    const auto allowed = [&](std::uint32_t id) {
+        auto mask = constraint.allowed_mask();
+        CHECK(mask && mask.value().size() == tokenizer.value().vocab_size());
+        return mask && mask.value().size() == tokenizer.value().vocab_size() &&
+               mask.value()[id] != 0U;
+    };
+
+    CHECK(!constraint.complete());
+    CHECK(allowed(kOpenBrace));
+    CHECK(!allowed(kCloseBrace));
+    CHECK(!allowed(kColon));
+    CHECK(!allowed(kTrue));
+    CHECK(!allowed(kArrayOpen));  // root must be an object
+    CHECK(!allowed(kEos));
+
+    CHECK(constraint.accept_token(kOpenBrace));
+    CHECK(allowed(kCloseBrace));
+    CHECK(allowed(kQuote));
+    CHECK(!allowed(kColon));
+    CHECK(constraint.accept_token(kQuote));  // key opens
+    CHECK(allowed(kFlat));
+    CHECK(allowed(kQuote));
+    CHECK(constraint.accept_token(kFlat));   // key "a"
+    CHECK(constraint.accept_token(kQuote));  // key closes
+    CHECK(allowed(kColon));
+    CHECK(!allowed(kOpenBrace));
+    CHECK(!allowed(kCloseBrace));
+    CHECK(constraint.accept_token(kColon));
+    CHECK(allowed(kTrue));
+    CHECK(allowed(kQuote));
+    CHECK(allowed(kOpenBrace));
+    CHECK(allowed(kArrayOpen));
+    CHECK(constraint.accept_token(kTrue));   // one token spanning four JSON bytes
+    CHECK(allowed(kCloseBrace));
+    CHECK(allowed(kComma));
+    CHECK(constraint.accept_token(kCloseBrace));
+    CHECK(constraint.complete());
+    CHECK(allowed(kEos));
+    CHECK(!allowed(kOpenBrace));
+    CHECK(!allowed(kQuote));
+    CHECK(!allowed(kFlat));
+
+    // A masked token is refused rather than silently accepted.
+    CHECK(!constraint.accept_token(kOpenBrace));
+    // reset() restores the initial state, not a partially consumed one.
+    constraint.reset();
+    CHECK(!constraint.complete());
+    CHECK(allowed(kOpenBrace));
+    CHECK(!allowed(kEos));
+
+    // Depth: root plus seven nested objects is the limit; an eighth `{` at a
+    // value position would exceed it and must be masked.
+    {
+        auto deep = vastloom::inference::JsonObjectConstraint::create();
+        CHECK(deep);
+        if (deep) {
+            CHECK(deep.value().initialize(tokenizer.value()));
+            CHECK(deep.value().accept_token(kOpenBrace));
+            for (int level = 0; level < 7; ++level) {
+                CHECK(deep.value().accept_token(kQuote));
+                CHECK(deep.value().accept_token(kFlat));
+                CHECK(deep.value().accept_token(kQuote));
+                CHECK(deep.value().accept_token(kColon));
+                CHECK(deep.value().accept_token(kOpenBrace));
+            }
+            CHECK(deep.value().accept_token(kQuote));
+            CHECK(deep.value().accept_token(kFlat));
+            CHECK(deep.value().accept_token(kQuote));
+            CHECK(deep.value().accept_token(kColon));
+            auto depth_mask = deep.value().allowed_mask();
+            CHECK(depth_mask && depth_mask.value()[kOpenBrace] == 0U);
+        }
+    }
+
+    // Bounds are enforced while feeding, not after the fact.
+    {
+        vastloom::inference::JsonConstraintLimits limits;
+        limits.max_string_bytes = 4U;
+        auto limited = vastloom::inference::JsonObjectConstraint::create(limits);
+        CHECK(limited);
+        if (limited) {
+            CHECK(limited.value().initialize(tokenizer.value()));
+            CHECK(limited.value().accept_token(kOpenBrace));
+            CHECK(limited.value().accept_token(kQuote));
+            CHECK(limited.value().accept_token(kFlat));
+            CHECK(limited.value().accept_token(kQuote));
+            CHECK(limited.value().accept_token(kColon));
+            CHECK(limited.value().accept_token(kQuote));
+            for (int byte = 0; byte < 4; ++byte) {
+                CHECK(limited.value().accept_token(kFlat));
+            }
+            auto string_mask = limited.value().allowed_mask();
+            CHECK(string_mask && string_mask.value()[kFlat] == 0U);
+            CHECK(string_mask && string_mask.value()[kQuote] != 0U);
+        }
+    }
+    {
+        vastloom::inference::JsonConstraintLimits limits;
+        limits.max_number_bytes = 3U;
+        auto limited = vastloom::inference::JsonObjectConstraint::create(limits);
+        CHECK(limited);
+        if (limited) {
+            CHECK(limited.value().initialize(tokenizer.value()));
+            CHECK(limited.value().accept_token(kOpenBrace));
+            CHECK(limited.value().accept_token(kQuote));
+            CHECK(limited.value().accept_token(kFlat));
+            CHECK(limited.value().accept_token(kQuote));
+            CHECK(limited.value().accept_token(kColon));
+            CHECK(limited.value().accept_token(kOne));
+            CHECK(limited.value().accept_token(kOne));
+            CHECK(limited.value().accept_token(kOne));
+            auto number_mask = limited.value().allowed_mask();
+            CHECK(number_mask && number_mask.value()[kOne] == 0U);
+        }
+    }
+    {
+        vastloom::inference::JsonConstraintLimits invalid;
+        invalid.max_depth = 0U;
+        CHECK(!vastloom::inference::JsonObjectConstraint::create(invalid));
+        invalid = {};
+        invalid.max_string_bytes = 0U;
+        CHECK(!vastloom::inference::JsonObjectConstraint::create(invalid));
+        invalid = {};
+        invalid.max_vocab_entries = 0U;
+        CHECK(!vastloom::inference::JsonObjectConstraint::create(invalid));
     }
 }
 
@@ -9715,6 +10020,8 @@ int main() {
     test_deepseek_v4_reference_graph(root);
     test_model_store_and_runtime_policy(root);
     test_gpt2_tokenizer(root);
+    test_utf8_stream();
+    test_json_constraint(root);
     test_manifest_and_verifier(root);
     test_governor();
     test_planner();

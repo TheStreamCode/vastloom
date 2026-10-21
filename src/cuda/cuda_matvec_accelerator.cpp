@@ -101,6 +101,12 @@ Result<std::unique_ptr<CudaMatvecAccelerator>> CudaMatvecAccelerator::create(
 // refusal rather than a failure, so the caller runs the CPU reference instead.
 Result<CudaMatvecAccelerator::Resident*> CudaMatvecAccelerator::ensure_resident(
     const inference::DeepseekV4PackedMatrix& matrix) {
+    // The D2b placement exercise asks for the expert tier alone. Trunk and global matrices recur
+    // every token and would otherwise claim the ceiling before any routed expert is offered.
+    if (options_.experts_only && matrix.recurring) {
+        ++stats_.declined_recurring;
+        return nullptr;
+    }
     const auto layout = layout_for(matrix.ggml_type);
     if (!layout.has_value()) {
         try {

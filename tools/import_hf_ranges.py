@@ -728,7 +728,14 @@ def import_range_artifact(
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--model", choices=(base.DEEPSEEK_V4_FLASH_0731_GGUF_IQ1S.alias,), required=True)
+    parser.add_argument(
+        "--model",
+        choices=(
+            base.DEEPSEEK_V4_FLASH_0731_GGUF_IQ1S.alias,
+            base.DEEPSEEK_V4_FLASH_0731_GGUF_IQ2XXS.alias,
+        ),
+        required=True,
+    )
     parser.add_argument("--plan", type=Path, required=True)
     parser.add_argument("--store", type=Path, required=True)
     parser.add_argument(

@@ -1,9 +1,25 @@
 # Roadmap and acceptance gates
 
-> **Closed (October 2026).** Active development has concluded; the open items
-> below (Q11l–Q11n, chunked prefill, Q12–Q14) are preserved as the planned
-> sequence, not as scheduled work. The repository remains a working record:
-> every completed milestone links to the report or test that defends it.
+> **Closed as a general programme (October 2026); scoped DeepSeek refocus.**
+> The summer-2026 Qwen programme below is closed: Q0–Q11j are its completed
+> evidence record, and the Qwen open items (Q11k–Q11n, Q12–Q13) are
+> comparison/validation-only, preserved as history rather than scheduled work;
+> Q14 (capability transfer) remains a design-only compass. The repository
+> remains a working record: every completed milestone links to the report or
+> test that defends it.
+>
+> **October 2026 refocus:** the primary execution target returns to **DeepSeek V4
+> Flash 0731** (`UD-IQ2_XXS`) via bounded exact range slices, specified as D0–D4
+> at the end of this file. D1, D2a, D2b, D3 (single- and multi-token scope) and the D4 design
+> with closed decisions are measured. This concludes the research record: the VRAM *payload*
+> tier, ratio-128 and learned-router/full-depth execution are not planned and need new
+> subsystems or the full checkpoint. The Qwen track is comparison/validation-only.
+>
+> **Post-conclusion update `0.5.0-alpha.1` (2026-10-20):** a maintenance and
+> serve-safety update on the dense SmolLM2 path (JSON-object constrained
+> decoding, control-token rejection, UTF-8-safe streaming) is recorded at the
+> end of this file. The maintenance slice itself reopens nothing: it advances no
+> large-model milestone.
 
 Vastloom advances only when each milestone has a measurable correctness and safety gate.
 A command existing in the CLI is not enough; it must run against a validated model path.
@@ -11,6 +27,13 @@ A command existing in the CLI is not enough; it must run against a validated mod
 > **Architectural pivot (2026-08-26):** the DeepSeek V4 Flash 0731 track (M0–M13) is frozen
 > in `docs/archive/deepseek_0731/`. The new track is **Qwen3.8-Flash-Next** (Qwen4
 > architecture preview). Roadmap Q0–Q14 below.
+>
+> **October 2026 refocus:** the Qwen track is now **comparison/validation-only** — Q0–Q11j
+> stay as completed evidence, Q11k–Q13 keep their history but no new Qwen features are
+> planned, and Q14 stays design-only. The primary execution target returns to DeepSeek V4
+> Flash 0731 in the reduced-payload form specified by D0–D4 at the end of this file. The
+> archived M0–M13 record stays frozen; D0–D4 is a new range-slice sequence, not a resumption
+> of it.
 
 ---
 
@@ -476,7 +499,16 @@ official Q8_0 checkpoint. The external oracle is established for Q12+.
 AGENTS.md/CHANGELOG. ~3.3-4 s/token generated, against llama.cpp's 0.32 s/token
 (~10x gap, structural: page cache vs our own caches).
 
-## Q11k - Chunked prefill (PRIORITY over Q12/Q13)
+## Q11k - Chunked prefill (Qwen track)
+
+> **Track status (October 2026 refocus): comparison/validation-only.** Q11k is no longer the
+> priority of the active programme; the design and open items below are kept as the Qwen
+> track's contract, not as scheduled work.
+
+> **Design:** [`planning/Q11K_CHUNKED_PREFILL_DESIGN.md`](planning/Q11K_CHUNKED_PREFILL_DESIGN.md)
+> — layer-major/trunk-stationary chunk pipeline, batched Q8_0 GEMM, chunked GDN/QSA, MoE
+> expert union, the chunk-boundary invariance contract, the Governor budget plan and the
+> blocking entry criteria. Design only: no chunked-prefill code exists.
 
 Motivation: the checkpoint declares a 262,144-token context; DeltaNet states are O(1)
 and the QSA caches grow ~72 KB/token in F32 (128k ≈ 9.4 GB, halvable with F16 caches —
@@ -529,6 +561,8 @@ documented.
 
 ## Q12 - Prefix-KV MoE stream (M13 port)
 
+> **Track status (October 2026 refocus): comparison/validation-only, not scheduled.**
+
 - [ ] Extend `LlamaSession` to the MoE stream path.
 - [ ] DeltaNet/QSA KV cache persisted across consecutive requests.
 - [ ] OpenAI-compatible endpoint as for the M13 SmolLM2 one.
@@ -548,6 +582,8 @@ documented.
 
 ## Q13 - vastloom serve for Qwen3.8
 
+> **Track status (October 2026 refocus): comparison/validation-only, not scheduled.**
+
 - [ ] Native text→id tokenizer for qwen4exp (gpt2-BPE: `tokenizer.ggml.tokens`
       + `merges` + pre-tokenizer from the GGUF metadata), validated against
       `llama-tokenize.exe` (oracle) on EN/IT fixtures.
@@ -564,13 +600,245 @@ documented.
 re-prefills every turn at ~3.5-4 s/token → short-context demos; the realistic long
 context depends on Q11k+Q12, not on Q13.
 
+## Post-conclusion update 0.5.0-alpha.1 (2026-10-20)
+
+> A maintenance and safety update after the project conclusion. The maintenance slice
+> reopens nothing: it advances no large-model milestone, no throughput or parity measurement
+> was repeated, and the Qwen items stay blocked by the shared entry criteria in this section.
+> The separate DeepSeek refocus section below records the only continuation: D1/D2a, D2b, D3
+> (single- and multi-token scope) and the closed D4 design are measured; the VRAM payload tier,
+> ratio-128 and learned-router/full-depth execution are not planned in this concluded record.
+
+### Completed
+
+- [x] **DeepInfer review** (`docs/research/DEEPINFER_REVIEW.md`): a datacenter-only engine
+  (SM100/Ascend 950, ~511 GB V4.1-Flash checkpoint, a 64+64-GPU minimum deployment); the
+  adoption order P0/P1/P2 and the rejected mechanisms are recorded; no code or dependency
+  was adopted.
+- [x] **Dense serve safety**: chat message content that encodes a reserved control token is
+  refused fail-closed with HTTP 400; every SSE chunk is valid UTF-8 (multi-byte sequences
+  are buffered across token boundaries); a streaming-producer lifetime defect was fixed
+  (the SSE producer invoked request state that had already gone out of scope).
+- [x] **JSON-object constrained decoding** on the dense SmolLM2 path:
+  `response_format: {"type": "json_object"}` on `serve` (exactly one root object, no JSON
+  Schema or GBNF), `finish_reason` `stop`/`length`, and the `vastloom_constraint_complete`
+  extension field; the one-shot CLI exposes `chat --json-object`.
+- [x] **Q11k design** (`docs/planning/Q11K_CHUNKED_PREFILL_DESIGN.md`): the chunked-prefill
+  contract, memory budget and blocking entry criteria for the next milestone.
+- [x] **Documentation and metadata**: README.md, AGENTS.md, SAFETY.md,
+  MODEL_COMPATIBILITY.md, CHANGELOG.md and CITATION.cff updated for `0.5.0-alpha.1`.
+- [x] **Stale-note correction**: the Q11C report still says the performance levers were
+  "designed but not implemented"; Q11j implemented the opt-in ggml SIMD backend, Q8_0 trunk
+  residency and concurrent expert prefetch, and Q11k now has the design above. The Q11C
+  report stays a dated evidence snapshot and is not rewritten.
+
+### Blocked backlog (Qwen track, comparison/validation-only)
+
+No large checkpoint is present on the reference PC any more — the Qwen3.8-Flash-Next Q8_0
+GGUF and the DeepSeek V4 Flash 0731 full profile are gone, and a local llama.cpp oracle is not
+available. The items below are **blocked, not retired**. The DeepSeek refocus below does not
+depend on this backlog: it is range-slice based and has its own gates.
+
+| Item | Gate when unblocked |
+|---|---|
+| Q11k — chunked prefill | chunk-boundary invariance and token-serial parity pass; prefill throughput measured in a report |
+| Q11l — ggml SIMD default + margin battery | `tools/parity_battery.py` (≥ 6 prompts × 24 tokens) green; honest comparison vs llama.cpp and ik_llama.cpp |
+| Q11m — Q4_K expert re-import | new profile passes the minimum-working-set gate; expert bytes/token measured |
+| Q11n — model-aware VRAM tier | beats the OS page cache on expert hit-rate at equal RAM |
+| Q12 — prefix-KV on the Qwen stream | two consecutive turns with `vastloom_cached_prefix_tokens` > 0 |
+| Q13 — serve for Qwen3.8 | native tokenizer parity with `llama-tokenize`; end-to-end serve smoke |
+| Q14 — capability transfer | design-only ladder; unchanged |
+
+**Shared entry criteria (all of the above):**
+
+1. The exact large checkpoint revision is legally available again and re-imported through
+   the canonical immutable store, with every file's SHA-256 verified and the live capacity
+   gate passed.
+2. The pinned llama.cpp oracle (`6fe7498`, or a later revision re-pinned explicitly) is
+   built locally, and the margin-aware parity battery with margin dumps exists.
+3. The Governor preflight passes on the reference PC (32 GiB RAM, 12 GiB VRAM) or on a
+   host that passes the public minimum-working-set gate; the plan is re-derived from live
+   capacity, never copied from an older machine state.
+4. The always-on reduced-graph test for the mechanism exists before real-weight work, and
+   every claim waits for a dated validation report under `docs/reports/`.
+
+## DeepSeek refocus (October 2026)
+
+> **Status: DeepSeek refocus measured through D3 (single- and multi-token) and the closed D4
+> design; research record concluded, no full-model claim.** The decision is recorded below and
+> seven steps are now measured: a metadata-only IQ2_XXS store and range imports (D1), one real
+> layer-0 execution (D2a), bit-identical device expert residency with bounded CPU fallback
+> (D2b.1), an independent NumPy layer-0 oracle (D2b.2), a deterministic 2/3-layer hash-routed
+> chain (D3a) whose independent chain oracle matches tokens 0/1 at depths 1–3 (D3b), a
+> five-token prefill that opens the layer-2 4:1 compression window and is matched by the same
+> oracle (D3c) and a design-only D4 byte budget with closed decisions. Evidence is the dated
+> [`D2 layer-0 range execution`](reports/D2_IQ2XXS_LAYER0_RANGE_EXECUTION.md),
+> [`D2b.1 device residency`](reports/D2B_DEVICE_RESIDENCY_VALIDATION.md),
+> [`D2b.2 layer-0 oracle`](reports/D2B_LAYER0_ORACLE_VALIDATION.md),
+> [`D3 hash chain`](reports/D3_HASH_CHAIN_VALIDATION.md),
+> [`D3b chain oracle`](reports/D3B_CHAIN_ORACLE_VALIDATION.md),
+> [`D3c multi-token oracle`](reports/D3C_MULTITOKEN_ORACLE_VALIDATION.md) and
+> [`D4 on-demand expert ranges`](planning/D4_ON_DEMAND_EXPERT_RANGES.md) documents. Still not
+> claimed: a VRAM *payload* tier (expert bundles still enter governed RAM first), throughput,
+> ratio-128 or learned-router/full-depth execution and any full-model result. Those remaining
+> items are not planned in this concluded research record. Historical full-payload and Qwen
+> records stay dated evidence.
+
+**Decision.** The primary execution target returns to **DeepSeek V4 Flash 0731**
+(`unsloth/DeepSeek-V4-Flash-0731-GGUF`, revision
+`fbbb5b93fb787c21338159b0af3318bb3f4d9768`) because the DeepInfer comparison and the newer
+DeepSeek-V4.1-Flash-1017 model are DeepSeek-centric and the research is meant to be
+DeepSeek-first. `UD-IQ2_XXS` is the only execution quant (three GGUF shards, 90.86 GB total);
+IQ1 / `UD-IQ1_S` stays non-product and historical. The full checkpoint is **not stored** on the
+reference PC: every step below works with bounded exact range slices — trunk tiles, the six
+global consumers and the selected complete expert bundles — through the existing pinned
+importer, immutable store and Safety Governor. Qwen3.8-Flash-Next becomes
+comparison/validation-only: its code, tests and llama.cpp parity evidence stay, and no new
+Qwen features are planned. The `0.5.0-alpha.1` dense serve update remains an orthogonal
+maintenance slice.
+
+**Memory contract.** Selected experts are placed in VRAM with a bounded fallback to system
+RAM; the always-active trunk weights stream from NVMe under the Governor; no full model is
+ever resident, and RAM plus VRAM is never summed to admit an indivisible expert. D2b.1 keeps
+expert matrices resident in VRAM with a bounded CPU fallback, but the bundles still enter
+governed RAM first: this is device residency, not a VRAM *payload* tier
+(`ResidencyObject` VRAM transitions remain unused on this path).
+
+**Entry criteria for every D-gate.**
+
+1. The pinned 0731 revision and its metadata identities are verified through the existing
+   bounded GGUF reader; header/metadata-only reads are allowed, a full-checkpoint download is
+   not.
+2. Any payload is fetched only by the pinned range importer with explicit authorization, the
+   selected-payload cap and the model-store free-space reserve, then rehashed and published
+   atomically under `models/optimized`; header prefixes never become executable sources.
+3. The Governor preflight passes from live capacity (32 GiB RAM / 12 GiB VRAM reference PC),
+   and every command reports its skipped/refused state instead of degrading silently.
+4. Each gate's evidence is a dated validation report under `docs/reports/`; no claim precedes
+   its report, and no full-checkpoint execution is claimed from a range-slice result.
+
+**Sequence.** Each item is unchecked until its gate passes.
+
+- [x] **D0 — documentation refocus.** README, AGENTS, this roadmap, MODEL_COMPATIBILITY and
+      CHANGELOG state the same target, quant, reduced-payload approach, memory contract and
+      D1–D4 gates; no source, test or dated report is changed.
+      **Gate met:** the documents agree on the decision and on what is *not* claimed.
+- [x] **D1 — IQ2_XXS metadata identities and one-layer range plan/import.** Pinned the
+      `UD-IQ2_XXS` identities (complete split 1, 5,257,664 B, plus separately hashed
+      2,097,152-byte header prefixes for splits 2/3), imported a 9,451,968-byte metadata-only
+      store and verified it with `deepseek-gguf-checkpoint` (pinned spec, reference config and
+      layer-0 catalog, hashes verified). The catalog closes at 1,328 physical / 34,223 logical
+      tensors, 43 layers, 256 experts top-6 and 11,008 bundles; always-active 6,986,088,796 B,
+      routed 83,869,302,784 B, bundles 7,536,640–9,830,400 B. Three range plans were imported
+      with every local range hash verified: layer-0 trunk 138,867,160 B / 21 ranges, globals
+      596,000,788 B / 6 ranges and the authoritative route 45,219,840 B / 18 ranges, resolved
+      from the imported trunk's own `tid2eid` for token 0 (experts 254, 222, 245, 200, 53, 35;
+      `routing_authority_verified: true`). Total payload: 780,087,788 B in 45 ranges.
+      **Gate met:** pinned identities, exact plan hashes, verified spans and a metadata-only
+      checkpoint verification; D1 itself claims no execution.
+- [x] **D2a — real layer-0 execution from IQ2_XXS ranges.** `deepseek-layer-probe` ran layer 0
+      from the metadata store plus the three verify-on-load range artifacts with `--token 0`:
+      1 of 43 layers (`complete_model: false`), 129,280 logits, min −16.1273, max 15.5206,
+      argmax 30,528, the same six experts, 45 relocated tensors / six bundles, and 45,219,840
+      expert + 138,867,160 trunk + 596,000,788 global bytes; two runs were identical at
+      345.325 ms and 347.433 ms. This is one layer of 43 and **not** the model's output.
+      **Gate met (execution half only):** deterministic, repeatable execution from verified
+      IQ2_XXS payload. No parity at that gate; D2b.2 later supplies the layer-0 logits oracle.
+- [x] **D2b.1 — device expert residency with bounded CPU fallback.** `deepseek-layer-probe`
+      gained `--cuda-experts`, `--gpu-limit`, `--gpu-reserve`, `--cpu-only` and the
+      `--dump-logits/--dump-hidden/--dump-trace` dumps (the CPU default is unchanged). With
+      `--cuda-experts --gpu-limit 16`: offered 38, accelerated 18, declined 20 (all recurring
+      trunk/global), evicted 12, resident 6 matrices / 15,230,976 B, uploaded 45,219,840 B,
+      kernel 138.961 ms, upload 6.2527 ms; all 129,280 logits are bit-identical to the CPU run
+      (max abs diff 0.0). With `--gpu-limit 1`: accelerated 0, declined 38, resident 0 and the
+      logits are still identical. The opt-in `vastloom_deepseek_v4_gpu_residency` contract
+      passes with the same counters and a declared 1e-3 fallback tolerance.
+      **Gate met:** bounded device residency and CPU fallback are bit-identical. This is **not**
+      a VRAM payload tier: expert bundles are read into governed RAM first and the device holds
+      matrix copies; `ResidencyObject` VRAM transitions remain unused.
+- [x] **D2b.2 — independent layer-0 logits oracle.** An independent NumPy implementation
+      (`tools/reference_deepseek_v4_layer_oracle.py`; no C++ calls, no network) dequantizes the
+      same artifact bytes and recomputes layer 0: 129,280 logits agree within
+      **9.5367431640625e-07** (gate 1e-3), the 4,096-wide final hidden state within
+      **4.76837158203125e-07** (rtol 1e-5 / atol 1e-6), and argmax 30,528 plus route
+      254/222/245/200/53/35 are identical. The synthetic decoder section passes 87 pinned
+      checks; 66 oracle stage checksums are recorded, of which only logits and the final hidden
+      state have a probe counterpart (the FNV difference is a 1-ulp diagnostic, not a gate).
+      `VASTLOOM_DEEPSEEK_V4_ORACLE_PYTHON` registers `vastloom_deepseek_v4_layer_oracle`;
+      `ctest` PASS at 87.14 s.
+      **Gate met for layer 0:** external-reference parity within the declared tolerance.
+- **D2b status: closed** — placement (D2b.1) and the layer-0 oracle (D2b.2) cover the gate's
+      wording. A true VRAM *payload* tier remains open and is explicitly not claimed.
+- [x] **D3a — hash-routed chain executor and measured runs.** New `deepseek-chain-probe`
+      executes 2 or 3 layers from per-layer trunk/expert artifacts through a lazy trunk window
+      and per-layer expert caches; only the three hash-routed layers are admitted (a
+      learned-router layer is refused because its route needs the preceding hidden state).
+      Token 0, 3 layers: argmax 86,051, logits [−16.0034, 16.1624], trunk 437,727,112 B,
+      expert bytes 135,659,520 B, 133 relocated tensors / 18 bundles, 2,761.23 ms; the repeat
+      run is bit-identical (max abs diff 0.0). Token 1, 3 layers: argmax 69,146 with
+      per-layer authoritative routes. Token 0, 2 layers: argmax 86,051. Extra D3 download:
+      434,539,472 B (trunks 1–2 + token-0 experts) plus 135,659,520 B (token-1 experts); local
+      payload is about 1.3 GiB.
+      **Executor gate met:** multi-layer range execution is deterministic and byte-accounted.
+- [x] **D3b — D3 gate: oracle extension and automated chain tests.** The independent NumPy
+      oracle now executes the three-layer chain, including the layer-2 4:1 compressor and
+      indexer, and reproduces the native chain probe for tokens 0 and 1 at depths 1, 2 and 3:
+      logits max abs diff **9.5367431640625e-07** (token 0) / **1.9073486328125e-06** (token 1),
+      hidden max abs diff 4.76837158203125e-07 → 3.814697265625e-06 (token 0) and
+      2.384185791015625e-07 (token 1), argmax 30,528 / 86,051 / 86,051 (token 0) and 69,146
+      (token 1), identical per-layer routes, unchanged tolerances; the synthetic section passes
+      104 pinned checks. Two opt-in CMake tests PASS: `vastloom_deepseek_v4_chain_probe`
+      (587.64 s: pinned 2/3-layer results, deterministic repeat, malformed chains refused) and
+      `vastloom_deepseek_v4_chain_oracle` (780.83 s: six token/depth comparisons). The GPU chain
+      (`--cuda-experts --gpu-limit 64`: offered 116, accelerated 54, declined 62, evicted 28,
+      26 resident matrices / 66,350,080 B, uploaded 135,659,520 B) is bit-identical to the CPU
+      chain (max abs diff 0.0).
+      **Gate met for the measured scope:** single-token prefill, three hash-routed layers,
+      two tokens × depths 1–3. A one-token prefill closes no compression window, so
+      compressed-slot attention and indexer selections with `top_k > 0` are synthetically, not
+      natively, compared.
+- **D3 status: met for both the single-token and the multi-token scopes.** No throughput or
+      full-model claim.
+- [x] **D3c — multi-token prefill and compressed-slot attention.** `deepseek-chain-probe
+      --tokens 0,1,2,3,4 --layers 3` ran the five-token causal prompt twice with bit-identical
+      dumps: argmax 20,267, logits [−38.0188, 14.7002], trunk 437,727,112 B, expert bytes
+      663,224,320 B (88 bundles from 15 artifacts, duplicated bundles merged), 391 oracle
+      stages. The independent NumPy oracle matches the last-position logits within
+      **1.9073486328125e-06** and the final hidden state within **5.960464477539063e-08**, with
+      all 15 per-layer/per-token routes identical and a non-empty compressed window: one
+      compressed row, selected by positions 3 and 4, compressed stages 512/128 and six slots
+      per position. The chain contract test was extended with the same five-token leg (PASS).
+      **Gate met:** multi-token prefill and the real 4:1 compressed-slot path reproduce the
+      oracle within the unchanged tolerances; no throughput claim.
+- [x] **D4 — on-demand expert range design and byte budget (design-only).** The design is
+      `docs/planning/D4_ON_DEMAND_EXPERT_RANGES.md` with the offline estimator
+      `tools/estimate_deepseek_token_bytes.py`: pre-download all always-active ranges once
+      (6,986,088,796 B in 1,199 ranges plus the 9,451,968-byte metadata store, footprint
+      6,995,540,764 B inside the 10 GB budget) and fetch selected complete expert bundles on
+      demand under bounded staging/cache and Governor reservations. Worst case is
+      1,965,686,784 expert bytes per token; a full-depth no-cache token needs 8,951,775,580 B.
+      **Decisions closed (§11 of the design):** SHA-256 first-touch digests for bundles without
+      a pre-pinned digest; disk bundle cache 2,000,000,000 B, staging 268,435,456 B and RAM
+      expert cache 1,073,741,824 B reserved through the Governor; the design does not depend on
+      the separate, unimplemented VRAM *payload* tier; no fetch occurs in this project.
+      **Design gate met:** written design plus byte-and-budget analysis with closed decisions,
+      and no network, no full-checkpoint download and no execution claim.
+
+**Closing note (October 2026).** Remaining: the VRAM *payload* tier, ratio-128 layers and
+learned-router/full-depth execution — not planned in this concluded research record (they need
+new subsystems or the full checkpoint); no further milestones. A full 90.86 GB checkpoint
+download, IQ1/`UD-IQ1_S` execution, CUDA dense/attention kernels, speculative decoding and any
+Qwen feature work were already out of scope, and a gate that would need a llama.cpp comparison
+against the full checkpoint stays blocked rather than changing that rule.
+
 ---
 
 ## Archived track
 
 The M0–M13 track (DeepSeek V4 Flash 0731) is frozen in `docs/archive/deepseek_0731/`.
-The C++ tests defending the pinned-ggml parity for IQ1_S/IQ2_XXS/Q4_K stay compiled and
-green — they are historical contracts. For the original M14+ (multi-backend, Kimi K3,
-Laguna, MiniMax, Vulkan/ROCm, multi-NVMe) see the archived roadmap preserved in git
-history (the previous content of this file, retrievable with
+The October 2026 DeepSeek refocus above is a separate reduced-payload sequence and does not
+unfreeze this archive. The C++ tests defending the pinned-ggml parity for
+IQ1_S/IQ2_XXS/Q4_K stay compiled and green — they are historical contracts. For the
+original M14+ (multi-backend, Kimi K3, Laguna, MiniMax, Vulkan/ROCm, multi-NVMe) see the
+archived roadmap preserved in git history (the previous content of this file, retrievable with
 `git log --follow docs/ROADMAP.md`).

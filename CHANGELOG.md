@@ -1,5 +1,195 @@
 # Changelog
 
+## Unreleased - DeepSeek refocus (October 2026)
+
+- **Decision - the primary execution target returns to DeepSeek V4 Flash 0731**:
+  - the DeepSeek track becomes the primary execution target again, because the DeepInfer
+    comparison and the newer DeepSeek-V4.1-Flash-1017 model are DeepSeek-centric and the
+    research is meant to be DeepSeek-first; Qwen3.8-Flash-Next becomes
+    comparison/validation-only and no new Qwen features are planned;
+  - `unsloth/DeepSeek-V4-Flash-0731-GGUF` at revision
+    `fbbb5b93fb787c21338159b0af3318bb3f4d9768` is the pinned profile. `UD-IQ2_XXS` is the only
+    execution quant (three GGUF shards, 90.86 GB total); IQ1 / `UD-IQ1_S` stays non-product and
+    historical;
+  - the full checkpoint is not stored on the reference PC. The track is pursued with bounded
+    exact range slices (trunk tiles, the six global consumers, selected complete expert
+    bundles) through the existing immutable-store, range-importer and Governor rules; a
+    full-checkpoint download is not part of it;
+  - memory contract: selected experts placed in VRAM with bounded fallback to system RAM,
+    always-active trunk weights streamed from NVMe under the Governor, and no full model
+    resident. D2b.1 now keeps expert matrices resident on the device with a bounded CPU
+    fallback, but the payload still transits governed RAM, so this is not a VRAM payload tier;
+  - the `0.5.0-alpha.1` dense serve and JSON-object update below stays an orthogonal
+    maintenance slice and advances this track in no way.
+- **Measured - D0/D1/D2a (see `docs/reports/D2_IQ2XXS_LAYER0_RANGE_EXECUTION.md`)**:
+  - D1 pinned the `UD-IQ2_XXS` metadata identities (complete split 1, 5,257,664 B, plus two
+    separately hashed 2,097,152-byte header prefixes), imported a 9,451,968-byte metadata-only
+    store verified by `deepseek-gguf-checkpoint` (pinned spec, reference config, layer-0
+    catalog and hashes), and imported three hash-verified range plans: layer-0 trunk
+    138,867,160 B / 21 ranges, globals 596,000,788 B / 6 ranges and the authoritative route
+    45,219,840 B / 18 ranges resolved from the imported trunk's own `tid2eid` (experts 254,
+    222, 245, 200, 53, 35), for 780,087,788 B in 45 ranges. The catalog closes at 1,328
+    physical / 34,223 logical tensors, with 6,986,088,796 always-active and 83,869,302,784
+    routed bytes;
+  - D2a executed layer 0 twice from the metadata store and the three verify-on-load artifacts:
+    1 of 43 layers (`complete_model: false`), 129,280 logits (min −16.1273, max 15.5206),
+    argmax 30,528, the same six experts, 45 relocated tensors / six bundles, 345.325 ms and
+    347.433 ms. This is one layer of 43: at that gate there was no independent logits oracle
+    (D2b.2 supplies it below), no parity, no VRAM placement, no throughput and no full-model
+    claim;
+  - gates recorded by the report: Release and Debug builds with warnings as errors pass;
+    Debug `ctest` 14 passed / 0 failed / 1 skipped (ggml); Python `compileall`,
+    `test_import_hf_model.py` and `ruff check tools tests` pass.
+- **Measured - D2b.1 and D3 executor (see
+  `docs/reports/D2B_DEVICE_RESIDENCY_VALIDATION.md` and
+  `docs/reports/D3_HASH_CHAIN_VALIDATION.md`)**:
+  - `deepseek-layer-probe` gained `--cuda-experts`, `--gpu-limit`, `--gpu-reserve`,
+    `--cpu-only` and the `--dump-logits/--dump-hidden/--dump-trace` dumps (CPU default
+    unchanged). With `--cuda-experts --gpu-limit 16`: offered 38, accelerated 18, declined 20
+    (all recurring trunk/global), evicted 12, resident 6 matrices / 15,230,976 B, uploaded
+    45,219,840 B, kernel 138.961 ms, upload 6.2527 ms; all 129,280 logits are bit-identical to
+    the CPU run (max abs diff 0.0). With `--gpu-limit 1`: accelerated 0 and the logits are
+    still identical. This is device residency, not a VRAM payload tier: expert bundles are
+    still read into governed RAM first and the device holds matrix copies;
+  - new `deepseek-chain-probe` executes 2 or 3 hash-routed layers from per-layer trunk/expert
+    artifacts through a lazy trunk window and per-layer expert caches; only the three
+    hash-routed layers are admitted and a learned-router layer is refused. Token 0, 3 layers:
+    argmax 86,051, logits [−16.0034, 16.1624], trunk 437,727,112 B, expert bytes 135,659,520 B,
+    133 relocated tensors / 18 bundles, 2,761.23 ms; the repeat run is bit-identical. Token 1,
+    3 layers: argmax 69,146. Extra D3 download: 434,539,472 B plus 135,659,520 B, about 1.3 GiB
+    local payload. At that gate the independent chain oracle, the automated chain test and the
+    GPU-chain run were still missing (D3b below supplies them);
+  - gates recorded by the D2b.1/D3 reports: Release and Debug builds with warnings as errors
+    pass; Debug `ctest` 15 tests: 14 passed / 0 failed / 1 skipped (ggml);
+    `vastloom_cuda_driver_test` passes including the new refusal cases; the opt-in
+    `vastloom_deepseek_v4_gpu_residency` contract passes (`accelerated=18`, `evicted=12`,
+    fallback within the declared `1e-3`).
+- **Measured - D2b.2 independent layer-0 oracle (see
+  `docs/reports/D2B_LAYER0_ORACLE_VALIDATION.md`)**:
+  - new `tools/reference_deepseek_v4_layer_oracle.py`: an independent NumPy implementation
+    (no C++ calls, no network) that parses the pinned GGUF headers, maps the three range
+    artifacts to tensors and recomputes layer 0 with its own Q8_0/Q5_K/Q6_K/Q4_K/BF16/F32/I32/
+    IQ2_XXS/IQ3_XXS decoders; its synthetic section passes 87 pinned checks;
+  - new `tests/test_deepseek_layer_oracle.py` and the opt-in CMake variable
+    `VASTLOOM_DEEPSEEK_V4_ORACLE_PYTHON` register `vastloom_deepseek_v4_layer_oracle`;
+    `ctest` PASS at 87.14 s;
+  - measured: 129,280 logits agree within **9.5367431640625e-07** (gate 1e-3), the final
+    hidden state within **4.76837158203125e-07** (rtol 1e-5 / atol 1e-6), and argmax 30,528
+    plus route 254/222/245/200/53/35 are identical; 66 oracle stage checksums are recorded,
+    but only the logits and the final hidden state have a probe counterpart (the FNV 1-ulp
+    difference is a diagnostic, not a gate). This is layer-0 parity, not bit-identity and not
+    model parity;
+  - the opt-in contracts were updated to the IQ2_XXS profile (`tensor_bytes` 90,855,391,580,
+    `routed` 83,869,302,784, `selected_expert_bytes` 45,219,840, `total` 184,087,000,
+    `expert_bytes_read` 45,219,840); all six contract commands pass.
+- **Measured - D3 oracle and chain CMake tests (see
+  `docs/reports/D3B_CHAIN_ORACLE_VALIDATION.md`)**:
+  - the NumPy oracle now runs the 3-layer hash-routed chain, including the layer-2 4:1
+    compressor and indexer; C++ vs oracle for tokens 0/1 at depths 1/2/3: logits max abs diff
+    **9.5367431640625e-07** (token 0) / **1.9073486328125e-06** (token 1), hidden
+    4.76837158203125e-07 → 3.814697265625e-06 (token 0) and 2.384185791015625e-07 (token 1),
+    argmax 30,528 / 86,051 / 86,051 and 69,146, identical per-layer routes, unchanged
+    tolerances; 104 synthetic checks;
+  - two opt-in CMake tests registered and PASS: `vastloom_deepseek_v4_chain_probe` (587.64 s:
+    pinned 2/3-layer results, deterministic repeat, malformed chains refused, optional GPU leg
+    bit-identical) and `vastloom_deepseek_v4_chain_oracle` (780.83 s: six token/depth
+    comparisons); new variables `VASTLOOM_DEEPSEEK_V4_CHAIN_GLOBALS`,
+    `..._CHAIN_TRUNK0/1/2`, `..._CHAIN_EXPERTS0/1/2` and `..._CHAIN_EXPERTS1_0/1/1/1/2`;
+  - GPU chain `--cuda-experts --gpu-limit 64`: offered 116, accelerated 54, declined 62,
+    evicted 28, 26 resident matrices / 66,350,080 B, uploaded 135,659,520 B, kernel 150.458 ms
+    and upload 20.3482 ms; logits bit-identical to the CPU chain (max abs diff 0.0). Device
+    residency of expert matrices only, not a VRAM payload tier;
+  - documented boundary at that gate: one prefill token is below the layer-2 compression ratio,
+    so the compressed caches were empty and compressed-slot attention / indexer `top_k > 0`
+    were covered synthetically only; D3c below supplies the multi-token comparison. Three
+    layers of 43.
+- **Measured - D3c multi-token oracle (see
+  `docs/reports/D3C_MULTITOKEN_ORACLE_VALIDATION.md`)**:
+  - `deepseek-chain-probe --tokens 0,1,2,3,4 --layers 3` ran the five-token causal prompt
+    twice with byte-identical dumps: argmax 20,267, logits [−38.0188, 14.7002], trunk
+    437,727,112 B, expert bytes 663,224,320 B (88 bundles from 15 artifacts, duplicated
+    bundles merged), 391 oracle stages; the chain contract test gained the same five-token leg
+    (PASS);
+  - the independent NumPy oracle executes the multi-token prefill with per-token
+    Hyper-Connection, the window table, compressor/indexer selection and sparse attention: the
+    last-position logits agree within **1.9073486328125e-06** (gate 1e-3), the final hidden state
+    within **5.960464477539063e-08**, argmax and all 15 per-layer/per-token routes are identical,
+    and the layer-2 4:1 window is really exercised (one compressed row selected by positions
+    3–4, compressed stages 512/128, six slots per position). Tolerances unchanged;
+  - documented boundary: three layers of 43 over one prompt, not the model's output; only
+    ratio 4 and only hash-routed layers; no decode, KV reuse, chunked prefill or GPU-chain
+    claim; the oracle does not re-verify payload SHA-256 (the probe does on load).
+- **Measured - D4 design and closed decisions (design-only, no execution)**:
+  `docs/planning/D4_ON_DEMAND_EXPERT_RANGES.md` plus `tools/estimate_deepseek_token_bytes.py`:
+  pre-download the always-active ranges (6,986,088,796 B in 1,199 ranges plus the 9,451,968-byte
+  metadata store = 6,995,540,764 B, inside the 10 GB budget) and fetch selected complete expert
+  bundles on demand with bounded staging/cache under the Governor; worst case
+  1,965,686,784 expert bytes/token, full-depth no-cache 8,951,775,580 B. §11 decisions are
+  closed: SHA-256 first-touch digests for bundles without a pre-pinned digest, disk bundle
+  cache 2,000,000,000 B / staging 268,435,456 B / RAM expert cache 1,073,741,824 B reserved
+  through the Governor, no dependency on the VRAM payload tier (a separate unimplemented item),
+  and no fetch in this project.
+- **Closing note**: the remaining items (VRAM *payload* tier, ratio-128 layers,
+  learned-router/full-depth execution) are not planned in this concluded research record; they
+  need new subsystems or the full checkpoint, and no further milestones are tracked. No
+  throughput, full-model or payload-tier claim exists.
+- **Documentation**: README (status and primary-track area, DeepSeek section, limitations),
+  AGENTS.md (execution checkpoint, checkpoint availability, range-slice safety invariant,
+  DeepSeek CLI boundary), `docs/ROADMAP.md` (D0–D4 checked including D3 single-/multi-token and
+  the closed D4 decisions; remaining items not planned; Qwen Q-series
+  comparison/validation-only), `docs/MODEL_COMPATIBILITY.md` (`UD-IQ2_XXS` row records the
+  metadata, layer-0, device-residency, oracle, chain and multi-token evidence),
+  `docs/SAFETY.md` (range-slice, oracle, chain and multi-token invariants), and
+  `docs/ARCHITECTURE.md` alignment for the DeepSeek primary / Qwen comparison split.
+
+## 0.5.0-alpha.1 - 2026-10-20
+
+- **DeepInfer review and roadmap update (October 2026)**:
+  - new `docs/research/DEEPINFER_REVIEW.md` reviews the datacenter-only DeepInfer engine
+    (SM100/Ascend 950, a ~511 GB DeepSeek-V4.1-Flash checkpoint, a 64+64-GPU minimum
+    deployment) and records the adoption order: P0 adopted here, P1 blocked behind the
+    checkpoint/oracle entry criteria, P2 deferred; vendor kernels, expert-parallel
+    replication, disaggregation and speculative decoding are explicitly not adopted;
+  - new `docs/planning/Q11K_CHUNKED_PREFILL_DESIGN.md` defines the chunked-prefill contract:
+    layer-major/trunk-stationary pipeline, batched Q8_0 GEMM through the opt-in ggml backend,
+    chunked Gated DeltaNet recurrence, batched QSA, per-chunk MoE expert union, the
+    chunk-boundary invariance contract and the Governor budget plan;
+  - `docs/ROADMAP.md` gains a post-conclusion update section with the blocked backlog and the
+    shared entry criteria (large checkpoint plus llama.cpp oracle), points Q11k at its design
+    document, and records that Q11j/Q11k supersede the Q11C report's "designed but not
+    implemented" wording without rewriting that dated report.
+- **Dense serve safety and JSON object mode (October 2026)**:
+  - fixed a streaming-producer lifetime defect in the SmolLM2 serve handler: the SSE producer
+    captured request-scoped state by reference and the transport invoked it after the handler
+    had returned. The request state now lives in a shared block owned by the producer, which
+    also gives the decoder constraint a stable address for the whole generation;
+  - fixed the empty stop-sequence filter: with no `stop` sequences requested it returned no
+    bytes at all, so every streamed chat completion was empty (the non-streaming form was
+    unaffected). The filter now forwards each piece unchanged when it has no sequences;
+  - chat message content that encodes a reserved control token is rejected fail-closed:
+    HTTP 400, no completion, and the refusal neither echoes the content nor the token;
+  - SSE responses are UTF-8-safe: a multi-byte sequence split across token boundaries is
+    buffered and emitted with the next chunk (or at the end of generation), so no `data:` frame
+    ends inside a code point;
+  - JSON-object constrained decoding on the dense SmolLM2 path: `response_format`
+    `{"type": "json_object"}` accepts exactly one root object (no JSON Schema, no GBNF),
+    refuses a `stop` sequence or an unsupported format type with HTTP 400, reports
+    `finish_reason` as `stop`/`length` and the `vastloom_constraint_complete` extension field;
+    the one-shot CLI gains `chat --json-object`;
+  - the constraint is bounded (depth 8, 1,024-byte strings, 64-byte numbers), masks sampling
+    only (model arithmetic is untouched) and fails closed on a dead-end state instead of
+    falling back to unconstrained text.
+- **No large-model re-measurement**: the Qwen3.8-Flash-Next and DeepSeek V4 Flash 0731
+  checkpoints are no longer present on the reference PC. Every large-model record in README,
+  AGENTS.md and MODEL_COMPATIBILITY.md keeps its original date and hardware; nothing was
+  re-run or revalidated for this release.
+- **Documentation and metadata**: README (status note, serve contract, limitations),
+  AGENTS.md (checkpoint availability, release scope, serve invariants), `docs/SAFETY.md`
+  (serve-path constraints), `docs/MODEL_COMPATIBILITY.md` (JSON mode on the SmolLM2 row,
+  historical DeepSeek IQ2_XXS row) and `CITATION.cff` (`0.5.0-alpha.1`, 2026-10-20). The exact
+  commands and results of this update are recorded in
+  `docs/reports/0_5_0_ALPHA1_SERVE_SAFETY_VALIDATION.md`.
+
 ## 0.4.0-alpha.5 - 2026-10-12
 
 - **Project conclusion (October 2026)**:

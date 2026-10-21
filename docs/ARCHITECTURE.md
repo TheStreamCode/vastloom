@@ -5,12 +5,21 @@
 Vastloom is a native inference runtime, not a model and not a generic swap wrapper. Its
 purpose is to execute a validated model graph while controlling where each weight/state
 object lives and how it moves. A small CLI is included as a reference client and
-validation surface. The primary track is **Qwen3.8-Flash-Next** (`qwen4exp`): the
-official unsloth Q8_0 GGUF executes end-to-end through the `qwen38-*` CLI family and
-achieves greedy token parity with llama.cpp. The DeepSeek V4 Flash `UD-IQ2_XXS`
-path (`deepseek-forward`) is historical; IQ1 is not an execution path. See
-`README.md` and `AGENTS.md` for the current measured position and the
-`docs/reports/Q11C_QWEN38_LLAMA_PARITY_VALIDATION.md` report for the parity evidence.
+validation surface. The primary execution target is the **DeepSeek V4 Flash 0731**
+`UD-IQ2_XXS` refocus, pursued with bounded exact range slices: one real layer of 43 with
+independent layer-0 and 3-layer chain oracles, an opt-in device-resident expert path and a
+2/3-layer hash-routed chain (single- and five-token prefill) execute from verified artifacts
+(D1–D4). This is a concluded research record.
+**Qwen3.8-Flash-Next** (`qwen4exp`) is the comparison/validation track: it remains the only
+externally validated end-to-end path and achieves greedy token parity with llama.cpp. See
+`README.md` and `AGENTS.md` for the current measured position,
+`docs/reports/D2_IQ2XXS_LAYER0_RANGE_EXECUTION.md`,
+`docs/reports/D2B_DEVICE_RESIDENCY_VALIDATION.md`,
+`docs/reports/D2B_LAYER0_ORACLE_VALIDATION.md`,
+`docs/reports/D3_HASH_CHAIN_VALIDATION.md`,
+`docs/reports/D3B_CHAIN_ORACLE_VALIDATION.md` and
+`docs/reports/D3C_MULTITOKEN_ORACLE_VALIDATION.md` for the range-slice evidence, and
+`docs/reports/Q11C_QWEN38_LLAMA_PARITY_VALIDATION.md` for the parity evidence.
 
 ```text
                      Model adapter
@@ -132,10 +141,11 @@ model graph exists yet. This proves the first real GPU math/copy boundary only.
 > in this section - the DeepSeek loading, residency, graph and kernel story - is preserved
 > verbatim in
 > [`archive/deepseek_0731/ARCHITECTURE_NARRATIVE.md`](archive/deepseek_0731/ARCHITECTURE_NARRATIVE.md),
-> where the frozen track keeps its documentation. This section now describes the path the
-> runtime actually executes today.
+> where the frozen track keeps its documentation. This section describes the paths the runtime
+> executes today: the Qwen3.8 comparison/validation path, then the October 2026 DeepSeek
+> range-slice path.
 
-The primary execution path is Qwen3.8-Flash-Next (`qwen4exp`) on the official unsloth Q8_0
+The comparison/validation execution path is Qwen3.8-Flash-Next (`qwen4exp`) on the official unsloth Q8_0
 GGUF checkpoint (6 shards, 175.3 GiB), dispatched automatically from safetensors or GGUF:
 
 ```text
@@ -166,6 +176,26 @@ same checkpoint - is recorded in the
 [Q11C parity report](reports/Q11C_QWEN38_LLAMA_PARITY_VALIDATION.md); the milestone
 history is the [roadmap's Q11 series](ROADMAP.md).
 
+**DeepSeek range-slice and chain path (October 2026 refocus).** The primary execution target is
+the `UD-IQ2_XXS` range-slice path, not a complete checkpoint. A metadata-only store (9,451,968 B)
+carries the pinned split identities; `deepseek-gguf-probe-plan` and
+`deepseek-gguf-global-plan` derive immutable source ranges; the range importer publishes
+`models/optimized` artifacts with per-range hashes; `deepseek-layer-probe` consumes a metadata
+store plus three verify-on-load artifacts (trunk, authoritative selected experts, globals) to
+execute one layer; and `deepseek-chain-probe` extends the same artifacts to the three hash-routed
+layers through a lazy trunk window and per-layer expert caches (learned-router layers are
+refused). D1/D2a measured 780,087,788 B in 45 ranges and a deterministic layer-0 result (1 of 43,
+129,280 logits); D2b.1 keeps expert matrices resident in VRAM with a bounded CPU fallback and
+bit-identical logits (device residency, not a payload tier); D2b.2 reproduces those logits with
+an independent NumPy oracle within 9.54e-07 (opt-in CMake test); D3 executes 2- and 3-layer runs
+(token 0, 3 layers: argmax 86,051) and its chain oracle matches the probe for tokens 0/1 at
+depths 1–3 within 1.91e-06 and for the five-token prefill `[0,1,2,3,4]` (last-position logits
+within 1.91e-06, hidden within 5.96e-08, non-empty layer-2 4:1 compressed window; two opt-in
+CMake tests; GPU chain bit-identical). The refocus is concluded: the VRAM payload tier,
+ratio-128 layers and learned-router/full-depth execution are not implemented and are not planned
+in this record; `deepseek-forward` still requires a complete checkpoint. The safety boundaries
+are in [`SAFETY.md`](SAFETY.md).
+
 
 ## TinyTransformer adapter boundary
 
@@ -179,8 +209,9 @@ The alpha.2 adapter defines:
 - hard format and dimension limits.
 
 It deliberately does not generalize tensor names or quantization. The DeepSeek metadata
-adapter is separate and reuses the core integrity/model-store modules; its future
-execution graph will also reuse the governor and bounded I/O infrastructure.
+adapter is separate and reuses the core integrity/model-store modules; its layer-0 range-slice
+executor reuses the immutable model store, bounded artifact verification and Governor rules
+(D1/D2a).
 
 ## Memory hierarchy
 
@@ -301,7 +332,9 @@ router decisions or accepted output tokens.
 - `cuda/`: dynamically loaded Windows/Linux CUDA capability probe, Governor-backed move-only VRAM
   allocation, synchronous copies, a bounded scalar FP32 RMSNorm parity kernel and the
   `CudaMatvecAccelerator`: a VRAM-resident quantized Q8_0/IQ matvec tier (used by
-  `qwen38-greedy --cuda-experts` and the DeepSeek graph) with LRU eviction that prefers
+  `qwen38-greedy --cuda-experts`, the historical DeepSeek graph and, opt-in, by the
+  range-slice `deepseek-layer-probe --cuda-experts` with bounded CPU fallback) with LRU
+  eviction that prefers
   recurring weights and device-only fast paths keyed on stable weight identities.
 - `planner/`: conservative capacity and placement plan.
 - `safety/`: reservations, state machine and heartbeat.
@@ -312,12 +345,14 @@ router decisions or accepted output tokens.
 - `research/`: native-telemetry-driven no-cache/LRU/LFU/static-hot simulation and exact
   unique-expert reuse distance.
 - `inference/`: TinyTransformer, pinned SmolLM2 generation, pinned OLMoE routed CPU
-  reference/streaming, the primary **Qwen3.8-Flash-Next (qwen4exp)** track - Safetensors/GGUF
-  dispatcher, Q8_0-native trunk weights (`Qwen38Weight` + `linear_w`, bit-identical F32-or-Q8
-  matvec seam), routed-expert Q8_0 matvecs with an O(1) LRU and concurrent prefetch, DeltaNet
-  parallel decode and the `qwen38-inspect/layer/prefill/chain/greedy` command family - plus the
-  DeepSeek Safetensors/GGUF inspection, the reduced router-first selected-expert reference path,
-  exact non-executing DeepSeek trunk-artifact binding and complete reduced packed-catalog
+  reference/streaming, the comparison/validation **Qwen3.8-Flash-Next (qwen4exp)** track -
+  Safetensors/GGUF dispatcher, Q8_0-native trunk weights (`Qwen38Weight` + `linear_w`,
+  bit-identical F32-or-Q8 matvec seam), routed-expert Q8_0 matvecs with an O(1) LRU and
+  concurrent prefetch, DeltaNet parallel decode and the `qwen38-inspect/layer/prefill/chain/greedy`
+  command family - plus the DeepSeek Safetensors/GGUF inspection, the reduced router-first
+  selected-expert reference path, the D1/D2a/D2b.1 IQ2_XXS metadata and range path with
+  one-layer `deepseek-layer-probe` execution and opt-in device expert residency, the
+  `deepseek-chain-probe` 2/3-layer hash-routed chain, and complete reduced packed-catalog
   tensor-set consumption.
 - `inference/ggml_compute`: opt-in delegation of CPU matrix-vector products to a pinned ggml
   checkout, enabled at configure time by `VASTLOOM_GGML_ROOT` and at run time by
@@ -338,5 +373,6 @@ router decisions or accepted output tokens.
 - `tools/`: pinned full/metadata import plus bounded non-executable range-artifact publication.
 
 The data plane now has device-level I/O plus a repeatable operating-system cache-bypass
-protocol. DeepSeek inspection must reuse these safety and identity boundaries rather
-than bypass them. Pinned host memory and asynchronous GPU transfers remain later layers.
+protocol. The DeepSeek inspection and range-slice execution reuse these safety and identity
+boundaries rather than bypass them. Pinned host memory and asynchronous GPU transfers remain
+later layers.

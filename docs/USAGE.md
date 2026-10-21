@@ -201,11 +201,13 @@ delta and can include concurrent activity from other processes. `trace-sim --jso
 exact cold/reused counts, unique-expert reuse distance and, for current 19-field traces,
 a bounded fixed-order versus ready-order replay.
 
-## Run the primary track (Qwen3.8-Flash-Next)
+## Run the comparison track (Qwen3.8-Flash-Next)
 
-The primary track needs the official Unsloth Q8_0 GGUF checkpoint (`qwen4exp`, 6 shards,
-175.3 GiB) imported through the canonical store first. The import is one-time, verified and
-read-only: bounded download, per-file SHA-256, atomic manifest, immutable publication.
+Qwen3.8 is the comparison/validation track since the October 2026 refocus: the code, tests and
+external parity evidence stay, but no new Qwen features are planned. The track needs the official
+Unsloth Q8_0 GGUF checkpoint (`qwen4exp`, 6 shards, 175.3 GiB) imported through the canonical store
+first. The import is one-time, verified and read-only: bounded download, per-file SHA-256, atomic
+manifest, immutable publication.
 
 ```powershell
 python tools/import_qwen38_fp8.py --store C:\vastloom-store `
@@ -225,7 +227,74 @@ Q13 roadmap item. The pinned parity prompt ("The capital of France is") and its 
 continuation are recorded in the
 [`Q11C parity report`](reports/Q11C_QWEN38_LLAMA_PARITY_VALIDATION.md); on the reference
 PC the same continuation comes out of both Vastloom and llama.cpp, at the honest ~3.3-4
-s/token versus llama.cpp's ~0.32 s/token (see the measured-position note above).
+s/token versus llama.cpp's ~0.32 s/token (see [`RESULTS.md`](RESULTS.md)).
+
+## DeepSeek reduced-payload probes
+
+The primary research track never stores the full 90.86 GB checkpoint: it executes bounded exact
+range slices imported through the pinned range importer. Metadata stores, range artifacts, dumps
+and the Python oracle are local validation data — they are not part of the repository and not a
+CMake model path.
+
+```powershell
+# 1. Metadata-only store: 9,451,968 B (complete split 1 plus two hashed header prefixes).
+python tools\import_hf_model.py `
+  --model deepseek-v4-flash-0731-gguf-iq2xxs `
+  --store C:\vastloom-store --metadata-only
+
+$model = 'C:\vastloom-store\models\original\deepseek-v4-flash-0731-iq2xxs-fbbb5b93--metadata'
+vastloom deepseek-gguf-checkpoint $model --context 4096 --batch-size 1 --json
+
+# 2a. Layer-0 trunk layout plan (these expert IDs are layout-only here), then import the trunk.
+vastloom deepseek-gguf-probe-plan $model --layer 0 --experts 0,1,2,3,4,5 `
+  --context 4096 --batch-size 1 --json > trunk-plan.json
+python tools\import_hf_ranges.py --model deepseek-v4-flash-0731-gguf-iq2xxs `
+  --plan trunk-plan.json --store C:\vastloom-store --scope trunk --allow-range-download
+$trunk = '<imported layer-0 trunk artifact>'
+
+# 2b. The imported trunk's own tid2eid names the authoritative experts for the token.
+vastloom deepseek-gguf-probe-plan $model --layer 0 `
+  --route-artifact $trunk --token 0 --context 4096 --batch-size 1 --json > route-plan.json
+
+# 2c. Globals plan and imports (one explicit authorization per scope, with caps).
+vastloom deepseek-gguf-global-plan $model --context 4096 --batch-size 1 --json > global-plan.json
+python tools\import_hf_ranges.py --model deepseek-v4-flash-0731-gguf-iq2xxs `
+  --plan route-plan.json --store C:\vastloom-store --scope selected-experts --allow-range-download
+python tools\import_hf_ranges.py --model deepseek-v4-flash-0731-gguf-iq2xxs `
+  --plan global-plan.json --store C:\vastloom-store --scope globals --allow-range-download
+
+# 3. One real layer, then a 2/3-layer hash-routed chain.
+vastloom deepseek-layer-probe $model <trunk-artifact> <expert-artifact> <global-artifact> `
+  --token 0 --json
+vastloom deepseek-chain-probe $model <global-artifact> --layers 3 --token 0 `
+  --trunk 0=<l0-trunk> --trunk 1=<l1-trunk> --trunk 2=<l2-trunk> `
+  --experts 0=<l0-experts-t0> --experts 1=<l1-experts-t0> --experts 2=<l2-experts-t0> --json
+```
+
+For a multi-token prompt (`--tokens 0,1,2,3,4`) pass one `--experts L=PATH` per prompt token per
+layer; overlapping experts are deduplicated and a bundle named twice must agree on its immutable
+source spans. The five-token measurement used 15 expert artifacts (five per layer).
+
+Each probe reports its executed depth against the 43-layer model and refuses a learned-router
+layer. The opt-in device path is `--cuda-experts --gpu-limit MIB` with a bounded CPU fallback: it
+is device residency of expert matrices, not a VRAM payload tier. `--dump-logits`, `--dump-hidden`
+and `--dump-trace` write local comparison files consumed by the independent NumPy oracle; the
+oracle paths and CMake plumbing are listed below.
+
+The opt-in tests point at already-imported local artifacts only:
+
+| Variable | Meaning |
+|---|---|
+| `VASTLOOM_DEEPSEEK_V4_MODEL` | Imported metadata store for the DeepSeek tests |
+| `VASTLOOM_DEEPSEEK_V4_GGUF_HEADER`, `VASTLOOM_DEEPSEEK_V4_GGUF_CHECKPOINT` | Header snapshot and metadata-store inputs |
+| `VASTLOOM_DEEPSEEK_V4_TRUNK_ARTIFACT`, `VASTLOOM_DEEPSEEK_V4_EXPERT_ARTIFACT`, `VASTLOOM_DEEPSEEK_V4_GLOBALS_ARTIFACT` | Layer-0 range artifacts |
+| `VASTLOOM_DEEPSEEK_V4_ORACLE_PYTHON` | Python interpreter for the independent oracle test |
+| `VASTLOOM_DEEPSEEK_V4_CHAIN_GLOBALS`, `VASTLOOM_DEEPSEEK_V4_CHAIN_TRUNK0/1/2`, `VASTLOOM_DEEPSEEK_V4_CHAIN_EXPERTS0/1/2` | 3-layer chain artifacts for token 0; `VASTLOOM_DEEPSEEK_V4_CHAIN_EXPERTS1_0/1/2` supply token 1 |
+
+The DeepSeek refocus consumes pinned range artifacts imported through
+`tools/import_hf_ranges.py`, not a CMake model path; these variables only locate local artifacts.
+Nothing here is a full-model or throughput claim: the measured depth is three layers of 43 and
+there is no VRAM payload tier.
 
 ## Other commands
 
@@ -261,6 +330,13 @@ vastloom qwen38-greedy MODEL_DIRECTORY --prompt-ids CSV [--steps N] [--expert-ca
 vastloom deepseek-expert-redundancy MODEL_DIRECTORY
 vastloom deepseek-forward MODEL_DIRECTORY [--layers N] [--expert-cache N]
     [--ggml-compute]
+vastloom deepseek-layer-probe MODEL_DIRECTORY TRUNK_ARTIFACT EXPERT_ARTIFACT GLOBAL_ARTIFACT
+    [--token ID] [--cuda-experts] [--gpu-limit MIB] [--gpu-reserve MIB] [--cpu-only]
+    [--dump-logits PATH] [--dump-hidden PATH] [--dump-trace PATH] [--json]
+vastloom deepseek-chain-probe MODEL_DIRECTORY GLOBAL_ARTIFACT --layers N
+    [--token ID | --tokens CSV] --trunk L=PATH --experts L=PATH [--experts L=PATH ...]
+    [--cuda-experts] [--gpu-limit MIB] [--gpu-reserve MIB]
+    [--dump-logits PATH] [--dump-hidden PATH] [--dump-trace PATH] [--json]
 vastloom deepseek-inspect MODEL_DIRECTORY [--no-verify] [--json]
 vastloom deepseek-gguf-inspect SHARD... [--declared-sizes CSV] [--revision ID] [--json]
 vastloom deepseek-gguf-checkpoint MODEL_DIRECTORY [--context N] [--batch-size N]

@@ -5,7 +5,47 @@ the validation evidence behind it. Execution status by model profile is summariz
 [`MODEL_COMPATIBILITY.md`](MODEL_COMPATIBILITY.md); measured results and limitations are in
 [`RESULTS.md`](RESULTS.md).
 
-## Qwen3.8-Flash-Next (primary track, llama.cpp-parity validated)
+## DeepSeek V4 Flash 0731 reduced-payload track (primary, range slices)
+
+- **Pinned profile:** `unsloth/DeepSeek-V4-Flash-0731-GGUF` at revision
+  `fbbb5b93fb787c21338159b0af3318bb3f4d9768`, `UD-IQ2_XXS` only. The full 90.86 GB checkpoint is
+  not stored; IQ1 / `UD-IQ1_S` stays non-product and historical.
+- **Governed range slices:** a 9,451,968-byte metadata-only store plus three hash-verified range
+  imports — layer-0 trunk 138,867,160 B / 21 ranges, globals 596,000,788 B / 6 ranges and the
+  authoritative route 45,219,840 B / 18 ranges resolved from the imported trunk's own `tid2eid` —
+  total 780,087,788 B in 45 ranges, all through the pinned importer and the Safety Governor.
+- **Layer probe:** `deepseek-layer-probe` executes one real layer from the metadata store and three
+  verify-on-load artifacts. Layer 0 is deterministic across runs (129,280 logits, min −16.1273,
+  max 15.5206, argmax 30,528) and every command reports one layer of 43.
+- **Chain probe:** `deepseek-chain-probe` executes 2–3 consecutive hash-routed layers from
+  per-layer trunk/expert artifacts, resolves each prompt token's route from its own `tid2eid` row,
+  deduplicates the per-layer expert union and refuses learned-router layers and full depth. A
+  five-token prefill exercises the layer-2 4:1 compressed window (one compressed row, six slots
+  per position).
+- **Independent oracles:** a separate NumPy implementation reproduces the layer-0 logits within
+  9.54e-07 and the three-layer chain, including the five-token prefill, within 1.91e-06 on the
+  logits and 5.96e-08 on the final hidden state, with identical argmax and per-layer routes. Three
+  opt-in CMake tests cover these paths.
+- **Device expert residency (not a payload tier):** the opt-in `--cuda-experts` path keeps expert
+  matrices in VRAM with a bounded CPU fallback and max abs logit difference 0.0 versus the CPU
+  run; expert bundles still enter governed RAM first, so this is not a VRAM payload tier.
+- **Design-only D4:** an on-demand expert-range plan and byte budget with closed decisions; no
+  fetch, no network and no execution.
+- **Evidence:** [D1/D2 layer 0](reports/D2_IQ2XXS_LAYER0_RANGE_EXECUTION.md),
+  [D2b.1 device residency](reports/D2B_DEVICE_RESIDENCY_VALIDATION.md),
+  [D2b.2 layer-0 oracle](reports/D2B_LAYER0_ORACLE_VALIDATION.md),
+  [D3 chain](reports/D3_HASH_CHAIN_VALIDATION.md),
+  [D3b chain oracle](reports/D3B_CHAIN_ORACLE_VALIDATION.md),
+  [D3c multi-token oracle](reports/D3C_MULTITOKEN_ORACLE_VALIDATION.md) and
+  [D4 design](planning/D4_ON_DEMAND_EXPERT_RANGES.md).
+- **Boundary:** three of 43 layers, no full-model or throughput claim, no VRAM payload tier;
+  ratio-128 and learned-router/full-depth execution are not implemented or planned in this
+  concluded record.
+
+## Qwen3.8-Flash-Next (comparison/validation track, llama.cpp-parity validated)
+
+Since the October 2026 refocus this is the comparison/validation track, not the primary execution
+target: the code, tests and external parity evidence stay, but no new Qwen features are planned.
 
 - **Pinned checkpoint:** `unsloth/Qwen3.8-Flash-Next-Q8_0` GGUF (6 shards,
   175.3 GiB, SHA-256 verified) imported through the canonical immutable
@@ -113,9 +153,10 @@ the validation evidence behind it. Execution status by model profile is summariz
   81,920-byte VRAM buffer, performs synchronous H2D/D2H copies and runs a scalar PTX RMSNorm over
   two 4,096-wide rows. Both native Windows and WSL match the CPU reference within `3e-5` and
   release the device allocation.
-- **Honest boundary:** this is a deliberately scalar correctness kernel. CUDA attention, dense and
-  quantized MoE kernels, streams, pinned buffers, asynchronous overlap and GPU model inference do
-  not exist yet.
+- **Honest boundary:** this is a deliberately scalar correctness kernel. CUDA attention, dense
+  graph kernels, streams, pinned buffers, asynchronous overlap and complete GPU model inference do
+  not exist yet; the device path is a bounded matvec accelerator used by the DeepSeek reduced-payload
+  graphs, plus the RMSNorm smoke above.
 
 ## Synthetic validation path retained
 
@@ -157,8 +198,9 @@ the validation evidence behind it. Execution status by model profile is summariz
   abstraction. Its optional async batch overlaps later read service with earlier CPU expert
   compute in a controlled fixture while preserving reduction order; successful abandoned reads
   are drained and counted as wasted prefetch. That reduced layer now uses IQ1_S W1/W3 and
-  IQ3_XXS W2 for all four routed bundles. Complete verified 0731 shards and a checkpoint-shaped
-  official-payload layer are not connected.
+  IQ3_XXS W2 for all four routed bundles. Complete verified 0731 shards are still not imported;
+  the reduced-payload track executes one real layer and a 3-layer hash-routed chain from verified
+  range artifacts through the same cache/consumer boundary (see the DeepSeek section above).
 - **Governed trunk tile:** one non-routed source tile is identity-checked against the catalog,
   destination and staging are reserved before allocation, metadata-only catalogs are refused and
   an RAII lease protects the resulting buffer through use/eviction.

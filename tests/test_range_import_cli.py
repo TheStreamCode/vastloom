@@ -38,6 +38,14 @@ def main() -> int:
     store = model.parents[2]
     if not (store / ".vastloom-store").is_file():
         raise AssertionError(f"model is not inside a Vastloom store: {model}")
+    # Name the store's pinned quantization: IQ2_XXS is the active profile, IQ1_S is the historical
+    # test profile. Both use the same architecture and layer-0 trunk, so the plan assertions below
+    # stay identical; only the source-object identity in the importer changes.
+    model_alias = (
+        "deepseek-v4-flash-0731-gguf-iq2xxs"
+        if (model / "UD-IQ2_XXS").exists()
+        else "deepseek-v4-flash-0731-gguf-iq1s"
+    )
     with tempfile.TemporaryDirectory(prefix="vastloom-range-cli-") as temporary:
         plan_path = Path(temporary) / "layer-0-plan.json"
         planned = run(
@@ -68,7 +76,7 @@ def main() -> int:
             sys.executable,
             str(args.importer),
             "--model",
-            "deepseek-v4-flash-0731-gguf-iq1s",
+            model_alias,
             "--plan",
             str(plan_path),
             "--store",
@@ -99,7 +107,7 @@ def main() -> int:
             sys.executable,
             str(args.importer),
             "--model",
-            "deepseek-v4-flash-0731-gguf-iq1s",
+            model_alias,
             "--plan",
             str(plan_path),
             "--store",
@@ -143,7 +151,7 @@ def main() -> int:
             sys.executable,
             str(args.importer),
             "--model",
-            "deepseek-v4-flash-0731-gguf-iq1s",
+            model_alias,
             "--plan",
             str(global_plan_path),
             "--store",

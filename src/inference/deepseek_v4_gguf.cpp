@@ -1049,8 +1049,10 @@ const DeepseekV4GgufCheckpointSpec& pinned_deepseek_v4_flash_0731_iq1s_checkpoin
 // pinning as its own identity rather than relaxing the check: the point of the pin is that a
 // checkpoint cannot quietly become a different one, and that guarantee is per-quantization.
 //
-// These shards carry no separately extracted header, so each object names itself for both its full
-// and its metadata identity - the reader takes the header from the front of the complete file.
+// The first split is small enough to import in full; splits 2 and 3 are pinned payload objects in
+// a full import and independently hashed 2 MiB header prefixes in metadata-only mode, exactly like
+// the IQ1_S profile. The prefixes carry the complete GGUF metadata/tensor-info block (46,912 and
+// 39,008 bytes respectively); the 2 MiB size leaves the reader's 16 MiB header ceiling untouched.
 const DeepseekV4GgufCheckpointSpec& pinned_deepseek_v4_flash_0731_iq2xxs_checkpoint() {
     static const DeepseekV4GgufCheckpointSpec spec{
         "unsloth/DeepSeek-V4-Flash-0731-GGUF",
@@ -1068,17 +1070,17 @@ const DeepseekV4GgufCheckpointSpec& pinned_deepseek_v4_flash_0731_iq2xxs_checkpo
                 "UD-IQ2_XXS/DeepSeek-V4-Flash-0731-UD-IQ2_XXS-00002-of-00003.gguf",
                 49'890'588'800U,
                 "65a113df6d4469f16db6882b6919e153c464c3c78c833f5e1b41a33803cdbd52",
-                "UD-IQ2_XXS/DeepSeek-V4-Flash-0731-UD-IQ2_XXS-00002-of-00003.gguf",
-                49'890'588'800U,
-                "65a113df6d4469f16db6882b6919e153c464c3c78c833f5e1b41a33803cdbd52",
+                "headers/UD-IQ2_XXS/DeepSeek-V4-Flash-0731-UD-IQ2_XXS-00002-of-00003.gguf.header",
+                2'097'152U,
+                "dbbfe94ed10ffb3d98e3e96878c6aca4289b9a82c5d13f5fc3e2593eda06ba16",
             },
             {
                 "UD-IQ2_XXS/DeepSeek-V4-Flash-0731-UD-IQ2_XXS-00003-of-00003.gguf",
                 40'964'890'464U,
                 "a69102ddfaf4a84426e11fdb66716654f4260dc3a1de3ade9fd50e006b8691d3",
-                "UD-IQ2_XXS/DeepSeek-V4-Flash-0731-UD-IQ2_XXS-00003-of-00003.gguf",
-                40'964'890'464U,
-                "a69102ddfaf4a84426e11fdb66716654f4260dc3a1de3ade9fd50e006b8691d3",
+                "headers/UD-IQ2_XXS/DeepSeek-V4-Flash-0731-UD-IQ2_XXS-00003-of-00003.gguf.header",
+                2'097'152U,
+                "162724024b4d9aa11b07f22d1555a34a23a657ea96def7a4f0ad92dd81f4cc32",
             },
         },
         43U,

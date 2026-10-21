@@ -17,11 +17,16 @@ namespace vastloom::cuda {
 struct CudaMatvecAcceleratorOptions {
     int device_ordinal{0};
     ByteCount minimum_free_vram_after{1U * GiB};
-    // Ceiling on resident weight bytes. Matrices beyond it stay on the CPU path rather than
-    // evicting an existing one: a decode step revisits the same matrices, so thrashing here would
-    // cost more than it saves.
+    // Ceiling on resident weight bytes. When the next matrix would cross it, the least valuable
+    // resident matrix is evicted first; a matrix that still does not fit is left on the CPU path,
+    // which stays the correctness reference.
     ByteCount maximum_resident_bytes{6U * GiB};
     std::size_t maximum_matrices{512U};
+    // Restrict residency to non-recurring matrices, i.e. the routed experts a decode step
+    // selects, and leave always-active trunk/global matrices on the CPU path. The D2b placement
+    // exercise uses this to observe the expert tier on its own instead of letting recurring
+    // weights fill VRAM first.
+    bool experts_only{false};
 };
 
 struct CudaMatvecAcceleratorStats {
@@ -29,6 +34,9 @@ struct CudaMatvecAcceleratorStats {
     std::size_t accelerated{0U};
     std::size_t declined{0U};
     std::size_t evicted{0U};
+    // Declines caused by experts_only, counted separately from the type/identity/space declines
+    // so an experts-only run cannot look like an accelerator that failed to support the model.
+    std::size_t declined_recurring{0U};
     // Declines that happened because the storage type has no device kernel, counted per type, so
     // the next kernel is chosen from what the model actually asks for rather than from guesswork.
     std::map<std::uint32_t, std::size_t> declined_by_type;

@@ -13,8 +13,44 @@ hardware, commands, measurements and limitations.
 
 ## Current reports
 
+- [`D3C_MULTITOKEN_ORACLE_VALIDATION.md`](D3C_MULTITOKEN_ORACLE_VALIDATION.md) —
+  D3c: a five-token causal prompt closes the layer-2 4:1 compression window; the independent
+  NumPy oracle reproduces the native 3-layer prefill (logits max abs 1.91e-06, hidden 5.96e-08,
+  argmax 20,267, all 15 per-token routes) and reports one compressed row with six selected slots
+  per position. Three layers of 43; no full-model claim.
+- [`D3B_CHAIN_ORACLE_VALIDATION.md`](D3B_CHAIN_ORACLE_VALIDATION.md) —
+  D3b: the independent NumPy oracle executes the 3-layer hash-routed chain (including the layer-2
+  4:1 compressor/indexer) and matches the native chain probe at depths 1–3 for tokens 0 and 1;
+  logits max abs 1.91e-06 and hidden max abs 3.81e-06, the same tolerances as D2b.2. Boundary:
+  one prefill token closes no compression window, so the compressed-slot attention is
+  synthetically, not natively, compared; three layers of 43.
+- [`D2B_LAYER0_ORACLE_VALIDATION.md`](D2B_LAYER0_ORACLE_VALIDATION.md) —
+  D2b.2: an independent NumPy implementation reads the same three range artifacts and reproduces
+  the probe's layer-0 logits (max abs diff 9.54e-07, gate 1e-3) and final hidden state
+  (4.77e-07), with the same argmax and route. Raw FNV differs by one float32 ulp and is reported
+  as a diagnostic; layer 0 only, no full-model or throughput claim.
+- [`D3_HASH_CHAIN_VALIDATION.md`](D3_HASH_CHAIN_VALIDATION.md) —
+  the D3 executor evidence: `deepseek-chain-probe` executes 2 and 3 hash-routed layers from
+  per-layer range artifacts, resolves each layer's route from its own `tid2eid`, loads trunks
+  lazily and reports exact trunk/expert bytes. Deterministic; the independent-oracle comparison
+  is in [`D3B_CHAIN_ORACLE_VALIDATION.md`](D3B_CHAIN_ORACLE_VALIDATION.md), and both opt-in CMake
+  chain tests pass for the single-token scope.
+- [`D2B_DEVICE_RESIDENCY_VALIDATION.md`](D2B_DEVICE_RESIDENCY_VALIDATION.md) —
+  D2b.1: routed-expert matrices resident in VRAM under a fixed ceiling, with per-matrix CPU
+  fallback; CPU and GPU runs produce bit-identical layer-0 logits; counters and the forced
+  1 MiB fallback are reported. Not a VRAM payload tier and no oracle yet.
+- [`D2_IQ2XXS_LAYER0_RANGE_EXECUTION.md`](D2_IQ2XXS_LAYER0_RANGE_EXECUTION.md) —
+  the DeepSeek refocus D1/D2a evidence: pinned `UD-IQ2_XXS` metadata identities, a metadata-only
+  store, exact range plans, and one real layer (layer 0 of 43) executed from 780,087,788 B of
+  range payload with the checkpoint's own `tid2eid` route and six complete experts. Deterministic
+  across runs; not the model's output, not a parity result, and no VRAM placement yet.
+- [`0_5_0_ALPHA1_SERVE_SAFETY_VALIDATION.md`](0_5_0_ALPHA1_SERVE_SAFETY_VALIDATION.md) —
+  the maintenance update: JSON-object constrained decoding and control-token rejection on the
+  dense SmolLM2 path, UTF-8-safe SSE streaming, the two serve defects the new tests exposed
+  (producer lifetime and an empty stop filter), Release/Debug gates and the bounded
+  non-claims. No large-model record was re-measured.
 - [`Q11C_QWEN38_LLAMA_PARITY_VALIDATION.md`](Q11C_QWEN38_LLAMA_PARITY_VALIDATION.md) —
-  the primary track's external validation: the native runtime's greedy generation matches
+  the comparison track's external validation: the native runtime's greedy generation matches
   llama.cpp token for token on the official Q8_0 `qwen4exp` checkpoint, and the six defects
   only the external oracle could find.
 - [`Q11B_QWEN38_REAL_CATALOG_VALIDATION.md`](Q11B_QWEN38_REAL_CATALOG_VALIDATION.md) —

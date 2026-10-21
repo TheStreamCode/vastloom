@@ -11,7 +11,7 @@ Run giant models. Keep your machine yours
 
 Vastloom is a safety-first native inference runtime for open-weight models that outgrow conventional VRAM and RAM limits. It treats VRAM, RAM and NVMe as one model-aware memory hierarchy: the Safety Governor reserves memory before it is allocated, every queue and buffer is bounded, original weights stay immutable, and emergency pressure aborts generation instead of risking the host. It is an independent research project, not a product, and it does not claim competitive throughput.
 
-The primary track executes Qwen3.8-Flash-Next end to end on the reference consumer PC and reproduces llama.cpp's greedy continuation token for token. The measured position, including the honest gap to the mmap-based engines, is recorded in [`docs/RESULTS.md`](docs/RESULTS.md).
+The primary research track executes DeepSeek V4 Flash 0731 (`UD-IQ2_XXS`) from bounded exact range slices — the full 90.86 GB checkpoint is not stored — and reproduces the layer-0 and three-layer chain outputs with independent NumPy oracles; Qwen3.8-Flash-Next is kept as the comparison/validation track that reproduces llama.cpp's greedy continuation token for token. The measured position, including the honest gap to the mmap-based engines, is recorded in [`docs/RESULTS.md`](docs/RESULTS.md).
 
 ## Contents
 
@@ -31,7 +31,11 @@ The primary track executes Qwen3.8-Flash-Next end to end on the reference consum
 
 ## Project status
 
-Vastloom was a summer-2026 research experiment in governed local inference for giant Mixture-of-Experts (MoE) models, first on DeepSeek V4 Flash and then on Qwen3.8-Flash-Next. Active development ended in October 2026 and the repository is preserved as a working record: it builds, its test suites pass, and every measured claim links to the report or test that defends it. No further milestones are planned.
+Vastloom was a summer-2026 research experiment in governed local inference for giant Mixture-of-Experts (MoE) models, first on DeepSeek V4 Flash and then on Qwen3.8-Flash-Next. The project concluded in October 2026 and the repository is preserved as a working record: it builds, its test suites pass, and every measured claim links to the report or test that defends it. No further milestones are planned.
+
+The October 2026 refocus returned the **primary research track** to DeepSeek V4 Flash 0731 (`UD-IQ2_XXS`), pursued with bounded exact range slices because the full 90.86 GB checkpoint is not stored. The measured steps cover a metadata-only IQ2_XXS store and verified range imports (780,087,788 B in 45 ranges); one deterministic layer-0 execution (129,280 logits, argmax 30,528); bit-identical device expert residency with bounded CPU fallback; independent layer-0 and three-layer chain oracles (logits within 9.54e-07 and 1.91e-06), including a five-token prefill that opens the layer-2 4:1 compressed window (logits within 1.91e-06, hidden within 5.96e-08); a deterministic 2/3-layer hash-routed chain with opt-in CMake tests and a bit-identical GPU chain; and a design-only D4 on-demand byte budget with closed decisions. Qwen3.8-Flash-Next is the comparison/validation track.
+
+Not claimed: full-model parity, throughput, a VRAM *payload* tier, ratio-128 layers or learned-router/full-depth execution. Those remaining items are not planned in this concluded record. The gate list is in [`docs/ROADMAP.md`](docs/ROADMAP.md#deepseek-refocus-october-2026).
 
 ## Install
 
@@ -59,7 +63,7 @@ The bundled TinyTransformer fixture needs no download and is the shortest path t
 ./build/vastloom chat examples/models/vastloom-tinychat-v1.sgm
 ```
 
-`doctor` reports the detected hardware without touching a model. `self-test` checks the fixture against its deterministic response vectors, and `chat` starts the interactive REPL. Real checkpoints are opt-in: each one is imported into an external model store outside the repository, verified by size and SHA-256, and published immutably. The [usage guide](docs/USAGE.md) covers the Qwen3.8-Flash-Next primary track, SmolLM2 and OLMoE probes, the local server, the DeepSeek metadata commands and the full command list.
+`doctor` reports the detected hardware without touching a model. `self-test` checks the fixture against its deterministic response vectors, and `chat` starts the interactive REPL. Real checkpoints are opt-in: each one is imported into an external model store outside the repository, verified by size and SHA-256, and published immutably. The [usage guide](docs/USAGE.md) covers the DeepSeek reduced-payload probes (primary track), the Qwen3.8 comparison track, SmolLM2 and OLMoE probes, the local server and the full command list.
 
 The loopback server exposes `GET /v1/models` and `POST /v1/chat/completions` on `127.0.0.1` only:
 
@@ -69,11 +73,12 @@ The loopback server exposes `GET /v1/models` and `POST /v1/chat/completions` on 
 
 ## Capabilities
 
-- **Primary track: Qwen3.8-Flash-Next.** The official Q8_0 GGUF checkpoint executes through the full 48-layer graph, and greedy generation matches llama.cpp token for token on the pinned prompt. The path covers multi-token prefill with carried state, MoE routing, the PLE n-gram block and partial RoPE. See [`docs/CAPABILITIES.md`](docs/CAPABILITIES.md) and the [parity report](docs/reports/Q11C_QWEN38_LLAMA_PARITY_VALIDATION.md).
+- **Primary track: DeepSeek V4 Flash 0731 reduced payload.** `UD-IQ2_XXS` executes from bounded exact range slices imported through the pinned range importer, because the full 90.86 GB checkpoint is not stored: `deepseek-layer-probe` executes one real layer from a metadata store plus three verified artifacts, `deepseek-chain-probe` executes 2/3 hash-routed layers over single- and five-token prompts, independent NumPy oracles reproduce both paths, and opt-in device expert residency is bit-identical to the CPU path without being a VRAM payload tier. See [`docs/CAPABILITIES.md`](docs/CAPABILITIES.md) and the [layer-0](docs/reports/D2_IQ2XXS_LAYER0_RANGE_EXECUTION.md), [residency](docs/reports/D2B_DEVICE_RESIDENCY_VALIDATION.md), [layer-0 oracle](docs/reports/D2B_LAYER0_ORACLE_VALIDATION.md), [chain](docs/reports/D3_HASH_CHAIN_VALIDATION.md), [chain oracle](docs/reports/D3B_CHAIN_ORACLE_VALIDATION.md) and [multi-token oracle](docs/reports/D3C_MULTITOKEN_ORACLE_VALIDATION.md) reports.
+- **Comparison/validation track: Qwen3.8-Flash-Next.** The official Q8_0 GGUF checkpoint executes through the full 48-layer graph, and greedy generation matches llama.cpp token for token on the pinned prompt. This evidence and the KV/long-context machinery are kept as the external validation reference; no new Qwen features are planned. See the [parity report](docs/reports/Q11C_QWEN38_LLAMA_PARITY_VALIDATION.md).
 - **Safety Governor.** Explicit reservations, per-kind and aggregate memory ceilings, lease-protected residency, a pressure ladder, and operating-system-enforced process caps. See [`docs/SAFETY.md`](docs/SAFETY.md).
 - **Governed NVMe streaming.** Routed experts stay immutable on disk and move through bounded, hashed ranges into reserved RAM or VRAM; every transition reserves its destination first.
-- **Real-model adapters.** SmolLM2 dense CPU inference, OLMoE CPU expert streaming with exact I/O telemetry, and a DeepSeek V4 Flash metadata and reference foundation that never treats a header snapshot as a runnable model.
-- **Native CUDA control boundary.** Toolkit-free driver discovery, Governor-first allocation and one scalar PTX RMSNorm parity kernel, without a CUDA toolkit or `nvcc`.
+- **Real-model adapters.** SmolLM2 dense CPU inference, OLMoE CPU expert streaming with exact I/O telemetry, and the DeepSeek reduced-payload probes above; a header snapshot is never treated as a runnable model.
+- **Native CUDA control boundary.** Toolkit-free driver discovery, Governor-first allocation, one scalar PTX RMSNorm parity kernel and a bounded VRAM-resident matvec accelerator used by the DeepSeek reduced-payload graphs, without a CUDA toolkit or `nvcc`.
 - **External-oracle validation.** llama.cpp, built from source against the same checkpoints, is the falsification authority; self-pinned tests alone are not evidence.
 - **Measured, not asserted.** Every milestone has a dated validation report under [`docs/reports/`](docs/reports/README.md) that distinguishes simulated traces, warm-cache measurements, process-visible I/O and physical device traffic.
 - **Local-only surface.** No telemetry, no remote API; the only HTTP surface is the explicit loopback server.
@@ -96,16 +101,18 @@ Model weights are not distributed with the repository. Real-model tests run only
 
 ## Configuration
 
-There is no configuration file for the engine. Placement and bounds are derived from detected hardware and the explicit command-line policy, and `vastloom runtime-policy --json` reports the effective process and memory policy. External checkpoints are attached at build time through CMake cache paths, and they are unset by default:
+There is no configuration file for the engine. Placement and bounds are derived from detected hardware and the explicit command-line policy, and `vastloom runtime-policy --json` reports the effective process and memory policy. External checkpoints live in the model store; the opt-in tests can also receive their local paths through CMake cache variables, which are unset by default:
 
 | Setting | Purpose | Default |
 | --- | --- | --- |
 | Model store root | External directory holding immutable imports; never inside the repository | Supplied per command |
 | Free-space reserve | Storage headroom preserved before an import or execution plan | 300 GiB for real-model paths |
-| `VASTLOOM_QWEN38_MODEL` | Imported Qwen3.8-Flash-Next checkpoint for the primary-track tests | Unset; tests report SKIPPED |
+| `VASTLOOM_QWEN38_MODEL` | Imported Qwen3.8-Flash-Next checkpoint for the comparison/validation tests | Unset; tests report SKIPPED |
 | `VASTLOOM_SMOLLM2_MODEL`, `VASTLOOM_OLMOE_MODEL`, `VASTLOOM_OLMOE_FULL_MODEL` | Imported dense and MoE checkpoints for their opt-in tests | Unset; tests report SKIPPED |
-| `VASTLOOM_DEEPSEEK_V4_*` | DeepSeek metadata, header and extracted-slice inputs for the historical track | Unset; tests report SKIPPED |
+| `VASTLOOM_DEEPSEEK_V4_*` | DeepSeek metadata, header, range-artifact, oracle-interpreter and chain-artifact inputs for the reduced-payload tests | Unset; tests report SKIPPED |
 | `VASTLOOM_GGML_ROOT` | External ggml checkout that enables the opt-in SIMD backend | Unset; scalar kernels stay the default |
+
+The DeepSeek refocus consumes pinned range artifacts imported through `tools/import_hf_ranges.py`, not a CMake model path: the `VASTLOOM_DEEPSEEK_V4_*` entries only point opt-in tests at already-imported local artifacts. Artifacts and metadata stores are local validation data and are never committed.
 
 ## Privacy and security
 
@@ -166,8 +173,9 @@ External model tests are opt-in through the `VASTLOOM_*_MODEL` cache paths; neve
 - [`docs/REFERENCE_PLAN.md`](docs/REFERENCE_PLAN.md) — the reference-PC admission gate and current planning output.
 - [`docs/ROADMAP.md`](docs/ROADMAP.md) — milestone status and the acceptance gates that were not executed.
 - [`docs/HISTORY.md`](docs/HISTORY.md) — the chronological development log preserved from the README.
-- [`docs/DEEPSEEK_V4_FLASH.md`](docs/DEEPSEEK_V4_FLASH.md) — the historical DeepSeek V4 Flash inspection and reference foundation.
-- [`docs/reports/`](docs/reports/README.md) — dated validation reports for every milestone.
+- [`docs/DEEPSEEK_V4_FLASH.md`](docs/DEEPSEEK_V4_FLASH.md) — the DeepSeek V4 Flash 0731 reduced-payload track, its measured gates and the dated metadata/reference foundation.
+- [`docs/reports/`](docs/reports/README.md) — dated validation reports for every milestone, including the DeepSeek reduced-payload series: the layer-0 range execution, the device-residency and layer-0-oracle reports, and the chain, chain-oracle and multi-token-oracle reports.
+- [`docs/planning/D4_ON_DEMAND_EXPERT_RANGES.md`](docs/planning/D4_ON_DEMAND_EXPERT_RANGES.md) — the design-only on-demand expert-range plan and byte budget.
 - [`docs/research/CONSUMER_STREAMING_INFERENCE.md`](docs/research/CONSUMER_STREAMING_INFERENCE.md) and the [PDF edition](docs/research/vastloom-streaming-moe-inference.pdf) — the systems working paper.
 - [`docs/MANIFEST_V1.md`](docs/MANIFEST_V1.md), [`docs/TINY_MODEL_V1.md`](docs/TINY_MODEL_V1.md), [`docs/RELEASING.md`](docs/RELEASING.md) and [`docs/BRANDING.md`](docs/BRANDING.md) — format, fixture, release and brand references.
 

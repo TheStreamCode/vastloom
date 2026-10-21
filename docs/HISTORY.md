@@ -4,18 +4,34 @@ This page preserves the chronological development record that the README carried
 project concluded in October 2026. Current status and results are in
 [`RESULTS.md`](RESULTS.md), and the README is the index.
 
+## October 2026 — DeepSeek refocus
+
+The project concluded with a scoped refocus that returned the primary execution target to
+**DeepSeek V4 Flash 0731** (`UD-IQ2_XXS`), pursued with bounded exact range slices because the full
+90.86 GB checkpoint is not stored, and demoted Qwen3.8-Flash-Next to comparison/validation-only.
+The measured sequence was D1 (metadata identities, catalog and range plans), D2a (one real
+layer-0 execution), D2b.1 (bit-identical device expert residency with bounded CPU fallback), D2b.2
+(independent layer-0 oracle), D3/D3b (2/3-layer hash-routed chain and chain oracle), D3c (five-token
+prefill with a non-empty layer-2 4:1 compressed window) and a design-only D4 on-demand expert-range
+budget with closed decisions. The VRAM *payload* tier, ratio-128 layers and
+learned-router/full-depth execution were not implemented and are not planned. **Project concluded;
+no further milestones.**
+
 ## Current measured position (August 2026)
 
-The primary track is now **Qwen3.8-Flash-Next** (`qwen4exp`, 125B MoE, 6B active,
+> Snapshot preserved as history: it predates the October 2026 refocus above. The execution status
+> and measured results are in [`RESULTS.md`](RESULTS.md).
+
+The primary track was at that point **Qwen3.8-Flash-Next** (`qwen4exp`, 125B MoE, 6B active,
 48 layers = 36 Gated DeltaNet + 12 QSA, 512 routed experts top-10 + shared). The
 native runtime executes the official unsloth **Q8_0 GGUF** checkpoint (175.3 GiB,
 canonical immutable import) end-to-end — per-layer forwards, multi-token prefill,
 the full 48-layer chain, PLE n-gram block and RoPE included — and achieves
 **greedy token parity with llama.cpp** (`6fe7498`, CPU, same checkpoint): pinned
 prompt "The capital of France is" produces the identical 16-token continuation
-on both engines. The former DeepSeek V4 Flash track (UD-IQ2_XXS, ~0.3 tok/s,
-self-pinned only) is historical; its pinned tests remain as contracts. The Qwen
-path is externally validated — that is the difference that matters. The long note
+on both engines. The DeepSeek V4 Flash track was considered historical in this snapshot; the
+October 2026 refocus reversed that. The Qwen
+path is externally validated — that is the difference that mattered here. The long note
 below is a chronological lab log; where it disagrees with this box, this box wins.
 
 Historical figures in this note (60 s/token, 6.9 s GPU, "kernels are the gap",

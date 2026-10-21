@@ -1,12 +1,81 @@
-# DeepSeek V4 Flash inspection and reference foundation
+# DeepSeek V4 Flash 0731 reduced-payload track
 
-The DeepSeek V4 Flash track is historical: its execution profile (`UD-IQ2_XXS`) was the only
-execution quantization, and the newer metadata and partial-range paths below never reached an
-official-payload layer, token or generation. Current execution status by profile is in
-[`MODEL_COMPATIBILITY.md`](MODEL_COMPATIBILITY.md); the reports under
-[`reports/`](reports/README.md) hold the milestone evidence.
+**Status: primary execution target of the October 2026 refocus (concluded research record).**
+The track uses `unsloth/DeepSeek-V4-Flash-0731-GGUF` at revision
+`fbbb5b93fb787c21338159b0af3318bb3f4d9768` with the `UD-IQ2_XXS` quantization only, and never
+stores the full 90.86 GB checkpoint: it executes through bounded exact range slices imported into
+the canonical immutable store. IQ1 / `UD-IQ1_S` stays non-product and historical. Current status
+by profile is in [`MODEL_COMPATIBILITY.md`](MODEL_COMPATIBILITY.md); the reports under
+[`reports/`](reports/README.md) hold the evidence.
+
+## Reduced-payload execution (October 2026)
+
+Seven measured steps; nothing beyond them is claimed.
+
+- **D1 — metadata identities, catalog and range plans.** A 9,451,968-byte metadata-only store
+  (complete split 1 plus two separately hashed 2,097,152-byte header prefixes) verifies the pinned
+  spec, reference configuration and layer-0 catalog. The catalog closes at 1,328 physical / 34,223
+  logical tensors, 43 layers, 256 experts top-6 and 11,008 bundles (always-active 6,986,088,796 B,
+  routed 83,869,302,784 B). Three hash-verified plans were imported: layer-0 trunk 138,867,160 B /
+  21 ranges, globals 596,000,788 B / 6 ranges and the authoritative route 45,219,840 B / 18 ranges
+  resolved from the imported trunk's own `tid2eid` for token 0 (experts 254, 222, 245, 200, 53,
+  35) — 780,087,788 B in 45 ranges. Evidence:
+  [`reports/D2_IQ2XXS_LAYER0_RANGE_EXECUTION.md`](reports/D2_IQ2XXS_LAYER0_RANGE_EXECUTION.md).
+- **D2a — one real layer.** `deepseek-layer-probe --token 0` executed layer 0 twice with identical
+  output: 1 of 43 layers, 129,280 logits (min −16.1273, max 15.5206), argmax 30,528, 45 relocated
+  tensors / six bundles, 345.325 ms and 347.433 ms.
+- **D2b.1 — device expert residency, not a payload tier.** The opt-in `--cuda-experts` path keeps
+  expert matrices in VRAM with bounded CPU fallback: offered 38, accelerated 18, declined 20,
+  evicted 12, 6 resident matrices / 15,230,976 B, uploaded 45,219,840 B; all 129,280 logits are
+  bit-identical to the CPU run (max abs diff 0.0). Expert bundles still enter governed RAM first.
+  Evidence:
+  [`reports/D2B_DEVICE_RESIDENCY_VALIDATION.md`](reports/D2B_DEVICE_RESIDENCY_VALIDATION.md).
+- **D2b.2 — independent layer-0 oracle.** An independent NumPy implementation reproduces the
+  layer-0 logits within 9.5367431640625e-07 (gate 1e-3) and the final hidden state within
+  4.76837158203125e-07 (rtol 1e-5 / atol 1e-6), with the same argmax and route, and passes 87
+  pinned synthetic decoder checks. Opt-in CMake test `vastloom_deepseek_v4_layer_oracle`.
+  Evidence: [`reports/D2B_LAYER0_ORACLE_VALIDATION.md`](reports/D2B_LAYER0_ORACLE_VALIDATION.md).
+- **D3/D3b — hash-routed chain and its oracle.** `deepseek-chain-probe` executes 2 or 3 layers
+  from per-layer trunk/expert artifacts, resolving each layer's route from its own `tid2eid`
+  (token 0, 3 layers: argmax 86,051; token 1: argmax 69,146; deterministic repeats). The
+  independent chain oracle, including the layer-2 4:1 compressor and indexer, matches tokens 0/1
+  at depths 1–3 within 9.5367431640625e-07 / 1.9073486328125e-06 on the logits, with identical
+  per-layer routes and unchanged tolerances; two opt-in CMake tests pass and the GPU chain is
+  bit-identical. Evidence:
+  [`reports/D3_HASH_CHAIN_VALIDATION.md`](reports/D3_HASH_CHAIN_VALIDATION.md) and
+  [`reports/D3B_CHAIN_ORACLE_VALIDATION.md`](reports/D3B_CHAIN_ORACLE_VALIDATION.md).
+- **D3c — multi-token prefill and the compressed window.** The five-token prompt `[0,1,2,3,4]`
+  over the three-layer chain gives argmax 20,267 and logits [−38.0188, 14.7002], trunk
+  437,727,112 B and expert bytes 663,224,320 B (88 bundles from 15 artifacts), deterministic
+  across two runs. The independent oracle matches the last-position logits within
+  1.9073486328125e-06 and the hidden state within 5.960464477539063e-08, all 15 per-layer/per-token
+  routes are identical, and the layer-2 4:1 compressed window is non-empty (one compressed row,
+  compressed stages 512/128, six slots per position). The chain contract test includes the
+  five-token leg. Evidence:
+  [`reports/D3C_MULTITOKEN_ORACLE_VALIDATION.md`](reports/D3C_MULTITOKEN_ORACLE_VALIDATION.md).
+- **D4 — on-demand expert-range design (design-only).** A hybrid plan pre-downloads the
+  always-active ranges once (6,986,088,796 B in 1,199 ranges plus the 9,451,968-byte metadata
+  store = 6,995,540,764 B, inside the 10 GB budget) and fetches selected complete expert bundles
+  on demand under a 2,000,000,000-byte disk cache, 268,435,456-byte staging and a
+  1,073,741,824-byte RAM cache. SHA-256 first-touch digests; no dependency on the VRAM payload
+  tier; no fetch occurs in this project. Evidence:
+  [`planning/D4_ON_DEMAND_EXPERT_RANGES.md`](planning/D4_ON_DEMAND_EXPERT_RANGES.md).
+
+**Not claimed:** full-model parity, throughput, a VRAM *payload* tier, ratio-128 layers or
+learned-router/full-depth execution. Three layers are 3 of 43 and the five-token prompt is not the
+model's output; those remaining items are not planned in this concluded record. The historical
+IQ1_S full-depth record (60.3 s/token, dated 2026-08-11) is a different, dated experiment and is
+not a revalidation of these numbers.
 
 ## Preview metadata and reference foundation
+
+> **Dated record (August 2026).** The preview identity, catalog and reduced-graph evidence below
+> belongs to the historical M0–M9 work. Execution status is given by the reduced-payload section
+> above; nothing in this section is a current large-model execution claim.
+
+The following evidence was produced against the pinned preview revision
+`deepseek-ai/DeepSeek-V4-Flash` and is preserved as the architecture and reference foundation that
+the 0731 track inherited.
 
 - **Pinned preview identity:** `deepseek-ai/DeepSeek-V4-Flash` revision
   `60d8d70770c6776ff598c94bb586a859a38244f1` remains the oracle for the evidence below.
@@ -154,7 +223,9 @@ official-payload layer, token or generation. Current execution status by profile
 
 ## Inspection commands
 
-These commands read metadata only. Payload acquisition requires the explicit authorization
+The reduced-payload probe commands are documented in
+[`USAGE.md`](USAGE.md#deepseek-reduced-payload-probes). The metadata-only commands below read
+metadata or bounded header ranges; payload acquisition requires the explicit authorization
 described in the sections above and in [`REFERENCE_PLAN.md`](REFERENCE_PLAN.md).
 
 The M6 metadata path downloads only bounded, independently hashed metadata and header
@@ -168,8 +239,9 @@ vastloom tokenize $model --text 'Ciao!' --chat --json
 ```
 
 The inspector allocates metadata structures only and never treats the snapshot as a
-runnable checkpoint. Do not add `--allow-large-download` merely to try the command: the
-complete checkpoint still has no Vastloom inference path.
+runnable checkpoint. Do not add `--allow-large-download` merely to try the command: a complete
+checkpoint has no full-checkpoint inference path; the reduced-payload track executes verified
+range slices instead (see the section above).
 
 The newer 0731 GGUF path can likewise catalog user-supplied complete files or bounded header
 prefixes. For three prefixes, their original complete sizes must be supplied in split order:
@@ -186,8 +258,15 @@ revision, read tensor payloads or authorize inference. Use only exact sizes from
 verified artifact manifest; a user-entered revision is reported as a label, not cryptographic
 proof.
 
-The preferred 0731 path uses the pinned importer contract. Metadata-only mode transfers exactly
-5,343,584 bytes, verifies all three objects and atomically publishes a Windows-safe artifact name:
+For the active reduced-payload track the corresponding importer alias is
+`deepseek-v4-flash-0731-gguf-iq2xxs`; its metadata-only store is 9,451,968 bytes (complete split 1
+plus two separately hashed 2,097,152-byte header prefixes), and `deepseek-gguf-checkpoint`
+verifies the pinned spec, reference configuration and layer-0 catalog. The example below uses the
+historical `UD-IQ1_S` profile.
+
+The historical 0731 metadata example uses the pinned importer contract. For `UD-IQ1_S`,
+metadata-only mode transfers exactly 5,343,584 bytes, verifies all three objects and atomically
+publishes a Windows-safe artifact name:
 
 ```powershell
 python tools\import_hf_model.py `

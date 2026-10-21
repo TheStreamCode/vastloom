@@ -248,6 +248,60 @@ def main() -> int:
             == "deepseek-v4-flash-0731-iq1s-fbbb5b93--metadata",
             "DeepSeek 0731 Windows-safe artifact name changed",
         )
+        gguf2_metadata = MODULE.selected_files(MODULE.DEEPSEEK_V4_FLASH_0731_GGUF_IQ2XXS, True)
+        gguf2_full = MODULE.selected_files(MODULE.DEEPSEEK_V4_FLASH_0731_GGUF_IQ2XXS, False)
+        require(len(gguf2_metadata) == 3, "DeepSeek 0731 IQ2_XXS metadata set is incomplete")
+        require(len(gguf2_full) == 3, "DeepSeek 0731 IQ2_XXS full set is incomplete")
+        require(
+            sum(item.size for item in gguf2_metadata) == 9_451_968,
+            "DeepSeek 0731 IQ2_XXS bounded metadata byte count changed",
+        )
+        require(
+            sum(item.size for item in gguf2_full) == 90_860_736_928,
+            "DeepSeek 0731 IQ2_XXS split byte count changed",
+        )
+        require(
+            sum(item.size for item in gguf2_full if item.weight) == 90_855_479_264,
+            "DeepSeek 0731 IQ2_XXS payload authorization byte count changed",
+        )
+        require(
+            all(item.sha256 for item in MODULE.DEEPSEEK_V4_FLASH_0731_GGUF_IQ2XXS.files),
+            "DeepSeek 0731 IQ2_XXS objects and headers must have pinned SHA-256 values",
+        )
+        require(
+            {item.name for item in gguf2_metadata if item.range_prefix}
+            == {
+                "headers/UD-IQ2_XXS/DeepSeek-V4-Flash-0731-UD-IQ2_XXS-00002-of-00003.gguf.header",
+                "headers/UD-IQ2_XXS/DeepSeek-V4-Flash-0731-UD-IQ2_XXS-00003-of-00003.gguf.header",
+            },
+            "DeepSeek 0731 IQ2_XXS metadata import did not select the exact bounded headers",
+        )
+        require(
+            MODULE.target_name(MODULE.DEEPSEEK_V4_FLASH_0731_GGUF_IQ2XXS, True)
+            == "deepseek-v4-flash-0731-iq2xxs-fbbb5b93--metadata",
+            "DeepSeek 0731 IQ2_XXS Windows-safe artifact name changed",
+        )
+        require(
+            MODULE.MODELS["deepseek-v4-flash-0731-gguf-iq2xxs"]
+            is MODULE.DEEPSEEK_V4_FLASH_0731_GGUF_IQ2XXS,
+            "DeepSeek 0731 IQ2_XXS alias is not registered",
+        )
+        try:
+            MODULE.import_model(
+                root,
+                MODULE.DEEPSEEK_V4_FLASH_0731_GGUF_IQ2XXS,
+                metadata_only=False,
+                reserve_bytes=20 * MODULE.GIB,
+                timeout=1.0,
+                dry_run=True,
+            )
+        except RuntimeError as error:
+            require(
+                "--allow-large-download" in str(error),
+                "IQ2_XXS large-import refusal is not actionable",
+            )
+        else:
+            raise AssertionError("DeepSeek 0731 IQ2_XXS full import lacked explicit authorization")
         try:
             MODULE.import_model(
                 root,

@@ -231,8 +231,11 @@ The opt-in authorizes only an immutable download. It does not imply that the run
 execute the checkpoint, and it does not relax the 300 GiB default free-space reserve.
 The newer official 0731 release, Unsloth GGUF variants and Laguna S 2.1 have separate identities.
 The 0731 GGUF family has a pinned importer and source-admission boundary. Execution on the
-reference PC is `UD-IQ2_XXS` through `deepseek-forward` after a live Governor preflight;
-exit 75 is a correct refusal. Do not execute or advertise `UD-IQ1_S`. A user-supplied URL
+reference PC is `UD-IQ2_XXS`: the historical full-depth path used `deepseek-forward` from a
+complete checkpoint after a live Governor preflight (exit 75 is a correct refusal), and the
+October 2026 refocus runs one layer through `deepseek-layer-probe` from three verified range
+artifacts (D1/D2a; 780,087,788 B in 45 ranges, 1 of 43). Do not execute or advertise
+`UD-IQ1_S`. A user-supplied URL
 never bypasses revision pinning, license review, exact size/hash catalogs or the
 large-download interlock.
 
@@ -250,8 +253,10 @@ The 0731 GGUF reader adds a metadata-only safety boundary:
   incomplete schedules fail closed;
 - `deepseek-gguf-inspect` never reads tensor payloads and always publishes a `metadata_only`
   catalog;
-- metadata-only import for the pinned profile is exactly 5,343,584 bytes: the complete metadata
-  split plus two exact HTTP range prefixes. Every object has an independent SHA-256 and is
+- metadata-only import for the historical `UD-IQ1_S` profile is exactly 5,343,584 bytes: the
+  complete metadata split plus two exact HTTP range prefixes. The active `UD-IQ2_XXS`
+  metadata-only store is 9,451,968 bytes: complete split 1 (5,257,664 bytes) plus two separately
+  hashed 2,097,152-byte header prefixes. Every object has an independent SHA-256 and is
   atomically published under a short stable artifact name to preserve Windows path safety;
 - `deepseek-gguf-checkpoint` rejects raw files, wrong revisions, missing/extra manifest entries,
   wrong paths/sizes/hashes, corruption and header snapshots presented as complete payloads;
@@ -282,9 +287,11 @@ The 0731 GGUF reader adds a metadata-only safety boundary:
   malformed/missing layer, bundle, range and tensor-slice identities fail before output;
 - metadata-only probe plans retain immutable complete shard object names and exact offsets instead
   of presenting local header-prefix paths as tensor payload. JSON always marks caller selections
-  unverified, routing authority false, plan-only true and execution unsupported. The current
-  layer-0 plan's 177,795,544 logical bytes are neither downloaded bytes nor physical-device
-  telemetry and do not relax the single-tier expert gate;
+  unverified, routing authority false, plan-only true and execution unsupported. The historical
+  `UD-IQ1_S` layer-0 plan's 177,795,544 logical bytes were neither downloaded bytes nor
+  physical-device telemetry; the active `UD-IQ2_XXS` plan is 780,087,788 B in 45 ranges and its
+  route is resolved from the imported trunk's own `tid2eid` (`routing_authority_verified: true`).
+  Neither plan relaxes the single-tier expert gate;
 - `deepseek-gguf-global-plan` first closes the complete pinned checkpoint catalog, then exposes
   exactly six canonical non-routed ranges with routing authority false. The official metadata
   plan totals 596,000,788 bytes in one source object and has a 297,861,120-byte maximum range;
@@ -294,9 +301,9 @@ The 0731 GGUF reader adds a metadata-only safety boundary:
   300 GiB free-space reserve, and refuses plans larger than 16 MiB, more than 4,096 ranges or any
   individual range above 1 GiB;
 - the dedicated `globals` import scope rejects expert roles and any routing-authority claim. The
-  official set exceeds the 256 MiB default selected-payload cap, so even an authorized transfer
-  must explicitly admit its verified byte total; its validation performed a no-network dry-run
-  only;
+  official set exceeds the 256 MiB default selected-payload cap, so an authorized transfer must
+  explicitly admit its verified byte total; the October 2026 D1 run imported it with that
+  authorization and verified local hashes;
 - only revision-pinned object URLs are constructed. HTTP 206, exact start/end/complete-object
   `Content-Range`, exact `Content-Length`, bounded reads, fsync and a second local SHA-256 pass are
   mandatory. A response partial is removed on failure and never resumed across responses;
@@ -337,9 +344,11 @@ The 0731 GGUF reader adds a metadata-only safety boundary:
   the I32 table. Packed-vector decode has a 1,048,576-element/4 MiB FP32 scratch ceiling. This
   does not promote the official artifact or checkpoint to executable status;
 - selected-expert/all range scopes fail before network while routing authority is caller-supplied.
-  A future authoritative source must be named explicitly; a forged flag/source combination is
-  rejected. Target-scoped locks clean only their own stale partial/incoming artifacts after a
-  crash and rehash any completed cached range before reuse;
+  An authoritative source must be named explicitly; a forged flag/source combination is
+  rejected. The October 2026 D1 run named the imported trunk as that source, resolved token 0's
+  route (experts 254, 222, 245, 200, 53, 35) and imported it with
+  `routing_authority_verified: true`. Target-scoped locks clean only their own stale
+  partial/incoming artifacts after a crash and rehash any completed cached range before reuse;
 - the scalar IQ1_S/IQ3_XXS expert and Q8_0/Q5_K/Q6_K/BF16/F32 trunk paths accept caller-supplied
   bounded spans only, prevalidate dimensions, encoded size, all applicable block scales, finite
   inputs and non-overlapping scratch, and have a 64-million-element default ceiling;
@@ -357,13 +366,14 @@ The 0731 GGUF reader adds a metadata-only safety boundary:
 - this opt-in test is not a generic GGUF/catalog execution backend, so metadata snapshots and
   unverified full shards still cannot reach the token path.
 
-The local validation used one complete 5.26 MB metadata shard and two 16 MiB HTTP-range prefixes;
-it did not download the 82.54 GB profile. Three separate exact ranges totaling 6,488,064 bytes
-were used for the real expert test and remain outside the immutable model store. The official
-596,000,788-byte global set was planned and dry-run only; its executable test used a small
-Q8_0/F32 fixture. Every loaded range is rehash-verified before use. Header-derived logical
-bytes/token are planning data, not physical device telemetry and never relax Resource Governor
-limits.
+The historical local validation used one complete 5.26 MB metadata shard and two 16 MiB HTTP-range
+prefixes; it did not download the 82.54 GB IQ1_S profile. Three separate exact ranges totaling
+6,488,064 bytes were used for the real expert test and remain outside the immutable model store.
+The October 2026 IQ2_XXS run used a 9,451,968-byte metadata-only store and imported 780,087,788 B
+in 45 verified ranges (trunk, globals, authoritative route) for the one-layer D2a probe; the
+596,000,788-byte global set is no longer dry-run only. Every loaded range is rehash-verified
+before use. Header-derived logical bytes/token are planning data, not physical device telemetry
+and never relax Resource Governor limits.
 
 ## Real OLMoE streaming bounds
 
@@ -418,9 +428,10 @@ its exact source, device identity and scope. Cache-bypass mode is stricter: it r
 start without a trustworthy mapping and rejects a run whose device bytes are below the
 logical expert payload. Whole-device counters can still include unrelated host traffic.
 
-## Qwen3.8 primary-track gates
+## Qwen3.8 comparison/validation-track gates
 
-The primary execution track adds its own safety boundary on top of the shared rules:
+The Qwen3.8 comparison/validation track adds its own safety boundary on top of the shared
+rules:
 
 - the greedy CLI derives every budget from the safe runtime policy before any allocation,
   including the raw Q8_0 payload cache, whose ceiling is pinned to a quarter of the
@@ -433,6 +444,95 @@ The primary execution track adds its own safety boundary on top of the shared ru
   abandoned loads are drained and counted;
 - the opt-in `--cuda-experts` VRAM tier holds a live VRAM reserve and falls back to the CPU
   kernel on any refusal; it is never the default path.
+
+## DeepSeek range-slice, oracle and chain gates (D1–D4)
+
+The October 2026 DeepSeek refocus adds a bounded range-slice boundary on top of the shared
+rules:
+
+- the `UD-IQ2_XXS` metadata identity is pinned as complete split 1 (5,257,664 B) plus two
+  separately hashed 2,097,152-byte header prefixes; the metadata-only store is 9,451,968 bytes
+  and `deepseek-gguf-checkpoint` publishes the reference configuration and layer-0 catalog only
+  after the pinned spec and every hash match;
+- the importer alias and every range plan are quantization-specific; a plan for one profile
+  cannot authorize payload from another;
+- fetched payload is limited to the explicit range scopes (trunk, globals, selected experts)
+  under the declared selected-payload cap and model-store reserve; no full checkpoint is
+  downloaded and no header prefix becomes an executable source;
+- every range artifact is verify-on-load (`local_range_hashes_verified`) and each
+  selected-expert artifact additionally carries `routing_authority_verified`, resolved from that
+  layer's imported trunk `tid2eid`, never from caller-supplied IDs;
+- `deepseek-chain-probe` admits only the three hash-routed layers and refuses a learned-router
+  layer, whose route cannot be planned before the preceding hidden state exists; every layer
+  needs its own trunk and expert artifacts, and the expert artifact must carry
+  `routing_authority_verified`. The command accepts `layers ∈ {2,3}`, accepts one to sixteen
+  prompt tokens, resolves each token's route from its own `tid2eid` row, deduplicates the
+  per-layer expert union and requires a bundle named twice to agree on its immutable source
+  spans — a disagreement fails closed — with the multi-token expert cache bounded at 32 bundles.
+  It binds each layer to its exact artifacts before reading payload;
+- `deepseek-layer-probe` reports `complete_model: false` and `executed_layers: 1` of 43; the
+  opt-in `--cuda-experts` path keeps expert matrix copies resident in VRAM with a bounded CPU
+  fallback, but bundles still enter governed RAM first, so this is device residency, not a VRAM
+  payload tier;
+- the independent NumPy oracle (`tools/reference_deepseek_v4_layer_oracle.py`) runs only on
+  the already-published artifacts and the bundled DSH Python/NumPy: it parses the pinned GGUF
+  headers, maps ranges to tensors, reuses no C++ code and has no network path. It does not
+  re-verify payload SHA-256, because the probe verifies every artifact on load before the oracle
+  reads it. Its tolerances are fixed constants (logits `atol = 1e-3`; hidden `rtol = 1e-5`,
+  `atol = 1e-6`) and are not tuned per run; the raw FNV equality is diagnostic only, never a
+  gate. The opt-in CMake tests `vastloom_deepseek_v4_layer_oracle`,
+  `vastloom_deepseek_v4_chain_probe` and `vastloom_deepseek_v4_chain_oracle` compare logits,
+  hidden state, argmax and per-layer routes, and refuse to fall back to a weaker comparison;
+- the chain oracle covers layers 0–2 for tokens 0/1 at depths 1–3 and the five-token prefill
+  `[0,1,2,3,4]`, including the layer-2 4:1 compressor/indexer. The five-token run is the direct
+  test of the compressed path: it closes one 4:1 window, selects one compressed row, records
+  compressed stages 512/128 and six slots per position, and the oracle matches the last-position
+  logits within 1.9073486328125e-06 and the hidden state within 5.960464477539063e-08 with all
+  15 per-layer/per-token routes identical. At a single prefill token the window is necessarily
+  empty (that case keeps its single-token comparison); ratio-128 layers are refused. No
+  generation path exists, so every probe/oracle result is a deterministic partial result, never
+  the model's answer;
+- D4 is a design-only deliverable: it performs no execution, download or network access, and its
+  §11 decisions are closed (SHA-256 first-touch digests; disk bundle cache 2,000,000,000 B,
+  staging 268,435,456 B, RAM expert cache 1,073,741,824 B; no dependency on the VRAM payload
+  tier).
+
+## Dense serve-path constraints (`0.5.0-alpha.1`)
+
+The dense SmolLM2 serve path adds three fail-closed guarantees. None of them changes model
+arithmetic; each refuses work rather than degrade a request silently.
+
+- **Chat content must never encode a control token.** Every message content is scanned for
+  the tokenizer's added/special tokens before the chat template frames it. A match is
+  refused with HTTP 400, the response never contains a completion, and the error
+  deliberately does not echo the content or the matched token, so a refusal cannot become a
+  probe for reserved markers. User text is never escaped into or reinterpreted as template
+  framing.
+- **Every SSE chunk is valid UTF-8.** A token boundary can fall inside a multi-byte UTF-8
+  sequence; the streaming emitter buffers a well-formed but incomplete trailing sequence and
+  releases it with the next chunk (or at end of generation). Complete sequences reach the
+  stop-sequence filter unchanged; genuinely invalid bytes are still replaced by the JSON
+  serializer, so no `data:` frame ends inside a code point.
+- **The JSON-object constraint is bounded and fails closed.** `response_format`
+  `{"type": "json_object"}` accepts exactly one RFC 8259 JSON object as the root value
+  (no root array, string or primitive) and enforces maximum depth 8 including the root,
+  1,024 bytes per string value or key and 64 bytes per number literal. It validates UTF-8
+  inside strings, never emits a control token except EOS, keeps its per-token byte table
+  under a 16 MiB ceiling and masks a vocabulary of at most 262,144 entries. The mask removes
+  tokens from the sampling distribution only.
+- **A dead end aborts the request.** If the constraint reaches a state where no vocabulary
+  token can extend the document, generation stops with an internal error instead of falling
+  back to unconstrained text; an EOS offered before the object is complete is treated the
+  same way. A `stop` sequence combined with `json_object` is refused with HTTP 400 because a
+  truncated object cannot be reported as complete, and an unsupported `response_format` type
+  is refused rather than served as text.
+- **Completeness is reported, not assumed.** `finish_reason` is `stop` when the model ended
+  by itself or closed the object, `length` when the token budget ran out. The non-standard
+  `vastloom_constraint_complete` field is present only when a constraint ran and is true
+  only when the document reached its accepting state; with `length` and false the response
+  is an explicit JSON prefix. The streamed form carries the field on its final chunk.
+- **The other serve paths do not approximate a constraint.** The TinyChat and OLMoE serve
+  paths refuse a constrained `response_format` with HTTP 400.
 
 ## Watchdog
 

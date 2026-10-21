@@ -10,6 +10,7 @@
 
 #include "vastloom/core/bytes.hpp"
 #include "vastloom/cuda/cuda_driver.hpp"
+#include "vastloom/cuda/cuda_matvec_accelerator.hpp"
 #include "vastloom/cuda/cuda_rms_norm.hpp"
 #include "vastloom/inference/deepseek_v4_reference.hpp"
 #include "vastloom/safety/resource_governor.hpp"
@@ -709,6 +710,78 @@ void test_rms_norm_failures_are_transactional() {
     CHECK(reserved_scratch(release_governor) == 0U);
 }
 
+void test_matvec_accelerator_placement_refusals() {
+    vastloom::safety::ResourceGovernor governor(limits(16U * vastloom::MiB));
+    const auto make_accelerator =
+        [&governor](const vastloom::cuda::CudaMatvecAcceleratorOptions& options)
+        -> std::unique_ptr<vastloom::cuda::CudaMatvecAccelerator> {
+        auto backend = std::make_shared<FakeCudaBackend>();
+        backend->governor = &governor;
+        auto driver = vastloom::cuda::CudaDriver::from_backend_for_testing(backend);
+        if (!driver) return nullptr;
+        auto created = vastloom::cuda::CudaMatvecAccelerator::create(
+            driver.take_value(), governor, options);
+        if (!created) return nullptr;
+        return created.take_value();
+    };
+
+    std::vector<float> input(32U, 0.25F);
+    std::vector<float> output(1U, 0.0F);
+    std::vector<std::byte> q8_payload(34U);
+    vastloom::cuda::CudaMatvecAcceleratorOptions experts_only;
+    experts_only.experts_only = true;
+    experts_only.maximum_resident_bytes = 8U * vastloom::MiB;
+    auto accelerator = make_accelerator(experts_only);
+    CHECK(accelerator != nullptr);
+    if (accelerator) {
+        vastloom::inference::DeepseekV4PackedMatrix recurring(8U, 1U, 32U, 32U, q8_payload);
+        recurring.cache_identity = 11U;
+        recurring.recurring = true;
+        auto accepted = accelerator->matvec(recurring, input, output);
+        CHECK(accepted && !accepted.value());
+        CHECK(accelerator->stats().offered == 1U);
+        CHECK(accelerator->stats().declined_recurring == 1U);
+        CHECK(accelerator->stats().declined == 1U);
+        CHECK(accelerator->stats().accelerated == 0U);
+    }
+
+    vastloom::cuda::CudaMatvecAcceleratorOptions plain;
+    plain.maximum_resident_bytes = 8U * vastloom::MiB;
+    auto anonymous_accelerator = make_accelerator(plain);
+    CHECK(anonymous_accelerator != nullptr);
+    if (anonymous_accelerator) {
+        vastloom::inference::DeepseekV4PackedMatrix anonymous(8U, 1U, 32U, 32U, q8_payload);
+        auto accepted = anonymous_accelerator->matvec(anonymous, input, output);
+        CHECK(accepted && !accepted.value());
+        CHECK(anonymous_accelerator->stats().declined == 1U);
+    }
+
+    auto type_accelerator = make_accelerator(plain);
+    CHECK(type_accelerator != nullptr);
+    if (type_accelerator) {
+        vastloom::inference::DeepseekV4PackedMatrix unsupported(999U, 1U, 32U, 32U, {});
+        unsupported.cache_identity = 12U;
+        auto accepted = type_accelerator->matvec(unsupported, input, output);
+        CHECK(accepted && !accepted.value());
+        CHECK(type_accelerator->stats().declined == 1U);
+        CHECK(type_accelerator->stats().declined_by_type.contains(999U));
+        CHECK(type_accelerator->stats().declined_by_type.at(999U) == 1U);
+    }
+
+    vastloom::cuda::CudaMatvecAcceleratorOptions tiny;
+    tiny.maximum_resident_bytes = 1U;
+    auto tiny_accelerator = make_accelerator(tiny);
+    CHECK(tiny_accelerator != nullptr);
+    if (tiny_accelerator) {
+        vastloom::inference::DeepseekV4PackedMatrix matrix(8U, 1U, 32U, 32U, q8_payload);
+        matrix.cache_identity = 13U;
+        auto accepted = tiny_accelerator->matvec(matrix, input, output);
+        CHECK(accepted && !accepted.value());
+        CHECK(tiny_accelerator->stats().declined == 1U);
+        CHECK(tiny_accelerator->stats().resident_matrices == 0U);
+    }
+}
+
 }  // namespace
 
 int main() {
@@ -719,6 +792,7 @@ int main() {
     test_copy_and_kernel_driver_contract();
     test_governed_rms_norm_success();
     test_rms_norm_failures_are_transactional();
+    test_matvec_accelerator_placement_refusals();
     if (failures != 0) {
         std::cerr << failures << " CUDA driver test(s) failed\n";
         return 1;

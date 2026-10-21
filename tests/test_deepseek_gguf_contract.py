@@ -12,9 +12,12 @@ Neither command reads payload: both work from verified metadata only.
 from __future__ import annotations
 
 import argparse
+import array
 import json
 from pathlib import Path
 import subprocess
+import sys
+import tempfile
 
 from host_pressure import host_pressure_reason, skipped
 
@@ -42,9 +45,9 @@ CHECKPOINT_CONTRACT = {
     "reference_architecture.shared_swiglu_schedule_values": 43,
     "physical_tensors": 1_328,
     "logical_tensors": 34_223,
-    "tensor_bytes": 82_533_892_444,
+    "tensor_bytes": 90_855_391_580,
     "always_active_bytes": 6_986_088_796,
-    "routed_expert_bytes": 75_547_803_648,
+    "routed_expert_bytes": 83_869_302_784,
     "layer_streaming.planned_layers": 43,
 }
 
@@ -52,8 +55,8 @@ PROBE_PLAN_CONTRACT = {
     "plan_only": True,
     "routing_authority_verified": False,
     "trunk_bytes": 138_867_160,
-    "selected_expert_bytes": 38_928_384,
-    "total_payload_bytes": 177_795_544,
+    "selected_expert_bytes": 45_219_840,
+    "total_payload_bytes": 184_087_000,
     "total_range_count": 39,
     "unique_source_objects": 1,
 }
@@ -82,10 +85,10 @@ GLOBALS_LOAD_CONTRACT = {
     "execution_supported": False,
 }
 
-# One real layer of 43, executed from official payload: Q8_0 attention, Q5_K/Q6_K shared expert,
-# BF16 router, I32 routing table, IQ1_S/IQ3_XXS routed experts and the Q4_K embedding, with the
-# checkpoint's own router choosing the six experts. These logits are the first layer's, not the
-# model's.
+# One real layer of 43, executed from official IQ2_XXS payload: Q8_0 attention, Q5_K/Q6_K shared
+# expert, BF16 router, I32 routing table, IQ2_XXS/IQ3_XXS routed experts and the Q4_K embedding,
+# with the checkpoint's own router choosing the six experts. These logits are the first layer's,
+# not the model's.
 LAYER_PROBE_CONTRACT = {
     "complete_model": False,
     "executed_layers": 1,
@@ -94,7 +97,7 @@ LAYER_PROBE_CONTRACT = {
     "logits": 129_280,
     "argmax_token": 30_528,
     "experts_executed": [254, 222, 245, 200, 53, 35],
-    "expert_bytes_read": 38_928_384,
+    "expert_bytes_read": 45_219_840,
     "expert_misses": 6,
     "trunk_bytes": 138_867_160,
     "global_bytes": 596_000_788,
@@ -110,7 +113,7 @@ ROUTE_CONTRACT = {
     "routing_token": 0,
     "selected_experts": [35, 53, 200, 222, 245, 254],
     "trunk_bytes": 138_867_160,
-    "selected_expert_bytes": 38_928_384,
+    "selected_expert_bytes": 45_219_840,
 }
 
 COMMANDS = {
@@ -153,6 +156,156 @@ COMMANDS = {
 MISSING = "<missing>"
 
 
+def _probe(
+    vastloom: Path,
+    model: Path,
+    trunk: Path,
+    experts: Path,
+    globals_: Path,
+    *,
+    extra: tuple[str, ...] = (),
+    logits_path: Path | None = None,
+) -> subprocess.CompletedProcess[str]:
+    command = [
+        str(vastloom),
+        "deepseek-layer-probe",
+        str(model),
+        str(trunk),
+        str(experts),
+        str(globals_),
+        "--token",
+        "0",
+        "--json",
+        *extra,
+    ]
+    if logits_path is not None:
+        command.extend(("--dump-logits", str(logits_path)))
+    return subprocess.run(
+        command, check=False, capture_output=True, text=True, encoding="utf-8", timeout=3_600
+    )
+
+
+def _read_logits(path: Path) -> array.array[float]:
+    values: array.array[float] = array.array("f")
+    with path.open("rb") as stream:
+        values.fromfile(stream, path.stat().st_size // values.itemsize)
+    return values
+
+
+def probe_gpu_residency(args: argparse.Namespace) -> int:
+    """Device residency with a bounded CPU fallback, compared against the CPU reference."""
+    contract = "0731 GPU expert residency contract"
+    if sys.byteorder != "little":
+        raise AssertionError(f"{contract} requires a little-endian host for raw float32 dumps")
+    required = {"artifact": args.artifact, "experts": args.experts, "globals": args.globals}
+    missing = [name for name, value in required.items() if value is None]
+    if missing:
+        raise SystemExit(f"{contract} requires --{', --'.join(missing)}")
+    model = args.model.resolve(strict=True)
+    trunk = args.artifact.resolve(strict=True)
+    experts = args.experts.resolve(strict=True)
+    globals_ = args.globals.resolve(strict=True)
+
+    info = subprocess.run(
+        [str(args.vastloom), "cuda-info", "--json"],
+        check=False,
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+        timeout=300,
+    )
+    if info.returncode != 0:
+        print(f"{contract}: skipped, no usable CUDA driver on this host", file=sys.stderr)
+        return 75
+
+    with tempfile.TemporaryDirectory(prefix="vastloom-gpu-residency-") as directory:
+        root = Path(directory)
+        cpu_logits = root / "cpu.f32"
+        gpu_logits = root / "gpu.f32"
+        fallback_logits = root / "fallback.f32"
+
+        cpu = _probe(args.vastloom, model, trunk, experts, globals_, logits_path=cpu_logits)
+        if cpu.returncode != 0:
+            pressure = host_pressure_reason(cpu)
+            if pressure is not None:
+                return skipped(contract, pressure)
+            raise AssertionError(f"{contract} CPU reference failed\nstderr={cpu.stderr}")
+        gpu = _probe(
+            args.vastloom,
+            model,
+            trunk,
+            experts,
+            globals_,
+            extra=("--cuda-experts", "--gpu-limit", "16"),
+            logits_path=gpu_logits,
+        )
+        if gpu.returncode != 0:
+            raise AssertionError(f"{contract} GPU probe failed\nstderr={gpu.stderr}")
+        fallback = _probe(
+            args.vastloom,
+            model,
+            trunk,
+            experts,
+            globals_,
+            extra=("--cuda-experts", "--gpu-limit", "1"),
+            logits_path=fallback_logits,
+        )
+        if fallback.returncode != 0:
+            raise AssertionError(f"{contract} fallback probe failed\nstderr={fallback.stderr}")
+
+        cpu_payload = json.loads(cpu.stdout)
+        gpu_payload = json.loads(gpu.stdout)
+        fallback_payload = json.loads(fallback.stdout)
+        if "accelerator" in cpu_payload:
+            raise AssertionError(f"{contract}: the default CPU path must not report an accelerator")
+
+        reference = _read_logits(cpu_logits)
+        if not reference:
+            raise AssertionError(f"{contract}: the CPU reference produced no logits")
+        for name, payload, path in (
+            ("GPU", gpu_payload, gpu_logits),
+            ("fallback", fallback_payload, fallback_logits),
+        ):
+            values = _read_logits(path)
+            if len(values) != len(reference):
+                raise AssertionError(f"{contract}: {name} logits length changed")
+            if payload["argmax_token"] != cpu_payload["argmax_token"]:
+                raise AssertionError(f"{contract}: {name} argmax changed")
+            difference = max(abs(left - right) for left, right in zip(values, reference))
+            if difference > 1.0e-3:
+                raise AssertionError(
+                    f"{contract}: {name} logits differ from the CPU reference by {difference}"
+                )
+
+        gpu_stats = gpu_payload.get("accelerator")
+        if not isinstance(gpu_stats, dict):
+            raise AssertionError(f"{contract}: GPU run did not report accelerator statistics")
+        if gpu_stats["accelerated"] <= 0:
+            raise AssertionError(f"{contract}: no matrix ran on the device")
+        if gpu_stats["declined_recurring"] <= 0:
+            raise AssertionError(f"{contract}: --cuda-experts did not keep the trunk on the CPU")
+        if gpu_stats["resident_bytes"] <= 0 or gpu_stats["evicted"] <= 0:
+            raise AssertionError(f"{contract}: the capped VRAM ceiling did not evict and re-fill")
+        if gpu_stats["kernel_ms"] <= 0.0 or gpu_stats["uploaded_bytes"] <= 0:
+            raise AssertionError(f"{contract}: the device tier reported no kernel or upload")
+
+        fallback_stats = fallback_payload.get("accelerator")
+        if not isinstance(fallback_stats, dict):
+            raise AssertionError(f"{contract}: fallback run did not report accelerator statistics")
+        if fallback_stats["accelerated"] != 0 or fallback_stats["resident_matrices"] != 0:
+            raise AssertionError(f"{contract}: a 1 MiB ceiling still admitted device matrices")
+        if fallback_stats["declined_recurring"] <= 0:
+            raise AssertionError(f"{contract}: the fallback run did not see the recurring matrices")
+
+        print(
+            f"{contract}: PASS (accelerated={gpu_stats['accelerated']}, "
+            f"evicted={gpu_stats['evicted']}, resident={gpu_stats['resident_bytes']} B, "
+            f"fallback logits identical within 1e-3)"
+        )
+    return 0
+
+
+
 def resolve(payload: object, path: str) -> object:
     """Follow a dotted path into the parsed document."""
     current = payload
@@ -174,8 +327,13 @@ def main() -> int:
     )
     parser.add_argument("--experts", type=Path, help="imported selected-expert range artifact")
     parser.add_argument("--globals", type=Path, help="imported global range artifact")
-    parser.add_argument("--command", choices=sorted(COMMANDS), required=True)
+    parser.add_argument(
+        "--command", choices=[*sorted(COMMANDS), "layer-probe-gpu"], required=True
+    )
     args = parser.parse_args()
+
+    if args.command == "layer-probe-gpu":
+        return probe_gpu_residency(args)
 
     contract, template, expected = COMMANDS[args.command]
     substitutions = {"model": str(args.model.resolve(strict=True))}

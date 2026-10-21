@@ -378,9 +378,17 @@ Result<DeepseekV4CatalogRelocation> deepseek_v4_relocate_catalog_to_artifacts(
                         "Imported range does not correspond to any catalog tensor", entry.label);
                 }
                 if (!relocated.insert(found->second).second) {
-                    return make_error(ErrorCode::invalid_format,
-                                      "Two imported ranges claim the same catalog tensor",
-                                      entry.label);
+                    // Two authoritative per-route artifacts can carry the same expert bundle when
+                    // different prompt tokens select it. The source identity matched above, so the
+                    // duplicate names identical bytes: relocate the tensor once, keep the first
+                    // local copy, and do not turn a legitimate overlapping route into a failure.
+                    if (entry.bytes != result.catalog.tensors[found->second].source.bytes) {
+                        return make_error(ErrorCode::invalid_format,
+                                          "Two imported ranges claim the same catalog tensor with "
+                                          "different lengths",
+                                          entry.label);
+                    }
+                    continue;
                 }
                 auto& tensor = result.catalog.tensors[found->second];
                 if (entry.bytes != tensor.source.bytes) {

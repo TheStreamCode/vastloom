@@ -320,9 +320,66 @@ DEEPSEEK_V4_FLASH_0731_GGUF_IQ1S = ModelSpec(
 )
 
 
+DEEPSEEK_V4_FLASH_0731_GGUF_IQ2XXS = ModelSpec(
+    alias="deepseek-v4-flash-0731-gguf-iq2xxs",
+    model_id="unsloth/DeepSeek-V4-Flash-0731-GGUF",
+    revision="fbbb5b93fb787c21338159b0af3318bb3f4d9768",
+    files=(
+        # Split 1 contains only GGUF metadata and is small enough to import in full for both
+        # modes. Splits 2 and 3 are immutable payload objects in a full import and bounded,
+        # independently hashed 2 MiB header prefixes in metadata-only mode. The prefixes carry
+        # the complete GGUF metadata/tensor-info block (46,912 and 39,008 bytes respectively).
+        FileSpec(
+            "UD-IQ2_XXS/DeepSeek-V4-Flash-0731-UD-IQ2_XXS-00001-of-00003.gguf",
+            5_257_664,
+            "c58c9d62eac7b62e9578b52613f425e48313d7212ab8d1d76caed8ea8de26595",
+        ),
+        FileSpec(
+            "UD-IQ2_XXS/DeepSeek-V4-Flash-0731-UD-IQ2_XXS-00002-of-00003.gguf",
+            49_890_588_800,
+            "65a113df6d4469f16db6882b6919e153c464c3c78c833f5e1b41a33803cdbd52",
+            True,
+        ),
+        FileSpec(
+            "UD-IQ2_XXS/DeepSeek-V4-Flash-0731-UD-IQ2_XXS-00003-of-00003.gguf",
+            40_964_890_464,
+            "a69102ddfaf4a84426e11fdb66716654f4260dc3a1de3ade9fd50e006b8691d3",
+            True,
+        ),
+        FileSpec(
+            "headers/UD-IQ2_XXS/DeepSeek-V4-Flash-0731-UD-IQ2_XXS-00002-of-00003.gguf.header",
+            2_097_152,
+            "dbbfe94ed10ffb3d98e3e96878c6aca4289b9a82c5d13f5fc3e2593eda06ba16",
+            source_name="UD-IQ2_XXS/DeepSeek-V4-Flash-0731-UD-IQ2_XXS-00002-of-00003.gguf",
+            metadata_only=True,
+            range_prefix=True,
+            source_size=49_890_588_800,
+        ),
+        FileSpec(
+            "headers/UD-IQ2_XXS/DeepSeek-V4-Flash-0731-UD-IQ2_XXS-00003-of-00003.gguf.header",
+            2_097_152,
+            "162724024b4d9aa11b07f22d1555a34a23a657ea96def7a4f0ad92dd81f4cc32",
+            source_name="UD-IQ2_XXS/DeepSeek-V4-Flash-0731-UD-IQ2_XXS-00003-of-00003.gguf",
+            metadata_only=True,
+            range_prefix=True,
+            source_size=40_964_890_464,
+        ),
+    ),
+    # Keep nested cache/staging paths below legacy Windows MAX_PATH without weakening the
+    # model/revision identity recorded in the immutable manifest.
+    artifact_name="deepseek-v4-flash-0731-iq2xxs-fbbb5b93",
+)
+
+
 MODELS = {
     item.alias: item
-    for item in (SMOLLM2, OLMOE, DEEPSEEK_V4_FLASH, DEEPSEEK_V4_FLASH_0731_GGUF_IQ1S)
+    for item in (
+        SMOLLM2,
+        OLMOE,
+        DEEPSEEK_V4_FLASH,
+        DEEPSEEK_V4_FLASH_0731_GGUF_IQ1S,
+        DEEPSEEK_V4_FLASH_0731_GGUF_IQ2XXS,
+    )
 }
 
 

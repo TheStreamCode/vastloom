@@ -9,9 +9,11 @@ Run giant models. Keep your machine yours
 
 ![Vastloom routes giant model tensors through VRAM, system RAM and NVMe while protecting the host computer](docs/assets/vastloom-hero.png)
 
-Vastloom is a safety-first native inference runtime for open-weight models that outgrow conventional VRAM and RAM limits. It treats VRAM, RAM and NVMe as one model-aware memory hierarchy: the Safety Governor reserves memory before it is allocated, every queue and buffer is bounded, original weights stay immutable, and emergency pressure aborts generation instead of risking the host. It is an independent research project, not a product, and it does not claim competitive throughput.
+Vastloom is a native C++ research runtime that treats VRAM, system RAM and NVMe as one model-aware memory hierarchy. A Safety Governor reserves memory before allocation, every queue and buffer is bounded, original weights stay immutable, and pressure aborts work instead of risking the host.
 
-The primary research track executes DeepSeek V4 Flash 0731 (`UD-IQ2_XXS`) from bounded exact range slices — the full 90.86 GB checkpoint is not stored — and reproduces the layer-0 and three-layer chain outputs with independent NumPy oracles; Qwen3.8-Flash-Next is kept as the comparison/validation track that reproduces llama.cpp's greedy continuation token for token. The measured position, including the honest gap to the mmap-based engines, is recorded in [`docs/RESULTS.md`](docs/RESULTS.md).
+The October 2026 track asked one question: how much of a **90.86 GB DeepSeek V4 Flash** checkpoint can run on a **12 GiB consumer GPU** with 32 GiB of RAM, while keeping every byte hash-verified and every result honest? The record: **780,087,788 B of verified range slices**, one real layer and a deterministic three-layer hash-routed chain, reproduced by independent NumPy oracles within **1e-6**.
+
+**New here? Start with the [two-minute showcase](docs/SHOWCASE.md)**, then [`docs/RESULTS.md`](docs/RESULTS.md). This is concluded research, not a product; full-model parity, throughput and a VRAM payload tier are not claimed.
 
 ## Contents
 
@@ -51,7 +53,7 @@ cmake --build --preset release --parallel
 ctest --preset release
 ```
 
-The helper scripts `scripts/build.sh` and `scripts/build.ps1` run the same sequence for Linux and Windows. A CMake install also copies the bundled validation fixture to `share/vastloom/models` under the selected install prefix.
+The helper scripts `scripts/build.sh` and `scripts/build.ps1` run the same sequence for Linux and Windows. After a build, `scripts/demo.sh` (or `pwsh scripts/demo.ps1`) runs the zero-download demo: version, hardware report and the bundled deterministic fixture. A CMake install also copies the bundled validation fixture to `share/vastloom/models` under the selected install prefix.
 
 ## Quick start
 
@@ -164,6 +166,7 @@ External model tests are opt-in through the `VASTLOOM_*_MODEL` cache paths; neve
 
 ## Documentation
 
+- [`docs/SHOWCASE.md`](docs/SHOWCASE.md) — the two-minute overview: what was built, what actually ran, the numbers that matter and the honest limits.
 - [`docs/USAGE.md`](docs/USAGE.md) — commands for every track, CLI options and the local server.
 - [`docs/CAPABILITIES.md`](docs/CAPABILITIES.md) — what each validated track does, with pinned model identities.
 - [`docs/RESULTS.md`](docs/RESULTS.md) — key results, limitations, prior art and the research path.

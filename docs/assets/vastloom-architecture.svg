@@ -1,0 +1,113 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1120" height="620" viewBox="0 0 1120 620" role="img" aria-labelledby="title desc">
+  <title id="title">Vastloom memory hierarchy</title>
+  <desc id="desc">Immutable hashed ranges on NVMe are admitted by a Safety Governor, staged through system RAM, and made resident in VRAM when possible; the CPU reference kernels remain the correctness fallback.</desc>
+  <defs>
+    <marker id="arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+      <path d="M 0 0 L 10 5 L 0 10 z" fill="#5b6b84"/>
+    </marker>
+    <style>
+      .title { font-family: "Segoe UI", "Helvetica Neue", Arial, sans-serif; font-size: 26px; font-weight: 650; fill: #14243d; }
+      .subtitle { font-family: "Segoe UI", "Helvetica Neue", Arial, sans-serif; font-size: 14px; fill: #4a5a75; }
+      .box-title { font-family: "Segoe UI", "Helvetica Neue", Arial, sans-serif; font-size: 17px; font-weight: 650; fill: #14243d; }
+      .label { font-family: "Segoe UI", "Helvetica Neue", Arial, sans-serif; font-size: 13px; fill: #2c3c55; }
+      .small { font-family: "Segoe UI", "Helvetica Neue", Arial, sans-serif; font-size: 12px; fill: #53637d; }
+      .mono { font-family: "Cascadia Mono", Consolas, monospace; font-size: 12px; fill: #24405f; }
+      .panel { fill: #f7f9fc; stroke: #c8d2e0; stroke-width: 1.5; rx: 12; }
+      .disk { fill: #eef3fa; stroke: #9fb4d3; stroke-width: 1.5; rx: 12; }
+      .gov { fill: #eef7f1; stroke: #7fb08f; stroke-width: 1.5; rx: 12; }
+      .vram { fill: #f3eefb; stroke: #a58cc9; stroke-width: 1.5; rx: 12; }
+      .ram { fill: #eef6fc; stroke: #82a9c9; stroke-width: 1.5; rx: 12; }
+      .cpu { fill: #fbf4ec; stroke: #c9a47e; stroke-width: 1.5; rx: 12; }
+      .badge { fill: #14243d; rx: 6; }
+      .badge-text { font-family: "Segoe UI", "Helvetica Neue", Arial, sans-serif; font-size: 11px; fill: #ffffff; }
+    </style>
+  </defs>
+
+  <rect width="1120" height="620" fill="#ffffff"/>
+  <text class="title" x="40" y="46">Vastloom — one model-aware memory hierarchy</text>
+  <text class="subtitle" x="40" y="70">Every byte is admitted by the Safety Governor; every claim in the repository points to a dated report.</text>
+
+  <!-- Disk -->
+  <rect class="disk" x="40" y="100" width="250" height="390"/>
+  <text class="box-title" x="60" y="132">Immutable model store</text>
+  <text class="small" x="60" y="152">local SSD · pinned GGUF revision</text>
+  <text class="label" x="60" y="190">DeepSeek V4 Flash 0731</text>
+  <text class="mono" x="60" y="210">90,860,736,928 B</text>
+  <text class="small" x="60" y="228">never downloaded as a whole</text>
+  <line x1="60" y1="244" x2="270" y2="244" stroke="#c8d2e0"/>
+  <text class="label" x="60" y="270">Range artifacts (D1/D3)</text>
+  <text class="mono" x="60" y="290">trunk · globals · experts</text>
+  <text class="mono" x="60" y="308">780,087,788 B · 45 ranges</text>
+  <text class="small" x="60" y="326">first gate: metadata-only</text>
+  <text class="small" x="60" y="342">SHA-256 per range</text>
+  <line x1="60" y1="358" x2="270" y2="358" stroke="#c8d2e0"/>
+  <text class="label" x="60" y="384">Rules</text>
+  <text class="small" x="60" y="402">weights immutable</text>
+  <text class="small" x="60" y="418">no header prefix becomes</text>
+  <text class="small" x="60" y="434">an executable source</text>
+  <text class="small" x="60" y="466">rehash → publish atomically</text>
+
+  <!-- Governor -->
+  <rect class="gov" x="330" y="100" width="280" height="390"/>
+  <text class="box-title" x="350" y="132">Safety Governor</text>
+  <text class="small" x="350" y="152">buffer-free admission contract</text>
+  <text class="label" x="350" y="188">1 · reserve</text>
+  <text class="small" x="350" y="206">RAM, VRAM, staging, disk</text>
+  <text class="label" x="350" y="238">2 · stage</text>
+  <text class="small" x="350" y="256">bounded ranges, bounded queues</text>
+  <text class="label" x="350" y="288">3 · hash</text>
+  <text class="small" x="350" y="306">every byte re-verified</text>
+  <text class="label" x="350" y="338">4 · publish</text>
+  <text class="small" x="350" y="356">immutable buffers + leases</text>
+  <line x1="350" y1="376" x2="590" y2="376" stroke="#b7d4c1"/>
+  <text class="label" x="350" y="402">On pressure</text>
+  <text class="small" x="350" y="420">reduce cache / prefetch first</text>
+  <text class="small" x="350" y="436">on emergency: abort, release</text>
+  <text class="label" x="350" y="466">Never</text>
+  <text class="small" x="350" y="484">unverified fallback, silent swap,</text>
+  <text class="small" x="350" y="500">or a full-model claim from slices</text>
+
+  <!-- VRAM -->
+  <rect class="vram" x="660" y="100" width="420" height="118"/>
+  <text class="box-title" x="682" y="130">VRAM · 12 GiB consumer GPU</text>
+  <text class="label" x="682" y="154">expert matrices / bundles when they fit</text>
+  <text class="small" x="682" y="174">bounded cache · eviction · per-matrix fallback</text>
+  <text class="mono" x="682" y="198">D2b.1: 18 accelerated · 12 evicted · logits identical to CPU</text>
+
+  <!-- RAM -->
+  <rect class="ram" x="660" y="246" width="420" height="120"/>
+  <text class="box-title" x="682" y="276">System RAM · 32 GiB</text>
+  <text class="label" x="682" y="300">staging + trunk window + expert bundle cache</text>
+  <text class="small" x="682" y="320">trunk streamed from local SSD, never fully resident</text>
+  <text class="mono" x="682" y="344">D3c: 437,727,112 B trunk · 663,224,320 B experts</text>
+
+  <!-- CPU -->
+  <rect class="cpu" x="660" y="396" width="420" height="94"/>
+  <text class="box-title" x="682" y="426">CPU reference kernels</text>
+  <text class="label" x="682" y="450">correctness fallback · bit-identical where measured</text>
+  <text class="small" x="682" y="470">independent NumPy oracles check the native path from the same bytes</text>
+
+  <!-- Arrows -->
+  <line x1="290" y1="180" x2="330" y2="180" stroke="#5b6b84" stroke-width="1.6" marker-end="url(#arrow)"/>
+  <text class="small" x="292" y="172">ranges</text>
+  <line x1="610" y1="190" x2="660" y2="190" stroke="#5b6b84" stroke-width="1.6" marker-end="url(#arrow)"/>
+  <text class="small" x="612" y="182">admit</text>
+  <line x1="610" y1="300" x2="660" y2="300" stroke="#5b6b84" stroke-width="1.6" marker-end="url(#arrow)"/>
+  <text class="small" x="612" y="292">stage</text>
+  <line x1="870" y1="246" x2="870" y2="218" stroke="#5b6b84" stroke-width="1.6" marker-end="url(#arrow)"/>
+  <text class="small" x="878" y="238">upload / role</text>
+  <line x1="870" y1="366" x2="870" y2="396" stroke="#5b6b84" stroke-width="1.6" marker-end="url(#arrow)"/>
+  <text class="small" x="878" y="386">fallback</text>
+  <line x1="760" y1="218" x2="760" y2="246" stroke="#5b6b84" stroke-width="1.6" marker-end="url(#arrow)"/>
+  <text class="small" x="690" y="238">bounded fallback</text>
+
+  <!-- Footer badge -->
+  <rect class="badge" x="40" y="524" width="270" height="26" rx="6"/>
+  <text class="badge-text" x="54" y="542">concluded research record · no product claim</text>
+  <text class="small" x="330" y="542">Measured: one real layer + a 2/3-layer hash chain from the slices; oracles within 1e-6. Full model, full depth, throughput and a VRAM payload tier are not claimed.</text>
+
+  <!-- Legend -->
+  <line x1="40" y1="580" x2="80" y2="580" stroke="#5b6b84" stroke-width="1.6" marker-end="url(#arrow)"/>
+  <text class="small" x="90" y="584">data movement (bounded, reserved first)</text>
+  <text class="small" x="420" y="584">Sources: docs/ARCHITECTURE.md · docs/SAFETY.md · docs/reports/D2B*/D3* · docs/RESULTS.md</text>
+</svg>

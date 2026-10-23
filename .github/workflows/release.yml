@@ -25,12 +25,10 @@ jobs:
           python-version: "3.12"
       - name: Refuse tag/version drift
         run: >-
-          python -c "import re,sys,pathlib
-          tag='${{ github.ref_name }}'
-          project_version=re.search(r'project\(\s*\w+\s+VERSION\s+([0-9][^\s)]*)',pathlib.Path('CMakeLists.txt').read_text()).group(1)
-          tag_version=tag[1:] if tag.startswith('v') else tag
-          if not tag_version.startswith(project_version):
-              sys.exit(f'tag {tag} does not match CMake project version {project_version}')"
+          python -c "import re,sys,pathlib; tag='${{ github.ref_name }}';
+          project_version=re.search(r'project\(\s*\w+\s+VERSION\s+([0-9][^\s)]*)',pathlib.Path('CMakeLists.txt').read_text()).group(1);
+          tag_version=tag[1:] if tag.startswith('v') else tag;
+          sys.exit(f'tag {tag} does not match CMake project version {project_version}') if not tag_version.startswith(project_version) else print(f'tag {tag} matches project version {project_version}')"
       - name: Configure
         run: >-
           cmake -S . -B build -DCMAKE_BUILD_TYPE=Release

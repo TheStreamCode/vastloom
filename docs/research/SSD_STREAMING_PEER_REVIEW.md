@@ -135,6 +135,13 @@ Verified in the working tree:
 
 ### P0 — highest value, fits the existing architecture
 
+Status (2026-10-23): items 1 and 2 are implemented as an opt-in experiment and validated in
+[`docs/reports/P0_EXPERT_PACK_IO_VALIDATION.md`](../reports/P0_EXPERT_PACK_IO_VALIDATION.md):
+one aligned read per expert, byte-identical outputs, read calls 54 → 18 (token 0) and 264 → 88
+(five-token prompt), buffered/bypass modes. Warm-cache timings were neutral to slightly slower and
+bypass was slower, so no speed claim is made; cold-cache and network-range measurements remain
+future work. Items 3 and 4 still need real measurements.
+
 1. **Derived expert-bundle container with one aligned read per expert.**
    Pack each expert's three tensors into one contiguous, 4 KiB-aligned record in a derived artifact
    (a sibling payload file with a JSON index and per-record CRC), while keeping the pinned GGUF

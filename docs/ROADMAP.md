@@ -828,7 +828,10 @@ governed RAM first: this is device residency, not a VRAM *payload* tier
 learned-router/full-depth execution — not planned in this concluded research record (they need
 new subsystems or the full checkpoint); no further milestones. The consolidated, dependency-ordered
 backlog for resuming the research — including the Qwen revalidation checklist and the safety entry
-criteria — is [`planning/FUTURE_WORK.md`](planning/FUTURE_WORK.md). A full 90.86 GB checkpoint
+criteria — is [`planning/FUTURE_WORK.md`](planning/FUTURE_WORK.md). A post-conclusion experiment
+implemented the peer review's P0 expert-pack and I/O items and is recorded in
+[`reports/P0_EXPERT_PACK_IO_VALIDATION.md`](reports/P0_EXPERT_PACK_IO_VALIDATION.md); it changes no
+milestone or measured claim. A full 90.86 GB checkpoint
 download, IQ1/`UD-IQ1_S` execution, CUDA dense/attention kernels, speculative decoding and any
 Qwen feature work were already out of scope, and a gate that would need a llama.cpp comparison
 against the full checkpoint stays blocked rather than changing that rule.

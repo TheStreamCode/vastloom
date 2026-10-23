@@ -184,6 +184,13 @@ evidence and "what not to copy" are in
    issue bounded readahead on a dedicated I/O thread, and keep it opt-in because hint-only
    prefetch can be negative on a saturated disk.
 
+**Status (2026-10-23):** items 1 and 2 are implemented and validated as an opt-in experiment in
+[`docs/reports/P0_EXPERT_PACK_IO_VALIDATION.md`](../reports/P0_EXPERT_PACK_IO_VALIDATION.md):
+one aligned read per expert, byte-identical outputs, read calls 54 → 18 (token 0) and 264 → 88
+(five-token prompt), with buffered/bypass modes. Warm-cache timings were neutral to slightly slower
+and bypass was slower; cold-cache and network-range measurements remain future work. Items 3 and 4
+are still future work.
+
 Each item needs the usual gate: bit-identical or oracle-verified outputs, exact read/byte counters,
 a dated report, and a measured win (or an explicit negative result) before it becomes a default.
 These are research directions, not active milestones.

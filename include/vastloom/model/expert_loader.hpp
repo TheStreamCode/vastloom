@@ -33,11 +33,13 @@ struct ExpertLoadOptions {
     bool measure_device_io{false};
     std::function<bool()> cancelled;
     io::BufferedReadSession* read_session{nullptr};
+    io::IoCacheMode io_cache_mode{io::IoCacheMode::buffered};
 };
 
 struct ExpertLoadTelemetry {
     ByteCount logical_bytes{0};
     std::size_t range_count{0};
+    std::size_t read_calls{0};
     std::size_t request_sequence{0};
     double queue_ms{0.0};
     double service_ms{0.0};

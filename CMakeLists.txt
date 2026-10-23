@@ -118,6 +118,7 @@ add_library(vastloom_core STATIC
     src/inference/deepseek_v4_gguf.cpp
     src/inference/deepseek_v4_probe.cpp
     src/inference/deepseek_v4_range_artifact.cpp
+    src/inference/deepseek_v4_expert_pack.cpp
     src/inference/deepseek_v4_model.cpp
     src/inference/deepseek_v4_graph.cpp
     src/inference/deepseek_v4_expert_provider.cpp
@@ -227,6 +228,17 @@ if(BUILD_TESTING AND VASTLOOM_BUILD_TESTS)
     vastloom_set_project_warnings(vastloom_range_artifact_test)
     vastloom_enable_sanitizers(vastloom_range_artifact_test)
     add_test(NAME vastloom_range_artifact COMMAND vastloom_range_artifact_test)
+    add_executable(vastloom_deepseek_expert_pack_test
+        tests/test_deepseek_expert_pack.cpp
+    )
+    target_link_libraries(vastloom_deepseek_expert_pack_test PRIVATE Vastloom::Core)
+    target_compile_features(vastloom_deepseek_expert_pack_test PRIVATE cxx_std_20)
+    vastloom_set_project_warnings(vastloom_deepseek_expert_pack_test)
+    vastloom_enable_sanitizers(vastloom_deepseek_expert_pack_test)
+    add_test(
+        NAME vastloom_deepseek_v4_expert_pack
+        COMMAND vastloom_deepseek_expert_pack_test
+    )
     add_executable(vastloom_cuda_driver_test
         tests/test_cuda_driver.cpp
     )
@@ -398,6 +410,12 @@ if(BUILD_TESTING AND VASTLOOM_BUILD_TESTS)
                 --vastloom $<TARGET_FILE:vastloom>
         )
         set_tests_properties(vastloom_range_artifact_cli PROPERTIES TIMEOUT 30)
+        add_test(
+            NAME vastloom_deepseek_v4_expert_pack_tool
+            COMMAND ${Python3_EXECUTABLE}
+                ${CMAKE_CURRENT_SOURCE_DIR}/tests/test_pack_deepseek_experts.py
+        )
+        set_tests_properties(vastloom_deepseek_v4_expert_pack_tool PROPERTIES TIMEOUT 60)
         add_test(
             NAME vastloom_watchdog_cli
             COMMAND ${Python3_EXECUTABLE}
@@ -609,6 +627,25 @@ if(BUILD_TESTING AND VASTLOOM_BUILD_TESTS)
                             --experts2 ${VASTLOOM_DEEPSEEK_V4_CHAIN_EXPERTS2}
                     )
                     set_tests_properties(vastloom_deepseek_v4_chain_probe PROPERTIES
+                        TIMEOUT 1800
+                        RUN_SERIAL TRUE
+                    )
+                    add_test(
+                        NAME vastloom_deepseek_v4_expert_pack_cli
+                        COMMAND ${Python3_EXECUTABLE}
+                            ${CMAKE_CURRENT_SOURCE_DIR}/tests/test_deepseek_expert_pack_cli.py
+                            --vastloom $<TARGET_FILE:vastloom>
+                            --model ${VASTLOOM_DEEPSEEK_V4_GGUF_CHECKPOINT}
+                            --globals ${VASTLOOM_DEEPSEEK_V4_CHAIN_GLOBALS}
+                            --trunk 0=${VASTLOOM_DEEPSEEK_V4_CHAIN_TRUNK0}
+                            --trunk 1=${VASTLOOM_DEEPSEEK_V4_CHAIN_TRUNK1}
+                            --trunk 2=${VASTLOOM_DEEPSEEK_V4_CHAIN_TRUNK2}
+                            --experts 0=${VASTLOOM_DEEPSEEK_V4_CHAIN_EXPERTS0}
+                            --experts 1=${VASTLOOM_DEEPSEEK_V4_CHAIN_EXPERTS1}
+                            --experts 2=${VASTLOOM_DEEPSEEK_V4_CHAIN_EXPERTS2}
+                            --tool ${CMAKE_CURRENT_SOURCE_DIR}/tools/pack_deepseek_experts.py
+                    )
+                    set_tests_properties(vastloom_deepseek_v4_expert_pack_cli PROPERTIES
                         TIMEOUT 1800
                         RUN_SERIAL TRUE
                     )

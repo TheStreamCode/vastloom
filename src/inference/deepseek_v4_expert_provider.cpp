@@ -559,6 +559,7 @@ public:
             entry->future.reset();
             if (!loaded) return loaded.error();
             entry->completed_logical_bytes = loaded.value().telemetry().logical_bytes;
+            const auto loaded_read_calls = loaded.value().telemetry().read_calls;
             const auto& binding = cache_->bindings_.at(expert_id);
             auto bound = bind_loaded_expert(binding, loaded.value(), true);
             if (!bound) return bound.error();
@@ -578,6 +579,12 @@ public:
                 cache_->telemetry_.resident_bytes,
                 binding.bundle.bytes);
             if (!resident_total) return resident_total.error();
+            if (loaded_read_calls > std::numeric_limits<std::size_t>::max() -
+                                       cache_->telemetry_.read_calls) {
+                return make_error(ErrorCode::resource_exhausted,
+                                  "DeepSeek expert read-call telemetry overflow",
+                                  block_prefix_);
+            }
             if (cache_->telemetry_.misses ==
                 std::numeric_limits<std::size_t>::max()) {
                 return make_error(ErrorCode::resource_exhausted,
@@ -594,6 +601,7 @@ public:
             }
             entry->installed = true;
             ++cache_->telemetry_.misses;
+            cache_->telemetry_.read_calls += loaded_read_calls;
             cache_->telemetry_.logical_bytes_read = logical_total.value();
             cache_->telemetry_.resident_bytes = resident_total.value();
             return expert;
@@ -866,6 +874,7 @@ Result<std::vector<DeepseekV4ResolvedExpert>> DeepseekV4BoundedExpertCache::reso
             auto loaded = model::load_expert_bundle(
                 binding.bundle, residency.value(), governor_, options_.load);
             if (!loaded) return loaded.error();
+            const auto loaded_read_calls = loaded.value().telemetry().read_calls;
 
             auto bound = bind_loaded_expert(binding, loaded.value(), false);
             if (!bound) return bound.error();
@@ -877,6 +886,11 @@ Result<std::vector<DeepseekV4ResolvedExpert>> DeepseekV4BoundedExpertCache::reso
             auto resident_total =
                 checked_add(telemetry_.resident_bytes, binding.bundle.bytes);
             if (!resident_total) return resident_total.error();
+            if (loaded_read_calls > std::numeric_limits<std::size_t>::max() - telemetry_.read_calls) {
+                return make_error(ErrorCode::resource_exhausted,
+                                  "DeepSeek expert read-call telemetry overflow",
+                                  options_.block_prefix);
+            }
             if (telemetry_.misses == std::numeric_limits<std::size_t>::max()) {
                 return make_error(ErrorCode::resource_exhausted,
                                   "DeepSeek expert cache miss telemetry overflow",
@@ -887,6 +901,7 @@ Result<std::vector<DeepseekV4ResolvedExpert>> DeepseekV4BoundedExpertCache::reso
                 CacheEntry{expert, residency.take_value(), tick_});
             result.push_back(std::move(expert));
             ++telemetry_.misses;
+            telemetry_.read_calls += loaded_read_calls;
             telemetry_.logical_bytes_read = logical_total.value();
             telemetry_.resident_bytes = resident_total.value();
         }

@@ -115,6 +115,7 @@ Result<LoadedExpert> load_prepared_expert_bundle(const ExpertBundle& bundle,
             (void)largest_range;
             std::vector<std::byte> destination(static_cast<std::size_t>(bundle.bytes));
             std::size_t cursor = 0U;
+            std::size_t read_calls = 0U;
             for (const auto& range : bundle.read_ranges) {
                 auto cancelled = cancellation_requested(options.cancelled);
                 if (!cancelled) return cancelled.error();
@@ -125,13 +126,18 @@ Result<LoadedExpert> load_prepared_expert_bundle(const ExpertBundle& bundle,
                 // Read straight into the published buffer. A bounce copy through a second
                 // scratch allocation was doubling every expert byte in RAM (about 2.37 GB per
                 // token) without changing the Governor staging reservation, which still bounds
-                // the largest range. Buffered on purpose: unbuffered reads of the same ranges
-                // were three times slower because the page cache already holds most recurrences.
+                // the largest range. Buffered is the default because unbuffered reads of the same
+                // small recurring ranges were three times slower when the page cache held them;
+                // `io_cache_mode` is the explicit bypass for cold/large or coalesced records.
                 const auto dest = std::span<std::byte>(destination).subspan(cursor, range_size);
-                auto read = options.read_session != nullptr
+                const bool use_session = options.io_cache_mode == io::IoCacheMode::buffered &&
+                                         options.read_session != nullptr;
+                auto read = use_session
                                 ? options.read_session->read_into(range.shard, range.offset, dest)
-                                : io::read_buffered_range_into(range.shard, range.offset, dest);
+                                : io::read_range_into(range.shard, range.offset, dest,
+                                                      options.io_cache_mode);
                 if (!read) return read.error();
+                ++read_calls;
                 cursor += range_size;
             }
             auto cancelled = cancellation_requested(options.cancelled);
@@ -151,6 +157,7 @@ Result<LoadedExpert> load_prepared_expert_bundle(const ExpertBundle& bundle,
             const auto completed = std::chrono::steady_clock::now();
             telemetry.logical_bytes = bundle.bytes;
             telemetry.range_count = bundle.read_ranges.size();
+            telemetry.read_calls = read_calls;
             telemetry.elapsed_ms = std::chrono::duration<double, std::milli>(
                                        completed - started)
                                        .count();

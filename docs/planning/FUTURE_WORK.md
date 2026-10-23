@@ -162,13 +162,40 @@ large, with near-tie divergence measured rather than hidden.
 - **DSpark / speculative decoding** stays out of scope until an execution loop exists; the
   historical feasibility work is archived.
 
+### F8 — Adopt the SSD-streaming peer-review findings
+
+A separate review of four public engines (Kimi K3 SSD streaming, DwarfStar/ds4, Colibri, WARP)
+identified four P0 improvements that fit Vastloom's existing architecture; the full analysis,
+evidence and "what not to copy" are in
+[`docs/research/SSD_STREAMING_PEER_REVIEW.md`](../research/SSD_STREAMING_PEER_REVIEW.md).
+
+1. **Coalesced, 4 KiB-aligned expert-bundle container**: one `pread` per expert (current artifacts
+   use three separate range files per expert), with the pinned GGUF range identity and SHA-256
+   manifest retained as provenance.
+2. **Adaptive I/O policy**: keep the measured buffered default for recurring small ranges and use
+   the existing bypass pool (`src/io/bounded_io_pool.cpp`) for cold/large or coalesced records;
+   publish a cold/warm A/B. The peer evidence includes Windows section-handle serialization and
+   O_DIRECT wins on some drives.
+3. **Learned expert placement**: persist per-expert routing heat across runs, auto-pin the hottest
+   experts in spare RAM/VRAM and repin at bounded turn boundaries with hysteresis; placement must
+   never change arithmetic.
+4. **Router-lookahead prefetch for learned layers**: predict layer L+1's experts from layer L's
+   post-attention state (Colibri reports 71.6% recall versus 41.3% for last-token repetition),
+   issue bounded readahead on a dedicated I/O thread, and keep it opt-in because hint-only
+   prefetch can be negative on a saturated disk.
+
+Each item needs the usual gate: bit-identical or oracle-verified outputs, exact read/byte counters,
+a dated report, and a measured win (or an explicit negative result) before it becomes a default.
+These are research directions, not active milestones.
+
 ## 4. What deliberately stays out of scope
 
 - Full 90.86 GB checkpoint download; IQ1/`UD-IQ1_S` execution; CUDA dense/attention kernels;
   speculative decoding; any new Qwen feature work.
 - Treating a 1–3-layer or partial-depth result as "the model works".
 - Throughput comparisons without recorded hardware, cache state and byte accounting.
-- Prediction of learned-router routes before the hidden state exists (it would fetch wrong bytes).
+- Using a predicted learned-router route as authority (prediction is allowed only for bounded
+  prefetch, never to choose which experts execute).
 
 ## 5. How to restart from a clean machine
 

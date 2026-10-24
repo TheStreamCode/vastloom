@@ -186,10 +186,10 @@ evidence and "what not to copy" are in
 
 **Status (2026-10-23):** items 1 and 2 are implemented and validated as an opt-in experiment in
 [`docs/reports/P0_EXPERT_PACK_IO_VALIDATION.md`](../reports/P0_EXPERT_PACK_IO_VALIDATION.md):
-one aligned read per expert, byte-identical outputs, read calls 54 → 18 (token 0) and 264 → 88
-(five-token prompt), with buffered/bypass modes. Warm-cache timings were neutral to slightly slower
-and bypass was slower; cold-cache and network-range measurements remain future work. Items 3 and 4
-are still future work.
+one aligned read per expert, byte-identical outputs, read calls 54 → 18 (token 0), 18 → 6
+(layer 0) and 264 → 88 (five-token prompt), with buffered/bypass modes and actual read-path
+counters. The direct-I/O proxy showed no wall-time win and bypass was slightly slower; a cold-cache
+reboot comparison remains future work. Items 3 and 4 are still future work.
 
 Each item needs the usual gate: bit-identical or oracle-verified outputs, exact read/byte counters,
 a dated report, and a measured win (or an explicit negative result) before it becomes a default.

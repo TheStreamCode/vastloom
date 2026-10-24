@@ -137,10 +137,11 @@ Verified in the working tree:
 
 Status (2026-10-23): items 1 and 2 are implemented as an opt-in experiment and validated in
 [`docs/reports/P0_EXPERT_PACK_IO_VALIDATION.md`](../reports/P0_EXPERT_PACK_IO_VALIDATION.md):
-one aligned read per expert, byte-identical outputs, read calls 54 → 18 (token 0) and 264 → 88
-(five-token prompt), buffered/bypass modes. Warm-cache timings were neutral to slightly slower and
-bypass was slower, so no speed claim is made; cold-cache and network-range measurements remain
-future work. Items 3 and 4 still need real measurements.
+one aligned read per expert, byte-identical outputs, read calls 54 → 18 (token 0), 18 → 6 (layer 0)
+and 264 → 88 (five-token prompt), with buffered/bypass modes and actual read-path counters. The
+direct-I/O proxy confirmed the bypass path delivered every requested read but showed no wall-time
+win; warm-cache timings were neutral to slightly slower. No speed claim is made; a cold-cache
+reboot comparison remains future work. Items 3 and 4 still need real measurements.
 
 1. **Derived expert-bundle container with one aligned read per expert.**
    Pack each expert's three tensors into one contiguous, 4 KiB-aligned record in a derived artifact

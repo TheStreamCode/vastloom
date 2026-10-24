@@ -133,12 +133,15 @@
   `docs/reports/P0_EXPERT_PACK_IO_VALIDATION.md` implements the two P0 items from the SSD-streaming
   peer review: a derived `vastloom.deepseek-v4-expert-pack.v1` container with one contiguous,
   4 KiB-aligned record per expert (same tensors/order, source-manifest and per-range SHA-256 kept)
-  and an opt-in `--io-cache buffered|bypass|auto` path on `deepseek-chain-probe`. Token 0 now reads
-  18 ranges instead of 54 and the five-token prompt 88 instead of 264, with logits and hidden dumps
-  byte-identical to the v1 artifact path (argmax 86,051 and 20,267). Warm-cache timings were neutral
-  to slightly slower for token 0 and about 3.7% faster for the five-token prompt, both inside the
-  run-to-run spread; bypass was slower on the warm cache. No throughput or cold-cache claim is made.
-  Placement learning (P0.3) and router-lookahead (P0.4) remain future work.
+  and an opt-in `--io-cache buffered|bypass|auto` path on `deepseek-chain-probe` and
+  `deepseek-layer-probe`. Token 0 now reads 18 ranges instead of 54, layer 0 6 instead of 18 and the
+  five-token prompt 88 instead of 264, with logits and hidden dumps byte-identical to the v1 artifact
+  path (argmax 86,051 / 30,528 / 20,267). The loader reports the path that actually delivered each
+  read, so buffered fallbacks are visible; the direct-I/O proxy (cache bypassed, no reboot) showed
+  zero fallbacks and no wall-time win, and bypass was slightly slower on both prompts. Warm-cache
+  timings were neutral to slightly slower for token 0 and about 3.7% faster for the five-token
+  prompt, both inside the run-to-run spread. No throughput or cold-cache claim is made. Placement
+  learning (P0.3) and router-lookahead (P0.4) remain future work.
 - **Closing note**: the remaining items (VRAM *payload* tier, ratio-128 layers,
   learned-router/full-depth execution) are not planned in this concluded research record; they
   need new subsystems or the full checkpoint, and no further milestones are tracked. No

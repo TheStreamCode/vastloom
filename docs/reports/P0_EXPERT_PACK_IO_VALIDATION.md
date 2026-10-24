@@ -23,11 +23,15 @@ records the result, including the parts that did not improve.
    `experts-L{layer}.bin` + `vastloom-expert-pack.json` atomically. No weights are downloaded.
 4. **Loader I/O mode and read telemetry**: `ExpertLoadOptions` now carries
    `io::IoCacheMode`; the loader uses the existing `read_range_into` bypass path when requested and
-   records `read_calls`. The chain JSON exposes `expert_read_calls`, `expert_source`,
+   records `read_calls`, `bypass_read_calls` and `buffered_read_calls`. The read API reports the
+   path that actually delivered each read, so a silent buffered fallback is visible instead of being
+   assumed. The chain and layer-probe JSON expose the counters plus `expert_source`,
    `expert_pack_records`, `expert_pack_bytes`, `io_cache_mode` and per-layer `io_cache_modes`.
 5. **CLI**: `deepseek-chain-probe` accepts `--expert-pack L=PATH` as an alternative to
-   `--experts L=PATH`, and `--io-cache buffered|bypass|auto`. `auto` resolves to bypass for packs
-   and to buffered for v1 artifacts; the v1 default is unchanged.
+   `--experts L=PATH`, and `--io-cache buffered|bypass|auto`. `deepseek-layer-probe` accepts the
+   same options, with either `MODEL TRUNK EXPERT GLOBALS` or `MODEL TRUNK GLOBALS --expert-pack`.
+   `auto` resolves to bypass for packs and to buffered for v1 artifacts; the v1 default is
+   unchanged.
 
 ## Correctness
 
@@ -48,6 +52,10 @@ The packs used here: token 0 has three packs of **45,219,840 B** each (6 records
 five-token prompt has packs of **218,562,560 B / 226,099,200 B / 218,562,560 B** (29/30/29 records,
 88 unique bundles total, 663,224,320 B), matching the v1 expert-byte total.
 
+The single-layer probe was checked the same way: v1 `deepseek-layer-probe` produced logits with
+SHA-256 `B201386B…C2BE239` and the pack run produced the same bytes, argmax 30,528, with read calls
+**18 → 6** (one per expert) and all six reads delivered through the requested bypass path.
+
 ## Read calls
 
 The pack changes the number of range reads, not the bytes read:
@@ -58,6 +66,8 @@ The pack changes the number of range reads, not the bytes read:
 | token 0, 3 layers | expert pack | 18 | 18 | 1 |
 | prompt `[0,1,2,3,4]`, 3 layers | v1 artifacts | 88 | 264 | 3 |
 | prompt `[0,1,2,3,4]`, 3 layers | expert pack | 88 | 88 | 1 |
+| layer 0, 1 layer | v1 artifact | 6 | 18 | 3 |
+| layer 0, 1 layer | expert pack | 6 | 6 | 1 |
 
 ## Warm-cache timing (not a throughput claim)
 
@@ -76,8 +86,33 @@ warm cache, consistent with the in-tree measurement that small recurring ranges 
 **No speed claim is made.** The result that is stable and attributable is the 3× read-call
 reduction and the unchanged outputs.
 
-A cold-cache or network-range comparison is the next experiment; it needs a controlled cache drop
-(or a fresh boot) and, for the on-demand path, the D4 fetch implementation. Neither was done here.
+## Direct-I/O proxy (no cache drop)
+
+The reference machine is not elevated, so a system-wide standby-list purge is not available; this
+run is a **direct-I/O proxy**, not a reboot-cold measurement. The new counters prove which path
+delivered the bytes: in every bypass run below, `bypass_read_calls == read_calls` and
+`buffered_read_calls == 0`, so the operating system did not serve those reads from the file cache
+and no silent fallback occurred.
+
+| Prompt | Config | Read calls | Actual bypass / buffered | Mean wall time |
+|---|---|---|---|---|
+| token 0 | v1 buffered | 54 | 0 / 54 | 2,127 ms |
+| token 0 | v1 bypass | 54 | 54 / 0 | 2,165 ms |
+| token 0 | pack buffered | 18 | 0 / 18 | 2,104 ms |
+| token 0 | pack bypass | 18 | 18 / 0 | 2,117 ms |
+| `[0,1,2,3,4]` | v1 buffered | 264 | 0 / 264 | 5,233 ms |
+| `[0,1,2,3,4]` | v1 bypass | 264 | 264 / 0 | 5,529 ms |
+| `[0,1,2,3,4]` | pack buffered | 88 | 0 / 88 | 5,202 ms |
+| `[0,1,2,3,4]` | pack bypass | 88 | 88 / 0 | 5,335 ms |
+
+Even with the cache explicitly bypassed, the pack's 3× read-call reduction does not translate into
+a wall-time win in this workload: the device delivers the same bytes and compute dominates. The
+bypass path is slightly slower on both prompts. This is a negative result for "one read per expert
+is a speed lever at this scale", not a failure of the mechanism; the peers operate at model sizes
+where tens of thousands of small reads per token dominate.
+
+A cold-cache reboot comparison remains the missing experiment. It needs a controlled cache drop
+(or a fresh boot), which the reference machine cannot do without elevation.
 
 ## Tests
 
@@ -87,7 +122,11 @@ A cold-cache or network-range comparison is the next experiment; it needs a cont
 - `vastloom_deepseek_v4_expert_pack_tool` (Python): aligned records, per-record hashes, multi-plan
   merge, mismatched plan/artifact, missing routing authority, existing output/`--force`. PASS.
 - `vastloom_deepseek_v4_expert_pack_cli` (opt-in, real artifacts): token 0, three layers, v1 vs pack
-  buffered and bypass; byte-identical dumps and expected read counts. PASS (449.96 s in debug).
+  buffered and bypass, plus the single-layer probe; byte-identical dumps and expected read counts.
+  PASS.
+- `vastloom_deepseek_v4_expert_pack_cli_multi` (opt-in, real artifacts): the five-token union
+  (15 artifacts), v1 vs pack buffered and bypass; byte-identical dumps, read calls 264 → 88, and
+  actual bypass path on every requested read. PASS.
 - Existing core tests: release 11/11, debug 11/11 pass. The default v1 chain behavior is unchanged.
 - Release and debug builds pass with warnings-as-errors.
 
@@ -98,9 +137,12 @@ A cold-cache or network-range comparison is the next experiment; it needs a cont
 - The pack is opt-in; the default remains the v1 artifact path with buffered reads.
 - No checkpoint or imported artifact was modified; packs are derived under `build/` and are not
   committed.
-- `io_cache_mode` in the JSON is the requested mode; `read_range_into` may fall back to a buffered
-  read when the platform rejects an unbuffered request, and this experiment did not add a separate
-  per-read fallback counter. The read-call reduction does not depend on that path.
+- The read counters report the path that actually delivered each read. In the bypass proxy runs,
+  every requested read was delivered by the bypass path (`buffered_read_calls == 0`); the loader
+  still keeps the documented buffered fallback for platforms that refuse an unbuffered read.
+- The cold-cache measurement is still missing: the reference process is not elevated, so the
+  system standby list cannot be purged safely. The direct-I/O proxy above bypasses the file cache
+  but is not a fresh-boot measurement.
 - This experiment does not change the project's measured claims: one real layer and a three-layer
   hash-routed chain, no full model, no throughput result, no VRAM payload tier.
 
@@ -117,10 +159,15 @@ build\release\vastloom.exe deepseek-chain-probe <metadata-store> <globals> --lay
   --trunk 0=<l0-trunk> --trunk 1=<l1-trunk> --trunk 2=<l2-trunk> `
   --expert-pack 0=<pack-L0> --expert-pack 1=<pack-L1> --expert-pack 2=<pack-L2> `
   --io-cache bypass --dump-logits pack-logits.f32 --dump-hidden pack-hidden.f32 --json
+
+build\release\vastloom.exe deepseek-layer-probe <metadata-store> <l0-trunk> <globals> `
+  --expert-pack <pack-L0> --io-cache bypass --token 0 `
+  --dump-logits layer-pack-logits.f32 --json
 ```
 
-Run the same command once with `--experts L=PATH` and compare the dumps byte for byte, then run the
-opt-in CTest keyed by the existing `VASTLOOM_DEEPSEEK_V4_CHAIN_*` variables.
+Run the same commands once with `--experts L=PATH` and compare the dumps byte for byte, then run the
+opt-in CTests keyed by the existing `VASTLOOM_DEEPSEEK_V4_CHAIN_*` variables (the multi-token test
+also needs the `..._EXPERTS2/3/4_*` variables).
 
 ## Files
 

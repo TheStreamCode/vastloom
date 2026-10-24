@@ -71,6 +71,24 @@ set(VASTLOOM_DEEPSEEK_V4_CHAIN_EXPERTS1_1 "" CACHE PATH
     "Optional token-1 layer-1 expert artifact for the chain oracle test")
 set(VASTLOOM_DEEPSEEK_V4_CHAIN_EXPERTS1_2 "" CACHE PATH
     "Optional token-1 layer-2 expert artifact for the chain oracle test")
+set(VASTLOOM_DEEPSEEK_V4_CHAIN_EXPERTS2_0 "" CACHE PATH
+    "Optional token-2 layer-0 expert artifact for the multi-token pack test")
+set(VASTLOOM_DEEPSEEK_V4_CHAIN_EXPERTS2_1 "" CACHE PATH
+    "Optional token-2 layer-1 expert artifact for the multi-token pack test")
+set(VASTLOOM_DEEPSEEK_V4_CHAIN_EXPERTS2_2 "" CACHE PATH
+    "Optional token-2 layer-2 expert artifact for the multi-token pack test")
+set(VASTLOOM_DEEPSEEK_V4_CHAIN_EXPERTS3_0 "" CACHE PATH
+    "Optional token-3 layer-0 expert artifact for the multi-token pack test")
+set(VASTLOOM_DEEPSEEK_V4_CHAIN_EXPERTS3_1 "" CACHE PATH
+    "Optional token-3 layer-1 expert artifact for the multi-token pack test")
+set(VASTLOOM_DEEPSEEK_V4_CHAIN_EXPERTS3_2 "" CACHE PATH
+    "Optional token-3 layer-2 expert artifact for the multi-token pack test")
+set(VASTLOOM_DEEPSEEK_V4_CHAIN_EXPERTS4_0 "" CACHE PATH
+    "Optional token-4 layer-0 expert artifact for the multi-token pack test")
+set(VASTLOOM_DEEPSEEK_V4_CHAIN_EXPERTS4_1 "" CACHE PATH
+    "Optional token-4 layer-1 expert artifact for the multi-token pack test")
+set(VASTLOOM_DEEPSEEK_V4_CHAIN_EXPERTS4_2 "" CACHE PATH
+    "Optional token-4 layer-2 expert artifact for the multi-token pack test")
 set(VASTLOOM_DEEPSEEK_V4_GGUF_CHECKPOINT "" CACHE PATH
     "Optional pinned DeepSeek V4 Flash 0731 UD-IQ1_S imported checkpoint")
 set(VASTLOOM_DEEPSEEK_V4_IQ1S_SLICE "" CACHE FILEPATH
@@ -649,6 +667,50 @@ if(BUILD_TESTING AND VASTLOOM_BUILD_TESTS)
                         TIMEOUT 1800
                         RUN_SERIAL TRUE
                     )
+                    if(VASTLOOM_DEEPSEEK_V4_CHAIN_EXPERTS1_0 AND
+                       VASTLOOM_DEEPSEEK_V4_CHAIN_EXPERTS1_1 AND
+                       VASTLOOM_DEEPSEEK_V4_CHAIN_EXPERTS1_2 AND
+                       VASTLOOM_DEEPSEEK_V4_CHAIN_EXPERTS2_0 AND
+                       VASTLOOM_DEEPSEEK_V4_CHAIN_EXPERTS2_1 AND
+                       VASTLOOM_DEEPSEEK_V4_CHAIN_EXPERTS2_2 AND
+                       VASTLOOM_DEEPSEEK_V4_CHAIN_EXPERTS3_0 AND
+                       VASTLOOM_DEEPSEEK_V4_CHAIN_EXPERTS3_1 AND
+                       VASTLOOM_DEEPSEEK_V4_CHAIN_EXPERTS3_2 AND
+                       VASTLOOM_DEEPSEEK_V4_CHAIN_EXPERTS4_0 AND
+                       VASTLOOM_DEEPSEEK_V4_CHAIN_EXPERTS4_1 AND
+                       VASTLOOM_DEEPSEEK_V4_CHAIN_EXPERTS4_2)
+                        add_test(
+                            NAME vastloom_deepseek_v4_expert_pack_cli_multi
+                            COMMAND ${Python3_EXECUTABLE}
+                                ${CMAKE_CURRENT_SOURCE_DIR}/tests/test_deepseek_expert_pack_cli.py
+                                --vastloom $<TARGET_FILE:vastloom>
+                                --model ${VASTLOOM_DEEPSEEK_V4_GGUF_CHECKPOINT}
+                                --globals ${VASTLOOM_DEEPSEEK_V4_CHAIN_GLOBALS}
+                                --trunk 0=${VASTLOOM_DEEPSEEK_V4_CHAIN_TRUNK0}
+                                --trunk 1=${VASTLOOM_DEEPSEEK_V4_CHAIN_TRUNK1}
+                                --trunk 2=${VASTLOOM_DEEPSEEK_V4_CHAIN_TRUNK2}
+                                --experts-token 0:0=${VASTLOOM_DEEPSEEK_V4_CHAIN_EXPERTS0}
+                                --experts-token 0:1=${VASTLOOM_DEEPSEEK_V4_CHAIN_EXPERTS1}
+                                --experts-token 0:2=${VASTLOOM_DEEPSEEK_V4_CHAIN_EXPERTS2}
+                                --experts-token 1:0=${VASTLOOM_DEEPSEEK_V4_CHAIN_EXPERTS1_0}
+                                --experts-token 1:1=${VASTLOOM_DEEPSEEK_V4_CHAIN_EXPERTS1_1}
+                                --experts-token 1:2=${VASTLOOM_DEEPSEEK_V4_CHAIN_EXPERTS1_2}
+                                --experts-token 2:0=${VASTLOOM_DEEPSEEK_V4_CHAIN_EXPERTS2_0}
+                                --experts-token 2:1=${VASTLOOM_DEEPSEEK_V4_CHAIN_EXPERTS2_1}
+                                --experts-token 2:2=${VASTLOOM_DEEPSEEK_V4_CHAIN_EXPERTS2_2}
+                                --experts-token 3:0=${VASTLOOM_DEEPSEEK_V4_CHAIN_EXPERTS3_0}
+                                --experts-token 3:1=${VASTLOOM_DEEPSEEK_V4_CHAIN_EXPERTS3_1}
+                                --experts-token 3:2=${VASTLOOM_DEEPSEEK_V4_CHAIN_EXPERTS3_2}
+                                --experts-token 4:0=${VASTLOOM_DEEPSEEK_V4_CHAIN_EXPERTS4_0}
+                                --experts-token 4:1=${VASTLOOM_DEEPSEEK_V4_CHAIN_EXPERTS4_1}
+                                --experts-token 4:2=${VASTLOOM_DEEPSEEK_V4_CHAIN_EXPERTS4_2}
+                                --tool ${CMAKE_CURRENT_SOURCE_DIR}/tools/pack_deepseek_experts.py
+                        )
+                        set_tests_properties(vastloom_deepseek_v4_expert_pack_cli_multi PROPERTIES
+                            TIMEOUT 3600
+                            RUN_SERIAL TRUE
+                        )
+                    endif()
                 endif()
                 if(VASTLOOM_DEEPSEEK_V4_ORACLE_PYTHON AND
                    VASTLOOM_DEEPSEEK_V4_CHAIN_GLOBALS AND

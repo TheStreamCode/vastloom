@@ -560,6 +560,8 @@ public:
             if (!loaded) return loaded.error();
             entry->completed_logical_bytes = loaded.value().telemetry().logical_bytes;
             const auto loaded_read_calls = loaded.value().telemetry().read_calls;
+            const auto loaded_bypass_read_calls = loaded.value().telemetry().bypass_read_calls;
+            const auto loaded_buffered_read_calls = loaded.value().telemetry().buffered_read_calls;
             const auto& binding = cache_->bindings_.at(expert_id);
             auto bound = bind_loaded_expert(binding, loaded.value(), true);
             if (!bound) return bound.error();
@@ -602,6 +604,8 @@ public:
             entry->installed = true;
             ++cache_->telemetry_.misses;
             cache_->telemetry_.read_calls += loaded_read_calls;
+            cache_->telemetry_.bypass_read_calls += loaded_bypass_read_calls;
+            cache_->telemetry_.buffered_read_calls += loaded_buffered_read_calls;
             cache_->telemetry_.logical_bytes_read = logical_total.value();
             cache_->telemetry_.resident_bytes = resident_total.value();
             return expert;
@@ -875,6 +879,8 @@ Result<std::vector<DeepseekV4ResolvedExpert>> DeepseekV4BoundedExpertCache::reso
                 binding.bundle, residency.value(), governor_, options_.load);
             if (!loaded) return loaded.error();
             const auto loaded_read_calls = loaded.value().telemetry().read_calls;
+            const auto loaded_bypass_read_calls = loaded.value().telemetry().bypass_read_calls;
+            const auto loaded_buffered_read_calls = loaded.value().telemetry().buffered_read_calls;
 
             auto bound = bind_loaded_expert(binding, loaded.value(), false);
             if (!bound) return bound.error();
@@ -902,6 +908,8 @@ Result<std::vector<DeepseekV4ResolvedExpert>> DeepseekV4BoundedExpertCache::reso
             result.push_back(std::move(expert));
             ++telemetry_.misses;
             telemetry_.read_calls += loaded_read_calls;
+            telemetry_.bypass_read_calls += loaded_bypass_read_calls;
+            telemetry_.buffered_read_calls += loaded_buffered_read_calls;
             telemetry_.logical_bytes_read = logical_total.value();
             telemetry_.resident_bytes = resident_total.value();
         }

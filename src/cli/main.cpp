@@ -327,11 +327,13 @@ void print_help() {
         << "      it fits the safe RAM budget, before allocating anything.\n\n"
         << "  deepseek-layer-probe MODEL_DIRECTORY TRUNK_ARTIFACT EXPERT_ARTIFACT GLOBAL_ARTIFACT"
            " [--token ID] [--cuda-experts] [--gpu-limit MIB] [--cpu-only]\n"
+        << "      MODEL_DIRECTORY TRUNK_ARTIFACT GLOBAL_ARTIFACT --expert-pack PATH [--io-cache MODE]\n"
         << "      [--dump-logits PATH] [--dump-hidden PATH] [--dump-trace PATH] [--json]\n"
-        << "      Execute one real layer from imported payload. This is one layer of 43, not the\n"
-        << "      model's output; the logits it prints are the first layer's alone. --cuda-experts\n"
-        << "      keeps the selected expert matrices in VRAM (bounded by --gpu-limit) and falls\n"
-        << "      back to the CPU per matrix; the default path is CPU-only.\n\n"
+        << "      Execute one real layer from imported payload. The --expert-pack form reads one\n"
+        << "      aligned record per expert and accepts --io-cache buffered|bypass|auto. This is\n"
+        << "      one layer of 43, not the model's output; the logits it prints are the first\n"
+        << "      layer's alone. --cuda-experts keeps the selected expert matrices in VRAM (bounded\n"
+        << "      by --gpu-limit) and falls back to the CPU per matrix; the default is CPU-only.\n\n"
         << "  deepseek-chain-probe MODEL_DIRECTORY GLOBAL_ARTIFACT --layers N --tokens CSV\n"
         << "      --trunk L=PATH (--experts L=PATH | --expert-pack L=PATH) [--expert-pack ...]\n"
         << "      [--io-cache buffered|bypass|auto]\n"
@@ -3325,25 +3327,27 @@ int command_deepseek_gguf_global_bind(const std::vector<std::string>& args) {
 // kernels on real payload, with the router choosing the experts.
 int command_deepseek_layer_probe(const std::vector<std::string>& args) {
     const bool json = has_flag(args, "--json");
+    const bool has_expert_pack = option_value(args, "--expert-pack").has_value();
+    const std::size_t positional_count = has_expert_pack ? 3U : 4U;
     auto valid = validate_options(
-        args, 4U,
+        args, positional_count,
         {"--token", "--context", "--batch-size", "--gpu-limit", "--gpu-reserve", "--dump-logits",
-         "--dump-hidden", "--dump-trace"},
+         "--dump-hidden", "--dump-trace", "--expert-pack", "--io-cache"},
         {"--json", "--cuda-experts", "--cpu-only"});
     if (!valid) return print_error(valid.error(), json);
-    if (args.size() < 4U) {
+    if (args.size() < positional_count) {
         return print_error(
             vastloom::make_error(
                 vastloom::ErrorCode::invalid_argument,
-                "deepseek-layer-probe requires MODEL_DIRECTORY TRUNK_ARTIFACT EXPERT_ARTIFACT "
-                "GLOBAL_ARTIFACT"),
+                "deepseek-layer-probe requires MODEL_DIRECTORY TRUNK_ARTIFACT "
+                "(EXPERT_ARTIFACT GLOBAL_ARTIFACT | GLOBAL_ARTIFACT --expert-pack PATH)"),
             json);
     }
-    for (std::size_t index = 0U; index < 4U; ++index) {
+    for (std::size_t index = 0U; index < positional_count; ++index) {
         if (vastloom::util::starts_with(args[index], "--")) {
             return print_error(
                 vastloom::make_error(vastloom::ErrorCode::invalid_argument,
-                                     "deepseek-layer-probe requires four directories first"),
+                                     "deepseek-layer-probe requires its directories first"),
                 json);
         }
     }
@@ -3376,6 +3380,15 @@ int command_deepseek_layer_probe(const std::vector<std::string>& args) {
     const auto dump_logits = option_path(args, "--dump-logits", {});
     const auto dump_hidden = option_path(args, "--dump-hidden", {});
     const auto dump_trace = option_path(args, "--dump-trace", {});
+    const std::string io_cache_requested =
+        option_value(args, "--io-cache").value_or(has_expert_pack ? "auto" : "buffered");
+    if (io_cache_requested != "auto" && io_cache_requested != "buffered" &&
+        io_cache_requested != "bypass") {
+        return print_error(vastloom::make_error(vastloom::ErrorCode::invalid_argument,
+                                                "--io-cache must be auto, buffered or bypass",
+                                                io_cache_requested),
+                           json);
+    }
 
     const auto checkpoint_root = cli_path(args[0]);
     auto hardware = vastloom::hardware::HardwareProbe::collect(checkpoint_root);
@@ -3399,7 +3412,7 @@ int command_deepseek_layer_probe(const std::vector<std::string>& args) {
     if (!config) return print_error(config.error(), json);
 
     std::vector<vastloom::model::RangeArtifact> artifacts;
-    for (std::size_t index = 1U; index < 4U; ++index) {
+    for (std::size_t index = 1U; index < positional_count; ++index) {
         auto artifact = vastloom::model::verify_range_artifact(cli_path(args[index]));
         if (!artifact) return print_error(artifact.error(), json);
         artifacts.push_back(artifact.take_value());
@@ -3407,6 +3420,30 @@ int command_deepseek_layer_probe(const std::vector<std::string>& args) {
     auto relocated = vastloom::inference::deepseek_v4_relocate_catalog_to_artifacts(
         report.value().catalog, artifacts);
     if (!relocated) return print_error(relocated.error(), json);
+
+    std::string expert_source = "range-artifacts";
+    std::size_t expert_pack_records = 0U;
+    vastloom::ByteCount expert_pack_bytes = 0U;
+    std::string io_cache_mode =
+        io_cache_requested == "bypass" ? "bypass" : "buffered";
+    if (has_expert_pack) {
+        auto pack = vastloom::inference::verify_deepseek_v4_expert_pack(
+            cli_path(*option_value(args, "--expert-pack")), report.value(), 0U);
+        if (!pack) return print_error(pack.error(), json);
+        auto applied = vastloom::inference::apply_deepseek_v4_expert_pack(
+            relocated.value().catalog, pack.value());
+        if (!applied) return print_error(applied.error(), json);
+        if (applied.value() != pack.value().records.size()) {
+            return print_error(
+                vastloom::make_error(vastloom::ErrorCode::integrity_error,
+                                     "expert pack did not apply every record"),
+                json);
+        }
+        expert_source = "expert-pack";
+        expert_pack_records = pack.value().records.size();
+        expert_pack_bytes = pack.value().payload_bytes;
+        io_cache_mode = io_cache_requested == "buffered" ? "buffered" : "bypass";
+    }
 
     vastloom::safety::ResourceGovernor governor(policy.value().resources);
 
@@ -3439,7 +3476,7 @@ int command_deepseek_layer_probe(const std::vector<std::string>& args) {
     auto global_plan = vastloom::inference::build_deepseek_v4_global_tensor_plan(report.value());
     if (!global_plan) return print_error(global_plan.error(), json);
     auto global_binding = vastloom::inference::bind_deepseek_v4_global_range_artifact(
-        artifacts[2], report.value(), global_plan.value(), spec);
+        artifacts.back(), report.value(), global_plan.value(), spec);
     if (!global_binding) return print_error(global_binding.error(), json);
     auto global_set_id = vastloom::inference::deepseek_v4_bound_global_tensor_set_logical_id(
         global_binding.value());
@@ -3469,6 +3506,9 @@ int command_deepseek_layer_probe(const std::vector<std::string>& args) {
     cache_options.block_prefix = "layers.0.ffn";
     cache_options.max_cached_experts = 6U;
     cache_options.max_experts_per_request = 6U;
+    cache_options.load.io_cache_mode =
+        io_cache_mode == "bypass" ? vastloom::io::IoCacheMode::bypass
+                                  : vastloom::io::IoCacheMode::buffered;
     auto cache = vastloom::inference::DeepseekV4BoundedExpertCache::create(
         expert_bindings.take_value(), governor, cache_options);
     if (!cache) return print_error(cache.error(), json);
@@ -3642,7 +3682,14 @@ int command_deepseek_layer_probe(const std::vector<std::string>& args) {
         std::cout << "],\"expert_bytes_read\":" << snapshot.logical_bytes_read
                   << ",\"expert_misses\":" << snapshot.misses
                   << ",\"expert_read_calls\":" << snapshot.read_calls
-                  << ",\"trunk_bytes\":" << trunk_tensors.value().payload_bytes()
+                  << ",\"expert_bypass_read_calls\":" << snapshot.bypass_read_calls
+                  << ",\"expert_buffered_read_calls\":" << snapshot.buffered_read_calls
+                  << ",\"expert_source\":\"" << expert_source
+                  << "\",\"expert_pack_records\":" << expert_pack_records
+                  << ",\"expert_pack_bytes\":" << expert_pack_bytes
+                  << ",\"io_cache_mode\":\"" << io_cache_requested
+                  << "\",\"io_cache_resolved\":\"" << io_cache_mode
+                  << "\",\"trunk_bytes\":" << trunk_tensors.value().payload_bytes()
                   << ",\"global_bytes\":" << global_tensors.value().payload_bytes()
                   << ",\"relocated_tensors\":" << relocated.value().relocated_tensors
                   << ",\"relocated_expert_bundles\":" << relocated.value().relocated_expert_bundles
@@ -4385,6 +4432,8 @@ int command_deepseek_chain_probe(const std::vector<std::string>& args) {
     std::uint64_t cache_evictions = 0U;
     std::size_t cache_hits = 0U;
     std::size_t expert_read_calls = 0U;
+    std::size_t expert_bypass_read_calls = 0U;
+    std::size_t expert_buffered_read_calls = 0U;
     for (const auto& cache : caches) {
         const auto snapshot = cache->snapshot();
         expert_bytes_read += snapshot.logical_bytes_read;
@@ -4392,6 +4441,8 @@ int command_deepseek_chain_probe(const std::vector<std::string>& args) {
         cache_evictions += snapshot.evictions;
         cache_hits += snapshot.hits;
         expert_read_calls += snapshot.read_calls;
+        expert_bypass_read_calls += snapshot.bypass_read_calls;
+        expert_buffered_read_calls += snapshot.buffered_read_calls;
     }
     const auto packed_layers = static_cast<std::size_t>(
         std::count(expert_sources.begin(), expert_sources.end(), std::string("expert-pack")));
@@ -4440,6 +4491,8 @@ int command_deepseek_chain_probe(const std::vector<std::string>& args) {
                   << ",\"expert_cache_hits\":" << cache_hits
                   << ",\"expert_cache_evictions\":" << cache_evictions
                   << ",\"expert_read_calls\":" << expert_read_calls
+                  << ",\"expert_bypass_read_calls\":" << expert_bypass_read_calls
+                  << ",\"expert_buffered_read_calls\":" << expert_buffered_read_calls
                   << ",\"expert_source\":\"" << expert_source
                   << "\",\"expert_pack_records\":" << expert_pack_records
                   << ",\"expert_pack_bytes\":" << expert_pack_bytes

@@ -239,7 +239,9 @@ std::string_view to_string(IoCacheMode mode) noexcept {
 Result<void> read_range_into(const std::filesystem::path& path,
                              ByteCount offset,
                              std::span<std::byte> destination,
-                             IoCacheMode cache_mode) {
+                             IoCacheMode cache_mode,
+                             IoCacheMode* actual_mode) {
+    if (actual_mode != nullptr) *actual_mode = IoCacheMode::buffered;
     if (path.empty() || destination.empty()) {
         return make_error(ErrorCode::invalid_argument,
                           "Range read requires a path and destination");
@@ -254,6 +256,7 @@ Result<void> read_range_into(const std::filesystem::path& path,
     if (!read || read.value() != destination.size()) {
         return read_buffered_range_into(path, offset, destination);
     }
+    if (actual_mode != nullptr) *actual_mode = IoCacheMode::bypass;
     return {};
 }
 

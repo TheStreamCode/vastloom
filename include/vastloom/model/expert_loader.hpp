@@ -40,6 +40,8 @@ struct ExpertLoadTelemetry {
     ByteCount logical_bytes{0};
     std::size_t range_count{0};
     std::size_t read_calls{0};
+    std::size_t bypass_read_calls{0};
+    std::size_t buffered_read_calls{0};
     std::size_t request_sequence{0};
     double queue_ms{0.0};
     double service_ms{0.0};

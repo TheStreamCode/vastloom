@@ -66,6 +66,8 @@ struct DeepseekV4ExpertCacheSnapshot {
     std::size_t abandoned_loads{0U};
     ByteCount logical_bytes_read{0U};
     std::size_t read_calls{0U};
+    std::size_t bypass_read_calls{0U};
+    std::size_t buffered_read_calls{0U};
     ByteCount wasted_prefetch_bytes{0U};
     bool telemetry_overflow{false};
 };

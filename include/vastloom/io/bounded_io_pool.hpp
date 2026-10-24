@@ -52,7 +52,9 @@ private:
     std::unique_ptr<Impl> impl_;
 };
 
-// Reads a range with the caller's choice of page-cache behaviour.
+// Reads a range with the caller's choice of page-cache behaviour. When `actual_mode` is non-null it
+// receives the path that delivered the bytes: a bypass request that the platform refuses (short
+// read, alignment rejection) falls back to a buffered read and is reported as such.
 //
 // Expert payload is the reason this is exposed. A decode step reads gigabytes of expert weights
 // that will not be read again - a different token routes to different experts - so filling the page
@@ -63,7 +65,8 @@ private:
 [[nodiscard]] Result<void> read_range_into(const std::filesystem::path& path,
                                            ByteCount offset,
                                            std::span<std::byte> destination,
-                                           IoCacheMode cache_mode);
+                                           IoCacheMode cache_mode,
+                                           IoCacheMode* actual_mode = nullptr);
 
 enum class IoFaultKind : std::uint8_t {
     none,

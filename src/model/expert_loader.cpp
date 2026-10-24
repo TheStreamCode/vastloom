@@ -116,6 +116,8 @@ Result<LoadedExpert> load_prepared_expert_bundle(const ExpertBundle& bundle,
             std::vector<std::byte> destination(static_cast<std::size_t>(bundle.bytes));
             std::size_t cursor = 0U;
             std::size_t read_calls = 0U;
+            std::size_t bypass_read_calls = 0U;
+            std::size_t buffered_read_calls = 0U;
             for (const auto& range : bundle.read_ranges) {
                 auto cancelled = cancellation_requested(options.cancelled);
                 if (!cancelled) return cancelled.error();
@@ -132,12 +134,18 @@ Result<LoadedExpert> load_prepared_expert_bundle(const ExpertBundle& bundle,
                 const auto dest = std::span<std::byte>(destination).subspan(cursor, range_size);
                 const bool use_session = options.io_cache_mode == io::IoCacheMode::buffered &&
                                          options.read_session != nullptr;
+                io::IoCacheMode actual_mode = io::IoCacheMode::buffered;
                 auto read = use_session
                                 ? options.read_session->read_into(range.shard, range.offset, dest)
                                 : io::read_range_into(range.shard, range.offset, dest,
-                                                      options.io_cache_mode);
+                                                      options.io_cache_mode, &actual_mode);
                 if (!read) return read.error();
                 ++read_calls;
+                if (actual_mode == io::IoCacheMode::bypass) {
+                    ++bypass_read_calls;
+                } else {
+                    ++buffered_read_calls;
+                }
                 cursor += range_size;
             }
             auto cancelled = cancellation_requested(options.cancelled);
@@ -158,6 +166,8 @@ Result<LoadedExpert> load_prepared_expert_bundle(const ExpertBundle& bundle,
             telemetry.logical_bytes = bundle.bytes;
             telemetry.range_count = bundle.read_ranges.size();
             telemetry.read_calls = read_calls;
+            telemetry.bypass_read_calls = bypass_read_calls;
+            telemetry.buffered_read_calls = buffered_read_calls;
             telemetry.elapsed_ms = std::chrono::duration<double, std::milli>(
                                        completed - started)
                                        .count();

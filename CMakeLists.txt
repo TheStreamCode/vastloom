@@ -137,6 +137,8 @@ add_library(vastloom_core STATIC
     src/inference/deepseek_v4_probe.cpp
     src/inference/deepseek_v4_range_artifact.cpp
     src/inference/deepseek_v4_expert_pack.cpp
+    src/inference/deepseek_v4_cache_plan.cpp
+    src/inference/deepseek_v4_usage_profile.cpp
     src/inference/deepseek_v4_model.cpp
     src/inference/deepseek_v4_graph.cpp
     src/inference/deepseek_v4_expert_provider.cpp
@@ -256,6 +258,28 @@ if(BUILD_TESTING AND VASTLOOM_BUILD_TESTS)
     add_test(
         NAME vastloom_deepseek_v4_expert_pack
         COMMAND vastloom_deepseek_expert_pack_test
+    )
+    add_executable(vastloom_deepseek_cache_plan_test
+        tests/test_deepseek_cache_plan.cpp
+    )
+    target_link_libraries(vastloom_deepseek_cache_plan_test PRIVATE Vastloom::Core)
+    target_compile_features(vastloom_deepseek_cache_plan_test PRIVATE cxx_std_20)
+    vastloom_set_project_warnings(vastloom_deepseek_cache_plan_test)
+    vastloom_enable_sanitizers(vastloom_deepseek_cache_plan_test)
+    add_test(
+        NAME vastloom_deepseek_v4_cache_plan
+        COMMAND vastloom_deepseek_cache_plan_test
+    )
+    add_executable(vastloom_deepseek_usage_profile_test
+        tests/test_deepseek_usage_profile.cpp
+    )
+    target_link_libraries(vastloom_deepseek_usage_profile_test PRIVATE Vastloom::Core)
+    target_compile_features(vastloom_deepseek_usage_profile_test PRIVATE cxx_std_20)
+    vastloom_set_project_warnings(vastloom_deepseek_usage_profile_test)
+    vastloom_enable_sanitizers(vastloom_deepseek_usage_profile_test)
+    add_test(
+        NAME vastloom_deepseek_v4_usage_profile
+        COMMAND vastloom_deepseek_usage_profile_test
     )
     add_executable(vastloom_cuda_driver_test
         tests/test_cuda_driver.cpp

@@ -36,7 +36,9 @@
 #include "vastloom/hardware/hardware_probe.hpp"
 #include "vastloom/inference/gpt2_tokenizer.hpp"
 #include "vastloom/cuda/cuda_matvec_accelerator.hpp"
+#include "vastloom/inference/deepseek_v4_cache_plan.hpp"
 #include "vastloom/inference/deepseek_v4_expert_pack.hpp"
+#include "vastloom/inference/deepseek_v4_usage_profile.hpp"
 #include "vastloom/inference/deepseek_v4_expert_provider.hpp"
 #include "vastloom/inference/deepseek_v4_gguf.hpp"
 #include "vastloom/inference/deepseek_v4_range_artifact.hpp"
@@ -336,7 +338,8 @@ void print_help() {
         << "      by --gpu-limit) and falls back to the CPU per matrix; the default is CPU-only.\n\n"
         << "  deepseek-chain-probe MODEL_DIRECTORY GLOBAL_ARTIFACT --layers N --tokens CSV\n"
         << "      --trunk L=PATH (--experts L=PATH | --expert-pack L=PATH) [--expert-pack ...]\n"
-        << "      [--io-cache buffered|bypass|auto]\n"
+        << "      [--io-cache buffered|bypass|auto] [--cache-entries N]\n"
+        << "      [--usage-profile PATH]\n"
         << "      [--cuda-experts] [--gpu-limit MIB]\n"
         << "      [--dump-logits PATH] [--dump-hidden PATH] [--dump-trace PATH] [--json]\n"
         << "      Execute 2 or 3 consecutive hash-routed layers from imported range artifacts.\n"
@@ -3757,7 +3760,9 @@ int command_deepseek_chain_probe(const std::vector<std::string>& args) {
     const auto is_value_option = [](std::string_view argument) {
         return argument == "--layers" || argument == "--token" || argument == "--tokens" ||
                argument == "--trunk" || argument == "--experts" || argument == "--expert-pack" ||
-               argument == "--io-cache" || argument == "--gpu-limit" ||
+               argument == "--io-cache" || argument == "--cache-entries" ||
+               argument == "--usage-profile" ||
+               argument == "--gpu-limit" ||
                argument == "--gpu-reserve" || argument == "--dump-logits" ||
                argument == "--dump-hidden" || argument == "--dump-trace";
     };
@@ -3885,6 +3890,7 @@ int command_deepseek_chain_probe(const std::vector<std::string>& args) {
     const auto dump_logits = option_path(args, "--dump-logits", {});
     const auto dump_hidden = option_path(args, "--dump-hidden", {});
     const auto dump_trace = option_path(args, "--dump-trace", {});
+    const auto usage_profile_path = option_path(args, "--usage-profile", {});
 
     const auto parse_layer_paths =
         [&args](std::string_view option)
@@ -3952,6 +3958,13 @@ int command_deepseek_chain_probe(const std::vector<std::string>& args) {
     if (!expert_paths) return print_error(expert_paths.error(), json);
     auto expert_pack_paths = parse_layer_paths("--expert-pack");
     if (!expert_pack_paths) return print_error(expert_pack_paths.error(), json);
+    auto cache_entries = optional_size(args, "--cache-entries", 0U);
+    if (!cache_entries) return print_error(cache_entries.error(), json);
+    if (cache_entries.value() > 128U) {
+        return print_error(vastloom::make_error(vastloom::ErrorCode::invalid_argument,
+                                                "--cache-entries must be at most 128"),
+                           json);
+    }
     const std::string io_cache_requested =
         option_value(args, "--io-cache").value_or("auto");
     if (io_cache_requested != "auto" && io_cache_requested != "buffered" &&
@@ -4085,6 +4098,38 @@ int command_deepseek_chain_probe(const std::vector<std::string>& args) {
     }
 
     vastloom::safety::ResourceGovernor governor(policy.value().resources);
+
+    const std::size_t request_entries = std::max<std::size_t>(
+        6U, std::min<std::size_t>(128U, 6U * token_ids.size()));
+    const std::size_t auto_entries = std::max<std::size_t>(
+        8U, std::min<std::size_t>(128U, 6U * token_ids.size()));
+    // The range-slice chain keeps the six globals, one layer trunk and the runtime scratch live; the
+    // full-checkpoint minimum_host_resident_bytes is not the floor for this path. The cache plan
+    // must leave that working set untouched.
+    const vastloom::ByteCount cache_resident_floor =
+        artifacts.front().payload_bytes + report.value().maximum_layer_trunk_bytes +
+        report.value().persistent_kv_bytes + report.value().compression_state_bytes +
+        report.value().rope_table_bytes + report.value().activation_scratch_bytes +
+        report.value().runtime_state_bytes;
+    vastloom::inference::DeepseekV4CachePlanInput cache_plan_input;
+    cache_plan_input.ram_budget = policy.value().resources.host_memory_hard_limit;
+    cache_plan_input.resident_floor = cache_resident_floor;
+    cache_plan_input.max_expert_bytes = report.value().maximum_expert_bundle_bytes;
+    cache_plan_input.request_entries = request_entries;
+    cache_plan_input.requested_entries = cache_entries.value();
+    cache_plan_input.auto_entries = auto_entries;
+    cache_plan_input.max_entries = 128U;
+    auto planned_cache = vastloom::inference::plan_deepseek_v4_expert_cache(cache_plan_input);
+    if (!planned_cache) return print_error(planned_cache.error(), json);
+    if (cache_entries.value() != 0U && planned_cache.value().clamped) {
+        return print_error(
+            vastloom::make_error(vastloom::ErrorCode::resource_exhausted,
+                                 "--cache-entries exceeds the live safe RAM headroom",
+                                 std::to_string(planned_cache.value().ceiling_entries) +
+                                     " entries fit"),
+            json);
+    }
+    const std::size_t cache_capacity = planned_cache.value().chosen_entries;
 
     auto chain_config = config.value();
     chain_config.cpu_threads = policy.value().cpu_threads;
@@ -4258,14 +4303,10 @@ int command_deepseek_chain_probe(const std::vector<std::string>& args) {
         if (!bindings) return print_error(bindings.error(), json);
         vastloom::inference::DeepseekV4ExpertCacheOptions cache_options;
         cache_options.block_prefix = "layers." + std::to_string(layer) + ".ffn";
-        // The cache must hold the union of the prompt tokens' routes: up to six experts per token,
-        // bounded by 128 (16 tokens x 6 with hash overlap always fits), and never below eight. One
-        // batch request carries every selected expert of the layer, so the per-request bound has
-        // to cover the same union instead of stopping at one token's six.
-        cache_options.max_cached_experts = std::max<std::size_t>(
-            8U, std::min<std::size_t>(128U, 6U * token_ids.size()));
-        cache_options.max_experts_per_request = std::max<std::size_t>(
-            6U, std::min<std::size_t>(128U, 6U * token_ids.size()));
+        // Capacity is bounded by the live RAM plan; the per-request bound still covers the full
+        // selected-expert union of the prompt.
+        cache_options.max_cached_experts = cache_capacity;
+        cache_options.max_experts_per_request = request_entries;
         cache_options.load.io_cache_mode =
             io_cache_modes[layer] == "bypass" ? vastloom::io::IoCacheMode::bypass
                                              : vastloom::io::IoCacheMode::buffered;
@@ -4450,6 +4491,25 @@ int command_deepseek_chain_probe(const std::vector<std::string>& args) {
                                           ? "expert-pack"
                                           : (packed_layers == 0U ? "range-artifacts" : "mixed");
 
+    std::optional<vastloom::inference::DeepseekV4UsageProfile> usage_profile;
+    if (!usage_profile_path.empty()) {
+        auto loaded_profile = vastloom::inference::load_deepseek_v4_usage_profile(
+            usage_profile_path, report.value().catalog.model_id,
+            report.value().catalog.revision);
+        if (!loaded_profile) return print_error(loaded_profile.error(), json);
+        for (std::size_t layer = 0U; layer < resolved_routes.size(); ++layer) {
+            for (const auto& route : resolved_routes[layer]) {
+                auto recorded = vastloom::inference::record_deepseek_v4_usage(
+                    loaded_profile.value(), static_cast<std::uint32_t>(layer), route);
+                if (!recorded) return print_error(recorded.error(), json);
+            }
+        }
+        auto saved = vastloom::inference::save_deepseek_v4_usage_profile(
+            usage_profile_path, loaded_profile.value());
+        if (!saved) return print_error(saved.error(), json);
+        usage_profile = loaded_profile.take_value();
+    }
+
     if (json) {
         std::cout << "{\"ok\":true,\"complete_model\":false,\"executed_layers\":"
                   << layers.value() << ",\"model_layers\":" << config.value().layer_count
@@ -4502,7 +4562,38 @@ int command_deepseek_chain_probe(const std::vector<std::string>& args) {
             if (layer != 0U) std::cout << ',';
             std::cout << '"' << io_cache_modes[layer] << '"';
         }
-        std::cout << "],\"relocated_tensors\":" << relocated.value().relocated_tensors
+        std::cout << "],\"cache_plan\":{\"floor_entries\":"
+                  << planned_cache.value().floor_entries
+                  << ",\"ceiling_entries\":" << planned_cache.value().ceiling_entries
+                  << ",\"chosen_entries\":" << planned_cache.value().chosen_entries
+                  << ",\"resident_floor_bytes\":"
+                  << planned_cache.value().resident_floor_bytes
+                  << ",\"headroom_bytes\":" << planned_cache.value().headroom_bytes
+                  << ",\"ceiling_bytes\":" << planned_cache.value().ceiling_bytes
+                  << ",\"chosen_bytes\":" << planned_cache.value().chosen_bytes
+                  << ",\"clamped\":"
+                  << (planned_cache.value().clamped ? "true" : "false")
+                  << ",\"reason\":\""
+                  << vastloom::util::json_escape(planned_cache.value().reason) << "\"}";
+        if (usage_profile.has_value()) {
+            std::cout << ",\"usage_profile\":{\"path\":\""
+                      << vastloom::util::json_escape(usage_profile_path.string())
+                      << "\",\"observations\":" << usage_profile->observations
+                      << ",\"top\":[";
+            for (std::size_t layer = 0U; layer < layers.value(); ++layer) {
+                if (layer != 0U) std::cout << ',';
+                const auto top = vastloom::inference::top_deepseek_v4_usage(
+                    usage_profile.value(), static_cast<std::uint32_t>(layer), 6U);
+                std::cout << "{\"layer\":" << layer << ",\"experts\":[";
+                for (std::size_t index = 0U; index < top.size(); ++index) {
+                    if (index != 0U) std::cout << ',';
+                    std::cout << top[index].first;
+                }
+                std::cout << "]}";
+            }
+            std::cout << "]}";
+        }
+        std::cout << ",\"relocated_tensors\":" << relocated.value().relocated_tensors
                   << ",\"relocated_expert_bundles\":"
                   << relocated.value().relocated_expert_bundles
                   << ",\"elapsed_ms\":" << elapsed;

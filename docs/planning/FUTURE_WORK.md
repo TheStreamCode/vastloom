@@ -189,7 +189,10 @@ evidence and "what not to copy" are in
 one aligned read per expert, byte-identical outputs, read calls 54 → 18 (token 0), 18 → 6
 (layer 0) and 264 → 88 (five-token prompt), with buffered/bypass modes and actual read-path
 counters. The direct-I/O proxy showed no wall-time win and bypass was slightly slower; a cold-cache
-reboot comparison remains future work. Items 3 and 4 are still future work.
+reboot comparison remains future work (helper: `scripts/purge-standby.ps1`, elevated only). Item 3
+has a recording-only prototype (`--usage-profile`, no pinning yet); item 4 is still future work.
+The P1 cache-plan/paging guard is implemented in the chain probe (`cache_plan`, `--cache-entries`);
+the remaining P1 items are still future work.
 
 Each item needs the usual gate: bit-identical or oracle-verified outputs, exact read/byte counters,
 a dated report, and a measured win (or an explicit negative result) before it becomes a default.

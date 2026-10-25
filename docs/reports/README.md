@@ -18,7 +18,9 @@ hardware, commands, measurements and limitations.
   opt-in buffered/bypass I/O mode on the chain and layer probes. Token 0 drops from 54 to 18 range
   reads, layer 0 from 18 to 6, and the five-token prompt from 264 to 88 with byte-identical
   logits/hidden; actual read-path counters and a direct-I/O proxy show no wall-time win, so no
-  throughput or cold-cache claim. Three layers of 43; no full-model result.
+  throughput or cold-cache claim. The chain also emits a bounded cache plan (`--cache-entries`) and
+  a recording-only usage profile; the elevated cold-cache helper is not executed here. Three layers
+  of 43; no full-model result.
 - [`D3C_MULTITOKEN_ORACLE_VALIDATION.md`](D3C_MULTITOKEN_ORACLE_VALIDATION.md) —
   D3c: a five-token causal prompt closes the layer-2 4:1 compression window; the independent
   NumPy oracle reproduces the native 3-layer prefill (logits max abs 1.91e-06, hidden 5.96e-08,

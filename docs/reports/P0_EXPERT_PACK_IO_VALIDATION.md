@@ -112,7 +112,41 @@ is a speed lever at this scale", not a failure of the mechanism; the peers opera
 where tens of thousands of small reads per token dominate.
 
 A cold-cache reboot comparison remains the missing experiment. It needs a controlled cache drop
-(or a fresh boot), which the reference machine cannot do without elevation.
+(or a fresh boot), which the reference machine cannot do without elevation. The helper is
+`scripts/purge-standby.ps1`: it enables `SeProfileSingleProcessPrivilege` and requests
+`MemoryPurgeStandbyList`, refuses to run without an elevated PowerShell, and is deliberately not
+part of the normal execution path. On this host a non-elevated invocation exits with a clear
+administrator-required error; the purge itself was therefore not executed here.
+
+## Cache plan and paging guard
+
+The chain probe now computes a cache plan before it creates the per-layer caches. The resident floor
+is the range-slice working set (globals + maximum layer trunk + KV/compression/rope/scratch/runtime),
+not the full-checkpoint `minimum_host_resident_bytes`; the ceiling is
+`(live host hard limit - floor) / maximum expert bundle`, capped at 128 entries. The plan must hold
+at least one layer request; `--cache-entries N` can lower the capacity but an explicit value below
+one request, or above the ceiling, fails closed. The automatic capacity is clamped with a reported
+reason.
+
+For the measured token-0 chain the plan is: resident floor **989,956,124 B**, headroom
+**2,991,409,124 B**, ceiling **128 entries / 1,258,291,200 B**, chosen **8 entries / 78,643,200 B**
+(`clamped: false`). An explicit `--cache-entries 4` fails with "smaller than one layer request";
+`--cache-entries 200` is rejected by the option bound; `--cache-entries 16` is admitted. The plan
+does not prove that a larger cache is faster; it prevents a cache that cannot fit the live headroom
+from being admitted at all. The unit test also checks that the ceiling never decreases when the RAM
+budget increases.
+
+## Usage-profile prototype (recording only)
+
+`--usage-profile PATH` records per-layer/per-expert route counts in a local
+`vastloom.deepseek-v4-usage-profile.v1` JSON sidecar after a chain run. The file is merged across
+runs, the pinned model/revision must match, malformed files fail closed, and the JSON output lists
+the top experts per layer. Two token-0 runs produced observations 3 → 6 with the expected counts
+(35, 53, 200, 222, 245, 254 for layer 0, and the matching routes for layers 1–2).
+
+This is deliberately **recording only**: it does not preload, pin or evict experts, and no placement
+or speed claim is made. The actual pinning policy remains P0.3 future work; the prototype records
+the signal that policy would need.
 
 ## Tests
 
@@ -127,6 +161,12 @@ A cold-cache reboot comparison remains the missing experiment. It needs a contro
 - `vastloom_deepseek_v4_expert_pack_cli_multi` (opt-in, real artifacts): the five-token union
   (15 artifacts), v1 vs pack buffered and bypass; byte-identical dumps, read calls 264 → 88, and
   actual bypass path on every requested read. PASS.
+- `vastloom_deepseek_v4_cache_plan` (C++): automatic/requested plans, minimum-request guard,
+  clamping, zero-headroom refusal, monotonic ceiling. PASS.
+- `vastloom_deepseek_v4_usage_profile` (C++): missing-file empty profile, round-trip counts, top
+  ordering, model mismatch and malformed-file refusal. PASS.
+- `scripts/purge-standby.ps1`: non-elevated invocation refuses with the administrator-required
+  message; the elevated purge path is not executed in this session.
 - Existing core tests: release 11/11, debug 11/11 pass. The default v1 chain behavior is unchanged.
 - Release and debug builds pass with warnings-as-errors.
 
@@ -141,8 +181,10 @@ A cold-cache reboot comparison remains the missing experiment. It needs a contro
   every requested read was delivered by the bypass path (`buffered_read_calls == 0`); the loader
   still keeps the documented buffered fallback for platforms that refuse an unbuffered read.
 - The cold-cache measurement is still missing: the reference process is not elevated, so the
-  system standby list cannot be purged safely. The direct-I/O proxy above bypasses the file cache
-  but is not a fresh-boot measurement.
+  system standby list cannot be purged safely. `scripts/purge-standby.ps1` documents and refuses the
+  non-elevated path; the direct-I/O proxy above bypasses the file cache but is not a fresh-boot
+  measurement.
+- The usage profile is recording only; no pinning or placement behavior is enabled by this report.
 - This experiment does not change the project's measured claims: one real layer and a three-layer
   hash-routed chain, no full model, no throughput result, no VRAM payload tier.
 
@@ -178,5 +220,11 @@ also needs the `..._EXPERTS2/3/4_*` variables).
 - `include/vastloom/inference/deepseek_v4_expert_provider.hpp`,
   `src/inference/deepseek_v4_expert_provider.cpp`
 - `src/cli/main.cpp`, `CMakeLists.txt`
+- `include/vastloom/inference/deepseek_v4_cache_plan.hpp`,
+  `src/inference/deepseek_v4_cache_plan.cpp`
+- `include/vastloom/inference/deepseek_v4_usage_profile.hpp`,
+  `src/inference/deepseek_v4_usage_profile.cpp`
+- `scripts/purge-standby.ps1`
 - `tests/test_deepseek_expert_pack.cpp`, `tests/test_pack_deepseek_experts.py`,
-  `tests/test_deepseek_expert_pack_cli.py`
+  `tests/test_deepseek_expert_pack_cli.py`, `tests/test_deepseek_cache_plan.cpp`,
+  `tests/test_deepseek_usage_profile.cpp`

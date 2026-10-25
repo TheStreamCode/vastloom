@@ -141,7 +141,9 @@ one aligned read per expert, byte-identical outputs, read calls 54 → 18 (token
 and 264 → 88 (five-token prompt), with buffered/bypass modes and actual read-path counters. The
 direct-I/O proxy confirmed the bypass path delivered every requested read but showed no wall-time
 win; warm-cache timings were neutral to slightly slower. No speed claim is made; a cold-cache
-reboot comparison remains future work. Items 3 and 4 still need real measurements.
+reboot comparison remains future work (helper: `scripts/purge-standby.ps1`). Item 3 has a
+recording-only usage-profile prototype; item 4 still needs a learned layer. The P1 cache-plan/paging
+guard is implemented in the chain probe.
 
 1. **Derived expert-bundle container with one aligned read per expert.**
    Pack each expert's three tensors into one contiguous, 4 KiB-aligned record in a derived artifact

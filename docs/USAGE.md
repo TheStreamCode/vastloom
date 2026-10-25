@@ -275,6 +275,17 @@ For a multi-token prompt (`--tokens 0,1,2,3,4`) pass one `--experts L=PATH` per 
 layer; overlapping experts are deduplicated and a bundle named twice must agree on its immutable
 source spans. The five-token measurement used 15 expert artifacts (five per layer).
 
+A derived expert pack replaces the per-token expert artifacts with one aligned record per expert:
+build it with `python tools\pack_deepseek_experts.py --layer N --output DIR --plan PLAN --artifact
+ARTIFACT`, then pass `--expert-pack L=PATH` instead of `--experts`. The pack keeps the source
+manifest and per-range SHA-256; it is opt-in and never modifies the imported artifacts.
+`--io-cache buffered|bypass|auto` selects the read path, `--cache-entries N` bounds the per-layer
+cache against the live RAM plan (the JSON `cache_plan` reports floor, ceiling and chosen entries),
+and `--usage-profile PATH` records per-expert routing counts in a local sidecar (recording only; it
+does not pin or place experts). The elevated cold-cache helper is `scripts/purge-standby.ps1`; it
+is a benchmark tool, not part of normal execution. See
+`docs/reports/P0_EXPERT_PACK_IO_VALIDATION.md` for the measured results and limits.
+
 Each probe reports its executed depth against the 43-layer model and refuses a learned-router
 layer. The opt-in device path is `--cuda-experts --gpu-limit MIB` with a bounded CPU fallback: it
 is device residency of expert matrices, not a VRAM payload tier. `--dump-logits`, `--dump-hidden`
@@ -334,7 +345,8 @@ vastloom deepseek-layer-probe MODEL_DIRECTORY TRUNK_ARTIFACT EXPERT_ARTIFACT GLO
     [--token ID] [--cuda-experts] [--gpu-limit MIB] [--gpu-reserve MIB] [--cpu-only]
     [--dump-logits PATH] [--dump-hidden PATH] [--dump-trace PATH] [--json]
 vastloom deepseek-chain-probe MODEL_DIRECTORY GLOBAL_ARTIFACT --layers N
-    [--token ID | --tokens CSV] --trunk L=PATH --experts L=PATH [--experts L=PATH ...]
+    [--token ID | --tokens CSV] --trunk L=PATH (--experts L=PATH | --expert-pack L=PATH)
+    [--io-cache buffered|bypass|auto] [--cache-entries N] [--usage-profile PATH]
     [--cuda-experts] [--gpu-limit MIB] [--gpu-reserve MIB]
     [--dump-logits PATH] [--dump-hidden PATH] [--dump-trace PATH] [--json]
 vastloom deepseek-inspect MODEL_DIRECTORY [--no-verify] [--json]

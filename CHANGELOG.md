@@ -144,8 +144,10 @@
   learning (P0.3) and router-lookahead (P0.4) remain future work.
   Follow-up: the chain now emits a bounded cache plan (range-slice resident floor, live headroom,
   128-entry ceiling, `--cache-entries` fail-closed guard) and an opt-in recording-only usage profile
-  (`--usage-profile`) for per-layer expert heat; `scripts/purge-standby.ps1` documents the elevated
-  cold-cache procedure but was not executed here. The usage profile does not pin or place experts.
+  (`--usage-profile`) for per-layer expert heat; `scripts/purge-standby.ps1` performed eight
+  successful elevated standby-list purges for the cold-cache run. Cold and warm results agree: the
+  pack's read-call reduction does not lower wall time at this scale. The usage profile does not pin
+  or place experts.
 - **Closing note**: the remaining items (VRAM *payload* tier, ratio-128 layers,
   learned-router/full-depth execution) are not planned in this concluded research record; they
   need new subsystems or the full checkpoint, and no further milestones are tracked. No

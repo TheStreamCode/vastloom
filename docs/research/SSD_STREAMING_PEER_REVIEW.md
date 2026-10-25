@@ -140,8 +140,8 @@ Status (2026-10-23): items 1 and 2 are implemented as an opt-in experiment and v
 one aligned read per expert, byte-identical outputs, read calls 54 → 18 (token 0), 18 → 6 (layer 0)
 and 264 → 88 (five-token prompt), with buffered/bypass modes and actual read-path counters. The
 direct-I/O proxy confirmed the bypass path delivered every requested read but showed no wall-time
-win; warm-cache timings were neutral to slightly slower. No speed claim is made; a cold-cache
-reboot comparison remains future work (helper: `scripts/purge-standby.ps1`). Item 3 has a
+win; warm-cache timings were neutral to slightly slower. No speed claim is made; the cold-cache run
+(8 elevated standby-list purges) was also negative for the pack and bypass paths. Item 3 has a
 recording-only usage-profile prototype; item 4 still needs a learned layer. The P1 cache-plan/paging
 guard is implemented in the chain probe.
 

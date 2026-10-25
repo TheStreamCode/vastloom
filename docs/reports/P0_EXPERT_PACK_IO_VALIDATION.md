@@ -111,12 +111,30 @@ bypass path is slightly slower on both prompts. This is a negative result for "o
 is a speed lever at this scale", not a failure of the mechanism; the peers operate at model sizes
 where tens of thousands of small reads per token dominate.
 
-A cold-cache reboot comparison remains the missing experiment. It needs a controlled cache drop
-(or a fresh boot), which the reference machine cannot do without elevation. The helper is
-`scripts/purge-standby.ps1`: it enables `SeProfileSingleProcessPrivilege` and requests
-`MemoryPurgeStandbyList`, refuses to run without an elevated PowerShell, and is deliberately not
-part of the normal execution path. On this host a non-elevated invocation exits with a clear
-administrator-required error; the purge itself was therefore not executed here.
+## Cold-cache measurement
+
+The cold measurement was executed after all: an elevated PowerShell session ran
+`scripts/purge-standby.ps1 -Force` immediately before each of the eight runs, so the standby list was
+flushed between configurations. The helper enables `SeProfileSingleProcessPrivilege` and requests
+`MemoryPurgeStandbyList`; it refuses to run without elevation (verified separately) and is not part
+of normal execution. One sample per configuration, sequential, after a successful purge each time.
+
+| Prompt | Config | Read calls | Cold elapsed | Warm mean (earlier) |
+|---|---|---|---|---|
+| token 0 | v1 buffered | 54 | 2,071 ms | 2,101 ms |
+| token 0 | v1 bypass | 54 | 2,256 ms | 2,165 ms |
+| token 0 | pack buffered | 18 | 2,328 ms | 2,159 ms |
+| token 0 | pack bypass | 18 | 2,226 ms | 2,202 ms |
+| `[0,1,2,3,4]` | v1 buffered | 264 | 5,375 ms | 5,473 ms |
+| `[0,1,2,3,4]` | v1 bypass | 264 | 5,700 ms | 5,529 ms |
+| `[0,1,2,3,4]` | pack buffered | 88 | 5,445 ms | 5,273 ms |
+| `[0,1,2,3,4]` | pack bypass | 88 | 5,627 ms | 5,512 ms |
+
+The cold-cache run is still negative for the pack: the 3× read-call reduction does not lower wall
+time, and the bypass path remains slower. At this slice size (135 MB token 0, 663 MB five-token
+expert bytes) the device read is a small fraction of the ~2–5 s compute; the peers operate at model
+sizes where the per-token expert bytes are orders of magnitude larger. The purge helper works
+(8/8 successful requests), but the mechanism's speed benefit does not appear at this scale.
 
 ## Cache plan and paging guard
 
@@ -166,7 +184,7 @@ the signal that policy would need.
 - `vastloom_deepseek_v4_usage_profile` (C++): missing-file empty profile, round-trip counts, top
   ordering, model mismatch and malformed-file refusal. PASS.
 - `scripts/purge-standby.ps1`: non-elevated invocation refuses with the administrator-required
-  message; the elevated purge path is not executed in this session.
+  message; an elevated session executed eight successful purge requests for the cold measurement.
 - Existing core tests: release 11/11, debug 11/11 pass. The default v1 chain behavior is unchanged.
 - Release and debug builds pass with warnings-as-errors.
 
@@ -180,10 +198,9 @@ the signal that policy would need.
 - The read counters report the path that actually delivered each read. In the bypass proxy runs,
   every requested read was delivered by the bypass path (`buffered_read_calls == 0`); the loader
   still keeps the documented buffered fallback for platforms that refuse an unbuffered read.
-- The cold-cache measurement is still missing: the reference process is not elevated, so the
-  system standby list cannot be purged safely. `scripts/purge-standby.ps1` documents and refuses the
-  non-elevated path; the direct-I/O proxy above bypasses the file cache but is not a fresh-boot
-  measurement.
+- The cold measurement used one purge-and-run sample per configuration; it is not a statistical
+  distribution. The elevated purge helper was executed successfully, but the pack and bypass paths
+  showed no cold-cache wall-time win.
 - The usage profile is recording only; no pinning or placement behavior is enabled by this report.
 - This experiment does not change the project's measured claims: one real layer and a three-layer
   hash-routed chain, no full model, no throughput result, no VRAM payload tier.

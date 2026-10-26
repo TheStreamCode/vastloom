@@ -154,9 +154,13 @@
   hash-layer prefetch, pinned heat, quant trade. The first thread-scaling experiment added
   `--cpu-threads N` to both DeepSeek probes: 1 → 12 threads cut token 0 from 4,270 ms to 2,053 ms
   and the five-token chain from 13,360 ms to 5,463 ms, while 16 threads regressed to 4,053/13,247 ms;
-  the default 12-thread policy is already the optimum, so no default changed. `docs/reports/C_SMOLLM2_END_TO_END_VALIDATION.md`
+  the default 12-thread policy is already the optimum, so no default changed. The SIMD follow-up
+  built the pinned ggml checkout externally and measured layer 0 12.5×, token-0 chain 1.6× and the
+  five-token chain 3.2× faster, with identical argmax/routes but logits differing by up to
+  0.19/0.17/0.46; it stays opt-in and the scalar reference remains the default until a parity gate
+  exists. `docs/reports/C_SMOLLM2_END_TO_END_VALIDATION.md`
   records the pinned SmolLM2-135M import (~273 MB) with the native CLI/reference contract and the
-  eight-case serve contract passing end-to-end. Neither note adds a speed claim.
+  eight-case serve contract passing end-to-end. Neither note adds a product speed claim.
 - **Closing note**: the remaining items (VRAM *payload* tier, ratio-128 layers,
   learned-router/full-depth execution) are not planned in this concluded research record; they
   need new subsystems or the full checkpoint, and no further milestones are tracked. No

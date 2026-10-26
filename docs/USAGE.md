@@ -284,7 +284,9 @@ cache against the live RAM plan (the JSON `cache_plan` reports floor, ceiling an
 and `--usage-profile PATH` records per-expert routing counts in a local sidecar (recording only; it
 does not pin or place experts). `--cpu-threads N` overrides the Governor's thread budget for a
 controlled scaling experiment; the default policy count is already the measured optimum on the
-reference host. The elevated cold-cache helper is `scripts/purge-standby.ps1`; it
+reference host. `--ggml-compute` enables the optional SIMD backend on the probes when the build was
+configured with an external `VASTLOOM_GGML_ROOT` checkout; it is opt-in because its accumulation
+differs from the scalar reference (see `docs/reports/SIMD_BACKEND_EXPERIMENT.md`). The elevated cold-cache helper is `scripts/purge-standby.ps1`; it
 is a benchmark tool, not part of normal execution. See
 `docs/reports/P0_EXPERT_PACK_IO_VALIDATION.md` for the measured results and limits.
 
@@ -345,11 +347,11 @@ vastloom deepseek-forward MODEL_DIRECTORY [--layers N] [--expert-cache N]
     [--ggml-compute]
 vastloom deepseek-layer-probe MODEL_DIRECTORY TRUNK_ARTIFACT EXPERT_ARTIFACT GLOBAL_ARTIFACT
     [--token ID] [--cuda-experts] [--gpu-limit MIB] [--gpu-reserve MIB] [--cpu-only]
-    [--cpu-threads N] [--dump-logits PATH] [--dump-hidden PATH] [--dump-trace PATH] [--json]
+    [--cpu-threads N] [--ggml-compute] [--dump-logits PATH] [--dump-hidden PATH] [--dump-trace PATH] [--json]
 vastloom deepseek-chain-probe MODEL_DIRECTORY GLOBAL_ARTIFACT --layers N
     [--token ID | --tokens CSV] --trunk L=PATH (--experts L=PATH | --expert-pack L=PATH)
     [--io-cache buffered|bypass|auto] [--cache-entries N] [--cpu-threads N]
-    [--usage-profile PATH]
+    [--ggml-compute] [--usage-profile PATH]
     [--cuda-experts] [--gpu-limit MIB] [--gpu-reserve MIB]
     [--dump-logits PATH] [--dump-hidden PATH] [--dump-trace PATH] [--json]
 vastloom deepseek-inspect MODEL_DIRECTORY [--no-verify] [--json]

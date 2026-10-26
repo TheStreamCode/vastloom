@@ -13,6 +13,10 @@ hardware, commands, measurements and limitations.
 
 ## Current reports
 
+- [`SIMD_BACKEND_EXPERIMENT.md`](SIMD_BACKEND_EXPERIMENT.md) —
+  post-conclusion SIMD experiment: pinned external ggml checkout vs the scalar reference. Layer 0
+  12.5× faster, token-0 chain 1.6×, five-token chain 3.2×, same argmax/routes, logits differ by up to
+  0.19/0.17/0.46; opt-in only, no default change, parity gate still required.
 - [`C_SMOLLM2_END_TO_END_VALIDATION.md`](C_SMOLLM2_END_TO_END_VALIDATION.md) —
   post-conclusion small-model path: pinned SmolLM2-135M import (~273 MB) with the native CLI/reference
   contract and the eight-case local serve contract passing end-to-end. Dense model only; no

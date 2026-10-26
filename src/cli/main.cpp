@@ -328,7 +328,8 @@ void print_help() {
         << "      Report exactly what a forward pass to that depth would make resident and whether\n"
         << "      it fits the safe RAM budget, before allocating anything.\n\n"
         << "  deepseek-layer-probe MODEL_DIRECTORY TRUNK_ARTIFACT EXPERT_ARTIFACT GLOBAL_ARTIFACT"
-           " [--token ID] [--cuda-experts] [--gpu-limit MIB] [--cpu-only] [--cpu-threads N]\n"
+           " [--token ID] [--cuda-experts] [--gpu-limit MIB] [--cpu-only] [--cpu-threads N]"
+           " [--ggml-compute]\n"
         << "      MODEL_DIRECTORY TRUNK_ARTIFACT GLOBAL_ARTIFACT --expert-pack PATH [--io-cache MODE]\n"
         << "      [--dump-logits PATH] [--dump-hidden PATH] [--dump-trace PATH] [--json]\n"
         << "      Execute one real layer from imported payload. The --expert-pack form reads one\n"
@@ -339,6 +340,7 @@ void print_help() {
         << "  deepseek-chain-probe MODEL_DIRECTORY GLOBAL_ARTIFACT --layers N --tokens CSV\n"
         << "      --trunk L=PATH (--experts L=PATH | --expert-pack L=PATH) [--expert-pack ...]\n"
         << "      [--io-cache buffered|bypass|auto] [--cache-entries N] [--cpu-threads N]\n"
+        << "      [--ggml-compute]\n"
         << "      [--usage-profile PATH]\n"
         << "      [--cuda-experts] [--gpu-limit MIB]\n"
         << "      [--dump-logits PATH] [--dump-hidden PATH] [--dump-trace PATH] [--json]\n"
@@ -3336,7 +3338,7 @@ int command_deepseek_layer_probe(const std::vector<std::string>& args) {
         args, positional_count,
         {"--token", "--context", "--batch-size", "--gpu-limit", "--gpu-reserve", "--dump-logits",
          "--dump-hidden", "--dump-trace", "--expert-pack", "--io-cache", "--cpu-threads"},
-        {"--json", "--cuda-experts", "--cpu-only"});
+        {"--json", "--cuda-experts", "--cpu-only", "--ggml-compute"});
     if (!valid) return print_error(valid.error(), json);
     if (args.size() < positional_count) {
         return print_error(
@@ -3452,6 +3454,22 @@ int command_deepseek_layer_probe(const std::vector<std::string>& args) {
     }
 
     vastloom::safety::ResourceGovernor governor(policy.value().resources);
+
+    struct GgmlScope {
+        bool active{false};
+        ~GgmlScope() {
+            if (active) vastloom::inference::ggml_compute_disable();
+        }
+    } ggml_scope;
+    if (has_flag(args, "--ggml-compute")) {
+        vastloom::inference::GgmlComputeOptions ggml_options;
+        ggml_options.threads = cpu_threads.value() == 0U
+                                   ? policy.value().cpu_threads
+                                   : static_cast<unsigned>(cpu_threads.value());
+        auto ggml_ready = vastloom::inference::ggml_compute_enable(governor, ggml_options);
+        if (!ggml_ready) return print_error(ggml_ready.error(), json);
+        ggml_scope.active = true;
+    }
 
     // Bind the trunk and globals through their verified artifact paths, exactly as the two
     // --load-tensor-set gates do, then hand the packed results to a one-layer graph.
@@ -3702,6 +3720,12 @@ int command_deepseek_layer_probe(const std::vector<std::string>& args) {
                   << ",\"relocated_tensors\":" << relocated.value().relocated_tensors
                   << ",\"relocated_expert_bundles\":" << relocated.value().relocated_expert_bundles
                   << ",\"elapsed_ms\":" << elapsed;
+        if (ggml_scope.active) {
+            std::cout << ",\"ggml_compute\":{\"enabled\":true,\"accelerated\":"
+                      << vastloom::inference::ggml_compute_accelerated_count()
+                      << ",\"fallback\":"
+                      << vastloom::inference::ggml_compute_fallback_count() << '}';
+        }
         if (cuda_experts) {
             std::cout << ",\"accelerator\":{\"offered\":" << accelerator_stats.offered
                       << ",\"accelerated\":" << accelerator_stats.accelerated
@@ -3760,7 +3784,8 @@ int command_deepseek_chain_probe(const std::vector<std::string>& args) {
     // rejects as duplicates, so it validates its own surface. The accepted set is closed: an
     // unknown option, a missing value or a repeated single-value option is an argument error.
     const auto is_flag = [](std::string_view argument) {
-        return argument == "--json" || argument == "--cuda-experts" || argument == "--cpu-only";
+        return argument == "--json" || argument == "--cuda-experts" || argument == "--cpu-only" ||
+               argument == "--ggml-compute";
     };
     const auto is_value_option = [](std::string_view argument) {
         return argument == "--layers" || argument == "--token" || argument == "--tokens" ||
@@ -4110,6 +4135,22 @@ int command_deepseek_chain_probe(const std::vector<std::string>& args) {
     }
 
     vastloom::safety::ResourceGovernor governor(policy.value().resources);
+
+    struct GgmlScope {
+        bool active{false};
+        ~GgmlScope() {
+            if (active) vastloom::inference::ggml_compute_disable();
+        }
+    } ggml_scope;
+    if (has_flag(args, "--ggml-compute")) {
+        vastloom::inference::GgmlComputeOptions ggml_options;
+        ggml_options.threads = cpu_threads.value() == 0U
+                                   ? policy.value().cpu_threads
+                                   : static_cast<unsigned>(cpu_threads.value());
+        auto ggml_ready = vastloom::inference::ggml_compute_enable(governor, ggml_options);
+        if (!ggml_ready) return print_error(ggml_ready.error(), json);
+        ggml_scope.active = true;
+    }
 
     const std::size_t request_entries = std::max<std::size_t>(
         6U, std::min<std::size_t>(128U, 6U * token_ids.size()));
@@ -4611,6 +4652,12 @@ int command_deepseek_chain_probe(const std::vector<std::string>& args) {
                   << ",\"relocated_expert_bundles\":"
                   << relocated.value().relocated_expert_bundles
                   << ",\"elapsed_ms\":" << elapsed;
+        if (ggml_scope.active) {
+            std::cout << ",\"ggml_compute\":{\"enabled\":true,\"accelerated\":"
+                      << vastloom::inference::ggml_compute_accelerated_count()
+                      << ",\"fallback\":"
+                      << vastloom::inference::ggml_compute_fallback_count() << '}';
+        }
         if (cuda_experts) {
             std::cout << ",\"accelerator\":{\"offered\":" << accelerator_stats.offered
                       << ",\"accelerated\":" << accelerator_stats.accelerated

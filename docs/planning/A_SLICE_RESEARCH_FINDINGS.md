@@ -36,6 +36,16 @@ oversubscribe the physical cores and are dramatically slower. Exposing the overr
 experiments, but it does **not** improve the default. The next real compute lever is the SIMD/ggml
 backend or a different quantized kernel, not more threads.
 
+### SIMD follow-up (measured)
+
+The pinned ggml backend was then built as an external checkout and compared on the same slices:
+layer 0 went from 344.96 ms to **27.50 ms (12.5×)**, token 0 from 2,059.57 ms to **1,291.46 ms
+(1.6×)** and the five-token chain from 5,316.70 ms to **1,658.22 ms (3.2×)**, with identical argmax
+and routes but logits differing by up to 0.19/0.17/0.46. That is the largest speed lever found, but
+it is **not** bit-identical and exceeds the oracle tolerance, so it stays opt-in and the default is
+unchanged. See [`SIMD_BACKEND_EXPERIMENT.md`](../reports/SIMD_BACKEND_EXPERIMENT.md); the next step
+is a parity/quality gate for the SIMD accumulation, not a default switch.
+
 ## What the measurements already say
 
 1. **Compute dominates at this slice scale.** Token 0 moves 135,659,520 expert bytes and takes

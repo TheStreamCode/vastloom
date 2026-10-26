@@ -151,7 +151,10 @@
 - **Research — slice suite and small-model path**: `docs/planning/A_SLICE_RESEARCH_FINDINGS.md`
   records the full debug suite attempt (29 passed, 2 environmental RAM-headroom failures, 7
   host/optional skips; no parity failure) and ranks the next speed experiments: CPU compute/SIMD,
-  hash-layer prefetch, pinned heat, quant trade. `docs/reports/C_SMOLLM2_END_TO_END_VALIDATION.md`
+  hash-layer prefetch, pinned heat, quant trade. The first thread-scaling experiment added
+  `--cpu-threads N` to both DeepSeek probes: 1 → 12 threads cut token 0 from 4,270 ms to 2,053 ms
+  and the five-token chain from 13,360 ms to 5,463 ms, while 16 threads regressed to 4,053/13,247 ms;
+  the default 12-thread policy is already the optimum, so no default changed. `docs/reports/C_SMOLLM2_END_TO_END_VALIDATION.md`
   records the pinned SmolLM2-135M import (~273 MB) with the native CLI/reference contract and the
   eight-case serve contract passing end-to-end. Neither note adds a speed claim.
 - **Closing note**: the remaining items (VRAM *payload* tier, ratio-128 layers,

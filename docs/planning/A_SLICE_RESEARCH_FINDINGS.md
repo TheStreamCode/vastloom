@@ -16,6 +16,26 @@ safety change.
 The measured scope remains one real layer and a three-layer hash-routed chain. No full-depth,
 full-model, throughput or placement claim is made.
 
+## Thread-scaling experiment (first lever measured)
+
+`deepseek-chain-probe` and `deepseek-layer-probe` now accept `--cpu-threads N` so the scalar
+reference matvecs can be swept without rebuilding. The same artifacts and outputs were used
+(argmax unchanged in every row):
+
+| Threads | token 0 | five-token |
+|---:|---:|---:|
+| 1 | 4,270 ms | 13,360 ms |
+| 2 | 3,382 ms | 9,275 ms |
+| 4 | 2,409 ms | 7,537 ms |
+| 8 | 2,186 ms | 5,733 ms |
+| 12 | 2,053 ms | 5,463 ms |
+| 16 | 4,053 ms | 13,247 ms |
+
+The default policy thread count is **12**, and it is the measured optimum on this host; 16 threads
+oversubscribe the physical cores and are dramatically slower. Exposing the override is useful for
+experiments, but it does **not** improve the default. The next real compute lever is the SIMD/ggml
+backend or a different quantized kernel, not more threads.
+
 ## What the measurements already say
 
 1. **Compute dominates at this slice scale.** Token 0 moves 135,659,520 expert bytes and takes
@@ -85,9 +105,11 @@ those layers exist. Do not use a partial-depth timing as a model throughput resu
 
 ## Immediate next experiment
 
-The cheapest high-value experiment is **1 (CPU compute path)**: it needs no new weights, only the
-existing three-layer artifacts and a controlled thread/backend comparison. The second is **2
-(hash-layer prefetch)**, which is implementable in the chain executor without new artifacts.
+The thread-scaling half of **1 (CPU compute path)** is now measured: the default 12-thread policy
+is the optimum, and 16 threads oversubscribe badly. The next experiment is the **SIMD/ggml backend
+or an alternative quantized matvec kernel**; it needs no new weights, only the existing three-layer
+artifacts and a controlled A/B. The second is **2 (hash-layer prefetch)**, which is implementable in
+the chain executor without new artifacts.
 
 ## Final suite result
 

@@ -328,7 +328,7 @@ void print_help() {
         << "      Report exactly what a forward pass to that depth would make resident and whether\n"
         << "      it fits the safe RAM budget, before allocating anything.\n\n"
         << "  deepseek-layer-probe MODEL_DIRECTORY TRUNK_ARTIFACT EXPERT_ARTIFACT GLOBAL_ARTIFACT"
-           " [--token ID] [--cuda-experts] [--gpu-limit MIB] [--cpu-only]\n"
+           " [--token ID] [--cuda-experts] [--gpu-limit MIB] [--cpu-only] [--cpu-threads N]\n"
         << "      MODEL_DIRECTORY TRUNK_ARTIFACT GLOBAL_ARTIFACT --expert-pack PATH [--io-cache MODE]\n"
         << "      [--dump-logits PATH] [--dump-hidden PATH] [--dump-trace PATH] [--json]\n"
         << "      Execute one real layer from imported payload. The --expert-pack form reads one\n"
@@ -338,7 +338,7 @@ void print_help() {
         << "      by --gpu-limit) and falls back to the CPU per matrix; the default is CPU-only.\n\n"
         << "  deepseek-chain-probe MODEL_DIRECTORY GLOBAL_ARTIFACT --layers N --tokens CSV\n"
         << "      --trunk L=PATH (--experts L=PATH | --expert-pack L=PATH) [--expert-pack ...]\n"
-        << "      [--io-cache buffered|bypass|auto] [--cache-entries N]\n"
+        << "      [--io-cache buffered|bypass|auto] [--cache-entries N] [--cpu-threads N]\n"
         << "      [--usage-profile PATH]\n"
         << "      [--cuda-experts] [--gpu-limit MIB]\n"
         << "      [--dump-logits PATH] [--dump-hidden PATH] [--dump-trace PATH] [--json]\n"
@@ -3335,7 +3335,7 @@ int command_deepseek_layer_probe(const std::vector<std::string>& args) {
     auto valid = validate_options(
         args, positional_count,
         {"--token", "--context", "--batch-size", "--gpu-limit", "--gpu-reserve", "--dump-logits",
-         "--dump-hidden", "--dump-trace", "--expert-pack", "--io-cache"},
+         "--dump-hidden", "--dump-trace", "--expert-pack", "--io-cache", "--cpu-threads"},
         {"--json", "--cuda-experts", "--cpu-only"});
     if (!valid) return print_error(valid.error(), json);
     if (args.size() < positional_count) {
@@ -3359,14 +3359,17 @@ int command_deepseek_layer_probe(const std::vector<std::string>& args) {
     auto batch_size = optional_size(args, "--batch-size", 1U);
     auto gpu_limit = optional_size(args, "--gpu-limit", 512U);
     auto gpu_reserve = optional_size(args, "--gpu-reserve", 1'024U);
+    auto cpu_threads = optional_size(args, "--cpu-threads", 0U);
     if (!token) return print_error(token.error(), json);
     if (!context) return print_error(context.error(), json);
     if (!batch_size) return print_error(batch_size.error(), json);
     if (!gpu_limit) return print_error(gpu_limit.error(), json);
     if (!gpu_reserve) return print_error(gpu_reserve.error(), json);
+    if (!cpu_threads) return print_error(cpu_threads.error(), json);
     if (token.value() > std::numeric_limits<std::uint32_t>::max() ||
         context.value() == 0U || context.value() > 1'048'576U ||
         batch_size.value() == 0U || batch_size.value() > 8U ||
+        (cpu_threads.value() != 0U && (cpu_threads.value() < 1U || cpu_threads.value() > 32U)) ||
         gpu_limit.value() > 64U * 1'024U || gpu_reserve.value() > 64U * 1'024U) {
         return print_error(
             vastloom::make_error(vastloom::ErrorCode::invalid_argument,
@@ -3520,7 +3523,9 @@ int command_deepseek_layer_probe(const std::vector<std::string>& args) {
     // checkpoint declares it, only the depth is cut to what has been imported. Layer 0 is
     // hash-routed, so the reduced hash-layer count stays 1.
     auto layer_config = config.value();
-    layer_config.cpu_threads = policy.value().cpu_threads;
+    layer_config.cpu_threads = cpu_threads.value() == 0U
+                                   ? policy.value().cpu_threads
+                                   : static_cast<unsigned>(cpu_threads.value());
     layer_config.layer_count = 1U;
     layer_config.hash_layer_count = std::min<std::size_t>(layer_config.hash_layer_count, 1U);
     layer_config.mtp_layer_count = 0U;
@@ -3761,7 +3766,7 @@ int command_deepseek_chain_probe(const std::vector<std::string>& args) {
         return argument == "--layers" || argument == "--token" || argument == "--tokens" ||
                argument == "--trunk" || argument == "--experts" || argument == "--expert-pack" ||
                argument == "--io-cache" || argument == "--cache-entries" ||
-               argument == "--usage-profile" ||
+               argument == "--cpu-threads" || argument == "--usage-profile" ||
                argument == "--gpu-limit" ||
                argument == "--gpu-reserve" || argument == "--dump-logits" ||
                argument == "--dump-hidden" || argument == "--dump-trace";
@@ -3965,6 +3970,13 @@ int command_deepseek_chain_probe(const std::vector<std::string>& args) {
                                                 "--cache-entries must be at most 128"),
                            json);
     }
+    auto cpu_threads = optional_size(args, "--cpu-threads", 0U);
+    if (!cpu_threads) return print_error(cpu_threads.error(), json);
+    if (cpu_threads.value() > 32U) {
+        return print_error(vastloom::make_error(vastloom::ErrorCode::invalid_argument,
+                                                "--cpu-threads must be at most 32"),
+                           json);
+    }
     const std::string io_cache_requested =
         option_value(args, "--io-cache").value_or("auto");
     if (io_cache_requested != "auto" && io_cache_requested != "buffered" &&
@@ -4132,7 +4144,9 @@ int command_deepseek_chain_probe(const std::vector<std::string>& args) {
     const std::size_t cache_capacity = planned_cache.value().chosen_entries;
 
     auto chain_config = config.value();
-    chain_config.cpu_threads = policy.value().cpu_threads;
+    chain_config.cpu_threads = cpu_threads.value() == 0U
+                                   ? policy.value().cpu_threads
+                                   : static_cast<unsigned>(cpu_threads.value());
     chain_config.layer_count = layers.value();
     chain_config.hash_layer_count = std::min<std::size_t>(chain_config.hash_layer_count,
                                                           layers.value());

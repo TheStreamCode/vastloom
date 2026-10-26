@@ -148,6 +148,12 @@
   successful elevated standby-list purges for the cold-cache run. Cold and warm results agree: the
   pack's read-call reduction does not lower wall time at this scale. The usage profile does not pin
   or place experts.
+- **Research — slice suite and small-model path**: `docs/planning/A_SLICE_RESEARCH_FINDINGS.md`
+  records the full debug suite attempt (29 passed, 2 environmental RAM-headroom failures, 7
+  host/optional skips; no parity failure) and ranks the next speed experiments: CPU compute/SIMD,
+  hash-layer prefetch, pinned heat, quant trade. `docs/reports/C_SMOLLM2_END_TO_END_VALIDATION.md`
+  records the pinned SmolLM2-135M import (~273 MB) with the native CLI/reference contract and the
+  eight-case serve contract passing end-to-end. Neither note adds a speed claim.
 - **Closing note**: the remaining items (VRAM *payload* tier, ratio-128 layers,
   learned-router/full-depth execution) are not planned in this concluded research record; they
   need new subsystems or the full checkpoint, and no further milestones are tracked. No

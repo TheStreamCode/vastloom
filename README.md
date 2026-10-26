@@ -181,6 +181,8 @@ External model tests are opt-in through the `VASTLOOM_*_MODEL` cache paths; neve
 - [`docs/planning/D4_ON_DEMAND_EXPERT_RANGES.md`](docs/planning/D4_ON_DEMAND_EXPERT_RANGES.md) — the design-only on-demand expert-range plan and byte budget.
 - [`docs/planning/FUTURE_WORK.md`](docs/planning/FUTURE_WORK.md) — the consolidated, dependency-ordered backlog for resuming the research, with entry criteria and explicit non-goals.
 - [`docs/reports/P0_EXPERT_PACK_IO_VALIDATION.md`](docs/reports/P0_EXPERT_PACK_IO_VALIDATION.md) — the post-conclusion expert-pack and buffered/bypass I/O experiment: one aligned read per expert, byte-identical outputs, neutral warm-cache timings.
+- [`docs/reports/C_SMOLLM2_END_TO_END_VALIDATION.md`](docs/reports/C_SMOLLM2_END_TO_END_VALIDATION.md) — the small-model end-to-end path: pinned SmolLM2-135M import with CLI/reference and serve contracts passing.
+- [`docs/planning/A_SLICE_RESEARCH_FINDINGS.md`](docs/planning/A_SLICE_RESEARCH_FINDINGS.md) — the slice suite result and ranked next speed experiments.
 - [`docs/research/CONSUMER_STREAMING_INFERENCE.md`](docs/research/CONSUMER_STREAMING_INFERENCE.md) and the [PDF edition](docs/research/vastloom-streaming-moe-inference.pdf) — the systems working paper.
 - [`docs/research/SSD_STREAMING_PEER_REVIEW.md`](docs/research/SSD_STREAMING_PEER_REVIEW.md) — the peer review of Kimi K3 SSD streaming, DwarfStar/ds4, Colibri and WARP, with the prioritized I/O and placement improvements.
 - [`docs/MANIFEST_V1.md`](docs/MANIFEST_V1.md), [`docs/TINY_MODEL_V1.md`](docs/TINY_MODEL_V1.md), [`docs/RELEASING.md`](docs/RELEASING.md) and [`docs/BRANDING.md`](docs/BRANDING.md) — format, fixture, release and brand references.

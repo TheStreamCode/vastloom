@@ -13,6 +13,10 @@ hardware, commands, measurements and limitations.
 
 ## Current reports
 
+- [`C_SMOLLM2_END_TO_END_VALIDATION.md`](C_SMOLLM2_END_TO_END_VALIDATION.md) —
+  post-conclusion small-model path: pinned SmolLM2-135M import (~273 MB) with the native CLI/reference
+  contract and the eight-case local serve contract passing end-to-end. Dense model only; no
+  large-model or throughput claim.
 - [`P0_EXPERT_PACK_IO_VALIDATION.md`](P0_EXPERT_PACK_IO_VALIDATION.md) —
   post-conclusion P0 experiment: a derived expert pack with one aligned read per expert and an
   opt-in buffered/bypass I/O mode on the chain and layer probes. Token 0 drops from 54 to 18 range

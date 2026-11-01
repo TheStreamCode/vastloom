@@ -1,5 +1,26 @@
 # Changelog
 
+## Unreleased (post-conclusion maintenance, 2026-11-01)
+
+- **Opt-in OLMoE `--cache adaptive` policy.** Two-hit admission for routed experts with a
+  bounded ghost history (identifiers only, at most 4,096) and frequency/recency eviction. The
+  idea is taken from the `Vastloom-v2-alpha-1` preview archive; the implementation here is
+  reworked to the repository's cache and error conventions. `lru`, `lfu` and `static-hot` are
+  unchanged, the policy changes only which experts stay resident, and it carries no measured
+  result: the pinned OLMoE checkpoint is not present on the reference PC.
+- **Linux cgroup-aware memory detection.** `HardwareProbe` now clamps detected RAM to the
+  effective cgroup v1/v2 limit, so a container never plans against memory the kernel will
+  deny. A missing or unlimited cgroup leaves the host values untouched.
+- **`trace-sim --policy adaptive`.** The trace simulator can now replay the same two-hit
+  admission rule on recorded traces, with the ghost history sized from the tier capacity and the
+  trace's mean expert size. The first comparison on the bundled synthetic trace is recorded in
+  [`docs/reports/TRACE_ADAPTIVE_ADMISSION_VALIDATION.md`](docs/reports/TRACE_ADAPTIVE_ADMISSION_VALIDATION.md):
+  a replay-level result on a 12-record fixture, not a model measurement.
+- **Test scratch directory fallback.** `tests/test_temp_dir.hpp` falls back to the working
+  directory when the host denies writes to the system temporary directory (for example a
+  Controlled Folder Access rule), which previously crashed two test binaries at start-up with no
+  output. No assertion changed; only the scratch location.
+
 ## Unreleased - DeepSeek refocus (October 2026)
 
 - **Decision - the primary execution target returns to DeepSeek V4 Flash 0731**:

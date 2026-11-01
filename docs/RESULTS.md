@@ -149,6 +149,11 @@ What the project established, each with its evidence:
   scalar chunked prefill shown to be a negative return; the near-tie parity
   deviation diagnosed (D1) as the oracle's activation quantization and
   deliberately not mirrored.
+- **Trace-level adaptive admission evidence, explicitly not a model result.** `trace-sim
+  --policy adaptive` keeps two hits where LRU and LFU thrash at a two-slot cache on the bundled
+  synthetic fixture, draws level at three slots and loses at four; `static-hot` is the offline
+  upper bound ([trace report](reports/TRACE_ADAPTIVE_ADMISSION_VALIDATION.md)). No model was
+  executed and no real routing trace was available.
 - **A working governed runtime around it.** Immutable verified imports, a
   reservation-based Safety Governor, exact sourced telemetry, three
   OpenAI-compatible serve endpoints, and a validation report per milestone.

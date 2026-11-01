@@ -4,6 +4,7 @@
 #include <array>
 #include <charconv>
 #include <cmath>
+#include <deque>
 #include <fstream>
 #include <list>
 #include <limits>
@@ -335,6 +336,46 @@ private:
     std::set<std::tuple<std::uint64_t, std::uint64_t, ExpertKey>> ranking_;
 };
 
+// Bounded two-hit admission, mirroring AdaptiveExpertAdmission in
+// inference/adaptive_admission.hpp. The simulator keeps its own copy for the same reason
+// it keeps its own LRU/LFU policies: it replays traces without runtime cache state.
+class GhostHistory {
+public:
+    explicit GhostHistory(std::size_t limit) : limit_(limit == 0U ? 1U : limit) {}
+
+    [[nodiscard]] bool should_admit(ExpertKey key) {
+        if (seen_.contains(key)) return true;
+        if (order_.size() == limit_) {
+            seen_.erase(order_.front());
+            order_.pop_front();
+        }
+        order_.push_back(key);
+        seen_.insert(key);
+        return false;
+    }
+
+private:
+    std::size_t limit_;
+    std::deque<ExpertKey> order_;
+    std::unordered_set<ExpertKey> seen_;
+};
+
+// Entry count the tier capacity buys at the trace's mean expert size, clamped to the
+// native 4..1024 slots before the ghost multiplier is applied.
+std::size_t admission_ghost_limit(const std::vector<TraceRecord>& records,
+                                  const TraceSimulationConfig& config) {
+    long double total_bytes = 0.0L;
+    for (const auto& record : records) {
+        total_bytes += static_cast<long double>(record.size);
+    }
+    if (records.empty() || total_bytes <= 0.0L) return 16U;
+    const long double mean_bytes = total_bytes / static_cast<long double>(records.size());
+    const long double capacity = static_cast<long double>(config.vram_cache_bytes) +
+                                 static_cast<long double>(config.ram_cache_bytes);
+    const long double slots = std::clamp(capacity / mean_bytes, 4.0L, 1024.0L);
+    return static_cast<std::size_t>(slots) * 4U;
+}
+
 template <typename Value>
 Value percentile_sorted(const std::vector<Value>& values, double quantile) {
     if (values.empty()) return 0;
@@ -640,6 +681,75 @@ TraceSimulationReport simulate_lfu(const std::vector<TraceRecord>& records, cons
     return report;
 }
 
+TraceSimulationReport simulate_adaptive(const std::vector<TraceRecord>& records,
+                                        const TraceSimulationConfig& config) {
+    TraceSimulationReport report;
+    report.policy = CachePolicy::adaptive;
+    report.records = records.size();
+    LfuCache vram(config.vram_cache_bytes);
+    LfuCache ram(config.ram_cache_bytes);
+    GhostHistory admission(admission_ghost_limit(records, config));
+    std::unordered_set<ExpertKey> unique;
+    std::map<std::uint64_t, ByteCount> per_token;
+    for (const auto& record : records) {
+        const ExpertKey key = make_key(record.layer, record.expert);
+        unique.insert(key);
+        per_token.try_emplace(record.token, 0U);
+        if (vram.contains(key)) {
+            ++report.vram_hits;
+            vram.touch(key);
+            continue;
+        }
+        if (ram.contains(key)) {
+            ++report.ram_hits;
+            ram.erase(key);
+            if (config.vram_cache_bytes != 0U) {
+                const auto evicted = vram.insert(key, record.size);
+                if (vram.contains(key)) {
+                    report.pcie_bytes += record.size;
+                    report.evictions += evicted.size();
+                    for (const auto& [victim, size] : evicted) {
+                        const auto ram_evicted = ram.insert(victim, size);
+                        report.evictions += ram_evicted.size();
+                    }
+                } else {
+                    // An expert too large for the VRAM tier stays resident in the RAM tier.
+                    ram.insert(key, record.size);
+                }
+            } else {
+                ram.insert(key, record.size);
+            }
+            continue;
+        }
+        ++report.storage_misses;
+        report.nvme_bytes += record.size;
+        per_token[record.token] += record.size;
+        // A first-seen expert is streamed for this access only; retention needs a second miss,
+        // so one-off scans cannot displace experts that are actually reused.
+        if (!admission.should_admit(key)) continue;
+        if (config.vram_cache_bytes != 0U) {
+            const auto evicted = vram.insert(key, record.size);
+            if (vram.contains(key)) {
+                report.pcie_bytes += record.size;
+                report.evictions += evicted.size();
+                for (const auto& [victim, size] : evicted) {
+                    const auto ram_evicted = ram.insert(victim, size);
+                    report.evictions += ram_evicted.size();
+                }
+            } else {
+                const auto ram_evicted = ram.insert(key, record.size);
+                report.evictions += ram_evicted.size();
+            }
+        } else {
+            const auto ram_evicted = ram.insert(key, record.size);
+            report.evictions += ram_evicted.size();
+        }
+    }
+    report.unique_experts = unique.size();
+    finalize_report(report, per_token);
+    return report;
+}
+
 TraceSimulationReport simulate_no_cache(const std::vector<TraceRecord>& records) {
     TraceSimulationReport report;
     report.policy = CachePolicy::none;
@@ -731,6 +841,7 @@ Result<CachePolicy> parse_cache_policy(std::string_view value) {
     if (normalized == "lru") return CachePolicy::lru;
     if (normalized == "lfu") return CachePolicy::lfu;
     if (normalized == "static-hot" || normalized == "static_hot") return CachePolicy::static_hot;
+    if (normalized == "adaptive") return CachePolicy::adaptive;
     return make_error(ErrorCode::invalid_argument, "Unknown trace cache policy", normalized);
 }
 
@@ -740,6 +851,7 @@ std::string_view to_string(CachePolicy policy) noexcept {
         case CachePolicy::lru: return "lru";
         case CachePolicy::lfu: return "lfu";
         case CachePolicy::static_hot: return "static-hot";
+        case CachePolicy::adaptive: return "adaptive";
     }
     return "lru";
 }
@@ -756,6 +868,7 @@ Result<TraceSimulationReport> simulate_trace(const std::filesystem::path& trace_
         if (config.policy == CachePolicy::none) report = simulate_no_cache(records.value());
         else if (config.policy == CachePolicy::static_hot) report = simulate_static_hot(records.value(), config);
         else if (config.policy == CachePolicy::lfu) report = simulate_lfu(records.value(), config);
+        else if (config.policy == CachePolicy::adaptive) report = simulate_adaptive(records.value(), config);
         else report = simulate_lru(records.value(), config);
         populate_reuse_metrics(records.value(), report);
         auto readiness = populate_ready_order_metrics(records.value(), report);

@@ -62,6 +62,15 @@ public:
 // malformed rows are skipped exactly as the live probe skips them.
 [[nodiscard]] std::vector<GpuInfo> parse_nvidia_smi_csv(std::string_view output);
 
+// Clamps detected host memory to an effective cgroup v1/v2 limit when the process runs
+// inside a container, so the Governor never plans against RAM the kernel will deny.
+// `max` and the cgroup v1 near-2^63 "unlimited" sentinel leave the host values unchanged;
+// an unreadable usage keeps availability bounded by the limit. Exposed as a pure seam so
+// the parsing has an always-on test without a cgroup filesystem.
+[[nodiscard]] MemoryInfo clamp_memory_to_cgroup_limit(MemoryInfo host,
+                                                      std::string_view limit_text,
+                                                      std::string_view usage_text);
+
 [[nodiscard]] std::string to_json(const HardwareSnapshot& snapshot);
 [[nodiscard]] std::string to_text(const HardwareSnapshot& snapshot);
 

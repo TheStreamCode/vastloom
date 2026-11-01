@@ -76,6 +76,8 @@
 #include "vastloom/util/sha256.hpp"
 #include "vastloom/util/string.hpp"
 
+#include "test_temp_dir.hpp"
+
 namespace {
 
 int failures = 0;
@@ -89,10 +91,7 @@ int failures = 0;
     } while (false)
 
 std::filesystem::path make_temp_dir() {
-    const auto stamp = std::chrono::steady_clock::now().time_since_epoch().count();
-    const auto path = std::filesystem::temp_directory_path() / ("vastloom-tests-" + std::to_string(stamp));
-    std::filesystem::create_directories(path);
-    return path;
+    return vastloom_test::make_temp_dir("vastloom-tests-");
 }
 
 void test_bytes() {
@@ -2820,6 +2819,7 @@ void test_olmoe_config(const std::filesystem::path& root) {
     CHECK(vastloom::inference::parse_expert_cache_policy("no-cache") &&
           vastloom::inference::parse_expert_cache_policy("LFU") &&
           vastloom::inference::parse_expert_cache_policy("static-hot") &&
+          vastloom::inference::parse_expert_cache_policy("adaptive") &&
           !vastloom::inference::parse_expert_cache_policy("random"));
     CHECK(vastloom::inference::parse_expert_read_mode("whole") &&
           vastloom::inference::parse_expert_read_mode("staged") &&
@@ -9099,6 +9099,9 @@ void test_trace(const std::filesystem::path& root) {
     config.ram_cache_bytes = 128U * vastloom::MiB;
     auto lfu = vastloom::research::simulate_trace(path, config);
     CHECK(lfu && lfu.value().records == 5U);
+    config.policy = vastloom::research::CachePolicy::adaptive;
+    auto adaptive = vastloom::research::simulate_trace(path, config);
+    CHECK(adaptive && adaptive.value().records == 5U);
 
     const auto telemetry_path = root / "telemetry-trace.csv";
     std::ofstream telemetry(telemetry_path);

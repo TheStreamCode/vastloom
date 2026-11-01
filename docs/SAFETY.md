@@ -576,7 +576,7 @@ large-model inference remains gated on that integration.
 - metadata-only runtime refusal, missing-shard rejection, one-millisecond timeout and
   invalid expert-cache policy rejection;
 - real no-cache byte accounting, real two-token LRU hits and native-telemetry simulation
-  for no-cache, LRU, LFU and static-hot baselines;
+  for no-cache, LRU, LFU, static-hot and adaptive baselines;
 - real asynchronous OLMoE parity for logits and all 128 routed experts, bounded prefetch
   counts, telemetry parsing and positive read-service/CPU overlap;
 - staged OLMoE parity, exact 8 MiB/4 MiB accounting, bounded two-worker overlap, LRU

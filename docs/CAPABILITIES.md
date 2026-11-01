@@ -105,6 +105,10 @@ target: the code, tests and external parity evidence stay, but no new Qwen featu
 - **Bounded expert memory:** one 12 MiB active expert, an explicitly reserved cache
   between 12 MiB and 2 GiB, and reservation-backed prefetch buffers constrained by the
   staging governor.
+- **Adaptive expert admission (opt-in):** `--cache adaptive` applies two-hit admission with a
+  bounded ghost history and frequency/recency eviction, so one-shot experts cannot displace
+  reused ones; `lru` remains the default. `trace-sim --policy adaptive` replays the same rule
+  on recorded traces. No model-level speedup is measured.
 - **Opt-in asynchronous pipeline:** whole-expert mode uses one 12 MiB range and one worker;
   staged mode uses two workers with an 8 MiB gate/up range plus a 4 MiB down range. Both
   retain prefetch depth one or two, bounded queues, timeouts and cancellation checks.

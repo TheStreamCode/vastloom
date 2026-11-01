@@ -15,6 +15,9 @@ enum class CachePolicy {
     lru,
     lfu,
     static_hot,
+    // Two-hit admission over LFU-style eviction: first-seen experts are streamed and
+    // dropped, repeated misses are retained.
+    adaptive,
 };
 
 struct TraceSimulationConfig {

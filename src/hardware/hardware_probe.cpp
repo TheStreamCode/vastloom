@@ -1,14 +1,17 @@
 #include "vastloom/hardware/hardware_probe.hpp"
 
+#include <algorithm>
 #include <array>
 #include <cerrno>
 #include <charconv>
 #include <cstdio>
 #include <cstdlib>
 #include <fstream>
+#include <optional>
 #include <sstream>
 #include <string_view>
 #include <thread>
+#include <utility>
 
 #include "vastloom/util/string.hpp"
 
@@ -25,6 +28,22 @@
 
 namespace vastloom::hardware {
 namespace {
+
+// cgroup v1 reports "no limit" as a value near 2^63; anything at or above this bound is
+// treated as unlimited so a container default cannot masquerade as a real cap.
+constexpr ByteCount kCgroupUnlimitedSentinel = static_cast<ByteCount>(1ULL << 60U);
+
+std::optional<std::string> read_first_line(const char* path) {
+    std::ifstream input(path);
+    if (!input) {
+        return std::nullopt;
+    }
+    std::string line;
+    if (!std::getline(input, line)) {
+        return std::nullopt;
+    }
+    return line;
+}
 
 std::string detect_os() {
 #if defined(_WIN32)
@@ -148,7 +167,26 @@ Result<MemoryInfo> detect_memory() {
     if (available == 0) {
         available = percentage(total, 0.50);
     }
-    return MemoryInfo{total, available};
+    // /proc/meminfo keeps reporting the host totals inside a container, while the cgroup
+    // filesystem describes what the kernel will actually grant this process.
+    const MemoryInfo host{total, available};
+    struct CgroupLimitFiles {
+        const char* limit;
+        const char* usage;
+    };
+    constexpr CgroupLimitFiles kCgroupLimitFiles[] = {
+        {"/sys/fs/cgroup/memory.max", "/sys/fs/cgroup/memory.current"},
+        {"/sys/fs/cgroup/memory/memory.limit_in_bytes",
+         "/sys/fs/cgroup/memory/memory.usage_in_bytes"},
+    };
+    for (const auto& files : kCgroupLimitFiles) {
+        const auto limit = read_first_line(files.limit);
+        if (!limit) {
+            continue;
+        }
+        return clamp_memory_to_cgroup_limit(host, *limit, read_first_line(files.usage).value_or(""));
+    }
+    return host;
 #else
     return make_error(ErrorCode::unsupported, "Memory probing is unsupported on this platform");
 #endif
@@ -274,6 +312,35 @@ std::vector<GpuInfo> detect_nvidia_gpus() {
 }
 
 }  // namespace
+
+MemoryInfo clamp_memory_to_cgroup_limit(MemoryInfo host,
+                                        std::string_view limit_text,
+                                        std::string_view usage_text) {
+    const auto parse_bytes = [](std::string_view text) -> std::optional<ByteCount> {
+        const std::string trimmed = util::trim(text);
+        if (trimmed.empty()) {
+            return std::nullopt;
+        }
+        ByteCount value = 0U;
+        const char* begin = trimmed.data();
+        const char* end = begin + trimmed.size();
+        const auto parsed = std::from_chars(begin, end, value);
+        if (parsed.ec != std::errc{} || parsed.ptr != end) {
+            return std::nullopt;
+        }
+        return value;
+    };
+    const auto limit = parse_bytes(limit_text);
+    // "max" in cgroup v2 and the v1 sentinel both fail the parse or exceed the bound, so
+    // an unlimited cgroup keeps the host values authoritative.
+    if (!limit || *limit == 0U || *limit >= kCgroupUnlimitedSentinel) {
+        return host;
+    }
+    const ByteCount usage = parse_bytes(usage_text).value_or(0U);
+    const ByteCount bounded_usage = std::min(usage, *limit);
+    return MemoryInfo{std::min(host.total_bytes, *limit),
+                      std::min(host.available_bytes, *limit - bounded_usage)};
+}
 
 std::vector<GpuInfo> parse_nvidia_smi_csv(std::string_view output) {
     std::vector<GpuInfo> gpus;

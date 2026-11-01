@@ -181,6 +181,10 @@ vastloom moe-logits $model --text 'Hello' --cache no-cache --io async --io-cache
 command. Full verification is enabled by default. After an immediately preceding full
 verification, `--no-verify` may be used for repeated local probes without rehashing all
 13.84 GB. Expert cache capacity is explicitly reserved and capped at 2 GiB.
+`--cache adaptive` is an opt-in two-hit admission policy: a first-seen expert is streamed
+and dropped instead of occupying a cache entry, a repeated miss is retained, and eviction
+prefers entries with the lowest frequency and oldest use. It changes which experts stay
+resident, never the arithmetic, and no speedup is measured yet: `lru` stays the default.
 Asynchronous I/O is opt-in while the baseline remains under study. Whole mode uses one
 worker and one 12 MiB request per expert. `--expert-read staged` requires asynchronous
 I/O and uses two bounded workers, an 8 MiB gate/up request and a 4 MiB down request without
@@ -199,7 +203,9 @@ scope. On Windows,
 `null`; it must not be interpreted as physical SSD traffic. `device_io` is a whole-device
 delta and can include concurrent activity from other processes. `trace-sim --json` reports
 exact cold/reused counts, unique-expert reuse distance and, for current 19-field traces,
-a bounded fixed-order versus ready-order replay.
+a bounded fixed-order versus ready-order replay. `--policy` accepts `no-cache`, `lru`, `lfu`,
+`static-hot` and `adaptive`; `adaptive` applies the same two-hit admission as the OLMoE
+runtime, with the ghost history sized from the tier capacity and the trace's mean expert size.
 
 ## Run the comparison track (Qwen3.8-Flash-Next)
 
@@ -368,7 +374,7 @@ vastloom deepseek-gguf-range-bind MODEL_DIRECTORY ARTIFACT_DIRECTORY --layer N -
 vastloom deepseek-gguf-global-bind MODEL_DIRECTORY ARTIFACT_DIRECTORY
     [--context N] [--batch-size N] [--json]
 vastloom moe-logits MODEL_DIRECTORY --text TEXT [--chat] [--top N]
-    [--cache no-cache|lru|lfu|static-hot] [--cache-bytes SIZE]
+    [--cache no-cache|lru|lfu|static-hot|adaptive] [--cache-bytes SIZE]
     [--io sync|async] [--io-cache buffered|bypass] [--expert-read whole|staged]
     [--prefetch-depth 1|2] [--io-timeout-ms N]
     [--timeout-ms N] [--trace PATH] [--no-verify] [--json]

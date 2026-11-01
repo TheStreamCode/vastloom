@@ -26,6 +26,8 @@
 #include "vastloom/safety/resource_governor.hpp"
 #include "vastloom/util/sha256.hpp"
 
+#include "test_temp_dir.hpp"
+
 namespace {
 
 int failures = 0;
@@ -40,11 +42,7 @@ int failures = 0;
     } while (false)
 
 std::filesystem::path make_temp_dir() {
-    const auto stamp = std::chrono::steady_clock::now().time_since_epoch().count();
-    const auto root = std::filesystem::temp_directory_path() /
-                      ("vastloom-range-artifact-tests-" + std::to_string(stamp));
-    std::filesystem::create_directories(root);
-    return root;
+    return vastloom_test::make_temp_dir("vastloom-range-artifact-tests-");
 }
 
 std::string range_name(std::size_t index) {

@@ -1,5 +1,6 @@
 #include "vastloom/inference/olmoe_runtime.hpp"
 
+#include "vastloom/inference/adaptive_admission.hpp"
 #include "vastloom/inference/llama_model.hpp"
 
 #include <algorithm>
@@ -578,9 +579,14 @@ private:
                 ExpertCachePolicy policy,
                 ByteCount capacity,
                 safety::Reservation reservation)
-        : model_(model), policy_(policy), capacity_bytes_(capacity), reservation_(std::move(reservation)) {}
+        : model_(model), policy_(policy), capacity_bytes_(capacity),
+          admission_(static_cast<std::size_t>(capacity / kExpertBytes)),
+          reservation_(std::move(reservation)) {}
 
-    [[nodiscard]] bool should_retain(std::uint32_t layer, std::uint32_t expert) const {
+    [[nodiscard]] bool should_retain(std::uint32_t layer, std::uint32_t expert) {
+        if (policy_ == ExpertCachePolicy::adaptive) {
+            return admission_.should_admit_miss(layer * model_.config().num_experts + expert);
+        }
         if (policy_ == ExpertCachePolicy::lru || policy_ == ExpertCachePolicy::lfu) return true;
         if (policy_ != ExpertCachePolicy::static_hot) return false;
         const std::size_t slots = static_cast<std::size_t>(capacity_bytes_ / kExpertBytes);
@@ -594,7 +600,7 @@ private:
         while (used_bytes_ + kExpertBytes > capacity_bytes_ && !entries_.empty()) {
             auto victim = entries_.begin();
             for (auto iterator = std::next(entries_.begin()); iterator != entries_.end(); ++iterator) {
-                const bool replace = policy_ == ExpertCachePolicy::lfu
+                const bool replace = (policy_ == ExpertCachePolicy::lfu || policy_ == ExpertCachePolicy::adaptive)
                                          ? std::pair{iterator->second.frequency, iterator->second.last_use} <
                                                std::pair{victim->second.frequency, victim->second.last_use}
                                          : iterator->second.last_use < victim->second.last_use;
@@ -611,6 +617,7 @@ private:
     ByteCount used_bytes_{0U};
     std::uint64_t clock_{0U};
     std::map<std::uint32_t, Entry> entries_;
+    AdaptiveExpertAdmission admission_;
     safety::Reservation reservation_;
 };
 
@@ -662,6 +669,7 @@ Result<ExpertCachePolicy> parse_expert_cache_policy(std::string_view value) {
     if (normalized == "lru") return ExpertCachePolicy::lru;
     if (normalized == "lfu") return ExpertCachePolicy::lfu;
     if (normalized == "static-hot") return ExpertCachePolicy::static_hot;
+    if (normalized == "adaptive") return ExpertCachePolicy::adaptive;
     return make_error(ErrorCode::invalid_argument, "Unknown OLMoE expert-cache policy", std::string(value));
 }
 
@@ -671,6 +679,7 @@ std::string_view to_string(ExpertCachePolicy policy) noexcept {
         case ExpertCachePolicy::lru: return "lru";
         case ExpertCachePolicy::lfu: return "lfu";
         case ExpertCachePolicy::static_hot: return "static-hot";
+        case ExpertCachePolicy::adaptive: return "adaptive";
     }
     return "unknown";
 }

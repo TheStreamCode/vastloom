@@ -125,6 +125,18 @@ this update is `docs/reports/0_5_0_ALPHA1_SERVE_SAFETY_VALIDATION.md`; this file
 contract, not a result. The maintenance slice is orthogonal to the DeepSeek refocus and advances
 that track in no way.
 
+**Post-conclusion maintenance updates (2026-11-01).** These sit outside the concluded research
+record and reopen no milestone. (1) OLMoE `--cache adaptive` is an opt-in two-hit admission
+policy with a bounded ghost history and frequency/recency eviction; `lru` remains the default and
+no model-level speedup is measured. (2) `trace-sim --policy adaptive` replays the same rule on
+recorded traces; the bundled-fixture comparison is
+`docs/reports/TRACE_ADAPTIVE_ADMISSION_VALIDATION.md`, replay-only and not a model result.
+(3) Linux memory probing clamps detected RAM to the effective cgroup v1/v2 limit, so a container
+is never planned against memory the kernel will deny. Test binaries create their scratch
+directory under the working directory when the system temp directory is denied, for example by a
+Controlled Folder Access rule; before that fallback the two binaries that created a scratch
+directory crashed with no output, which had nothing to do with the code under test.
+
 **Current measured position (reference PC).** Qwen3.8-Flash-Next greedy
 generate matches llama.cpp token-for-token ("The capital of France is" →
 " Paris. The capital of Germany is Berlin. The capital of Italy is Rome.

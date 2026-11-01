@@ -29,6 +29,9 @@ enum class ExpertCachePolicy : std::uint8_t {
     lru,
     lfu,
     static_hot,
+    // Two-hit admission with frequency/recency eviction; an opt-in experimental policy
+    // that has no measured result on a real checkpoint yet.
+    adaptive,
 };
 
 enum class ExpertIoMode : std::uint8_t {

@@ -328,7 +328,8 @@ router decisions or accepted output tokens.
 
 ## Current modules
 
-- `hardware/`: non-invasive machine probe.
+- `hardware/`: non-invasive machine probe; on Linux the detected RAM is clamped to the
+  effective cgroup v1/v2 limit when the process runs inside a container.
 - `cuda/`: dynamically loaded Windows/Linux CUDA capability probe, Governor-backed move-only VRAM
   allocation, synchronous copies, a bounded scalar FP32 RMSNorm parity kernel and the
   `CudaMatvecAccelerator`: a VRAM-resident quantized Q8_0/IQ matvec tier (used by
@@ -342,7 +343,7 @@ router decisions or accepted output tokens.
   verification, immutable model storage, the universal logical tensor/expert catalog and governed
   residency state.
 - `io/`: bounded asynchronous reads plus platform-labeled process-I/O counters.
-- `research/`: native-telemetry-driven no-cache/LRU/LFU/static-hot simulation and exact
+- `research/`: native-telemetry-driven no-cache/LRU/LFU/static-hot/adaptive simulation and exact
   unique-expert reuse distance.
 - `inference/`: TinyTransformer, pinned SmolLM2 generation, pinned OLMoE routed CPU
   reference/streaming, the comparison/validation **Qwen3.8-Flash-Next (qwen4exp)** track -

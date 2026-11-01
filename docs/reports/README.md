@@ -13,6 +13,11 @@ hardware, commands, measurements and limitations.
 
 ## Current reports
 
+- [`TRACE_ADAPTIVE_ADMISSION_VALIDATION.md`](TRACE_ADAPTIVE_ADMISSION_VALIDATION.md) —
+  post-conclusion replay experiment: `trace-sim --policy adaptive` on the bundled synthetic trace
+  at three capacities. At two slots adaptive keeps 2 hits where LRU and LFU thrash (0), draws level
+  at three, and loses at four; `static-hot` is an offline upper bound. Trace-level only: no model,
+  no real routing trace, no throughput claim.
 - [`SIMD_BACKEND_EXPERIMENT.md`](SIMD_BACKEND_EXPERIMENT.md) —
   post-conclusion SIMD experiment: pinned external ggml checkout vs the scalar reference. Layer 0
   12.5× faster, token-0 chain 1.6×, five-token chain 3.2×, same argmax/routes, logits differ by up to

@@ -248,6 +248,30 @@ if(BUILD_TESTING AND VASTLOOM_BUILD_TESTS)
     vastloom_set_project_warnings(vastloom_range_artifact_test)
     vastloom_enable_sanitizers(vastloom_range_artifact_test)
     add_test(NAME vastloom_range_artifact COMMAND vastloom_range_artifact_test)
+    add_executable(vastloom_expert_admission_test
+        tests/test_expert_admission.cpp
+    )
+    target_link_libraries(vastloom_expert_admission_test PRIVATE Vastloom::Core)
+    target_compile_features(vastloom_expert_admission_test PRIVATE cxx_std_20)
+    vastloom_set_project_warnings(vastloom_expert_admission_test)
+    vastloom_enable_sanitizers(vastloom_expert_admission_test)
+    add_test(NAME vastloom_expert_admission COMMAND vastloom_expert_admission_test)
+    add_executable(vastloom_hardware_memory_limits_test
+        tests/test_hardware_memory_limits.cpp
+    )
+    target_link_libraries(vastloom_hardware_memory_limits_test PRIVATE Vastloom::Core)
+    target_compile_features(vastloom_hardware_memory_limits_test PRIVATE cxx_std_20)
+    vastloom_set_project_warnings(vastloom_hardware_memory_limits_test)
+    vastloom_enable_sanitizers(vastloom_hardware_memory_limits_test)
+    add_test(NAME vastloom_hardware_memory_limits COMMAND vastloom_hardware_memory_limits_test)
+    add_executable(vastloom_trace_adaptive_test
+        tests/test_trace_adaptive.cpp
+    )
+    target_link_libraries(vastloom_trace_adaptive_test PRIVATE Vastloom::Core)
+    target_compile_features(vastloom_trace_adaptive_test PRIVATE cxx_std_20)
+    vastloom_set_project_warnings(vastloom_trace_adaptive_test)
+    vastloom_enable_sanitizers(vastloom_trace_adaptive_test)
+    add_test(NAME vastloom_trace_adaptive COMMAND vastloom_trace_adaptive_test)
     add_executable(vastloom_deepseek_expert_pack_test
         tests/test_deepseek_expert_pack.cpp
     )

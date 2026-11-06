@@ -3,9 +3,8 @@
 Run giant models. Keep your machine yours
 
 [![CI](https://github.com/TheStreamCode/vastloom/actions/workflows/ci.yml/badge.svg)](https://github.com/TheStreamCode/vastloom/actions/workflows/ci.yml)
-[![CodeQL](https://github.com/TheStreamCode/vastloom/actions/workflows/codeql.yml/badge.svg)](https://github.com/TheStreamCode/vastloom/actions/workflows/codeql.yml)
-[![License: Apache-2.0](https://img.shields.io/badge/license-Apache--2.0-blue.svg)](LICENSE)
-[![Status: concluded research](https://img.shields.io/badge/status-concluded_research-lightgrey.svg)](#project-status)
+[![License](https://img.shields.io/badge/License-Apache--2.0-blue.svg)](LICENSE)
+[![Release](https://img.shields.io/github/v/release/TheStreamCode/vastloom)](https://github.com/TheStreamCode/vastloom/releases/latest)
 
 ![Vastloom routes giant model tensors through VRAM, system RAM and NVMe while protecting the host computer](docs/assets/vastloom-hero.png)
 
@@ -14,30 +13,6 @@ Vastloom is a native C++ research runtime that treats VRAM, system RAM and NVMe 
 The October 2026 track asked one question: how much of a **90.86 GB DeepSeek V4 Flash** checkpoint can run on a **12 GiB consumer GPU** with 32 GiB of RAM, while keeping every byte hash-verified and every result honest? The record: **780,087,788 B of verified range slices**, one real layer and a deterministic three-layer hash-routed chain, reproduced by independent NumPy oracles within **1e-6**.
 
 **New here? Start with the [two-minute showcase](docs/SHOWCASE.md)**, then [`docs/RESULTS.md`](docs/RESULTS.md). This is concluded research, not a product; full-model parity, throughput and a VRAM payload tier are not claimed.
-
-## Contents
-
-- [Project status](#project-status)
-- [Install](#install)
-- [Quick start](#quick-start)
-- [Capabilities](#capabilities)
-- [Requirements](#requirements)
-- [Configuration](#configuration)
-- [Privacy and security](#privacy-and-security)
-- [Troubleshooting](#troubleshooting)
-- [Development](#development)
-- [Documentation](#documentation)
-- [Support](#support)
-- [Contributing](#contributing)
-- [License](#license)
-
-## Project status
-
-Vastloom was a summer-2026 research experiment in governed local inference for giant Mixture-of-Experts (MoE) models, first on DeepSeek V4 Flash and then on Qwen3.8-Flash-Next. The project concluded in October 2026 and the repository is preserved as a working record: it builds, its test suites pass, and every measured claim links to the report or test that defends it. No further milestones are planned. Post-conclusion maintenance continues on opt-in experiments only, such as adaptive expert admission and cgroup-aware memory detection; it reopens no milestone and claims no throughput.
-
-The October 2026 refocus returned the **primary research track** to DeepSeek V4 Flash 0731 (`UD-IQ2_XXS`), pursued with bounded exact range slices because the full 90.86 GB checkpoint is not stored. The measured steps cover a metadata-only IQ2_XXS store and verified range imports (780,087,788 B in 45 ranges); one deterministic layer-0 execution (129,280 logits, argmax 30,528); bit-identical device expert residency with bounded CPU fallback; independent layer-0 and three-layer chain oracles (logits within 9.54e-07 and 1.91e-06), including a five-token prefill that opens the layer-2 4:1 compressed window (logits within 1.91e-06, hidden within 5.96e-08); a deterministic 2/3-layer hash-routed chain with opt-in CMake tests and a bit-identical GPU chain; and a design-only D4 on-demand byte budget with closed decisions. Qwen3.8-Flash-Next is the comparison/validation track.
-
-Not claimed: full-model parity, throughput, a VRAM *payload* tier, ratio-128 layers or learned-router/full-depth execution. Those remaining items are not planned in this concluded record. The gate list is in [`docs/ROADMAP.md`](docs/ROADMAP.md#deepseek-refocus-october-2026).
 
 ## Install
 
@@ -73,7 +48,7 @@ The loopback server exposes `GET /v1/models` and `POST /v1/chat/completions` on 
 ./build/vastloom serve examples/models/vastloom-tinychat-v1.sgtm --port 8099
 ```
 
-## Capabilities
+## Features
 
 - **Primary track: DeepSeek V4 Flash 0731 reduced payload.** `UD-IQ2_XXS` executes from bounded exact range slices imported through the pinned range importer, because the full 90.86 GB checkpoint is not stored: `deepseek-layer-probe` executes one real layer from a metadata store plus three verified artifacts, `deepseek-chain-probe` executes 2/3 hash-routed layers over single- and five-token prompts, independent NumPy oracles reproduce both paths, and opt-in device expert residency is bit-identical to the CPU path without being a VRAM payload tier. See [`docs/CAPABILITIES.md`](docs/CAPABILITIES.md) and the [layer-0](docs/reports/D2_IQ2XXS_LAYER0_RANGE_EXECUTION.md), [residency](docs/reports/D2B_DEVICE_RESIDENCY_VALIDATION.md), [layer-0 oracle](docs/reports/D2B_LAYER0_ORACLE_VALIDATION.md), [chain](docs/reports/D3_HASH_CHAIN_VALIDATION.md), [chain oracle](docs/reports/D3B_CHAIN_ORACLE_VALIDATION.md) and [multi-token oracle](docs/reports/D3C_MULTITOKEN_ORACLE_VALIDATION.md) reports.
 - **Comparison/validation track: Qwen3.8-Flash-Next.** The official Q8_0 GGUF checkpoint executes through the full 48-layer graph, and greedy generation matches llama.cpp token for token on the pinned prompt. This evidence and the KV/long-context machinery are kept as the external validation reference; no new Qwen features are planned. See the [parity report](docs/reports/Q11C_QWEN38_LLAMA_PARITY_VALIDATION.md).
@@ -164,7 +139,15 @@ python tests/test_import_hf_model.py
 
 External model tests are opt-in through the `VASTLOOM_*_MODEL` cache paths; never download a large model only to satisfy a check. Benchmark records must state hardware, model revision, cache state and bytes per token, as described in [`docs/BENCHMARK_PROTOCOL.md`](docs/BENCHMARK_PROTOCOL.md). Contribution rules, engineering invariants and pull-request expectations are in [`CONTRIBUTING.md`](CONTRIBUTING.md).
 
-## Documentation
+### Project status
+
+Vastloom was a summer-2026 research experiment in governed local inference for giant Mixture-of-Experts (MoE) models, first on DeepSeek V4 Flash and then on Qwen3.8-Flash-Next. The project concluded in October 2026 and the repository is preserved as a working record: it builds, its test suites pass, and every measured claim links to the report or test that defends it. No further milestones are planned. Post-conclusion maintenance continues on opt-in experiments only, such as adaptive expert admission and cgroup-aware memory detection; it reopens no milestone and claims no throughput.
+
+The October 2026 refocus returned the **primary research track** to DeepSeek V4 Flash 0731 (`UD-IQ2_XXS`), pursued with bounded exact range slices because the full 90.86 GB checkpoint is not stored. The measured steps cover a metadata-only IQ2_XXS store and verified range imports (780,087,788 B in 45 ranges); one deterministic layer-0 execution (129,280 logits, argmax 30,528); bit-identical device expert residency with bounded CPU fallback; independent layer-0 and three-layer chain oracles (logits within 9.54e-07 and 1.91e-06), including a five-token prefill that opens the layer-2 4:1 compressed window (logits within 1.91e-06, hidden within 5.96e-08); a deterministic 2/3-layer hash-routed chain with opt-in CMake tests and a bit-identical GPU chain; and a design-only D4 on-demand byte budget with closed decisions. Qwen3.8-Flash-Next is the comparison/validation track.
+
+Not claimed: full-model parity, throughput, a VRAM *payload* tier, ratio-128 layers or learned-router/full-depth execution. Those remaining items are not planned in this concluded record. The gate list is in [`docs/ROADMAP.md`](docs/ROADMAP.md#deepseek-refocus-october-2026).
+
+### Documentation
 
 - [`docs/SHOWCASE.md`](docs/SHOWCASE.md) — the two-minute overview: what was built, what actually ran, the numbers that matter and the honest limits.
 - [`docs/USAGE.md`](docs/USAGE.md) — commands for every track, CLI options and the local server.
